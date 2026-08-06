@@ -1,7 +1,7 @@
 ---
 description: Opening a PR carries obligations — title, proof, Closes, board move, QA verdict
 condition: 'gh\s+pr\s+create|gh\s+stack\s+submit'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

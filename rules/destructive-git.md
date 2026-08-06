@@ -1,7 +1,7 @@
 ---
 description: Destructive git commands erase uncommitted work — look at what you're deleting first
 condition: 'git\s+reset\s+--hard|git\s+clean\s+-\w*[fd]|git\s+(restore|checkout)\s+(--\s+)?\.(\s|$)|git\s+branch\s+-D\b|git\s+stash\s+(drop|clear)'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

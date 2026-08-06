@@ -33,9 +33,10 @@ this one is the reusable half.
 ## What it gives you
 
 - **Commands** (`commands/*.md`, invoked as `/foreman:<name>` once
-  installed): `init`, `help`, `record`, `groom`, `work <issue>`,
+  installed): `init`, `doctor`, `help`, `record`, `groom`, `work <issue>`,
   `orchestrate <epic>`, `report`, `triage`.
 - **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/foreman:init`),
+  `doctor` (backs `/foreman:doctor` — config-drift detection and repair),
   `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `bug-triage`,
   `verification`, `stacked-prs`.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
@@ -77,6 +78,7 @@ Restart the session (or `/reload-plugins`) after adding it.
 
 ```
 /foreman:init         # one-time (or repair) setup: labels + project board + .omp/foreman.json
+/foreman:doctor       # drift check: labels/board/detected-commands still match reality
 /foreman:record ...   # capture an idea
 /foreman:groom        # turn ideas into task/epic issues, or reject them
 /foreman:work <n>     # deliver a task or bug end to end
@@ -100,6 +102,13 @@ or agent) grounded in the live tree, not from memory.
 - **The operator always merges.** Every skill and agent treats "the
   operator merges the PR" as the approval and "the operator commented on
   the PR" as a change request — no agent merges on its own judgment.
+- **Rules are scoped to `tool:bash`, never bare `tool`.** A bare `tool`
+  scope matches every tool call's arguments, including `write`/`edit`
+  file *content* — so a rule like `git worktree add` would fire while a
+  skill file merely documented that command in a code block. All eight
+  `rules/*.md` are scoped to `"tool:bash"` so they only fire on actual
+  shell execution, and `scripts/check.ts` fails the build if a bare
+  `scope: tool` ever comes back.
 
 ## `.omp/foreman.json`
 
@@ -158,3 +167,19 @@ instead of assuming a repo, a board, or a toolchain:
 - Hand-edit any field at any time; `/foreman:init` re-run is a repair pass
   that fills gaps and never clobbers a value that looks deliberately
   edited.
+
+## Development
+
+This repo is almost entirely markdown, so there's no compiler to catch a
+broken cross-reference or a missing frontmatter field. `scripts/check.ts`
+does that instead — it verifies every command/skill/agent/rule has its
+required frontmatter, every `skill://<name>` and `/foreman:<name>`
+reference actually resolves, and flags rule files that reintroduce the
+`scope: tool` false-positive (see Design notes) or command files that
+re-bake the plugin's own name prefix (the `foreman:init` incident).
+
+```sh
+bun scripts/check.ts
+```
+
+Runs in CI (`.github/workflows/check.yml`) on every push and PR.

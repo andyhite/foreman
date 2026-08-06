@@ -1,7 +1,7 @@
 ---
 description: An issue closes exactly two ways — delivered via merged PR, or declined at grooming with a recorded reason
 condition: 'gh\s+issue\s+close'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

@@ -1,7 +1,7 @@
 ---
 description: Skipping git hooks (--no-verify) is exceptional and must be justified
 condition: '--no-verify\b'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

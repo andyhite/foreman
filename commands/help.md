@@ -25,7 +25,10 @@ Present, compactly — tables over prose, one screen if you can:
    Bugs enter through `/foreman:triage` with a severity label and skip the
    idea stage. `/foreman:report` snapshots the board without moving
    anything. `/foreman:init` is the one-time (or repair) setup step
-   everything else depends on.
+   everything else depends on; `/foreman:doctor` is the maintenance pass
+   that catches drift after init (renamed labels, edited board options,
+   renamed scripts) — run it whenever a foreman skill's assumptions stop
+   matching reality.
 2. **Commands.** One row each: command, argument, what it does, and the
    moment you'd reach for it.
 3. **Skills.** The operating manual behind the commands: which skill backs

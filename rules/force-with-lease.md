@@ -1,7 +1,7 @@
 ---
 description: Force pushes use --force-with-lease, never bare --force
 condition: 'git\s+push[^\n]*\s(-f\b|--force(?!-with-lease))'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

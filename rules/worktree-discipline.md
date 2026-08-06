@@ -1,7 +1,7 @@
 ---
 description: Worktree discipline — claim before create, one writer, remove only your own after Done
 condition: 'git\s+worktree\s+(add|remove)'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

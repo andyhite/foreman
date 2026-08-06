@@ -1,7 +1,7 @@
 ---
 description: the main branch is PR-only — branch protection enforces it; don't fight it locally
 condition: 'git\s+push[^\n]*[\s:](main|master)\b|git\s+merge\s+(?!--abort|--continue|--ff-only)'
-scope: tool
+scope: "tool:bash"
 interruptMode: tool-only
 ---
 

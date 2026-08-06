@@ -242,3 +242,8 @@ not blind creation.
 - A detected `commands.*` value is a cache, not a promise: if a script gets
   renamed and a run of `verification` finds it missing, update the config
   rather than letting it silently point at a dead command.
+
+This skill covers first-time setup and repair-on-request. For an ongoing
+health check without re-running the full setup narrative, use
+`skill://doctor` (`/foreman:doctor`) — it runs the same detection logic in
+read-first, repair-what's-safe mode.
