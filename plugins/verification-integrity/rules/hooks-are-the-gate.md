@@ -19,4 +19,4 @@ format gate). Then:
    reads as hiding a failure.
 
 Never skip a hook to silence a failure your own change caused, and never
-commit directly on the main branch to route around one.
+commit directly on the default branch to route around one.

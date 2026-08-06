@@ -14,8 +14,7 @@ That change narrows or softens the test suite. The bar:
   broke is presenting unfinished work as done.
 - **E2E/integration suites stay `retries: 0`** by design where the project
   sets that — a retry turns a flake into a green check with a note nobody
-  reads. A flaky test is a bug: file it (`bug-triage` skill), don't launder
-  it.
+  reads. A flaky test is a bug: file it, don't launder it.
 - **Snapshot updates are reviewed diffs**, not a reflex — read what changed
   before accepting it.
 

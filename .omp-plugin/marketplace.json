@@ -5,19 +5,152 @@
     "name": "Andy Hite"
   },
   "metadata": {
-    "description": "GitHub-issue-tracker-driven dev workflow (commands, skills, agents) for omp",
-    "version": "0.1.0"
+    "description": "The foreman dev workflow (commands, skills, agents) plus a library of standalone, opt-in rule packs for omp",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "foreman",
       "description": "GitHub-issue-tracker-driven dev workflow — ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge — as reusable commands (invoked as /foreman:<name>), skills, and agents. Config-driven via .omp/foreman.json; no hardcoded repo or toolchain.",
       "source": "./",
+      "version": "0.2.0",
       "category": "productivity",
       "homepage": "https://github.com/andyhite/omp-foreman",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
       "keywords": ["github", "issues", "project-board", "workflow", "dev-loop"]
+    },
+    {
+      "name": "git-hygiene",
+      "description": "Guards for irreversible git operations and for the default branch: destructive commands (reset --hard, clean -fd, branch -D, stash drop), bare --force pushes, direct pushes and local merges to main, and a standing rule that the default branch is read-only. Workflow-agnostic.",
+      "source": "./plugins/git-hygiene",
+      "version": "0.2.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/git-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["git", "safety", "rules", "force-push", "branch-protection"]
+    },
+    {
+      "name": "verification-integrity",
+      "description": "Guards against faking a green build: narrowing the test suite (.only/.skip, retries, blind snapshot updates) and bypassing git hooks with --no-verify. Workflow-agnostic.",
+      "source": "./plugins/verification-integrity",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/verification-integrity",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["testing", "ci", "rules", "git-hooks"]
+    },
+    {
+      "name": "generated-files",
+      "description": "Stops hand-edits to machine-generated artifacts: *.generated.*, __generated__/, protobuf stubs, GraphQL schemas, ORM migrations, and OpenAPI clients. Edit the source and re-run the generator. Excludes package-manager lockfiles — those live in the per-manager packs.",
+      "source": "./plugins/generated-files",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/generated-files",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["codegen", "generated", "protobuf", "migrations", "rules"]
+    },
+    {
+      "name": "shell-safety",
+      "description": "Guards for irreversible or over-privileged shell operations: rm -rf, sudo, world-writable chmod, curl | sh, and truncating > redirects into source files. Complements git-hygiene, which owns the git-specific commands.",
+      "source": "./plugins/shell-safety",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/shell-safety",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["shell", "safety", "rm", "sudo", "rules"]
+    },
+    {
+      "name": "secrets-hygiene",
+      "description": "Keeps credentials out of the repo and out of transcripts: writing .env and key files, staging them, dumping an environment, and inline passwords in shell commands.",
+      "source": "./plugins/secrets-hygiene",
+      "version": "0.1.0",
+      "category": "security",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/secrets-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["secrets", "credentials", "security", "dotenv", "rules"]
+    },
+    {
+      "name": "pnpm-hygiene",
+      "description": "For repos whose package manager is pnpm: blocks npm/yarn/bun/npx invocations, hand-edited pnpm-lock.yaml, --no-frozen-lockfile, and unscoped workspace-root installs.",
+      "source": "./plugins/pnpm-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/pnpm-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["pnpm", "package-manager", "lockfile", "workspace", "rules"]
+    },
+    {
+      "name": "npm-hygiene",
+      "description": "For repos whose package manager is npm: blocks pnpm/yarn/bun invocations, hand-edited package-lock.json, npm install where npm ci belongs, and --legacy-peer-deps/--force escape hatches.",
+      "source": "./plugins/npm-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/npm-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["npm", "package-manager", "lockfile", "npm-ci", "rules"]
+    },
+    {
+      "name": "yarn-hygiene",
+      "description": "For repos whose package manager is yarn (Classic and Berry): blocks npm/pnpm/bun invocations, hand-edited yarn.lock, mutable installs (--no-immutable/--pure-lockfile), and --ignore-engines/--ignore-integrity.",
+      "source": "./plugins/yarn-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/yarn-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["yarn", "berry", "package-manager", "lockfile", "rules"]
+    },
+    {
+      "name": "bun-hygiene",
+      "description": "For repos whose package manager is bun: blocks npm/pnpm/yarn/npx invocations, hand-edited bun.lock and bun.lockb (binary), and --force/--no-save installs.",
+      "source": "./plugins/bun-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/bun-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["bun", "package-manager", "lockfile", "bunx", "rules"]
+    },
+    {
+      "name": "uv-hygiene",
+      "description": "For Python repos managed by uv: blocks pip/poetry/pipenv/conda installs that bypass uv.lock, hand-edited uv.lock, --system/--break-system-packages, and bare python where uv run belongs.",
+      "source": "./plugins/uv-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/uv-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["uv", "python", "package-manager", "lockfile", "rules"]
+    },
+    {
+      "name": "pip-hygiene",
+      "description": "For Python repos using pip and virtualenv directly: blocks installs outside a venv (sudo pip, --user, --break-system-packages), unpinned ad-hoc installs, hand-edited pip-compile output, and --no-deps/--force-reinstall.",
+      "source": "./plugins/pip-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/pip-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["pip", "python", "virtualenv", "requirements", "rules"]
+    },
+    {
+      "name": "cargo-hygiene",
+      "description": "For Rust repos: blocks hand-edited Cargo.lock, blanket cargo update, command-line clippy suppression (--cap-lints allow, -A clippy::all), and cargo publish without a dry run.",
+      "source": "./plugins/cargo-hygiene",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/cargo-hygiene",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": ["cargo", "rust", "lockfile", "clippy", "rules"]
     }
   ]
 }

@@ -40,10 +40,55 @@ this one is the reusable half.
   `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `bug-triage`,
   `verification`, `stacked-prs`.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
-- **Rules** (`rules/*.md`): tool-call interrupts for the sharp edges — force
-  pushes, destructive git, pushing at the main branch, closing issues by
-  hand, softening tests, skipping hooks, and keeping the todo list synced
-  to real landings (PR merges, issue closes, worktree cleanup).
+- **Rules** (`rules/*.md`): five tool-call interrupts for the workflow's own
+  sharp edges — pushing at the main branch, closing issues by hand, worktree
+  discipline, the obligations that come with opening a PR, and keeping the
+  todo list synced to real landings (PR merges, issue closes, worktree
+  cleanup). These are the enforcement half of the skills above, so they ship
+  with foreman rather than separately.
+
+## Rule packs in this marketplace
+
+Everything that *doesn't* depend on the foreman workflow ships as a
+standalone plugin from the same catalog, grouped by concept. Install any
+combination — none depends on `foreman` or on any other pack, and
+`scripts/check.ts` fails the build if one ever grows a `skill://` or
+`/foreman:` reference back into foreman.
+
+**Always safe to install together:**
+
+| Plugin | Rules | Concept |
+|---|---|---|
+| [`git-hygiene`](plugins/git-hygiene) | `destructive-git`, `force-with-lease`, `main-needs-a-pr`, `default-branch-is-read-only` | Irreversible git operations, and keeping the default branch clean |
+| [`verification-integrity`](plugins/verification-integrity) | `test-integrity`, `hooks-are-the-gate` | Don't fake a green build |
+| [`generated-files`](plugins/generated-files) | 4 path rules | Don't hand-edit machine-generated output |
+| [`shell-safety`](plugins/shell-safety) | 5 rules | Irreversible or over-privileged shell commands |
+| [`secrets-hygiene`](plugins/secrets-hygiene) | 4 rules | Credentials out of the repo and out of transcripts |
+
+**Pick exactly one per ecosystem** — each pack asserts that *its* tool is the
+package manager, so two of them will fire on each other's correct commands:
+
+| Plugin | For repos using |
+|---|---|
+| [`pnpm-hygiene`](plugins/pnpm-hygiene) | pnpm |
+| [`npm-hygiene`](plugins/npm-hygiene) | npm |
+| [`yarn-hygiene`](plugins/yarn-hygiene) | yarn (Classic and Berry) |
+| [`bun-hygiene`](plugins/bun-hygiene) | bun |
+| [`uv-hygiene`](plugins/uv-hygiene) | uv (Python) |
+| [`pip-hygiene`](plugins/pip-hygiene) | pip + virtualenv (Python) |
+| [`cargo-hygiene`](plugins/cargo-hygiene) | cargo (Rust) |
+
+Each pack carries a wrong-tool rule (`pnpm-only`, `npm-only`, …) naming the
+right idiom for every competing command, a path rule protecting its lockfile,
+and the tool's specific escape hatches (`--no-frozen-lockfile`,
+`--legacy-peer-deps`, `--break-system-packages`, `--cap-lints allow`).
+Because these are per-project choices, install them with `--scope project`:
+
+```sh
+omp plugin install --scope project pnpm-hygiene@omp-foreman
+omp plugin install git-hygiene@omp-foreman
+omp plugin install shell-safety@omp-foreman
+```
 
 ## Install
 
@@ -103,13 +148,26 @@ or agent) grounded in the live tree, not from memory.
 - **The operator always merges.** Every skill and agent treats "the
   operator merges the PR" as the approval and "the operator commented on
   the PR" as a change request — no agent merges on its own judgment.
-- **Rules are scoped to `tool:bash`, never bare `tool`.** A bare `tool`
-  scope matches every tool call's arguments, including `write`/`edit`
-  file *content* — so a rule like `git worktree add` would fire while a
-  skill file merely documented that command in a code block. All eight
-  `rules/*.md` are scoped to `"tool:bash"` so they only fire on actual
-  shell execution, and `scripts/check.ts` fails the build if a bare
-  `scope: tool` ever comes back.
+- **Rules come in three shapes, and the `scope` requirement differs.**
+  `scripts/check.ts` enforces all three:
+  - A **command rule** has a regex `condition` and an explicit `scope`, which
+    must be `"tool:bash"` and never bare `tool` — a bare `tool` scope matches
+    every tool call's arguments including `write`/`edit` file *content*, so a
+    rule about `git worktree add` would fire while a skill file merely
+    documented that command in a code block.
+  - A **path rule** has a `condition` that is a YAML sequence of globs and
+    **no** `scope`: omp turns a glob-shaped condition into `tool:edit(<glob>)`
+    and `tool:write(<glob>)` entries with catch-all condition `.*`. Adding an
+    explicit `scope` there is a bug — it keeps the catch-all and fires the
+    rule on every command in that scope.
+  - A **standing rule** has `alwaysApply: true` and no condition, so its body
+    is injected into the system prompt. This is the only shape that can state
+    an invariant a regex can't detect — `default-branch-is-read-only` uses it
+    because no condition can ask which branch is checked out.
+- **Rule names are global.** omp deduplicates rules by name across every
+  installed plugin and keeps only the first, so a collision silently disables
+  one. Tool-specific rules are prefixed (`pnpm-lockfile`, not `lockfile`) and
+  `scripts/check.ts` fails on a duplicate.
 
 ## `.omp/foreman.json`
 
@@ -173,11 +231,14 @@ instead of assuming a repo, a board, or a toolchain:
 
 This repo is almost entirely markdown, so there's no compiler to catch a
 broken cross-reference or a missing frontmatter field. `scripts/check.ts`
-does that instead — it verifies every command/skill/agent/rule has its
-required frontmatter, every `skill://<name>` and `/foreman:<name>`
-reference actually resolves, and flags rule files that reintroduce the
-`scope: tool` false-positive (see Design notes) or command files that
-re-bake the plugin's own name prefix (the `foreman:init` incident).
+does that instead, across every plugin in the catalog — it verifies every
+command/skill/agent/rule has its required frontmatter, every `skill://<name>`
+and `/foreman:<name>` reference actually resolves, every `plugins/*`
+directory is registered in `.omp-plugin/marketplace.json`, and no sibling
+plugin references foreman's skills or commands. It also flags rule files that
+reintroduce the `scope: tool` false-positive (see Design notes) and command
+files that re-bake the plugin's own name prefix (the `foreman:init`
+incident).
 
 ```sh
 bun scripts/check.ts
