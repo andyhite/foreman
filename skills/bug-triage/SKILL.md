@@ -82,7 +82,7 @@ GitHub UI).
 
 For each open issue labeled plain `bug` (no severity suffix): reproduce (or
 establish why not), apply the rubric, swap `bug` for `bug:sevN`, route per
-the table. `/omp-foreman:groom` sweeps these, but anyone meeting an untriaged
+the table. `/foreman:groom` sweeps these, but anyone meeting an untriaged
 bug may triage it.
 
 ## 5. sev0 escalation

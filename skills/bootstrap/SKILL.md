@@ -1,6 +1,6 @@
 ---
 name: bootstrap
-description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary, a GitHub Projects v2 board with a Status field, and detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands) into .omp/foreman.json. Read when running /omp-foreman:init or repairing a project's tracker config.
+description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary, a GitHub Projects v2 board with a Status field, and detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands) into .omp/foreman.json. Read when running /foreman:init or repairing a project's tracker config.
 ---
 
 # Bootstrap — wire a repo into the foreman workflow
@@ -8,7 +8,7 @@ description: Setting up GitHub issue tracking for a repo under the foreman workf
 Every other foreman skill (`tracker`, `worktree`, `dev-loop`, `epic-loop`,
 `grooming`, `bug-triage`, `verification`, `stacked-prs`) reads its constants
 from `.omp/foreman.json` at the repo root. This skill is how that file gets
-created, or repaired — it is what `/omp-foreman:init` runs.
+created, or repaired — it is what `/foreman:init` runs.
 
 The philosophy: **detect what's detectable, ask what's ambiguous, never
 guess silently.** Nothing here invents a convention the repo doesn't

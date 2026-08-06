@@ -12,7 +12,7 @@ editing. Related skills: `tracker` (every status/label move), `worktree`
 
 ## 0. Preflight and claim
 
-- `.omp/foreman.json` exists — if not, run `/omp-foreman:init` first (`skill://bootstrap`).
+- `.omp/foreman.json` exists — if not, run `/foreman:init` first (`skill://bootstrap`).
 - The issue is open, labeled task or bug (with a severity), and its status
   is `To Do`. Anything else stops here: an epic goes to the `epic-loop`
   skill; a `Backlog` item needs grooming or an explicit operator say-so; an

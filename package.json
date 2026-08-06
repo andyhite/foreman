@@ -1,7 +1,7 @@
 {
-  "name": "omp-foreman",
+  "name": "foreman",
   "version": "0.1.0",
-  "description": "An omp extension (slash commands, skills, and agents; commands are invoked as /omp-foreman:<name> once installed as a plugin) that packages a GitHub-issue-tracker-driven dev workflow (ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge) for any project. Named omp-foreman to avoid colliding with the unrelated 'foreman' process manager on npm/rubygems.",
+  "description": "An omp extension (slash commands, skills, and agents; commands are invoked as /foreman:<name> once installed as a plugin) that packages a GitHub-issue-tracker-driven dev workflow (ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge) for any project. The plugin/package is named 'foreman' for a short command prefix; it's distributed from the 'omp-foreman' repo to avoid colliding with the unrelated 'foreman' process manager on npm/rubygems as a published package name.",
   "private": true,
   "type": "module",
   "license": "MIT",

@@ -1,6 +1,6 @@
 ---
 name: tracker
-description: The single source of truth for foreman work tracking on a GitHub repo — issue lifecycle, label vocabulary, board statuses, epic status derivation, and the exact gh/GraphQL recipes for every transition. Read before creating, relabeling, or moving any issue. Constants come from .omp/foreman.json — run /omp-foreman:init first if it's missing.
+description: The single source of truth for foreman work tracking on a GitHub repo — issue lifecycle, label vocabulary, board statuses, epic status derivation, and the exact gh/GraphQL recipes for every transition. Read before creating, relabeling, or moving any issue. Constants come from .omp/foreman.json — run /foreman:init first if it's missing.
 ---
 
 # Tracker — GitHub Issues + the project board
@@ -13,7 +13,7 @@ your assumptions — an item nobody moved reads as work available.
 ## Constants
 
 Read `.omp/foreman.json` at the repo root for every value below. If it's
-missing, run `/omp-foreman:init` (`skill://bootstrap`) before doing anything
+missing, run `/foreman:init` (`skill://bootstrap`) before doing anything
 else — nothing in this skill works without it.
 
 | Thing                | Source in `.omp/foreman.json`         |

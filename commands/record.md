@@ -9,7 +9,7 @@ $ARGUMENTS
 
 If that is empty, ask what the idea is before doing anything.
 
-Read `skill://tracker` (run `/omp-foreman:init` first if `.omp/foreman.json`
+Read `skill://tracker` (run `/foreman:init` first if `.omp/foreman.json`
 doesn't exist yet), then: distill a plain-sentence title in this repo's
 existing issue-title style, keep the body faithful to the note as given (an
 idea is a recorded intention, not a spec — do not embellish it into a

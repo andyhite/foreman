@@ -13,7 +13,7 @@ through subagents, the verification ladder, the `qa` agent gate looped to
 PASS, PR, review wait, post-merge cleanup, board moves.
 
 Two checks before you start: if #$1 is labeled `epic`, stop and tell me to
-use `/omp-foreman:orchestrate $1` instead; if it is not at `To Do` (or carries
+use `/foreman:orchestrate $1` instead; if it is not at `To Do` (or carries
 an untriaged bug label), stop and tell me what state it is actually in —
 do not work around the lifecycle.
 
