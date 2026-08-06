@@ -1,0 +1,14 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "An omp extension that packages a GitHub-issue-tracker-driven dev workflow (ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge) as reusable commands, skills, and agents for any project.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
