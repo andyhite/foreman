@@ -51,9 +51,10 @@ Build the dependency graph over subtasks, then partition it into **tracks**:
   branch) stays merge-gated: B dispatches only after that layer lands. If
   such edges are everywhere, the partition is wrong — refold the chains.
 
-Run tracks in parallel, at most **3 workers** concurrently. `todo init`: one
-omp todo per subtask grouped by track, an integration todo per landing, and
-a closeout phase.
+Run tracks in parallel, at most `epicLoop.maxConcurrentTracks` workers
+concurrently (`.omp/foreman.json`, default 3 — raise or lower it to match
+this project's review bandwidth). `todo init`: one omp todo per subtask
+grouped by track, an integration todo per landing, and a closeout phase.
 
 ## 4. Dispatch and monitor
 

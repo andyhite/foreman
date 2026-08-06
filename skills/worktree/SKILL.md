@@ -20,9 +20,9 @@ or, if that file doesn't exist yet, the primary checkout's directory name.
 | Branch   | `<type>/<issue>-<slug>`        | `fix/291-actor-identity-gate`        |
 | Worktree | `<repo-slug>-<issue>-<slug>`   | `../myapp-291-actor-identity-gate`   |
 
-- `<type>` is a Conventional Commit type. Check whether the repo's commit
-  hook restricts the set (many do, to `feat fix docs refactor perf test
-  build ci chore style revert`); if it does, stay inside it. Bugs are `fix/`;
+- `<type>` is a Conventional Commit type. `.omp/foreman.json#commitTypes`
+  (written by `/foreman:init`, detected from this repo's commitlint config
+  where one exists) is the allowed set — stay inside it. Bugs are `fix/`;
   tasks take whatever type fits the change.
 - `<slug>` is the issue title, lower-kebab, trimmed to a handful of words.
 - No colons or other characters that break a Windows checkout — kebab only.
@@ -35,8 +35,8 @@ git -C "$PRIMARY" fetch origin <mainBranch>
 git -C "$PRIMARY" worktree add "$PRIMARY/../<repo-slug>-<issue>-<slug>" \
   -b <type>/<issue>-<slug> origin/<mainBranch>
 cd "$PRIMARY/../<repo-slug>-<issue>-<slug>"
-<install>   # this repo's dependency install command — node_modules/vendor
-            # dirs are per-worktree, and this also wires any git hooks
+<commands.install>   # from .omp/foreman.json#commands.install — node_modules/vendor
+                      # dirs are per-worktree, and this also wires any git hooks
 ```
 
 Before creating, check nobody beat you to it: the issue must not already be

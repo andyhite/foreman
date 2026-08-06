@@ -7,8 +7,18 @@ description: The foreman verification ladder — cheapest-first feedback while i
 
 Three rungs. Climb only when the current rung is green; never open with the
 full suite. This skill does not assume any specific package manager, test
-runner, or monorepo tool — the first time you touch a repo, spend thirty
-seconds learning what it actually runs:
+runner, or monorepo tool.
+
+**Check the cache first.** `.omp/foreman.json#commands` (written by
+`/foreman:init`, or updated by a previous run of this skill) holds this
+repo's own `packageManager`, `install`, `check`, `verify`, and `e2e`
+commands when they were detectable. If a value is present there, use it
+directly instead of re-detecting. If it's absent, `null`, or turns out to
+be wrong (the script was renamed, the command 404s), detect fresh below —
+and if you're the one who fixes it, write the corrected value back to the
+config so the next session skips the same rediscovery.
+
+Detecting from scratch takes thirty seconds:
 
 - `package.json#scripts` (root, and, in a workspace, the affected package's)
   — look for `verify`, `check`, `test`, `lint`, `typecheck`, `build`, `e2e`

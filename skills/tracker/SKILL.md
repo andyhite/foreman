@@ -16,28 +16,40 @@ Read `.omp/foreman.json` at the repo root for every value below. If it's
 missing, run `/foreman:init` (`skill://bootstrap`) before doing anything
 else — nothing in this skill works without it.
 
-| Thing                | Source in `.omp/foreman.json`        |
-| --------------------- | -------------------------------------- |
-| Repository             | `repo`                                 |
-| Project owner/number   | `board.owner` / `board.projectNumber`  |
-| Project node ID        | `board.projectNodeId`                  |
-| Status field ID        | `board.statusFieldId`                  |
-| Status option IDs      | `board.statusOptions.<Name>`           |
-| Label vocabulary       | `labels.*`                             |
+| Thing                | Source in `.omp/foreman.json`         |
+| --------------------- | ---------------------------------------- |
+| Repository             | `repo`                                   |
+| Main branch            | `mainBranch`                             |
+| Project owner/number   | `board.owner` / `board.projectNumber`    |
+| Project node ID        | `board.projectNodeId`                    |
+| Status field ID        | `board.statusFieldId`                    |
+| Status role → name/ID  | `board.statuses.<role>.{name,id}`        |
+| Label vocabulary       | `labels.*`                               |
 
 If an ID ever fails to resolve, re-derive it (`gh project field-list
 <number> --owner <owner> --format json`) and correct the config — never
 guess.
 
+### Status roles
+
+This skill (and every other foreman skill) talks about statuses by six
+**semantic roles** — `backlog`, `todo`, `inProgress`, `review`, `done`,
+`rejected` — not by literal text. `board.statuses.<role>.name` is
+whatever this repo's board actually calls that column (most repos use the
+obvious names below; a repo whose board predates foreman may not). Every
+time this skill or another says a status like "`To Do`", read it as the
+`todo` role and substitute `board.statuses.todo.name` if this repo's board
+calls it something else.
+
 ## Labels
 
 | Label                            | Meaning                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `labels.idea` (default `idea`)     | Recorded intention, minimal detail. Awaits grooming.                      |
 | `labels.epic` (default `epic`)     | Large multi-task effort. Never actionable itself; broken into sub-issues. |
 | `labels.task` (default `task`)     | Small, directly actionable unit: one PR, one worktree.                    |
 | `labels.bug` (default `bug`)       | Untriaged bug report — triage replaces it with a severity label.          |
-| `<bug>:sev0` … `<bug>:sev3`         | Triaged bug; severity rubric in the `bug-triage` skill.                   |
+| `<bug>:sev0` … `<bug>:sevN`         | Triaged bug; severity rubric in the `bug-triage` skill. The exact set is `labels.bugSeverities`. |
 
 Exactly one type label per issue. Ideas become epics or tasks at grooming;
 bugs keep a `bug*` label for life and are **never** relabeled `task` or
@@ -49,44 +61,49 @@ List all bugs regardless of triage state (search commas are OR):
 gh issue list --search "label:bug,bug:sev0,bug:sev1,bug:sev2,bug:sev3" --state open
 ```
 
+(Substitute this repo's actual `labels.bug` prefix and `labels.bugSeverities`
+list if they differ from the defaults.)
+
 ## Statuses and who moves them
 
-| Status        | Meaning                                            | Entered when                                                                                          |
-| ------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Backlog`     | Captured, not committed to                          | Idea recorded; epic accepted; low-severity bug filed                                                  |
-| `To Do`       | Committed, next up, ordered by priority             | Task accepted at grooming; epic breakdown lands; high-severity bug filed; low-severity bug promoted    |
-| `In Progress` | Actively being worked in a worktree                 | A session claims it — **before its first edit**                                                        |
-| `Review`      | PR open, checks green, waiting on the operator      | The PR opens. An operator comment on the PR is a change request → falls back to `In Progress`         |
-| `Done`        | Operator-merged to the main branch, worktree gone   | The operator merges the PR — the merge **is** the approval. `Done` only after merge **and** cleanup    |
-| `Rejected`    | Groomed and declined                                | Grooming rejects an idea; issue is closed as not planned                                              |
+| Role (config key) | Default name  | Meaning                                            | Entered when                                                                                          |
+| ------------------ | ------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backlog`           | `Backlog`     | Captured, not committed to                          | Idea recorded; epic accepted; low-severity bug filed                                                  |
+| `todo`              | `To Do`       | Committed, next up, ordered by priority             | Task accepted at grooming; epic breakdown lands; high-severity bug filed; low-severity bug promoted    |
+| `inProgress`        | `In Progress` | Actively being worked in a worktree                 | A session claims it — **before its first edit**                                                        |
+| `review`            | `Review`      | PR open, checks green, waiting on the operator      | The PR opens. An operator comment on the PR is a change request → falls back to `inProgress`          |
+| `done`              | `Done`        | Operator-merged to the main branch, worktree gone   | The operator merges the PR — the merge **is** the approval. `done` only after merge **and** cleanup    |
+| `rejected`          | `Rejected`    | Groomed and declined                                | Grooming rejects an idea; issue is closed as not planned                                              |
 
-Lifecycle: `idea → Backlog` → grooming → (`Rejected` | `task → To Do` |
-`epic → Backlog` → breakdown → subtasks `To Do`) → `In Progress` → `Review` →
-`Done`. Bugs skip the idea stage: triage routes the top severities straight
-to `To Do` and the rest to `Backlog` (`bug-triage` skill).
+Lifecycle: `idea → backlog` → grooming → (`rejected` | `task → todo` |
+`epic → backlog` → breakdown → subtasks `todo`) → `inProgress` → `review` →
+`done`. Bugs skip the idea stage: triage routes the top severities straight
+to `todo` and the rest to `backlog` (`bug-triage` skill).
 
 Chained epic subtasks ship as **stacked PRs** — one layer per subtask, each
-layer's issue moving through `Review`/`Done` exactly as above as its layer
+layer's issue moving through `review`/`done` exactly as above as its layer
 PR opens and merges; see `skill://stacked-prs`.
 
 ## Epic status is derived from its subtasks
 
 An epic never moves on its own. Recompute after every subtask transition:
 
-1. All subtasks `Done` **and** epic integration verification passed → `Done`
-   (close the epic).
-2. Else, all subtasks at `Review` or `Done` → `Review`.
-3. Else, any subtask at `In Progress`, `Review`, or `Done` → `In Progress`.
-4. Else, any subtask at `To Do` → `To Do`.
-5. Else → `Backlog`.
+1. All subtasks `done` **and** epic integration verification passed →
+   `done` (close the epic).
+2. Else, all subtasks at `review` or `done` → `review`.
+3. Else, any subtask at `inProgress`, `review`, or `done` → `inProgress`.
+4. Else, any subtask at `todo` → `todo`.
+5. Else → `backlog`.
 
-This is bidirectional: a subtask falling back (e.g. `Review → In Progress`
+This is bidirectional: a subtask falling back (e.g. `review → inProgress`
 on requested changes) pulls the epic back with it.
 
 ## Recipes
 
 Substitute this repo's values from `.omp/foreman.json` wherever a recipe
 below names `<owner>`, `<repo>`, `<number>`, a field/option ID, or a label.
+`<OPTION_ID>` below means `board.statuses.<role>.id` for whichever role
+applies.
 
 ### Create an issue
 
@@ -102,7 +119,7 @@ issue-title style — check a few recent ones before inventing a new tone.
 ```sh
 ITEM=$(gh project item-add <number> --owner <owner> --url <issue-url> --format json --jq '.id')
 gh project item-edit --id "$ITEM" --project-id <board.projectNodeId> \
-  --field-id <board.statusFieldId> --single-select-option-id <OPTION_ID>
+  --field-id <board.statusFieldId> --single-select-option-id <board.statuses.<role>.id>
 ```
 
 ### Find the board item for an existing issue
@@ -120,6 +137,8 @@ gh api graphql -f query='query{repository(owner:"<owner>",name:"<repo>"){
   issue(number:<N>){projectItems(first:10){nodes{project{number}
     fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}'
 ```
+
+Match the returned `name` against `board.statuses.*.name` to get the role.
 
 ### Link a task to its epic (sub-issue)
 
@@ -142,7 +161,7 @@ gh api graphql -f query='query{repository(owner:"<owner>",name:"<repo>"){
 
 ```sh
 gh issue close <N> --reason "not planned" --comment "<why, in one or two sentences>"
-# then set the board item's status to Rejected (board.statusOptions.Rejected)
+# then set the board item's status to the `rejected` role (board.statuses.rejected.id)
 ```
 
 ### Relabel at grooming
@@ -170,8 +189,8 @@ gh issue comment <N> --body "Blocked: <what, since when, what would unblock it>"
   but do not get there.)
 - `gh project item-edit` needs the **item** ID (`PVTI_…`), not the issue ID.
 - A PR body containing `Closes #N` closes the issue on merge, but does
-  **not** move the board status — set `Done` explicitly after merge and
-  cleanup.
+  **not** move the board status — set the `done` role explicitly after
+  merge and cleanup.
 - Exactly one type label per issue: adding `task` means removing `idea`;
   adding a severity label means removing the plain `bug` label.
 - If a `gh` call authenticates as the wrong account, `env -u GH_TOKEN`
