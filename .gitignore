@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# omp's project-scope plugin state (machine-local). NOT .omp/ — the
+# .omp/foreman.json config beside it is meant to be committed.
+.omp/plugins/

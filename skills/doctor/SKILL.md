@@ -1,17 +1,19 @@
 ---
 name: doctor
-description: Diagnosing and repairing drift in .omp/foreman.json against live GitHub state — renamed labels, moved/renamed board fields or options, stale detected commands, board hygiene. Read when running /foreman:doctor, or when a foreman skill hits a resolution failure (missing label, unknown option ID, a detected command that 404s).
+description: Diagnosing and repairing drift in .omp/foreman.json against live GitHub state — renamed labels, moved/renamed board fields or options, stale detected commands, board hygiene, and a stale or wrong companion rule pack. Read when running /foreman:doctor, or when a foreman skill hits a resolution failure (missing label, unknown option ID, a detected command that 404s).
 ---
 
 # Doctor — catch drift before it silently breaks tracking
 
 `.omp/foreman.json` is a cache of things that live on GitHub (labels, a
-project board's field/option IDs) and in the repo (package manager,
-scripts, commit types). All of those can change out from under it: a
-label gets renamed, someone edits the board's `Status` options by hand, a
-script gets renamed in `package.json`. This skill finds that drift and
-repairs it — it's `bootstrap` run in verification mode instead of setup
-mode, and it's what `/foreman:doctor` runs.
+project board's field/option IDs), in the repo (package manager, scripts,
+commit types), and in omp's own plugin state (which rule packs this repo
+decided it needs). All of those can change out from under it: a label gets
+renamed, someone edits the board's `Status` options by hand, a script gets
+renamed in `package.json`, the project switches package manager and the pack
+guarding the old one keeps firing. This skill finds that drift and repairs
+it — it's `bootstrap` run in verification mode instead of setup mode, and
+it's what `/foreman:doctor` runs.
 
 ## What it checks
 
@@ -45,6 +47,23 @@ mode, and it's what `/foreman:doctor` runs.
    matching branch anywhere (`git ls-remote --heads origin` against
    `<issue>-` patterns); `review` issues whose PR is merged or closed;
    epics whose derived status (`tracker` skill) disagrees with the board.
+6. **Rule packs.** Compare `plugins.packs` against what's actually installed
+   at project scope (`omp plugin list`), and against what `bootstrap` §4 would
+   conclude today:
+   - A recorded pack that isn't installed → install it, or drop it from
+     `plugins.packs` if the evidence for it is gone. Say which and why.
+   - The **wrong package-manager pack** is the one that matters. A repo that
+     migrated pnpm → bun keeps firing `pnpm-only` on every correct `bun
+     install`, so the operator learns to dismiss rule interrupts — which
+     silently disarms every other pack too. Uninstall the stale one
+     (`omp plugin uninstall --scope project <pack>@omp-foreman`) and install
+     the pack matching the re-detected `commands.packageManager`.
+   - Two package-manager packs installed at once is always a bug, never a
+     polyglot setup: they fire on each other. Resolve to one.
+   - A conditional pack whose evidence disappeared (`generated-files` with no
+     tracked generated file left) is informational, not urgent — report it and
+     let the operator decide, since removing it costs a reinstall if the
+     evidence comes back.
 
 ## Procedure
 

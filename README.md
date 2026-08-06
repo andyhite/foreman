@@ -213,6 +213,10 @@ instead of assuming a repo, a board, or a toolchain:
   },
   "epicLoop": {
     "maxConcurrentTracks": 3
+  },
+  "plugins": {
+    "marketplace": "omp-foreman",
+    "packs": ["git-hygiene", "shell-safety", "secrets-hygiene", "pnpm"]
   }
 }
 ```
@@ -227,6 +231,11 @@ instead of assuming a repo, a board, or a toolchain:
   foreman doesn't need to be renamed to fit it.
 - `epicLoop.maxConcurrentTracks` is a starting default (3), not a detected
   value — tune it to the project's review bandwidth.
+- `plugins.packs` is what `/foreman:init` concluded this repo needs from the
+  rule packs above, installed at **project scope**. It records intent, not a
+  mirror of omp's install state — that gap is the point, because it lets
+  `/foreman:doctor` catch a repo that migrated package manager while the old
+  pack is still installed and firing on every correct command.
 - Hand-edit any field at any time; `/foreman:init` re-run is a repair pass
   that fills gaps and never clobbers a value that looks deliberately
   edited.
