@@ -1,4 +1,4 @@
-# cargo-hygiene
+# cargo
 
 Four tool-call interrupt rules for the Cargo operations that are permanent,
 unreviewable, or quietly load-bearing. Nothing here assumes a crate layout, a
@@ -20,7 +20,7 @@ a path rule: its glob condition scopes it to edits and writes of that file.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install cargo-hygiene@omp-foreman
+omp plugin install cargo@omp-foreman
 ```
 
 Independent of every other plugin in this marketplace — install any of them,

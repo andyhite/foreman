@@ -1,4 +1,4 @@
-# yarn-hygiene
+# yarn
 
 Four tool-call interrupt rules for repositories whose package manager is
 Yarn. They keep a foreign package manager out of the tree, keep `yarn.lock`
@@ -27,7 +27,7 @@ not trip on an unrelated tool that happens to share a flag name.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install yarn-hygiene@omp-foreman
+omp plugin install yarn@omp-foreman
 ```
 
 Independent of the other plugins in this marketplace — install it alone, or

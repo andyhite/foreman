@@ -2,18 +2,21 @@
 /**
  * Consistency checker for every plugin this repo publishes.
  *
- * The repo is a marketplace: `foreman` at the root, plus standalone rule
- * packs under `plugins/`. It's mostly prose (commands/skills/agents/rules as
- * markdown), so nothing type-checks it. This script catches the failure
- * modes that bit us during authoring: a required frontmatter field missing,
- * a `skill://<name>` reference to a skill that doesn't exist, a
- * `/foreman:<name>` reference to a command that doesn't exist (or still
- * carries the old baked-in `foreman:` filename prefix), a sibling plugin
- * that leaks a dependency on foreman or never got registered in the
- * catalog, and duplicate adjacent lines (the signature of a botched
- * line-range edit).
+ * The repo is a marketplace: `foreman` at the root, plus one plugin per
+ * directory under `plugins/`. It's mostly prose (commands/skills/agents/rules
+ * as markdown), so nothing type-checks it. This script catches the failure
+ * modes that bit us during authoring: a required frontmatter field missing, a
+ * `skill://<name>` or `/<plugin>:<command>` reference that doesn't resolve, a
+ * sibling plugin that leaks a dependency on foreman or never got registered in
+ * the catalog, a rule name that collides with another plugin's, and duplicate
+ * adjacent lines (the signature of a botched line-range edit).
  *
- * Run: `bun scripts/check.ts`. Exits non-zero with a report on failure.
+ * Every content check is per-plugin: a pack under `plugins/` may grow its own
+ * commands, skills, and agents, and they are validated against that plugin's
+ * own namespace rather than foreman's.
+ *
+ * Run: `bun scripts/check.ts` (or `node scripts/check.ts`). Exits non-zero
+ * with a report on failure.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -71,62 +74,26 @@ function listDirs(dir: string): string[] {
 const errors: string[] = [];
 const warnings: string[] = [];
 
-// --- commands/*.md: must have `description`, filename must not re-bake the
-// plugin's own name (that produces the double-prefix bug we already hit
-// once) ---
-const commandNames = new Set<string>();
-for (const file of listMd(join(ROOT, "commands"))) {
-  const path = join(ROOT, "commands", file);
-  const { fm } = parseFrontmatter(readFileSync(path, "utf8"));
-  const name = file.replace(/\.md$/, "");
-  commandNames.add(name);
-  if (!fm.description) errors.push(`commands/${file}: missing frontmatter "description"`);
-  if (name.includes(":")) {
-    errors.push(
-      `commands/${file}: filename bakes in a namespace prefix — omp already prefixes plugin commands with the package name, so this would double up (see the foreman:init incident)`,
-    );
-  }
-}
-
-// --- skills/<name>/SKILL.md: must have name == dirname, must have
-// description ---
-const skillNames = new Set<string>();
-for (const dir of listDirs(join(ROOT, "skills"))) {
-  const path = join(ROOT, "skills", dir, "SKILL.md");
-  let content: string;
-  try {
-    content = readFileSync(path, "utf8");
-  } catch {
-    errors.push(`skills/${dir}/: no SKILL.md`);
-    continue;
-  }
-  const { fm } = parseFrontmatter(content);
-  skillNames.add(dir);
-  if (!fm.name) errors.push(`skills/${dir}/SKILL.md: missing frontmatter "name"`);
-  else if (fm.name !== dir)
-    errors.push(`skills/${dir}/SKILL.md: name "${fm.name}" doesn't match directory "${dir}"`);
-  if (!fm.description) errors.push(`skills/${dir}/SKILL.md: missing frontmatter "description"`);
-}
-
-// --- agents/*.md: must have name + description ---
-for (const file of listMd(join(ROOT, "agents"))) {
-  const path = join(ROOT, "agents", file);
-  const { fm } = parseFrontmatter(readFileSync(path, "utf8"));
-  if (!fm.name) errors.push(`agents/${file}: missing frontmatter "name"`);
-  if (!fm.description) errors.push(`agents/${file}: missing frontmatter "description"`);
-}
-
-// --- plugin roots: foreman at the repo root, plus the standalone rule packs
-// under plugins/. Each gets the same rule checks; the siblings additionally
-// have to stand on their own. ---
-type PluginRoot = { id: string; dir: string; prefix: string; standalone: boolean };
+// --- plugin roots: foreman at the repo root, plus every directory under
+// plugins/. `id` doubles as the command prefix omp derives from the plugin
+// name, so a pack's own commands resolve as /<id>:<command>. ---
+type PluginRoot = {
+  id: string;
+  dir: string;
+  prefix: string;
+  standalone: boolean;
+  commands: Set<string>;
+  skills: Set<string>;
+};
 const pluginRoots: PluginRoot[] = [
-  { id: "foreman", dir: ROOT, prefix: "", standalone: false },
+  { id: "foreman", dir: ROOT, prefix: "", standalone: false, commands: new Set(), skills: new Set() },
   ...listDirs(join(ROOT, "plugins")).map((name) => ({
     id: name,
     dir: join(ROOT, "plugins", name),
     prefix: `plugins/${name}/`,
     standalone: true,
+    commands: new Set<string>(),
+    skills: new Set<string>(),
   })),
 ];
 
@@ -158,23 +125,72 @@ const pluginRoots: PluginRoot[] = [
         `.omp-plugin/marketplace.json: plugin "${String(entry.name)}" has source "${source}", which is not a plugin directory in this repo — installing it would fail`,
       );
     }
+    // A directory named differently from its plugin name would break the
+    // /<plugin>:<command> prefix that omp derives from the name.
+    const name = String(entry.name);
+    if (source.startsWith("./plugins/") && source !== `./plugins/${name}`) {
+      errors.push(
+        `.omp-plugin/marketplace.json: plugin "${name}" lives at "${source}" — the directory must match the plugin name, since omp prefixes its commands with the name`,
+      );
+    }
   }
 }
 
-// --- rules/*.md. Three valid shapes, and the scope requirement differs per
-// shape because omp derives scope from a glob-shaped condition:
-//   command rule: regex `condition` + explicit `scope` (never bare "tool")
-//   path rule:    `condition` as a glob sequence, NO scope (omp infers
-//                 tool:edit()/tool:write() and substitutes condition `.*`)
-//   standing rule: `alwaysApply: true`, no condition, no scope
 let ruleCount = 0;
 const ruleOrigin: Record<string, string> = {};
+
 for (const plugin of pluginRoots) {
-  const dir = join(plugin.dir, "rules");
-  for (const file of listMd(dir)) {
+  // --- commands/*.md: must have `description`; the filename must not re-bake
+  // the plugin's own name (that produces the double-prefix bug we hit once) ---
+  for (const file of listMd(join(plugin.dir, "commands"))) {
+    const rel = `${plugin.prefix}commands/${file}`;
+    const { fm } = parseFrontmatter(readFileSync(join(plugin.dir, "commands", file), "utf8"));
+    const name = file.replace(/\.md$/, "");
+    plugin.commands.add(name);
+    if (!fm.description) errors.push(`${rel}: missing frontmatter "description"`);
+    if (name.includes(":")) {
+      errors.push(
+        `${rel}: filename bakes in a namespace prefix — omp already prefixes plugin commands with the plugin name, so this would double up (see the foreman:init incident)`,
+      );
+    }
+  }
+
+  // --- skills/<name>/SKILL.md: must have name == dirname and a description ---
+  for (const dir of listDirs(join(plugin.dir, "skills"))) {
+    const rel = `${plugin.prefix}skills/${dir}/SKILL.md`;
+    let content: string;
+    try {
+      content = readFileSync(join(plugin.dir, "skills", dir, "SKILL.md"), "utf8");
+    } catch {
+      errors.push(`${plugin.prefix}skills/${dir}/: no SKILL.md`);
+      continue;
+    }
+    const { fm } = parseFrontmatter(content);
+    plugin.skills.add(dir);
+    if (!fm.name) errors.push(`${rel}: missing frontmatter "name"`);
+    else if (fm.name !== dir) errors.push(`${rel}: name "${String(fm.name)}" doesn't match directory "${dir}"`);
+    if (!fm.description) errors.push(`${rel}: missing frontmatter "description"`);
+  }
+
+  // --- agents/*.md: must have name + description ---
+  for (const file of listMd(join(plugin.dir, "agents"))) {
+    const rel = `${plugin.prefix}agents/${file}`;
+    const { fm } = parseFrontmatter(readFileSync(join(plugin.dir, "agents", file), "utf8"));
+    if (!fm.name) errors.push(`${rel}: missing frontmatter "name"`);
+    if (!fm.description) errors.push(`${rel}: missing frontmatter "description"`);
+  }
+
+  // --- rules/*.md. Three valid shapes, and the scope requirement differs per
+  // shape because omp derives scope from a glob-shaped condition:
+  //   command rule: regex `condition` + explicit `scope` (never bare "tool")
+  //   path rule:    `condition` as a glob sequence, NO scope (omp infers
+  //                 tool:edit()/tool:write() and substitutes condition `.*`)
+  //   standing rule: `alwaysApply: true`, no condition, no scope
+  const rulesDir = join(plugin.dir, "rules");
+  for (const file of listMd(rulesDir)) {
     ruleCount++;
     const rel = `${plugin.prefix}rules/${file}`;
-    const { fm } = parseFrontmatter(readFileSync(join(dir, file), "utf8"));
+    const { fm } = parseFrontmatter(readFileSync(join(rulesDir, file), "utf8"));
 
     // omp identifies rules by name (filename) across every installed plugin
     // and keeps only the first, so a collision silently disables one of them.
@@ -241,27 +257,34 @@ function walkMd(base: string): string[] {
   return out;
 }
 
+const foreman = pluginRoots.find((p) => !p.standalone)!;
+
 for (const plugin of pluginRoots) {
   for (const path of walkMd(plugin.dir)) {
     const content = readFileSync(path, "utf8");
     const rel = path.slice(ROOT.length + 1);
 
+    // A plugin may reference its OWN skills. A standalone pack referencing a
+    // skill it doesn't define would depend on another plugin being installed,
+    // which nothing guarantees.
     for (const m of content.matchAll(/skill:\/\/([a-z0-9-]+)/g)) {
-      if (plugin.standalone) {
-        errors.push(
-          `${rel}: references skill://${m[1]} — a standalone plugin can't depend on foreman's skills; inline the guidance instead`,
-        );
-      } else if (!skillNames.has(m[1])) {
-        errors.push(`${rel}: references skill://${m[1]}, which doesn't exist`);
-      }
+      if (plugin.skills.has(m[1])) continue;
+      errors.push(
+        plugin.standalone
+          ? `${rel}: references skill://${m[1]}, which ${plugin.id} doesn't define — a standalone plugin can't depend on another plugin's skills; add the skill here or inline the guidance`
+          : `${rel}: references skill://${m[1]}, which doesn't exist`,
+      );
     }
-    for (const m of content.matchAll(/\/foreman:([a-z0-9-]+)/g)) {
-      if (plugin.standalone) {
-        errors.push(
-          `${rel}: references /foreman:${m[1]} — a standalone plugin can't depend on foreman's commands`,
-        );
-      } else if (!commandNames.has(m[1])) {
-        errors.push(`${rel}: references /foreman:${m[1]}, which doesn't exist`);
+
+    // Commands resolve as /<plugin>:<command>. Referencing foreman's from a
+    // standalone pack is the coupling this split exists to prevent.
+    for (const m of content.matchAll(/\/([a-z0-9-]+):([a-z0-9-]+)/g)) {
+      const [, ns, cmd] = m;
+      if (ns !== plugin.id && ns !== foreman.id) continue;
+      if (ns !== plugin.id) {
+        errors.push(`${rel}: references /${ns}:${cmd} — a standalone plugin can't depend on ${ns}'s commands`);
+      } else if (!plugin.commands.has(cmd)) {
+        errors.push(`${rel}: references /${ns}:${cmd}, which doesn't exist`);
       }
     }
 
@@ -286,6 +309,8 @@ if (errors.length > 0) {
   console.error("");
   process.exit(1);
 }
+const commands = pluginRoots.reduce((n, p) => n + p.commands.size, 0);
+const skills = pluginRoots.reduce((n, p) => n + p.skills.size, 0);
 console.log(
-  `ok: ${pluginRoots.length} plugins, ${commandNames.size} commands, ${skillNames.size} skills, ${ruleCount} rules checked, no errors${warnings.length ? ` (${warnings.length} warning(s) above)` : ""}`,
+  `ok: ${pluginRoots.length} plugins, ${commands} commands, ${skills} skills, ${ruleCount} rules checked, no errors${warnings.length ? ` (${warnings.length} warning(s) above)` : ""}`,
 );

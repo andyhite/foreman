@@ -20,8 +20,8 @@ prose or a code block that merely mentions one of these paths.
 
 Package-manager lockfiles are generated too, and this pack ships no glob for
 any of them. They belong to the per-tool packs in the same marketplace —
-`pnpm-hygiene`, `npm-hygiene`, `yarn-hygiene`, `bun-hygiene`, `uv-hygiene`,
-`pip-hygiene`, and `cargo-hygiene` — each of which covers its own lockfile
+`pnpm`, `npm`, `yarn`, `bun`, `uv`,
+`pip`, and `cargo` — each of which covers its own lockfile
 with advice specific to that tool's install, resolution, and CI flags.
 Duplicating those globs here would double-fire for anyone running both.
 

@@ -1,4 +1,4 @@
-# bun-hygiene
+# bun
 
 Three tool-call interrupt rules for repos where Bun is the package manager and
 the runtime. They keep a foreign package manager, a hand-edited lockfile, and a
@@ -23,7 +23,7 @@ Install this only in repos that really are Bun-based; in a pnpm or npm repo
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install bun-hygiene@omp-foreman
+omp plugin install bun@omp-foreman
 ```
 
 Independent of every other plugin in this marketplace — install it alone, with

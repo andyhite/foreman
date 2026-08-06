@@ -1,4 +1,4 @@
-# npm-hygiene
+# npm
 
 Four tool-call interrupt rules for repositories whose package manager is
 npm. They keep a second lockfile out of the tree, keep `package-lock.json`
@@ -21,7 +21,7 @@ fires on an edit to the lockfile and not on prose that mentions it.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install npm-hygiene@omp-foreman
+omp plugin install npm@omp-foreman
 ```
 
 Independent of the other plugins in this marketplace — install it alone, or

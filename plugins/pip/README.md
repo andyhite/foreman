@@ -1,4 +1,4 @@
-# pip-hygiene
+# pip
 
 Four tool-call interrupt rules for Python repos that use `pip` and
 `venv` directly — no uv, no Poetry, no Pipenv. They defend one property: the
@@ -26,7 +26,7 @@ environment rather than being dependencies of the project.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install pip-hygiene@omp-foreman
+omp plugin install pip@omp-foreman
 ```
 
 Independent of every other plugin in this marketplace — install it alone, with

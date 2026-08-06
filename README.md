@@ -47,48 +47,52 @@ this one is the reusable half.
   cleanup). These are the enforcement half of the skills above, so they ship
   with foreman rather than separately.
 
-## Rule packs in this marketplace
+## Plugins in this marketplace
 
-Everything that *doesn't* depend on the foreman workflow ships as a
-standalone plugin from the same catalog, grouped by concept. Install any
-combination — none depends on `foreman` or on any other pack, and
-`scripts/check.ts` fails the build if one ever grows a `skill://` or
-`/foreman:` reference back into foreman.
+Everything that *doesn't* depend on the foreman workflow ships as its own
+plugin from the same catalog. Pick the ones you want — none depends on
+`foreman` or on any other, and `scripts/check.ts` fails the build if one ever
+grows a `skill://` or `/foreman:` reference back into foreman.
 
-**Always safe to install together:**
+**Concept packs** — general discipline, safe in any repo, safe together:
 
 | Plugin | Rules | Concept |
 |---|---|---|
-| [`git-hygiene`](plugins/git-hygiene) | `destructive-git`, `force-with-lease`, `main-needs-a-pr`, `default-branch-is-read-only` | Irreversible git operations, and keeping the default branch clean |
-| [`verification-integrity`](plugins/verification-integrity) | `test-integrity`, `hooks-are-the-gate` | Don't fake a green build |
-| [`generated-files`](plugins/generated-files) | 4 path rules | Don't hand-edit machine-generated output |
-| [`shell-safety`](plugins/shell-safety) | 5 rules | Irreversible or over-privileged shell commands |
-| [`secrets-hygiene`](plugins/secrets-hygiene) | 4 rules | Credentials out of the repo and out of transcripts |
+| [`git-hygiene`](plugins/git-hygiene) | 4 | Irreversible git operations, and keeping the default branch clean |
+| [`verification-integrity`](plugins/verification-integrity) | 2 | Don't fake a green build |
+| [`generated-files`](plugins/generated-files) | 4 | Don't hand-edit machine-generated output |
+| [`shell-safety`](plugins/shell-safety) | 5 | Irreversible or over-privileged shell commands |
+| [`secrets-hygiene`](plugins/secrets-hygiene) | 4 | Credentials out of the repo and out of transcripts |
 
-**Pick exactly one per ecosystem** — each pack asserts that *its* tool is the
-package manager, so two of them will fire on each other's correct commands:
+**Tool packs** — one per package manager. Install the one your project uses:
 
 | Plugin | For repos using |
 |---|---|
-| [`pnpm-hygiene`](plugins/pnpm-hygiene) | pnpm |
-| [`npm-hygiene`](plugins/npm-hygiene) | npm |
-| [`yarn-hygiene`](plugins/yarn-hygiene) | yarn (Classic and Berry) |
-| [`bun-hygiene`](plugins/bun-hygiene) | bun |
-| [`uv-hygiene`](plugins/uv-hygiene) | uv (Python) |
-| [`pip-hygiene`](plugins/pip-hygiene) | pip + virtualenv (Python) |
-| [`cargo-hygiene`](plugins/cargo-hygiene) | cargo (Rust) |
+| [`pnpm`](plugins/pnpm) | pnpm |
+| [`npm`](plugins/npm) | npm |
+| [`yarn`](plugins/yarn) | yarn (Classic and Berry) |
+| [`bun`](plugins/bun) | bun |
+| [`uv`](plugins/uv) | uv (Python) |
+| [`pip`](plugins/pip) | pip + virtualenv (Python) |
+| [`cargo`](plugins/cargo) | cargo (Rust) |
 
-Each pack carries a wrong-tool rule (`pnpm-only`, `npm-only`, …) naming the
-right idiom for every competing command, a path rule protecting its lockfile,
-and the tool's specific escape hatches (`--no-frozen-lockfile`,
+Each carries a wrong-tool rule (`pnpm-only`, `npm-only`, …) naming the right
+idiom for every competing command, a path rule protecting its lockfile, and
+that tool's specific escape hatches (`--no-frozen-lockfile`,
 `--legacy-peer-deps`, `--break-system-packages`, `--cap-lints allow`).
-Because these are per-project choices, install them with `--scope project`:
 
 ```sh
-omp plugin install --scope project pnpm-hygiene@omp-foreman
+omp plugin install pnpm@omp-foreman
 omp plugin install git-hygiene@omp-foreman
 omp plugin install shell-safety@omp-foreman
 ```
+
+A tool pack is named for its tool, not `<tool>-hygiene`, because it's the home
+for *everything* about that tool — rules today, and skills or commands as they
+get written. Don't install two package-manager packs in the same project: each
+asserts that its own tool is the manager, so they fire on each other's correct
+commands. If you work across projects with different managers, install the
+relevant one per project (`--scope project`) rather than globally.
 
 ## Install
 

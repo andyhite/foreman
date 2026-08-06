@@ -1,4 +1,4 @@
-# pnpm-hygiene
+# pnpm
 
 Four tool-call interrupt rules for repositories whose package manager is
 pnpm. They defend the two things pnpm gets right and every other manager
@@ -21,7 +21,7 @@ code block. `pnpm-lockfile` is a path rule and fires on the edit itself.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install pnpm-hygiene@omp-foreman
+omp plugin install pnpm@omp-foreman
 ```
 
 Independent of every other plugin in this marketplace — install it alone in

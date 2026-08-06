@@ -1,4 +1,4 @@
-# uv-hygiene
+# uv
 
 Four tool-call interrupt rules for Python repos managed by
 [uv](https://docs.astral.sh/uv/). They defend one invariant: `pyproject.toml`
@@ -23,7 +23,7 @@ and none of the command rules trip on `uv run python ...`.
 
 ```sh
 omp plugin marketplace add andyhite/omp-foreman
-omp plugin install uv-hygiene@omp-foreman
+omp plugin install uv@omp-foreman
 ```
 
 Independent of every other plugin in this marketplace — it assumes only that
