@@ -11,7 +11,7 @@
   "plugins": [
     {
       "name": "omp-foreman",
-      "description": "GitHub-issue-tracker-driven dev workflow — ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge — as reusable /foreman:* commands, skills, and agents. Config-driven via .omp/foreman.json; no hardcoded repo or toolchain.",
+      "description": "GitHub-issue-tracker-driven dev workflow — ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge — as reusable commands (invoked as /omp-foreman:<name>), skills, and agents. Config-driven via .omp/foreman.json; no hardcoded repo or toolchain.",
       "source": "./",
       "category": "productivity",
       "homepage": "https://github.com/andyhite/omp-foreman",

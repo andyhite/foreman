@@ -3,17 +3,23 @@
 An [omp](https://github.com/oh-my-pi) extension that packages a
 GitHub-issue-tracker-driven development workflow — ideas → epics/tasks →
 worktrees → TDD implementation → QA gate → (stacked) pull requests →
-operator merge — as reusable commands, skills, and agents, all under the
-`/foreman:*` slash-command namespace. It carries no hardcoded repo, org, or
-tech stack: every project-specific constant (repo, GitHub Projects v2
-board, label vocabulary, commit-type set, package manager, check/verify/
-e2e commands) is resolved once by `/foreman:init` and read back out of
-`.omp/foreman.json`.
+operator merge — as reusable commands, skills, and agents. It carries no
+hardcoded repo, org, or tech stack: every project-specific constant (repo,
+GitHub Projects v2 board, label vocabulary, commit-type set, package
+manager, check/verify/e2e commands) is resolved once by `/omp-foreman:init`
+and read back out of `.omp/foreman.json`.
 
 The package is named `omp-foreman` (repo: `andyhite/omp-foreman`) because
-plain `foreman` already names an unrelated process manager; the shorter
-`foreman` name lives on as the in-session vocabulary — the slash-command
-prefix, the skill/agent names, and the `.omp/foreman.json` config file.
+plain `foreman` already names an unrelated process manager. Commands ship
+with **bare** names (`init`, `help`, `record`, …) — omp automatically
+prefixes every command from an installed plugin with its package name, so
+installed via `omp plugin link`/`omp plugin install` (the normal path,
+below) they're invoked as `/omp-foreman:init`, `/omp-foreman:help`, etc.
+Loading the extension directly with `--extension` instead (no plugin
+wrapper) exposes the bare names with no prefix. `foreman` still names the
+skills, agents, and the `.omp/foreman.json` config file — those aren't
+namespaced by omp, and this doc uses the prefixed command form throughout
+since that's how you'll actually have it installed.
 
 This is the generalized, project-agnostic form of a workflow originally
 built inside one specific repo; if you're looking at both side by side,
@@ -21,10 +27,10 @@ this one is the reusable half.
 
 ## What it gives you
 
-- **Commands** (`commands/foreman:*.md`): `/foreman:init`, `/foreman:help`,
-  `/foreman:record`, `/foreman:groom`, `/foreman:work <issue>`,
-  `/foreman:orchestrate <epic>`, `/foreman:report`, `/foreman:triage`.
-- **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/foreman:init`),
+- **Commands** (`commands/*.md`, invoked as `/omp-foreman:<name>` once
+  installed): `init`, `help`, `record`, `groom`, `work <issue>`,
+  `orchestrate <epic>`, `report`, `triage`.
+- **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/omp-foreman:init`),
   `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `bug-triage`,
   `verification`, `stacked-prs`.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
@@ -60,17 +66,17 @@ Restart the session (or `/reload-plugins`) after adding it.
 ## Quick start
 
 ```
-/foreman:init         # one-time (or repair) setup: labels + project board + .omp/foreman.json
-/foreman:record ...   # capture an idea
-/foreman:groom        # turn ideas into task/epic issues, or reject them
-/foreman:work <n>     # deliver a task or bug end to end
-/foreman:orchestrate <n>  # deliver an epic via issue-worker subagents
-/foreman:report       # board snapshot
-/foreman:triage ...   # file/triage a bug with a severity label
+/omp-foreman:init         # one-time (or repair) setup: labels + project board + .omp/foreman.json
+/omp-foreman:record ...   # capture an idea
+/omp-foreman:groom        # turn ideas into task/epic issues, or reject them
+/omp-foreman:work <n>     # deliver a task or bug end to end
+/omp-foreman:orchestrate <n>  # deliver an epic via issue-worker subagents
+/omp-foreman:report       # board snapshot
+/omp-foreman:triage ...   # file/triage a bug with a severity label
 ```
 
-`/foreman:help` explains all of the above (and any single command, skill,
-or agent) grounded in the live tree, not from memory.
+`/omp-foreman:help` explains all of the above (and any single command,
+skill, or agent) grounded in the live tree, not from memory.
 
 ## Design notes
 
@@ -78,7 +84,7 @@ or agent) grounded in the live tree, not from memory.
   `package.json` scripts / `Makefile` / monorepo tool / CI config instead
   of assuming pnpm, vitest, or turbo.
 - **No hardcoded repo or toolchain convention.** Every skill reads
-  `.omp/foreman.json` (written by `/foreman:init`) for the repo, project
+  `.omp/foreman.json` (written by `/omp-foreman:init`) for the repo, project
   board IDs, label vocabulary, commit types, package manager, and
   check/verify/e2e commands — see below.
 - **The operator always merges.** Every skill and agent treats "the
@@ -87,7 +93,7 @@ or agent) grounded in the live tree, not from memory.
 
 ## `.omp/foreman.json`
 
-Written and repaired by `/foreman:init`. Every other skill reads this
+Written and repaired by `/omp-foreman:init`. Every other skill reads this
 instead of assuming a repo, a board, or a toolchain:
 
 ```json
@@ -130,7 +136,7 @@ instead of assuming a repo, a board, or a toolchain:
 ```
 
 - `mainBranch`, `commitTypes`, `commands.*`, and `board.statuses.<role>.name`
-  are **detected** by `/foreman:init` from this repo's own commitlint
+  are **detected** by `/omp-foreman:init` from this repo's own commitlint
   config, lockfile, `package.json` scripts, and existing board — never
   invented. Anything undetectable is left `null`/a documented default and
   called out as a guess in the init report, not silently assumed.
@@ -139,6 +145,6 @@ instead of assuming a repo, a board, or a toolchain:
   foreman doesn't need to be renamed to fit it.
 - `epicLoop.maxConcurrentTracks` is a starting default (3), not a detected
   value — tune it to the project's review bandwidth.
-- Hand-edit any field at any time; `/foreman:init` re-run is a repair pass
+- Hand-edit any field at any time; `/omp-foreman:init` re-run is a repair pass
   that fills gaps and never clobbers a value that looks deliberately
   edited.

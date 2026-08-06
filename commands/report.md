@@ -4,7 +4,7 @@ description: Snapshot the board — status counts, in-flight work, review queue,
 
 Produce a board snapshot. Read-only: query, never move anything.
 
-Read `skill://tracker` for the board constants (run `/foreman:init` first
+Read `skill://tracker` for the board constants (run `/omp-foreman:init` first
 if `.omp/foreman.json` doesn't exist), then gather (parallelize the
 queries):
 

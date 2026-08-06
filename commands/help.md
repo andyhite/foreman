@@ -13,18 +13,18 @@ Ground everything in the live tree, never from memory: list this
 extension's `commands/*.md` and take each one's `description` frontmatter;
 list `skills/*/SKILL.md` and `agents/*.md` the same way. If
 `.omp/foreman.json` is missing, say so up front — most of this workflow is
-inert until `/foreman:init` runs.
+inert until `/omp-foreman:init` runs.
 
 Present, compactly — tables over prose, one screen if you can:
 
 1. **The lifecycle in one breath.** Ideas are recorded cheaply
-   (`/foreman:record`), groomed into a task or an epic — or rejected
-   (`/foreman:groom`), delivered (`/foreman:work <issue>` for a task or
-   bug, `/foreman:orchestrate <epic>` for an epic), and land on the main
+   (`/omp-foreman:record`), groomed into a task or an epic — or rejected
+   (`/omp-foreman:groom`), delivered (`/omp-foreman:work <issue>` for a task or
+   bug, `/omp-foreman:orchestrate <epic>` for an epic), and land on the main
    branch only through a PR that **I** merge — the merge is the approval.
-   Bugs enter through `/foreman:triage` with a severity label and skip the
-   idea stage. `/foreman:report` snapshots the board without moving
-   anything. `/foreman:init` is the one-time (or repair) setup step
+   Bugs enter through `/omp-foreman:triage` with a severity label and skip the
+   idea stage. `/omp-foreman:report` snapshots the board without moving
+   anything. `/omp-foreman:init` is the one-time (or repair) setup step
    everything else depends on.
 2. **Commands.** One row each: command, argument, what it does, and the
    moment you'd reach for it.
@@ -39,6 +39,6 @@ Present, compactly — tables over prose, one screen if you can:
    writer; claim before the first edit and keep the board current; agents
    never merge; a task is not done while its worktree exists.
 
-Close with the one-line default: unsure where to start? `/foreman:report`
-to see the board, then `/foreman:work` the top of `To Do` — or
-`/foreman:init` first if the board doesn't exist yet.
+Close with the one-line default: unsure where to start? `/omp-foreman:report`
+to see the board, then `/omp-foreman:work` the top of `To Do` — or
+`/omp-foreman:init` first if the board doesn't exist yet.

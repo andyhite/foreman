@@ -10,7 +10,7 @@ full suite. This skill does not assume any specific package manager, test
 runner, or monorepo tool.
 
 **Check the cache first.** `.omp/foreman.json#commands` (written by
-`/foreman:init`, or updated by a previous run of this skill) holds this
+`/omp-foreman:init`, or updated by a previous run of this skill) holds this
 repo's own `packageManager`, `install`, `check`, `verify`, and `e2e`
 commands when they were detectable. If a value is present there, use it
 directly instead of re-detecting. If it's absent, `null`, or turns out to

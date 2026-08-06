@@ -21,7 +21,7 @@ or, if that file doesn't exist yet, the primary checkout's directory name.
 | Worktree | `<repo-slug>-<issue>-<slug>`   | `../myapp-291-actor-identity-gate`   |
 
 - `<type>` is a Conventional Commit type. `.omp/foreman.json#commitTypes`
-  (written by `/foreman:init`, detected from this repo's commitlint config
+  (written by `/omp-foreman:init`, detected from this repo's commitlint config
   where one exists) is the allowed set — stay inside it. Bugs are `fix/`;
   tasks take whatever type fits the change.
 - `<slug>` is the issue title, lower-kebab, trimmed to a handful of words.
