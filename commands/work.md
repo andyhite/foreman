@@ -18,8 +18,12 @@ an untriaged bug label), stop and tell me what state it is actually in —
 do not work around the lifecycle.
 
 You are the orchestrator: subagents search and edit, you own sequencing,
-verification, and delivery. **You never merge**: I merge the PR — that is
-the approval — and my comments on it are change requests to address and
+verification, and delivery. **Keep the todo list synced to reality as you
+go**: mark each step `done` in the same turn you verify it — not a batch
+of `done` calls at the very end, and never a report that "shipped" while
+todos sit open. **You never merge**: I merge the PR — that is the
+approval — and my comments on it are change requests to address and
 return to `Review`. When the PR is open and ready, tell me and yield; pick
 the loop back up when I merge or comment. Report at the end: PR, what
-shipped, how it was proven, board state, worktree removed.
+shipped, how it was proven, board state, worktree removed, and confirm
+every todo is `done` or explicitly dropped.

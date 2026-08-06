@@ -51,8 +51,13 @@ epic rather than silently delivering a big bang.
 
 `todo init` with the plan: one omp todo per step, plus a `Verification`
 phase (pre-PR gate, QA) and a `Delivery` phase (PR, review, merge,
-cleanup). Keep it moving as you go — todos are your working memory, the
-board is the world's.
+cleanup). This list is not a one-time artifact — it's your working
+memory for the rest of the loop, and it is **only useful if it tracks
+reality as you go**: mark each item `done` the moment its work is
+verified, in the same turn as that verification, never batched for the
+end. A todo list that's still all-open when you report the issue shipped
+means you didn't actually check anything off while doing the work — that's
+a process failure, not a cosmetic one.
 
 ## 5. Implement — TDD, orchestrated
 
@@ -70,7 +75,9 @@ For each step (batch independent steps into one `task` dispatch):
 - Verify each result yourself with rung 1 of the `verification` skill (LSP
   diagnostics, per-file lint, the step's test file). A subagent's
   "completed" is a claim, not a fact.
-- After each coherent slice, rung 2 (package/workspace-scoped check).
+- After each coherent slice, rung 2 (package/workspace-scoped check), then
+  mark that step's todo `done` immediately — the check passing and the
+  todo flipping happen together, not "I'll clean up the list later."
 - Commit as you go: Conventional Commits, one logical change per commit.
 
 House rules that bind every step: if the repo centralizes rule/validation
@@ -94,6 +101,8 @@ own checks, exercises the change, and writes any missing e2e coverage.
   re-dispatch QA. Loop until `PASS`. Disagreements you can't resolve go to
   the operator, not into the PR.
 - QA's e2e additions get reviewed by you and committed on the branch.
+- `PASS` → mark the `QA` todo `done` now, in this same turn, before
+  opening the PR.
 
 ## 8. Pull request
 
@@ -105,7 +114,7 @@ own checks, exercises the change, and writes any missing e2e coverage.
   #<issue>`.
 - Record the QA verdict as a PR comment (who reviewed, what was checked,
   `PASS`).
-- Move the issue to `Review`.
+- Move the issue to `Review`; mark the `PR` todo `done` now.
 - Under an epic, a chained subtask's PR is a stack layer instead — same
   gates, different plumbing: see `skill://stacked-prs`.
 
@@ -144,7 +153,10 @@ two-step.
 3. Delete the remote branch if the merge didn't; remove the worktree and
    local branch (`worktree` skill). The task is not complete while the
    worktree exists.
-4. Report: issue, PR, what shipped, how it was proven.
+4. Mark every remaining todo `done` — if any step's todo is still open
+   here, that step's work was never actually verified; go back and verify
+   it before reporting, don't just close the list to match the outcome.
+5. Report: issue, PR, what shipped, how it was proven.
 
 ## Blocked?
 

@@ -22,6 +22,14 @@ stack, note that merging a layer takes everything below it), and my
 comments on any PR are change requests for the owning worker. Verify
 workers' claims against the board and the main branch, not their say-so.
 
+**The todo list must track landings as they happen, not just exist at the
+start.** The moment you verify a subtask actually landed (PR merged, issue
+`Done`), mark its todo `done` in that same turn — across every track, not
+only the last one to finish. Before you report closeout, audit the whole
+list: every todo is `done` or explicitly `drop`ped with a reason: an epic
+reported "shipped" with every todo still open means the tracks landed but
+nobody verified them as they went.
+
 Report at the end: track → subtask → PR → status table, how the integrated
 behavior was proven, anything deferred (as linked issues), integration
-worktree removed.
+worktree removed, and the todo list's final state.

@@ -42,7 +42,8 @@ this one is the reusable half.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
 - **Rules** (`rules/*.md`): tool-call interrupts for the sharp edges — force
   pushes, destructive git, pushing at the main branch, closing issues by
-  hand, softening tests, skipping hooks.
+  hand, softening tests, skipping hooks, and keeping the todo list synced
+  to real landings (PR merges, issue closes, worktree cleanup).
 
 ## Install
 

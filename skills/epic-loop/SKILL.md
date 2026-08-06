@@ -55,6 +55,12 @@ Run tracks in parallel, at most `epicLoop.maxConcurrentTracks` workers
 concurrently (`.omp/foreman.json`, default 3 — raise or lower it to match
 this project's review bandwidth). `todo init`: one omp todo per subtask
 grouped by track, an integration todo per landing, and a closeout phase.
+This list is the only place tracking a multi-track epic is tractable —
+**it is worthless if you create it and never touch it again.** The
+failure mode to avoid: all these categorized track todos get created up
+front, then nobody marks any of them done as tracks actually land, so the
+epic finishes with every todo still open despite real work having shipped.
+Step 4 below says exactly when each one flips.
 
 ## 4. Dispatch and monitor
 
@@ -82,7 +88,14 @@ While tracks run:
   rebase after the first lands, or serialize them.
 
 A worker's "completed" is a claim. Verify it: PRs merged, issues `Done`,
-worktree gone.
+worktree gone. **The instant you've verified a subtask landed, mark its
+todo `done` — in that same turn, not batched for later.** Do this for
+every subtask as it lands, not just the last one in a track: if a track
+has three chained layers, that's three todos each flipped as each layer
+merges, not one flip when the track finishes. If you reach step 6 and
+find todos still open for subtasks the board says are `Done`, you skipped
+verifying them when they actually landed — go verify now, don't just
+close the todos to match the board.
 
 ## 5. Integrate as work lands
 
@@ -116,13 +129,21 @@ as their own track.
 
 When every subtask is `Done`:
 
-1. Final integration pass (step 5) against the epic's own acceptance
+1. **Todo audit first.** `todo view` the whole list. Every per-subtask and
+   integration todo must be `done` (because you verified that landing
+   when it happened, per step 4) or explicitly `drop`ped with a reason
+   recorded in the same message. An open todo at this point means either
+   you're not actually done, or you forgot to flip it when the work
+   landed — find out which before continuing; don't paper over it by
+   closing the list to match the outcome you're about to report.
+2. Final integration pass (step 5) against the epic's own acceptance
    criteria — judge the epic against what it promised, not just against
    green checks.
-2. Summary comment on the epic: what shipped, per-subtask PRs, how the
+3. Summary comment on the epic: what shipped, per-subtask PRs, how the
    integrated behavior was proven, anything deferred (as linked issues,
    never as prose someone must remember).
-3. Close the epic; board status `Done` (this is the one `Done` that isn't
+4. Close the epic; board status `Done` (this is the one `Done` that isn't
    tied to a PR of its own).
-4. Remove the integration worktree. The epic is not complete while it
-   exists.
+5. Remove the integration worktree. The epic is not complete while it
+   exists. Mark the closeout todo `done` last, once 1–4 above are
+   actually true — not before.
