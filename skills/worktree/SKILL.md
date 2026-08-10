@@ -53,6 +53,16 @@ the issue (status `In Progress`, `tracker` skill) before your first edit.
 - Push with `git push -u origin <branch>` (`--force-with-lease` after a
   rebase, never bare `--force`).
 
+### When the rebase conflicts
+
+Point at `skill://resolving-merge-conflicts` for the method. Two
+rules matter most here: always resolve the conflict, never `--abort`
+— an abort throws away the information you just paid to recover.
+And never invent behavior to make a hunk compile: recover each
+side's intent from its commits and PRs, and where the two are
+genuinely incompatible, pick the one that matches the rebase's goal
+and say so.
+
 ## Clean up — yours, and only after the work landed
 
 A task is not complete while its worktree still exists. After the PR is

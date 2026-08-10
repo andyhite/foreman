@@ -44,16 +44,22 @@ calls it something else.
 ## Labels
 
 | Label                            | Meaning                                                                   |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `labels.idea` (default `idea`)     | Recorded intention, minimal detail. Awaits grooming.                      |
-| `labels.epic` (default `epic`)     | Large multi-task effort. Never actionable itself; broken into sub-issues. |
-| `labels.task` (default `task`)     | Small, directly actionable unit: one PR, one worktree.                    |
-| `labels.bug` (default `bug`)       | Untriaged bug report — triage replaces it with a severity label.          |
-| `<bug>:sev0` … `<bug>:sevN`         | Triaged bug; severity rubric in the `bug-triage` skill. The exact set is `labels.bugSeverities`. |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| `labels.idea` (default `idea`)   | Recorded intention, minimal detail. Awaits grooming.                      |
+| `labels.epic` (default `epic`)   | Large multi-task effort. Never actionable itself; broken into sub-issues. |
+| `labels.task` (default `task`)   | Small, directly actionable unit: one PR, one worktree.                    |
+| `labels.bug` (default `bug`)     | Untriaged bug report — triage replaces it with a severity label.          |
+| `<bug>:sev0` … `<bug>:sevN`      | Triaged bug; severity rubric in `bug-triage`. Set by `labels.bugSeverities`. |
+| `labels.readyForHuman` (default `ready-for-human`) | Modifier on a `To Do` task: an agent must not claim it; `/foreman:work` refuses it. |
+| `labels.chart` (default `chart`) | Modifier marking a wayfinding map issue and its decision tickets.         |
 
-Exactly one type label per issue. Ideas become epics or tasks at grooming;
-bugs keep a `bug*` label for life and are **never** relabeled `task` or
-`epic`.
+Exactly one **type** label per issue. Ideas become epics or tasks at
+grooming; bugs keep a `bug*` label for life and are **never** relabeled
+`task` or `epic`.
+
+`labels.readyForHuman` and `labels.chart` are **modifier** labels. They
+sit alongside the issue's one type label rather than replacing it; they
+are not a sixth and seventh type.
 
 List all bugs regardless of triage state (search commas are OR):
 
@@ -157,6 +163,38 @@ gh api graphql -f query='query{repository(owner:"<owner>",name:"<repo>"){
       fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}}}'
 ```
 
+### Manage issue dependencies
+
+Native issue dependencies encode ordering between tasks. To make
+`<child-number>` depend on `<blocker-number>`, first resolve the blocker's
+database ID, then add the edge:
+
+```sh
+BLOCKER_DB_ID=$(gh issue view <blocker-number> --json id --jq .id)
+gh api --method POST \
+  repos/<owner>/<repo>/issues/<child-number>/dependencies/blocked_by \
+  -F issue_id="$BLOCKER_DB_ID"
+```
+
+`issue_id` means the blocker's numeric **database ID**, obtainable with
+the `gh issue view` command above. It is not the issue's `#number` and
+not its `node_id`. Passing either wrong value is the failure everyone
+hits, and the API's error does not make the mistake obvious.
+
+List everything blocking a task:
+
+```sh
+gh api \
+  repos/<owner>/<repo>/issues/<child-number>/dependencies/blocked_by
+```
+
+Remove one blocking edge with the same blocker database ID:
+
+```sh
+gh api --method DELETE \
+  repos/<owner>/<repo>/issues/<child-number>/dependencies/blocked_by/"$BLOCKER_DB_ID"
+```
+
 ### Reject an idea
 
 ```sh
@@ -171,9 +209,10 @@ gh issue edit <N> --remove-label <labels.idea> --add-label <labels.task>   # or 
 gh issue edit <N> --body-file <respecced-body.md>
 ```
 
-### Record a blocker
+### Record blocker context
 
-Blockers live on the issue, not in your head:
+Use an issue dependency for issue-to-issue ordering. Add a comment for
+context the graph cannot carry, or for a blocker that is not an issue:
 
 ```sh
 gh issue comment <N> --body "Blocked: <what, since when, what would unblock it>"

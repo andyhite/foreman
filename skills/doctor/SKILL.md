@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: Diagnosing and repairing drift in .omp/foreman.json against live GitHub state — renamed labels, moved/renamed board fields or options, stale detected commands, board hygiene, and a stale or wrong companion rule pack. Read when running /foreman:doctor, or when a foreman skill hits a resolution failure (missing label, unknown option ID, a detected command that 404s).
+description: Diagnosing and repairing drift in .omp/foreman.json against live GitHub and repo state — renamed labels, moved/renamed board fields or options, stale detected commands, doc paths, board hygiene, and missing, stale, or wrong companion packs. Read when running /foreman:doctor, or when a foreman skill hits a resolution failure (missing label, unknown option ID, a dead doc path, a detected command that 404s, or a skill:// that resolves to nothing).
 ---
 
 # Doctor — catch drift before it silently breaks tracking
@@ -17,10 +17,12 @@ it's what `/foreman:doctor` runs.
 
 ## What it checks
 
-1. **Labels.** Every name in `labels.*` (the idea/epic/task/bug prefix,
-   and each entry in `bugSeverities`) actually exists (`gh label list
+1. **Labels.** Every name in `labels.*` (the
+   idea/epic/task/bug prefix, each entry in `bugSeverities`, and the
+   `readyForHuman`/`chart` modifiers) actually exists (`gh label list
    --json name`). Missing → recreate it (bootstrap §1) rather than
-   silently continuing to file issues with a label that isn't there.
+   silently continuing to file or read issues with a label that
+   isn't there.
 2. **Board identity.** `board.projectNodeId` still resolves (`gh project
    view <number> --owner <owner> --format json`). If the project was
    deleted or the number changed, stop and ask — don't recreate a board
@@ -60,20 +62,38 @@ it's what `/foreman:doctor` runs.
      the pack matching the re-detected `commands.packageManager`.
    - Two package-manager packs installed at once is always a bug, never a
      polyglot setup: they fire on each other. Resolve to one.
+   - A missing **`craft`** fails differently and worse than the stale
+     package-manager case. The stale pack creates noise; a missing
+     required pack creates silence — a `skill://` resolves to nothing,
+     so the foreman skill that needed it proceeds without ever knowing
+     it was there. This isn't recommendation drift; it's a broken
+     install. Install it at project scope (`omp plugin install --scope
+     project craft@omp-foreman`) and keep it in `plugins.packs`.
    - A conditional pack whose evidence disappeared (`generated-files` with no
      tracked generated file left) is informational, not urgent — report it and
      let the operator decide, since removing it costs a reinstall if the
      evidence comes back.
+7. **Domain doc paths.** Re-run bootstrap's domain-doc layout
+   detection and compare each `docs.*` field with the repo:
+   - A non-null path that no longer exists → set its field to `null`.
+     The repo deleted that glossary, map, ADR directory, or
+     out-of-scope directory, and that's allowed.
+   - A null field whose conventional path now exists → fill it in,
+     using bootstrap's ordered ADR probe and requiring an
+     `NNNN-`-prefixed markdown file there.
+   Both are ordinary drift, not errors. Repair them without asking;
+   closing known drift is the point of doctor.
 
 ## Procedure
 
-Read-only pass first: gather every finding above without writing anything.
-Then present them as a table (check → current config value → live value
-→ proposed fix) before applying anything. Apply only the unambiguous
-repairs — a cosmetic rename, a re-detected command that still resolves to
-a real script. Ask before touching anything ambiguous: a vanished option
-`id`, a project that 404s, a config value that looks like a deliberate
-hand-edit rather than staleness.
+Read-only pass first: gather every finding above without writing
+anything. Then present them as a table (check → current config value
+→ live value → proposed fix) before applying anything. Apply only the
+unambiguous repairs — a cosmetic rename, a re-detected command that
+still resolves to a real script, doc-path drift, or installing the
+required `craft` pack. Ask before touching anything ambiguous: a
+vanished option `id`, a project that 404s, a config value that looks
+like a deliberate hand-edit rather than staleness.
 
 ## Report
 

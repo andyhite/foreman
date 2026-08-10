@@ -9,12 +9,13 @@ empty for a full pass):
 $ARGUMENTS
 
 Read `skill://grooming` and `skill://tracker`, then run the grooming
-procedure: research each idea and recommend accept-as-task / accept-as-epic
-/ reject / defer — **decisions are mine, batch them into as few ask rounds
-as possible** — then apply the outcomes (re-spec bodies, relabel, statuses,
-epic breakdowns as sub-issues). Include the bug pass (untriaged bugs,
-backlog severity promotions) and the stale-board sweep unless I scoped you
-to a single issue.
+procedure: research each idea and recommend accept-as-task / accept-as-epic /
+chart / reject / defer. Work the decisions through `skill://grilling`: ask
+the whole frontier in one round with a recommended answer attached to every
+question, and never ask me for a fact a `scout` can find. Apply the outcomes
+(re-spec bodies, relabel, statuses, chart maps, epic breakdowns as
+sub-issues). Include the bug pass (untriaged bugs, backlog severity
+promotions) and the stale-board sweep unless I scoped you to one issue.
 
 Finish with a summary table: item → decision → resulting label/status,
 plus anything flagged stale and what was done about it.

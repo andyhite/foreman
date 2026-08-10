@@ -1,6 +1,6 @@
 ---
 name: bootstrap
-description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary, a GitHub Projects v2 board with a Status field, and detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands) into .omp/foreman.json. Read when running /foreman:init or repairing a project's tracker config.
+description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary (including the ready-for-human and chart modifiers), a GitHub Projects v2 board with a Status field, detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands, domain-doc layout) into .omp/foreman.json, and installing the required craft pack. Read when running /foreman:init or repairing a project's tracker config.
 ---
 
 # Bootstrap — wire a repo into the foreman workflow
@@ -50,6 +50,20 @@ create only what's missing:
 gh label create idea --color c5def5 --description "Recorded intention, minimal detail" --force
 # repeat per row — --force updates color/description on an existing label
 # instead of erroring, so this loop is safe to re-run
+```
+
+Two more labels are **modifiers**, not types — they sit alongside a
+type label (`ready-for-human` beside `task`, `chart` beside `epic`)
+instead of replacing it, and get created the same way:
+
+| Label              | Color (suggestion) | Meaning                                               |
+| ------------------- | -------------------- | -------------------------------------------------------- |
+| `ready-for-human`   | `fbca04`             | A `To Do` task an agent must not claim                |
+| `chart`             | `1d76db`             | Marks a wayfinding map issue and its decision tickets |
+
+```sh
+gh label create ready-for-human --color fbca04 --description "A To Do task an agent must not claim" --force
+gh label create chart --color 1d76db --description "Marks a wayfinding map issue and its decision tickets" --force
 ```
 
 If the project wants a different label vocabulary (different names, more or
@@ -157,6 +171,28 @@ record its package-filter syntax as a `{package}` placeholder in `check`
 (e.g. `"pnpm check --filter={package}"`) so `verification` rung 2 can
 substitute it directly instead of rediscovering the syntax every time.
 
+### Domain doc layout
+
+Detected into `docs.*`. Every field defaults to `null` when the repo
+doesn't have that file yet, and that's an ordinary, silent outcome —
+not a gap, not a guess, and not something to create or offer to
+create. `skill://domain-modeling` creates `CONTEXT.md`, a
+`CONTEXT-MAP.md`, an ADR, or an out-of-scope file lazily, at the
+moment there's a first term or a first decision worth recording; a
+scaffolded empty glossary is worse than none, because it reads as a
+glossary that already has nothing to say.
+
+- `docs.contextMap` — `CONTEXT-MAP.md` at the repo root, if it
+  exists.
+- `docs.context` — `CONTEXT.md` at the repo root. In a repo with a
+  context map this stays `null`; the map points at its own
+  per-context `CONTEXT.md` files instead of there being one at the
+  root.
+- `docs.adr` — the first of `docs/adr`, `docs/adrs`, `docs/decisions`,
+  `doc/adr`, `adr` (checked in that order) that both exists and
+  contains at least one `NNNN-`-prefixed markdown file.
+- `docs.outOfScope` — `.out-of-scope` at the repo root, if it exists.
+
 ## 4. Companion rule packs
 
 The marketplace that ships foreman also ships standalone rule packs. This
@@ -187,6 +223,19 @@ omp plugin marketplace update omp-foreman        # always — the cache goes sta
 If a pack still isn't found after a refresh, that is a real missing entry in
 the catalog, not a caching problem. Stop and report it instead of guessing a
 different name.
+
+### `craft`, unconditionally
+
+`craft` doesn't wait for evidence the way the packs below do — it's
+not a recommendation, it's a requirement. foreman declares it in
+`package.json#omp.requiresPlugins`, and several foreman skills resolve
+`skill://` references into it (`skill://tdd`, `skill://code-review`,
+and others). If the pack isn't installed, those references resolve to
+nothing and the skill that named one proceeds without ever knowing it
+went missing. Install it on every run, in every repo, regardless of
+language or toolchain, and always list it first in `plugins.packs` —
+the same hazards below apply to it as to any other pack (not live
+until `/reload-plugins`; `--dry-run` still installs).
 
 ### One package-manager pack, keyed off `commands.packageManager`
 
@@ -271,7 +320,9 @@ Write (or update) `.omp/foreman.json` at the repo root:
     "epic": "epic",
     "task": "task",
     "bug": "bug",
-    "bugSeverities": ["sev0", "sev1", "sev2", "sev3"]
+    "bugSeverities": ["sev0", "sev1", "sev2", "sev3"],
+    "readyForHuman": "ready-for-human",
+    "chart": "chart"
   },
   "board": {
     "owner": "<owner>",
@@ -294,12 +345,18 @@ Write (or update) `.omp/foreman.json` at the repo root:
     "verify": "<detected, or null>",
     "e2e": "<detected, or null>"
   },
+  "docs": {
+    "context": "<CONTEXT.md, or null>",
+    "contextMap": "<CONTEXT-MAP.md, or null>",
+    "adr": "<detected ADR directory, or null>",
+    "outOfScope": "<.out-of-scope, or null>"
+  },
   "epicLoop": {
     "maxConcurrentTracks": 3
   },
   "plugins": {
     "marketplace": "omp-foreman",
-    "packs": ["git-hygiene", "shell-safety", "secrets-hygiene", "<one package-manager pack>"]
+    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "<one package-manager pack>"]
   }
 }
 ```
@@ -311,11 +368,20 @@ those six names means the semantic role, resolved through this map.
 `epicLoop.maxConcurrentTracks` defaults to 3; raise or lower it if the
 project's review bandwidth or CI capacity says otherwise — it's a starting
 point, not a measured value, so don't dress it up as detected.
-`plugins.packs` records what step 4 concluded this repo needs — intent, not a
-mirror of what omp currently has installed. Keeping it lets `skill://doctor`
-notice the two disagreeing: a repo that migrated from pnpm to bun still has
-the `pnpm` pack installed and firing on every correct `bun install`, which is
-exactly the drift nothing else would catch.
+
+`docs.*` fields are `null` exactly when step 3's domain-doc detection
+found nothing at that path — an ordinary, silent absence, unlike a
+null `commands.check`, which is a gap worth flagging as a guess.
+Don't call out a null `docs.*` field in the init report as if it
+needed a decision; it doesn't.
+`plugins.packs` records what step 4 concluded this repo needs —
+intent, not a mirror of what omp currently has installed. `craft` is
+the one exception: it's always in the list, because foreman requires
+it rather than recommending it. Keeping the rest as intent lets
+`skill://doctor` notice the two disagreeing: a repo that migrated
+from pnpm to bun still has the `pnpm` pack installed and firing on
+every correct `bun install`, which is exactly the drift nothing else
+would catch.
 
 Commit it — it's small, stable, and every other skill needs it; don't
 gitignore it. If the repo already has one, diff before overwriting: a
@@ -325,18 +391,23 @@ and only fill in fields that are genuinely still empty.
 
 ## 6. Report
 
-Confirm back: repo, project URL, which labels were created vs. already
-present, the Status role → option-name → ID mapping, every detected
-convention (main branch, commit types, package manager, check/verify/e2e
-commands) with **which were detected vs. guessed vs. left null**, and the
-path to the written config. If step 2 hit the "don't replace" branch, say
-so explicitly — that board predates this run and needed careful merging,
-not blind creation.
+Confirm back: repo, project URL, which labels were created vs.
+already present (including the two modifier labels), the Status role
+→ option-name → ID mapping, every detected convention (main branch,
+commit types, package manager, check/verify/e2e commands) with
+**which were detected vs. guessed vs. left null**, and the path to
+the written config. The `docs.*` layout goes in this list too, but
+without the guessed/null distinction — a null there is never a
+guess, so just state what was found. If step 2 hit the "don't
+replace" branch, say so explicitly — that board predates this run
+and needed careful merging, not blind creation.
 
-Then, separately, the rule packs: which were installed, which were skipped and
-on what evidence, whether the marketplace had to be registered or its catalog
-refreshed, and whether `.gitignore` needed the `.omp/plugins/` entry. If the
-detected package manager has no pack yet, name it as a marketplace gap.
+Then, separately, the rule packs: which were installed, which were
+skipped and on what evidence, whether the marketplace had to be
+registered or its catalog refreshed, and whether `.gitignore` needed
+the `.omp/plugins/` entry. `craft` doesn't need evidence — just
+confirm it installed. If the detected package manager has no pack
+yet, name it as a marketplace gap.
 
 ## Hazards
 

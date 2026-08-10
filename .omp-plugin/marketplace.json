@@ -18,7 +18,31 @@
       "homepage": "https://github.com/andyhite/omp-foreman",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["github", "issues", "project-board", "workflow", "dev-loop"]
+      "keywords": [
+        "github",
+        "issues",
+        "project-board",
+        "workflow",
+        "dev-loop"
+      ]
+    },
+    {
+      "name": "craft",
+      "description": "Ten model-invoked reference skills for the thinking around a change: grilling a decision to settle it, domain modeling (CONTEXT.md + ADRs), deep-module design vocabulary, what makes a test worth keeping, two-axis code review, the hard-bug diagnosis loop, prototyping, primary-source research, merge-conflict resolution, and writing documents agents consume. Adapted from mattpocock/skills (MIT).",
+      "source": "./plugins/craft",
+      "version": "0.1.0",
+      "category": "development",
+      "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/craft",
+      "repository": "https://github.com/andyhite/omp-foreman",
+      "license": "MIT",
+      "keywords": [
+        "design",
+        "tdd",
+        "code-review",
+        "debugging",
+        "adr",
+        "skills"
+      ]
     },
     {
       "name": "git-hygiene",
@@ -29,7 +53,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/git-hygiene",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["git", "safety", "rules", "force-push", "branch-protection"]
+      "keywords": [
+        "git",
+        "safety",
+        "rules",
+        "force-push",
+        "branch-protection"
+      ]
     },
     {
       "name": "verification-integrity",
@@ -40,7 +70,12 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/verification-integrity",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["testing", "ci", "rules", "git-hooks"]
+      "keywords": [
+        "testing",
+        "ci",
+        "rules",
+        "git-hooks"
+      ]
     },
     {
       "name": "generated-files",
@@ -51,7 +86,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/generated-files",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["codegen", "generated", "protobuf", "migrations", "rules"]
+      "keywords": [
+        "codegen",
+        "generated",
+        "protobuf",
+        "migrations",
+        "rules"
+      ]
     },
     {
       "name": "shell-safety",
@@ -62,7 +103,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/shell-safety",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["shell", "safety", "rm", "sudo", "rules"]
+      "keywords": [
+        "shell",
+        "safety",
+        "rm",
+        "sudo",
+        "rules"
+      ]
     },
     {
       "name": "secrets-hygiene",
@@ -73,7 +120,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/secrets-hygiene",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["secrets", "credentials", "security", "dotenv", "rules"]
+      "keywords": [
+        "secrets",
+        "credentials",
+        "security",
+        "dotenv",
+        "rules"
+      ]
     },
     {
       "name": "pnpm",
@@ -84,7 +137,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/pnpm",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["pnpm", "package-manager", "lockfile", "workspace", "rules"]
+      "keywords": [
+        "pnpm",
+        "package-manager",
+        "lockfile",
+        "workspace",
+        "rules"
+      ]
     },
     {
       "name": "npm",
@@ -95,7 +154,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/npm",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["npm", "package-manager", "lockfile", "npm-ci", "rules"]
+      "keywords": [
+        "npm",
+        "package-manager",
+        "lockfile",
+        "npm-ci",
+        "rules"
+      ]
     },
     {
       "name": "yarn",
@@ -106,7 +171,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/yarn",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["yarn", "berry", "package-manager", "lockfile", "rules"]
+      "keywords": [
+        "yarn",
+        "berry",
+        "package-manager",
+        "lockfile",
+        "rules"
+      ]
     },
     {
       "name": "bun",
@@ -117,7 +188,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/bun",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["bun", "package-manager", "lockfile", "bunx", "rules"]
+      "keywords": [
+        "bun",
+        "package-manager",
+        "lockfile",
+        "bunx",
+        "rules"
+      ]
     },
     {
       "name": "uv",
@@ -128,7 +205,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/uv",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["uv", "python", "package-manager", "lockfile", "rules"]
+      "keywords": [
+        "uv",
+        "python",
+        "package-manager",
+        "lockfile",
+        "rules"
+      ]
     },
     {
       "name": "pip",
@@ -139,7 +222,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/pip",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["pip", "python", "virtualenv", "requirements", "rules"]
+      "keywords": [
+        "pip",
+        "python",
+        "virtualenv",
+        "requirements",
+        "rules"
+      ]
     },
     {
       "name": "cargo",
@@ -150,7 +239,13 @@
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/cargo",
       "repository": "https://github.com/andyhite/omp-foreman",
       "license": "MIT",
-      "keywords": ["cargo", "rust", "lockfile", "clippy", "rules"]
+      "keywords": [
+        "cargo",
+        "rust",
+        "lockfile",
+        "clippy",
+        "rules"
+      ]
     }
   ]
 }

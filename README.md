@@ -33,12 +33,12 @@ this one is the reusable half.
 ## What it gives you
 
 - **Commands** (`commands/*.md`, invoked as `/foreman:<name>` once
-  installed): `init`, `doctor`, `help`, `record`, `groom`, `work <issue>`,
-  `orchestrate <epic>`, `report`, `triage`.
+  installed): `init`, `doctor`, `help`, `record`, `groom`, `chart`, `work
+  <issue>`, `orchestrate <epic>`, `report`, `triage`.
 - **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/foreman:init`),
   `doctor` (backs `/foreman:doctor` — config-drift detection and repair),
-  `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `bug-triage`,
-  `verification`, `stacked-prs`.
+  `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `charting`,
+  `bug-triage`, `verification`, `stacked-prs`.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
 - **Rules** (`rules/*.md`): five tool-call interrupts for the workflow's own
   sharp edges — pushing at the main branch, closing issues by hand, worktree
@@ -53,6 +53,13 @@ Everything that *doesn't* depend on the foreman workflow ships as its own
 plugin from the same catalog. Pick the ones you want — none depends on
 `foreman` or on any other, and `scripts/check.ts` fails the build if one ever
 grows a `skill://` or `/foreman:` reference back into foreman.
+
+[`craft`](plugins/craft) is the tracker-independent reference-skill
+pack. It is neither a concept pack nor a tool pack: it is the one pack
+`foreman` actually requires, and that edge runs one way only — craft
+never references foreman. `/foreman:init` installs it at project scope
+and records it in `plugins.packs`; `/foreman:doctor` reports a missing
+copy as a broken install, not an optional recommendation.
 
 **Concept packs** — general discipline, safe in any repo, safe together:
 
@@ -131,6 +138,7 @@ Restart the session (or `/reload-plugins`) after adding it.
 /foreman:doctor       # drift check: labels/board/detected-commands still match reality
 /foreman:record ...   # capture an idea
 /foreman:groom        # turn ideas into task/epic issues, or reject them
+/foreman:chart ...    # chart a foggy idea as decision tickets before grooming
 /foreman:work <n>     # deliver a task or bug end to end
 /foreman:orchestrate <n>  # deliver an epic via issue-worker subagents
 /foreman:report       # board snapshot
@@ -172,6 +180,13 @@ or agent) grounded in the live tree, not from memory.
   installed plugin and keeps only the first, so a collision silently disables
   one. Tool-specific rules are prefixed (`pnpm-lockfile`, not `lockfile`) and
   `scripts/check.ts` fails on a duplicate.
+- **Required plugins form one-way, acyclic edges.** A plugin may
+  declare `omp.requiresPlugins` in its `package.json`.
+  `scripts/check.ts` then resolves each `skill://` against that
+  plugin's own skills plus the skills of every declared requirement.
+  A requirement may point only at a standalone pack, and a standalone
+  pack may not declare any requirements itself, so the graph stays
+  acyclic rather than growing chains or cycles.
 
 ## `.omp/foreman.json`
 
@@ -188,7 +203,9 @@ instead of assuming a repo, a board, or a toolchain:
     "epic": "epic",
     "task": "task",
     "bug": "bug",
-    "bugSeverities": ["sev0", "sev1", "sev2", "sev3"]
+    "bugSeverities": ["sev0", "sev1", "sev2", "sev3"],
+    "readyForHuman": "ready-for-human",
+    "chart": "chart"
   },
   "board": {
     "owner": "owner",
@@ -211,31 +228,49 @@ instead of assuming a repo, a board, or a toolchain:
     "verify": "pnpm verify",
     "e2e": "pnpm --filter @scope/web e2e"
   },
+  "docs": {
+    "context": "CONTEXT.md",
+    "contextMap": null,
+    "adr": "docs/adr",
+    "outOfScope": ".out-of-scope"
+  },
   "epicLoop": {
     "maxConcurrentTracks": 3
   },
   "plugins": {
     "marketplace": "omp-foreman",
-    "packs": ["git-hygiene", "shell-safety", "secrets-hygiene", "pnpm"]
+    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "pnpm"]
   }
 }
 ```
 
-- `mainBranch`, `commitTypes`, `commands.*`, and `board.statuses.<role>.name`
-  are **detected** by `/foreman:init` from this repo's own commitlint
-  config, lockfile, `package.json` scripts, and existing board — never
-  invented. Anything undetectable is left `null`/a documented default and
-  called out as a guess in the init report, not silently assumed.
-  `board.statuses` maps foreman's six semantic roles onto whatever this
-  repo's board actually calls those columns, so a board that predates
-  foreman doesn't need to be renamed to fit it.
-- `epicLoop.maxConcurrentTracks` is a starting default (3), not a detected
-  value — tune it to the project's review bandwidth.
-- `plugins.packs` is what `/foreman:init` concluded this repo needs from the
-  rule packs above, installed at **project scope**. It records intent, not a
-  mirror of omp's install state — that gap is the point, because it lets
-  `/foreman:doctor` catch a repo that migrated package manager while the old
-  pack is still installed and firing on every correct command.
+- `mainBranch`, `commitTypes`, `commands.*`, and
+  `board.statuses.<role>.name` are **detected** by `/foreman:init`
+  from this repo's own commitlint config, lockfile, `package.json`
+  scripts, and existing board — never invented. Anything
+  undetectable is left `null`/a documented default and called out as
+  a guess in the init report, not silently assumed.
+  `board.statuses` maps foreman's six semantic roles onto whatever
+  this repo's board actually calls those columns, so a board that
+  predates foreman doesn't need to be renamed to fit it.
+- `docs.context`, `docs.contextMap`, `docs.adr`, and
+  `docs.outOfScope` record the domain-doc layout that already exists.
+  A `null` here is ordinary absence, not a guess or a setup gap:
+  `skill://domain-modeling` creates these files lazily when the first
+  term or decision is worth recording.
+- `labels.readyForHuman` and `labels.chart` are modifier labels. They
+  sit alongside an issue's type label: the former reserves a `To Do`
+  task for a human, while the latter marks a wayfinding map and its
+  decision tickets.
+- `epicLoop.maxConcurrentTracks` is a starting default (3), not a
+  detected value — tune it to the project's review bandwidth.
+- `plugins.packs` is what `/foreman:init` concluded this repo needs
+  from the packs above, installed at **project scope**. `craft` is
+  always included because foreman requires it. The list records
+  intent, not a mirror of omp's install state — that gap lets
+  `/foreman:doctor` catch a missing requirement or a repo that
+  migrated package manager while the old pack is still installed and
+  firing on every correct command.
 - Hand-edit any field at any time; `/foreman:init` re-run is a repair pass
   that fills gaps and never clobbers a value that looks deliberately
   edited.

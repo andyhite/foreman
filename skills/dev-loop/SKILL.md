@@ -30,13 +30,33 @@ dependencies the repo's way.
 ## 2. Context
 
 Read, in order: the issue body and all comments; the parent epic (title,
-body, sibling subtasks) if there is one; this project's spec/design docs the
-issue references — check `docs/`, a linked doc, or an `AGENTS.md`/`README`
-pointer for where those live; any other docs the issue touches. If the issue
-contradicts the spec, stop and raise it on the issue — the spec wins until
-amended.
+body, sibling subtasks) if there is one; the domain glossary at
+`docs.context`, or the relevant glossaries reached through
+`docs.contextMap`, and the ADRs under `docs.adr` that touch the area you're
+changing. Read every path from `.omp/foreman.json`; see
+`skill://domain-modeling` for the formats. Any of those config paths may be
+`null`, which means the repo has none — that's normal, never flag it. Read
+any other docs the issue touches. If the issue contradicts the spec, stop and
+raise it on the issue — the spec wins until amended. A change that
+contradicts a recorded ADR is an amendment to raise, not a feature to build
+quietly over the decision.
 
-## 3. Plan
+## 3. Diagnose — bugs only
+
+When the issue carries the bug label, run `skill://diagnosing-bugs` before
+dispatching the planner. Its Phase 1 gate — a reproduction command that is
+red-capable, deterministic, fast, and agent-runnable — has to be met first;
+if you catch yourself reading code to build a theory before that command
+exists, stop and go build the command instead.
+
+That command earns its place: it's the regression test's first draft, it's
+how you'll know the fix worked instead of believing it did, and it's what QA
+re-runs independently in step 8. Post it as a comment on the issue so QA and
+the operator can run it too.
+
+A task issue skips this step.
+
+## 4. Plan
 
 Dispatch the `planner` agent with the issue number, the epic context, and
 anything you learned. For a genuinely trivial change (one file, obvious fix)
@@ -47,7 +67,7 @@ Sanity-check the plan yourself — you own it once you accept it. If the plan
 reveals the "task" is not tiny, stop: take it back to grooming to become an
 epic rather than silently delivering a big bang.
 
-## 4. Track
+## 5. Track
 
 `todo init` with the plan: one omp todo per step, plus a `Verification`
 phase (pre-PR gate, QA) and a `Delivery` phase (PR, review, merge,
@@ -59,7 +79,7 @@ end. A todo list that's still all-open when you report the issue shipped
 means you didn't actually check anything off while doing the work — that's
 a process failure, not a cosmetic one.
 
-## 5. Implement — TDD, orchestrated
+## 6. Implement — TDD, orchestrated
 
 For each step (batch independent steps into one `task` dispatch):
 
@@ -68,10 +88,17 @@ For each step (batch independent steps into one `task` dispatch):
   self-contained: files, the failing-test-first contract, acceptance
   criteria, and **skip formatters/linters/project-wide suites** (you run
   those).
-- **Test first.** The subagent writes the test, watches it fail for the
-  right reason, implements, watches it pass. New behavior gets a test that
-  would catch its plausible regression; a bug fix starts from a
-  reproduction.
+- **Test first.** `skill://tdd` is the governing reference for what makes a
+  test worth keeping; the subagent writes the test, watches it fail for
+  the right reason, implements, watches it pass. New behavior gets a test
+  that would catch its plausible regression; a bug fix starts from a
+  reproduction. The one rule that changes behavior: no test gets written
+  at an unconfirmed seam. The seam comes from the issue's `## Test seams`
+  section, agreed at grooming; if the issue has none — an older issue, or
+  one that said the seam couldn't be named yet — confirm it with the
+  operator before the first test instead of inventing one silently.
+  `skill://codebase-design` has the vocabulary for placing or moving a
+  seam.
 - Verify each result yourself with rung 1 of the `verification` skill (LSP
   diagnostics, per-file lint, the step's test file). A subagent's
   "completed" is a claim, not a fact.
@@ -85,13 +112,13 @@ predicates somewhere (check its own docs for the convention), extend that,
 never re-derive one at a call site; never truncate content silently; don't
 hand-edit generated files.
 
-## 6. Pre-PR gate
+## 7. Pre-PR gate
 
 Rung 3 of the `verification` skill: format, the repo's full verify script,
 e2e when it applies, and **exercise the change** — the observed behavior is
 the proof, and it goes in the PR body.
 
-## 7. QA gate
+## 8. QA gate
 
 Dispatch the `qa` agent with: issue number, worktree path, branch, what you
 built, and how you exercised it. QA independently reviews the diff, runs its
@@ -104,13 +131,13 @@ own checks, exercises the change, and writes any missing e2e coverage.
 - `PASS` → mark the `QA` todo `done` now, in this same turn, before
   opening the PR.
 
-## 8. Pull request
+## 9. Pull request
 
 - Rebase onto fresh `origin/<mainBranch>`; re-run the pre-PR gate if the
   rebase pulled in real changes; push.
 - Open the PR: title is a Conventional Commit header for the squashed
   result (a squash merge takes it as the commit subject); body says what
-  changed, why, how it was exercised (the proof from step 6), and `Closes
+  changed, why, how it was exercised (the proof from step 7), and `Closes
   #<issue>`.
 - Record the QA verdict as a PR comment (who reviewed, what was checked,
   `PASS`).
@@ -118,12 +145,12 @@ own checks, exercises the change, and writes any missing e2e coverage.
 - Under an epic, a chained subtask's PR is a stack layer instead — same
   gates, different plumbing: see `skill://stacked-prs`.
 
-## 9. Review — the operator decides on the PR itself
+## 10. Review — the operator decides on the PR itself
 
 You never merge on your own judgment. **The operator merging the PR is the
 approval; the operator commenting on it is a change request.** An explicit
 "merge it" from the operator is the same approval executed by your hands —
-`gh pr merge --squash`, then step 10. There is no approve-then-merge
+`gh pr merge --squash`, then step 11. There is no approve-then-merge
 two-step.
 
 - Watch CI (`github` tool `run_watch`). Red checks are yours to fix
@@ -133,19 +160,21 @@ two-step.
   - **A comment you did not post** (you know which are yours; ignore CI
     bots) → change request: issue back to `In Progress`, address every
     point with a fix or an evidence-backed reply on the PR, re-run the
-    gates (6–7 if code changed), push, reply on the PR that it is
+    gates (7–8 if code changed), push, reply on the PR that it is
     addressed, issue back to `Review`, resume waiting.
-  - **Merged** → step 10.
+  - **Merged** → step 11.
   - **Closed unmerged** → the operator declined it: comment the state on
     the issue, ask where it should go, and stop.
 - Keep it mergeable while you wait: if the main branch moves under the PR
   into conflict, rebase onto `origin/<mainBranch>` and `git push
-  --force-with-lease`.
+  --force-with-lease`. If the rebase itself conflicts,
+  `skill://resolving-merge-conflicts` is the procedure — never `--abort`
+  your way out, and never invent behavior to make a hunk compile.
 - Interactive session: tell the operator the PR is ready and yield rather
   than poll forever. Subagent: report the PR to your parent via `hub`, then
   keep polling with backoff.
 
-## 10. After the merge
+## 11. After the merge
 
 1. The operator merged — squash or fast-forward, the main branch stays
    linear either way.
