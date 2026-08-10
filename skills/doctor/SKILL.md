@@ -37,13 +37,13 @@ it's what `/foreman:doctor` runs.
      back at the recovery note in `bootstrap`'s Hazards (each issue's
      timeline keeps `ProjectV2ItemStatusChangedEvent`).
 4. **Repo conventions.** Re-run the detection steps from `bootstrap` §3
-   (main branch, commit types, package manager, check/verify/e2e
-   commands). A detected value that no longer matches reality (a renamed
-   script, a switched package manager, a new commitlint config) gets
-   corrected. A value that doesn't match any detector's output but also
-   isn't obviously stale (no dead script, no renamed lockfile) is left
-   alone — report the mismatch as informational, don't overwrite what
-   looks like a deliberate hand-edit.
+   (main branch, commit types, the full lockfile inventory and the primary
+   package manager it implies, check/verify/e2e commands). A detected value
+   that no longer matches reality (a renamed script, a switched package
+   manager, a new commitlint config) gets corrected. A value that doesn't
+   match any detector's output but also isn't obviously stale (no dead
+   script, no renamed lockfile) is left alone — report the mismatch as
+   informational, don't overwrite what looks like a deliberate hand-edit.
 5. **Board hygiene sweep** (the same checks as the `grooming` skill's
    stale-board section, runnable standalone): `inProgress` issues with no
    matching branch anywhere (`git ls-remote --heads origin` against
@@ -54,14 +54,24 @@ it's what `/foreman:doctor` runs.
    conclude today:
    - A recorded pack that isn't installed → install it, or drop it from
      `plugins.packs` if the evidence for it is gone. Say which and why.
-   - The **wrong package-manager pack** is the one that matters. A repo that
-     migrated pnpm → bun keeps firing `pnpm-only` on every correct `bun
+   - The **wrong Node package-manager pack** is the one that matters. A repo
+     that migrated pnpm → bun keeps firing `pnpm-only` on every correct `bun
      install`, so the operator learns to dismiss rule interrupts — which
      silently disarms every other pack too. Uninstall the stale one
      (`omp plugin uninstall --scope project <pack>@omp-foreman`) and install
      the pack matching the re-detected `commands.packageManager`.
-   - Two package-manager packs installed at once is always a bug, never a
-     polyglot setup: they fire on each other. Resolve to one.
+   - Two packs claiming the **same** ecosystem is always a bug: two of
+     `npm`/`pnpm`/`yarn`/`bun`, or `uv` alongside `pip`. They fire on each
+     other's correct commands. Resolve to the one the lockfile evidence
+     names.
+   - Packs from **different** ecosystems are not that case, and this is the
+     easiest wrong repair to make. `bun` and `cargo` installed together in a
+     repo that has both `bun.lock` and `Cargo.lock` is correct: `cargo`
+     makes no claim about Node and never fires on a Bun command. Don't
+     uninstall it for not matching `commands.packageManager` — that field
+     names the primary manager, not the only permitted one. The test is
+     evidence, not primacy: flag a pack only when the repo has nothing left
+     that the pack speaks to.
    - A missing **`craft`** fails differently and worse than the stale
      package-manager case. The stale pack creates noise; a missing
      required pack creates silence — a `skill://` resolves to nothing,
@@ -73,6 +83,9 @@ it's what `/foreman:doctor` runs.
      tracked generated file left) is informational, not urgent — report it and
      let the operator decide, since removing it costs a reinstall if the
      evidence comes back.
+   - Report the evidence either way: for every package-manager pack, the
+     lockfile or manifest that keeps it, or the absence that condemns it. A
+     bare "remove `cargo`" is the finding an operator can't check.
 7. **Domain doc paths.** Re-run bootstrap's domain-doc layout
    detection and compare each `docs.*` field with the repo:
    - A non-null path that no longer exists → set its field to `null`.
