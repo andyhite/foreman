@@ -44,8 +44,9 @@ this one is the reusable half.
   sharp edges — pushing at the main branch, closing issues by hand, worktree
   discipline, the obligations that come with opening a PR, and keeping the
   todo list synced to real landings (PR merges, issue closes, worktree
-  cleanup). These are the enforcement half of the skills above, so they ship
-  with foreman rather than separately.
+  cleanup). They restate the skills above at the moment of the tool call,
+  where a skill that was never read can't help, so they ship with foreman
+  rather than separately.
 
 ## Plugins in this marketplace
 
@@ -71,7 +72,7 @@ copy as a broken install, not an optional recommendation.
 | [`shell-safety`](plugins/shell-safety) | 5 | Irreversible or over-privileged shell commands |
 | [`secrets-hygiene`](plugins/secrets-hygiene) | 4 | Credentials out of the repo and out of transcripts |
 
-**Tool packs** — one per package manager. Install the one your project uses:
+**Tool packs** — one per package manager. Install the ones your project uses:
 
 | Plugin | For repos using |
 |---|---|
@@ -96,10 +97,14 @@ omp plugin install shell-safety@omp-foreman
 
 A tool pack is named for its tool, not `<tool>-hygiene`, because it's the home
 for *everything* about that tool — rules today, and skills or commands as they
-get written. Don't install two package-manager packs in the same project: each
-asserts that its own tool is the manager, so they fire on each other's correct
-commands. If you work across projects with different managers, install the
-relevant one per project (`--scope project`) rather than globally.
+get written. Install at most one pack per ecosystem: `pnpm`, `npm`, `yarn`, and
+`bun` each assert that their own tool is *the* Node package manager, so a
+second one fires on every correct command of the first, and `uv` and `pip`
+compete the same way over Python. Packs for *different* ecosystems don't
+collide — a Bun frontend with a Rust core installs `bun` and `cargo` together,
+and neither fires on the other's commands. If you work across projects with
+different managers, install the relevant ones per project (`--scope project`)
+rather than globally.
 
 ## Install
 
@@ -160,6 +165,17 @@ or agent) grounded in the live tree, not from memory.
 - **The operator always merges.** Every skill and agent treats "the
   operator merges the PR" as the approval and "the operator commented on
   the PR" as a change request — no agent merges on its own judgment.
+- **Rules advise; the extension enforces exactly one thing.** A rule is a
+  prompt-level interrupt — it puts the objection in front of the agent as it
+  reaches for the command, and an agent can still argue its way past. The
+  main branch is the exception: in a repo that has `.omp/foreman.json`,
+  foreman blocks the git mutations a session aims at the configured
+  `mainBranch`, including the bare `git push` and the commit made from a
+  main checkout that no regex condition can recognize. That guard covers this
+  agent's own tool calls and nothing else — a person working in their own
+  terminal is unaffected. Branch protection on the remote is a separate,
+  optional defence; configure it if you want one, but nothing here assumes
+  it exists or leans on it as the backstop.
 - **Rules come in three shapes, and the `scope` requirement differs.**
   `scripts/check.ts` enforces all three:
   - A **command rule** has a regex `condition` and an explicit `scope`, which
@@ -239,14 +255,14 @@ instead of assuming a repo, a board, or a toolchain:
   },
   "plugins": {
     "marketplace": "omp-foreman",
-    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "pnpm"]
+    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "pnpm", "cargo"]
   }
 }
 ```
 
 - `mainBranch`, `commitTypes`, `commands.*`, and
   `board.statuses.<role>.name` are **detected** by `/foreman:init`
-  from this repo's own commitlint config, lockfile, `package.json`
+  from this repo's own commitlint config, lockfiles, `package.json`
   scripts, and existing board — never invented. Anything
   undetectable is left `null`/a documented default and called out as
   a guess in the init report, not silently assumed.
@@ -266,11 +282,16 @@ instead of assuming a repo, a board, or a toolchain:
   detected value — tune it to the project's review bandwidth.
 - `plugins.packs` is what `/foreman:init` concluded this repo needs
   from the packs above, installed at **project scope**. `craft` is
-  always included because foreman requires it. The list records
-  intent, not a mirror of omp's install state — that gap lets
-  `/foreman:doctor` catch a missing requirement or a repo that
-  migrated package manager while the old pack is still installed and
-  firing on every correct command.
+  always included because foreman requires it. The package-manager
+  entries are one Node pack plus a pack for every other ecosystem the
+  repo has its own lockfile for — the `pnpm` and `cargo` pair above is
+  a pnpm workspace with a Rust crate in it, and both belong there.
+  `commands.packageManager` names the primary manager, the one whose
+  install sets the repo up for `check`/`verify`/`e2e`; it doesn't make
+  the others illegitimate. The list records intent, not a mirror of
+  omp's install state — that gap lets `/foreman:doctor` catch a missing
+  requirement or a repo that migrated package manager while the old
+  pack is still installed and firing on every correct command.
 - Hand-edit any field at any time; `/foreman:init` re-run is a repair pass
   that fills gaps and never clobbers a value that looks deliberately
   edited.

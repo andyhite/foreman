@@ -139,9 +139,11 @@ none exists, fall back to the Conventional Commits default set (`feat fix
 docs refactor perf test build ci chore style revert`) and note in the
 report that nothing enforces it.
 
-### Package manager and install command
+### Package managers and install command
 
-Detect from the lockfile present at the repo root (first match wins):
+Find **every** lockfile at the repo root, not the first one that matches —
+a repo can legitimately have several, and each is evidence of a real
+toolchain that step 4 will need:
 
 | Lockfile                          | Package manager | Install command      |
 | ---------------------------------- | ---------------- | ---------------------- |
@@ -155,8 +157,24 @@ Detect from the lockfile present at the repo root (first match wins):
 | `uv.lock`                           | uv                | `uv sync`               |
 | `Gemfile.lock`                      | bundler           | `bundle install`       |
 
-If more than one lockfile is present (a migration in progress, or a
-polyglot repo), ask which is authoritative rather than guessing.
+Node lockfiles (`pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`,
+`bun.lock`/`bun.lockb`) are competing claims about the same toolchain, so
+at most one can be authoritative. If two or more are present — a migration
+in progress, or a stale lockfile nobody deleted — ask which one wins rather
+than guessing, and say which file the answer makes redundant.
+
+Lockfiles from *different* ecosystems are not competing. `bun.lock` beside
+`Cargo.lock` is an ordinary polyglot repo — a Bun-run frontend and a Rust
+core — not a migration to disambiguate, and asking which of the two is
+"authoritative" poses a question with no correct answer. Record every
+ecosystem you found.
+
+`commands.packageManager` and `commands.install` name the **primary**
+manager: the generic one whose install sets the repo up for the
+`check`/`verify`/`e2e` commands below. Where there's a Node ecosystem at
+all, that's normally its manager. The other ecosystems don't get
+`commands.*` entries of their own — they carry their own idiomatic commands
+and surface in step 4 as packs, and in the final report.
 
 ### Check / verify / e2e commands
 
@@ -198,9 +216,10 @@ glossary that already has nothing to say.
 The marketplace that ships foreman also ships standalone rule packs. This
 step installs the ones this repo actually needs, at **project scope**.
 
-Nothing here re-detects the package manager: it reads the value step 3 just
-resolved — including whichever lockfile the operator named as authoritative —
-so the pack and `commands.packageManager` can never disagree.
+Nothing here re-detects anything: it reads what step 3 resolved — the
+primary manager, every other ecosystem it found a lockfile for, and
+whichever Node lockfile the operator named as authoritative — so the packs
+and `commands.packageManager` can never disagree.
 
 ### Prerequisite: register the marketplace *and* refresh its catalog
 
@@ -237,10 +256,10 @@ language or toolchain, and always list it first in `plugins.packs` —
 the same hazards below apply to it as to any other pack (not live
 until `/reload-plugins`; `--dry-run` still installs).
 
-### One package-manager pack, keyed off `commands.packageManager`
+### Package-manager packs — the primary manager's, plus each independent ecosystem's
 
-| `commands.packageManager` | Pack |
-| -------------------------- | ------ |
+| Detected manager | Pack |
+| ------------------ | ------ |
 | pnpm | `pnpm` |
 | npm | `npm` |
 | yarn | `yarn` |
@@ -249,11 +268,29 @@ until `/reload-plugins`; `--dry-run` still installs).
 | cargo | `cargo` |
 | pip — a `requirements.txt`/`requirements.in` with no `uv.lock` or `poetry.lock` | `pip` |
 
-**Never install two.** Each asserts that its own tool is the package manager,
-so a second one fires on every correct command of the first. `poetry`, `go
-modules`, and `bundler` are detectable managers with **no pack yet** — say so
-in the report rather than installing nothing silently, so it reads as a gap in
-the marketplace instead of a detection failure.
+**One Node pack.** `npm`, `pnpm`, `yarn`, and `bun` each assert that their
+own tool is *the* Node package manager, so a second one fires on every
+correct command of the first. Install the single one that matches the
+authoritative Node lockfile — normally the one named in
+`commands.packageManager`.
+
+**Then one pack per independently evidenced ecosystem.** A pack for
+another language makes no claim about Node: `cargo` speaks to Cargo
+commands, `uv` and `pip` to Python ones. A repo with `bun.lock` and
+`Cargo.lock` takes `bun` **and** `cargo` — that is the correct install for
+a polyglot repo, not a conflict to resolve, and neither pack fires on the
+other's commands. The evidence is the lockfile or manifest step 3 already
+recorded; install on that, never on a hunch that a language is probably in
+use somewhere.
+
+**Conflicts are within an ecosystem, never across them.** Two Node packs
+collide, and so do `uv` and `pip`, which both claim Python — pick the one
+the lockfile evidence names. Nothing else in the table is mutually
+exclusive.
+
+`poetry`, `go modules`, and `bundler` are detectable managers with **no
+pack yet** — say so in the report rather than installing nothing silently,
+so it reads as a gap in the marketplace instead of a detection failure.
 
 ### Always, for any git repo
 
@@ -282,9 +319,9 @@ Skip anything already present (`omp plugin list`), then:
 omp plugin install --scope project <pack>@omp-foreman
 ```
 
-Project scope is the whole point. The package-manager pack is a per-repo
-choice, and a user-scoped `pnpm` pack would fire on every correct `npm
-install` in the next repo you open.
+Project scope is the whole point. Which package-manager packs a repo wants
+is a per-repo answer, and a user-scoped `pnpm` pack would fire on every
+correct `npm install` in the next repo you open.
 
 A project-scope install writes omp's own state into `.omp/plugins/` —
 `installed_plugins.json`, `omp-plugins.lock.json`, and a `node_modules/` tree
@@ -303,8 +340,9 @@ it: it silently un-commits the config every other foreman skill reads.
 This is the only step that writes outside the repo's own files, so it is the
 one to report in full: every pack installed, every pack skipped, and the
 evidence behind each decision. If the operator already answered a "which
-lockfile is authoritative" question in step 3, that answer picks the pack —
-don't ask again.
+Node lockfile is authoritative" question in step 3, that answer picks the
+Node pack — don't ask again, and don't turn the repo's other ecosystems
+into a second question, since their packs follow from evidence alone.
 
 ## 5. Write the config
 
@@ -356,7 +394,7 @@ Write (or update) `.omp/foreman.json` at the repo root:
   },
   "plugins": {
     "marketplace": "omp-foreman",
-    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "<one package-manager pack>"]
+    "packs": ["craft", "git-hygiene", "shell-safety", "secrets-hygiene", "<the one Node package-manager pack>", "<a pack per other evidenced ecosystem, e.g. cargo>"]
   }
 }
 ```
@@ -377,11 +415,13 @@ needed a decision; it doesn't.
 `plugins.packs` records what step 4 concluded this repo needs —
 intent, not a mirror of what omp currently has installed. `craft` is
 the one exception: it's always in the list, because foreman requires
-it rather than recommending it. Keeping the rest as intent lets
-`skill://doctor` notice the two disagreeing: a repo that migrated
-from pnpm to bun still has the `pnpm` pack installed and firing on
-every correct `bun install`, which is exactly the drift nothing else
-would catch.
+it rather than recommending it. The package-manager entries are the
+one Node pack plus a pack for each other ecosystem the repo has a
+lockfile for, so a Bun-and-Rust repo lists `bun` and `cargo` and both
+belong there. Keeping the rest as intent lets `skill://doctor` notice
+the two disagreeing: a repo that migrated from pnpm to bun still has
+the `pnpm` pack installed and firing on every correct `bun install`,
+which is exactly the drift nothing else would catch.
 
 Commit it — it's small, stable, and every other skill needs it; don't
 gitignore it. If the repo already has one, diff before overwriting: a
@@ -394,7 +434,8 @@ and only fill in fields that are genuinely still empty.
 Confirm back: repo, project URL, which labels were created vs.
 already present (including the two modifier labels), the Status role
 → option-name → ID mapping, every detected convention (main branch,
-commit types, package manager, check/verify/e2e commands) with
+commit types, the primary package manager plus every other ecosystem
+whose lockfile you found, check/verify/e2e commands) with
 **which were detected vs. guessed vs. left null**, and the path to
 the written config. The `docs.*` layout goes in this list too, but
 without the guessed/null distinction — a null there is never a
@@ -406,8 +447,10 @@ Then, separately, the rule packs: which were installed, which were
 skipped and on what evidence, whether the marketplace had to be
 registered or its catalog refreshed, and whether `.gitignore` needed
 the `.omp/plugins/` entry. `craft` doesn't need evidence — just
-confirm it installed. If the detected package manager has no pack
-yet, name it as a marketplace gap.
+confirm it installed. Name the lockfile behind each package-manager
+pack, so a second one reads as the polyglot repo it is rather than a
+mistake. If a detected manager has no pack yet, name it as a
+marketplace gap.
 
 ## Hazards
 
