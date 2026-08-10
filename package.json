@@ -6,7 +6,8 @@
   "type": "module",
   "license": "MIT",
   "omp": {
-    "extensions": ["./src/index.ts"]
+    "extensions": ["./src/index.ts"],
+    "requiresPlugins": ["craft"]
   },
   "pi": {
     "extensions": ["./src/index.ts"]

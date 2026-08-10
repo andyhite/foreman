@@ -38,18 +38,50 @@ don't dispatch around it.
 
 ## 3. Partition into tracks
 
-Build the dependency graph over subtasks, then partition it into **tracks**:
+Tracks come from the **native GitHub issue dependency graph**, not from
+re-reading prose. `skill://grooming` records this graph at breakdown
+time; read it, don't rebuild it by hand.
 
-- A **chain** — subtasks where each depends on the previous one — is one
-  track, delivered by **one** worker as **stacked PRs** (`stacked-prs`
-  skill): one worktree, one layer per subtask, review never blocking the
-  next layer. Serial work goes to one worker on purpose — it accumulates
-  the chain's context instead of re-learning it per subtask.
-- An independent subtask is a single-subtask track: plain dev loop, PR off
+For each subtask, query its blockers:
+
+```sh
+gh api repos/<owner>/<repo>/issues/<n>/dependencies/blocked_by
+```
+
+Do this for every subtask and assemble the graph over the epic's
+subtasks. Partition it into **tracks**:
+
+- A **maximal chain of blocking edges** — subtask B blocked by A, C
+  blocked by B, and so on — is one track, delivered by **one** worker as
+  **stacked PRs** (`stacked-prs` skill): one worktree, one layer per
+  subtask, review never blocking the next layer. Serial work goes to one
+  worker on purpose — it accumulates the chain's context instead of
+  learning it again for every subtask.
+- Subtasks with no edge between them are independent tracks and may run
+  concurrently, one single-subtask track each: plain dev loop, PR off
   the main branch.
 - A cross-track dependency (track B needs track A's layer on the main
-  branch) stays merge-gated: B dispatches only after that layer lands. If
-  such edges are everywhere, the partition is wrong — refold the chains.
+  branch) stays merge-gated: B dispatches only after that layer lands.
+  If such edges are everywhere, the partition is wrong — refold the
+  chains.
+
+**Fallback for a repo without issue dependencies recorded**: parse
+`Blocked by: #<n>` lines from each subtask's body instead. Same graph,
+worse encoding — the partition logic above is unchanged, only the source
+of edges differs.
+
+The graph gives you ordering, not interface. Cross-task contracts —
+shared interfaces, schema shapes, file ownership, naming — are still
+fixed and commented on the epic before any dispatch, per step 2. Both
+are needed and they are not the same thing: a correct partition
+dispatched against a stale or missing contract still fails at
+integration.
+
+If a subtask is discovered mid-epic to depend on another, add a real
+blocking edge (`skill://tracker` has the recipe) — not a note in a
+comment or the epic thread. The next partition re-reads the graph, not
+the conversation, so an edge that only exists as prose is invisible to
+it and the tracks silently drift out of order.
 
 Run tracks in parallel, at most `epicLoop.maxConcurrentTracks` workers
 concurrently (`.omp/foreman.json`, default 3 — raise or lower it to match
@@ -58,9 +90,9 @@ grouped by track, an integration todo per landing, and a closeout phase.
 This list is the only place tracking a multi-track epic is tractable —
 **it is worthless if you create it and never touch it again.** The
 failure mode to avoid: all these categorized track todos get created up
-front, then nobody marks any of them done as tracks actually land, so the
-epic finishes with every todo still open despite real work having shipped.
-Step 4 below says exactly when each one flips.
+front, then nobody marks any of them done as tracks land, so the epic
+finishes with every todo still open after real work shipped. Step 4 below
+says exactly when each one flips.
 
 ## 4. Dispatch and monitor
 
@@ -138,7 +170,14 @@ When every subtask is `Done`:
    closing the list to match the outcome you're about to report.
 2. Final integration pass (step 5) against the epic's own acceptance
    criteria — judge the epic against what it promised, not just against
-   green checks.
+   green checks. For an epic run as an expand / migrate / contract
+   sequence over a wide refactor, "promised" includes the contract step:
+   the epic is not done when the last migration batch lands, it is done
+   when the contract lands and the old form is gone. A half-migrated
+   expand left in the tree is the epic's worst failure mode — it looks
+   finished (tests green, subtasks `Done`) and costs the next reader
+   twice: once to discover the old form is still live, and again to
+   finish the migration nobody tracked.
 3. Summary comment on the epic: what shipped, per-subtask PRs, how the
    integrated behavior was proven, anything deferred (as linked issues,
    never as prose someone must remember).

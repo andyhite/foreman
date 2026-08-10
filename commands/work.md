@@ -10,12 +10,20 @@ Read `skill://dev-loop`, `skill://tracker`, `skill://worktree`, and
 preflight and claim, worktree, context, plan (dispatch the `planner` agent
 for anything non-trivial), omp todos, TDD implementation orchestrated
 through subagents, the verification ladder, the `qa` agent gate looped to
-PASS, PR, review wait, post-merge cleanup, board moves.
+PASS, PR, review wait, post-merge cleanup, board moves. A bug-labeled
+issue enters `skill://diagnosing-bugs` before planning. Do not dispatch
+the planner until that skill's four-box gate is met: red-capable,
+deterministic, fast, and agent-runnable.
 
-Two checks before you start: if #$1 is labeled `epic`, stop and tell me to
-use `/foreman:orchestrate $1` instead; if it is not at `To Do` (or carries
-an untriaged bug label), stop and tell me what state it is actually in —
-do not work around the lifecycle.
+Three checks before you start: if #$1 is labeled `epic`, stop and tell me
+to use `/foreman:orchestrate $1` instead; if it is not at `To Do` (or
+carries an untriaged bug label), stop and tell me what state it is
+actually in; if it carries `<labels.readyForHuman>` (`.omp/foreman.json`,
+conventionally `ready-for-human`), stop and tell me instead of claiming
+it — `To Do` means an agent may claim the issue, and that label is the
+only way to park a `To Do` item a human must do by hand. Skip this guard
+when the repo has not set `labels.readyForHuman`. Do not work around the
+lifecycle.
 
 You are the orchestrator: subagents search and edit, you own sequencing,
 verification, and delivery. **Keep the todo list synced to reality as you

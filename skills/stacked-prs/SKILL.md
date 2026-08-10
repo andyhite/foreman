@@ -79,9 +79,12 @@ after anything lands:
   deleted.
 - **Operator comments on layer K** — change request for that layer only:
   issue K back to `In Progress`; fix **on layer K's branch**; then `gh
-  stack rebase` (cascades the fix up through K+1…top; `--continue` after
-  resolving any conflict) and `gh stack push`; re-run the layer's gates and
-  the top-of-stack verification; reply on the PR; issue K back to `Review`.
+  stack rebase` (cascades the fix up through K+1…top; `--continue`
+  after resolving any conflict — see "Conflicts during a cascade"
+  below) and `gh stack push`; re-run the gate for every layer above K,
+  not just the top-of-stack verification — a clean rebase of layer
+  N+1 says nothing about whether layer N+2 still passes; reply on the
+  PR; issue K back to `Review`.
 - **The main branch moved underneath** — `gh stack sync` (fetch, trunk
   fast-forward, cascade rebase, force-with-lease push). Non-interactive
   sync aborts on a genuinely diverged stack instead of guessing — resolve
@@ -90,6 +93,21 @@ after anything lands:
 - **`gh stack merge` is the operator's decision**, on every layer, always —
   run it yourself only on the operator's explicit instruction (remember a
   mid-stack merge takes every layer below it).
+
+### Conflicts during a cascade
+
+A `gh stack rebase` conflict is resolved on behalf of a layer you may
+not have written — the intent to recover is the *layer's own*, from
+its subtask issue and its own PR, not the stack's overall goal.
+Resolving a mid-stack conflict toward the top layer's intent silently
+rewrites what the lower layer meant.
+
+Point at `skill://resolving-merge-conflicts` for the method. The same
+two rules apply here: always resolve and never `--abort` — an abort
+throws away the information you just paid to recover. And never
+invent behavior to make a hunk compile: recover each side's intent
+from its commits and PR, and where the two are genuinely
+incompatible, pick the one matching that layer's intent and say so.
 
 ## Restructuring
 

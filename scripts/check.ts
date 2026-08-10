@@ -7,9 +7,11 @@
  * as markdown), so nothing type-checks it. This script catches the failure
  * modes that bit us during authoring: a required frontmatter field missing, a
  * `skill://<name>` or `/<plugin>:<command>` reference that doesn't resolve, a
- * sibling plugin that leaks a dependency on foreman or never got registered in
- * the catalog, a rule name that collides with another plugin's, and duplicate
- * adjacent lines (the signature of a botched line-range edit).
+ * sibling plugin that leaks a dependency back on foreman, a declared
+ * `omp.requiresPlugins` edge that points nowhere, a plugin that never got
+ * registered in the catalog, a rule name that collides with another
+ * plugin's, and duplicate adjacent lines (the signature of a botched
+ * line-range edit).
  *
  * Every content check is per-plugin: a pack under `plugins/` may grow its own
  * commands, skills, and agents, and they are validated against that plugin's
@@ -71,6 +73,23 @@ function listDirs(dir: string): string[] {
   }
 }
 
+// A plugin may declare `omp.requiresPlugins` in its package.json to point at
+// packs it can't function without. That edge is what lets foreman reference
+// `skill://tdd` when tdd lives in the `craft` pack: /foreman:init installs
+// every requirement at project scope and /foreman:doctor reports a missing
+// one, so the pointer is guaranteed live rather than merely hoped-for.
+function readRequires(dir: string): string[] {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, "package.json"), "utf8");
+  } catch {
+    return [];
+  }
+  const pkg = JSON.parse(raw) as { omp?: { requiresPlugins?: unknown } };
+  const declared = pkg.omp?.requiresPlugins;
+  return Array.isArray(declared) ? declared.map(String) : [];
+}
+
 const errors: string[] = [];
 const warnings: string[] = [];
 
@@ -82,20 +101,31 @@ type PluginRoot = {
   dir: string;
   prefix: string;
   standalone: boolean;
+  requires: string[];
   commands: Set<string>;
   skills: Set<string>;
 };
 const pluginRoots: PluginRoot[] = [
-  { id: "foreman", dir: ROOT, prefix: "", standalone: false, commands: new Set(), skills: new Set() },
+  {
+    id: "foreman",
+    dir: ROOT,
+    prefix: "",
+    standalone: false,
+    requires: readRequires(ROOT),
+    commands: new Set(),
+    skills: new Set(),
+  },
   ...listDirs(join(ROOT, "plugins")).map((name) => ({
     id: name,
     dir: join(ROOT, "plugins", name),
     prefix: `plugins/${name}/`,
     standalone: true,
+    requires: readRequires(join(ROOT, "plugins", name)),
     commands: new Set<string>(),
     skills: new Set<string>(),
   })),
 ];
+const pluginsById = new Map(pluginRoots.map((p) => [p.id, p]));
 
 // The catalog and the tree must agree in both directions: an unregistered
 // directory ships to nobody, and a registered directory that doesn't exist
@@ -132,6 +162,32 @@ const pluginRoots: PluginRoot[] = [
       errors.push(
         `.omp-plugin/marketplace.json: plugin "${name}" lives at "${source}" — the directory must match the plugin name, since omp prefixes its commands with the name`,
       );
+    }
+  }
+}
+
+// Requirement edges may only run one way: from a workflow plugin down into a
+// standalone pack. A pack that requires anything stops being installable on
+// its own, and a requirement pointing at a non-standalone plugin would let two
+// workflow plugins require each other — a cycle no install order satisfies.
+{
+  for (const plugin of pluginRoots) {
+    const where = `${plugin.prefix}package.json`;
+    if (plugin.standalone && plugin.requires.length) {
+      errors.push(
+        `${where}: standalone pack "${plugin.id}" declares omp.requiresPlugins — a pack has to install on its own; add the skill here or inline the guidance`,
+      );
+      continue;
+    }
+    for (const dep of plugin.requires) {
+      const target = pluginsById.get(dep);
+      if (!target) {
+        errors.push(`${where}: omp.requiresPlugins names "${dep}", which is not a plugin in this repo`);
+      } else if (!target.standalone) {
+        errors.push(
+          `${where}: omp.requiresPlugins names "${dep}", which is not a standalone pack — requirements may only point at packs, so the graph stays acyclic`,
+        );
+      }
     }
   }
 }
@@ -260,19 +316,27 @@ function walkMd(base: string): string[] {
 const foreman = pluginRoots.find((p) => !p.standalone)!;
 
 for (const plugin of pluginRoots) {
+  // A plugin may reference its OWN skills, plus those of every pack it
+  // declares in omp.requiresPlugins. Anything else would depend on a plugin
+  // being installed that nothing guarantees.
+  const reachable = new Set(plugin.skills);
+  for (const dep of plugin.requires) {
+    for (const skill of pluginsById.get(dep)?.skills ?? []) reachable.add(skill);
+  }
+
   for (const path of walkMd(plugin.dir)) {
     const content = readFileSync(path, "utf8");
     const rel = path.slice(ROOT.length + 1);
 
-    // A plugin may reference its OWN skills. A standalone pack referencing a
-    // skill it doesn't define would depend on another plugin being installed,
-    // which nothing guarantees.
     for (const m of content.matchAll(/skill:\/\/([a-z0-9-]+)/g)) {
-      if (plugin.skills.has(m[1])) continue;
+      if (reachable.has(m[1])) continue;
+      const owner = pluginRoots.find((p) => p.id !== plugin.id && p.skills.has(m[1]));
       errors.push(
-        plugin.standalone
-          ? `${rel}: references skill://${m[1]}, which ${plugin.id} doesn't define — a standalone plugin can't depend on another plugin's skills; add the skill here or inline the guidance`
-          : `${rel}: references skill://${m[1]}, which doesn't exist`,
+        owner
+          ? `${rel}: references skill://${m[1]}, which ${owner.id} defines but ${plugin.id} doesn't require — add "${owner.id}" to omp.requiresPlugins, or move the skill`
+          : plugin.standalone
+            ? `${rel}: references skill://${m[1]}, which ${plugin.id} doesn't define — a standalone plugin can't depend on another plugin's skills; add the skill here or inline the guidance`
+            : `${rel}: references skill://${m[1]}, which doesn't exist`,
       );
     }
 
