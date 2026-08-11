@@ -192,10 +192,6 @@ of forty. `fleet` then appends its own protocol block telling the worker how
 to commit, how to file its report, and how to interrupt you with a question,
 so briefs never repeat any of it.
 
-`disable-model-invocation: true` lands mostly on the other side of this split
-than you'd expect. Every one of the orchestrator's own interview skills sets it
-— `triage`, `to-tickets`, `to-spec`, `grill-me`, `wayfinder` — so it is *your*
-skill list that is missing entries, not the worker's. Among the execution
-skills only `implement` sets it; `diagnosing-bugs`, `research`, `prototype`,
-and `code-review` do not. Either way `fleet skill <name>` reads the file
-directly and ignores the field.
+`disable-model-invocation: true` is the reason a brief names its skill instead
+of trusting a menu — `fleet skill fleet-dispatch` covers which skills set it
+and why that lands on the orchestrator more than the worker.

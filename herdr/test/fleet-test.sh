@@ -231,6 +231,38 @@ else
   printf '  skip  dispatched prompt cases (needs git and jq)\n'
 fi
 
+# ── portable plugin prose ────────────────────────────────────────────────────
+#
+# `skill://` is an omp-only URI. A worker on any other harness cannot resolve
+# one, and the failure is silent — it just does generic work. This caught a real
+# regression: a rebase reintroduced four of them in hunks git never flagged,
+# because the merge conflicted elsewhere in the same files.
+
+printf '\nportable plugin prose\n'
+plugin_dir=$(cd "$(dirname "$0")/../../plugins/fleet" 2>/dev/null && pwd)
+if [ -n "$plugin_dir" ]; then
+  offenders=""
+  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/README.md; do
+    [ -f "$f" ] || continue
+    if [ -n "$(sed -n '/skill:\/\//p' "$f")" ]; then
+      offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
+    fi
+  done
+  is 'no skill:// URI survives in the plugin prose' "${offenders# }" ''
+
+  # Each dispatch command must name the skill it dispatches, or the worker gets
+  # the brief with no procedure attached.
+  missing=""
+  for c in implement diagnosing-bugs research prototype code-review; do
+    f="$plugin_dir/commands/$c.md"
+    [ -f "$f" ] || continue
+    [ -n "$(sed -n "/--skill $c/p" "$f")" ] || missing="$missing $c"
+  done
+  is 'every dispatch command passes its own --skill' "${missing# }" ''
+else
+  printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
+fi
+
 # ── reap argument handling ───────────────────────────────────────────────────
 #
 # `cmd_reap` joins a handle onto $FLEET_STATE and `rm -rf`s it, and its handles

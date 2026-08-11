@@ -78,11 +78,14 @@ out of a list of forty. Fleet prepends an instruction to run
 with its base directory. Without `--skill` you get a generic agent doing
 generic work; with it the worker follows the named skill's own procedure.
 
-`disable-model-invocation: true` does not land on the execution skills here —
-it is set on your own interview skills instead: `triage`, `to-tickets`,
-`to-spec`, `grill-me`, `wayfinder`. Reading them by URI (`skill://triage` and
-the rest) rather than expecting them in a menu is the same discipline you are
-asking of the worker, applied to yourself.
+`disable-model-invocation: true` lands mostly on the other side of this split
+than you would expect. Every one of your own interview skills sets it —
+`triage`, `to-tickets`, `to-spec`, `grill-me`, `wayfinder` — while among the
+execution skills only `implement` does. So it is mostly *your* menu that is
+missing entries, not the worker's: naming a skill and reading it, rather than
+expecting to find it in a list, is the same discipline you are asking of the
+worker, applied to yourself. `fleet skill <name>` reads the file directly and
+ignores the field either way.
 
 **Do not include:** where to commit, whether to push, how to report back, or a
 reminder to stay in the worktree. `fleet` appends its own protocol block

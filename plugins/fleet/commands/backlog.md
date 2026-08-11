@@ -52,7 +52,7 @@ Both are hard stops.
 2. **`docs/agents/issue-tracker.md`.** It is the only thing that knows how to
    list issues, read dependencies, comment, and close in this repo. If it is
    missing, the repo was never set up: stop and tell the user to run
-   `skill://setup-matt-pocock-skills`. Do not substitute a `gh` command you
+   `fleet skill setup-matt-pocock-skills`. Do not substitute a `gh` command you
    invented — this tracker may not be GitHub.
 
 If `docs/agents/triage-labels.md` exists, read it — it maps the canonical
@@ -134,7 +134,7 @@ answers a given skill stalls without are in the ticket body:
 
 | Kind | Cannot start without |
 |---|---|
-| implement | the spec inline, or a reference the worker can fetch; the **seams** `skill://tdd` will test at, since it refuses an unconfirmed one; decisions already made — libraries, patterns, code to reuse |
+| implement | the spec inline, or a reference the worker can fetch; the **seams** the `tdd` skill will test at, since it refuses an unconfirmed one; decisions already made — libraries, patterns, code to reuse |
 | diagnosing-bugs | the exact symptom text; how to trigger it, including fixtures or services; how often; the known-good commit if any; environment |
 | research | the question, sharp enough to be answerable; which sources count as primary; where the write-up goes |
 | prototype | the design question it answers; what "runnable" means here; that the code is throwaway |

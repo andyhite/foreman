@@ -40,7 +40,7 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <the tickets or spec, inline or a reference the worker can read>
 
 ## Seams to test at
-<the public interfaces skill://tdd should work against>
+<the public interfaces the `tdd` skill should work against>
 
 ## Decisions already made
 <libraries, patterns, existing code to reuse>
