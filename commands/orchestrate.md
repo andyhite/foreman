@@ -1,18 +1,36 @@
 ---
-description: Deliver an epic by orchestrating issue-worker subagents
-argument-hint: "<epic-number>"
+description: Orchestrate the board — or one epic — dispatching issue-workers into worktrees you provision
+argument-hint: "[epic-number]"
 ---
 
-Deliver epic #$1 by orchestration.
+Orchestrate delivery. Given an argument, the scope is epic #$1; bare, the
+scope is the whole board — work through `To Do` until it is empty or
+everything left is reserved, blocked, or awaiting a decision.
 
-Read `skill://epic-loop`, `skill://tracker`, and `skill://stacked-prs`, then
-run the epic loop exactly as written: preflight (it must be a broken-down
-epic — if the breakdown is missing, run it per `skill://grooming` with my
-sign-off first), fix the cross-task contracts before any dispatch,
-partition the subtasks into dependency tracks, dispatch `issue-worker`
-subagents (one per track, chained tracks as stacked PRs, at most 3
-concurrent), keep the epic's derived board status current, run integration
-verification as work lands in an integration worktree, file integration
+Read `skill://epic-loop`, `skill://tracker`, and `skill://stacked-prs`,
+then run the orchestration loop exactly as written. **Board scope** selects
+per its step 0: top-severity bugs first, blockers respected (hold back
+anything blocked by an open issue), the column's own order for the rest;
+broken-down epics expand into tracks, an epic without a breakdown routes
+through `skill://grooming` with my sign-off, `ready-for-human` and `chart`
+items are skipped, and the board is re-snapshotted after every landing
+before the next dispatch. **Epic scope** runs the preflight (it must be a
+broken-down epic — if the breakdown is missing, run it per
+`skill://grooming` with my sign-off first), fixes the cross-task contracts
+before any dispatch, and partitions the subtasks into dependency tracks.
+
+Both scopes share one machinery, and **the worktrees are yours**: for
+every track you claim the issue, provision its worktree through
+`skill://worktree`, hand the path and branch to the worker in its brief,
+and retire it after you verify the PRs merged and the issues `Done` —
+workers never create or remove worktrees — under `fleet` dispatch,
+provisioning and retirement run through `fleet spawn`/`fleet reap`, same
+owner, same contract. Dispatch workers per `policy.epicLoop.dispatch`
+(in-process `issue-worker` subagents by default; under `fleet`, separate
+omp processes with you as the fleet boss), one per track, chain shape per
+`policy.delivery.prStrategy`,
+keep the derived board status current, run integration verification as
+epic work lands through the `scratch-create` operation, file integration
 findings as tracked issues, and close out with the final verification and
 summary.
 
@@ -26,10 +44,11 @@ workers' claims against the board and the main branch, not their say-so.
 start.** The moment you verify a subtask actually landed (PR merged, issue
 `Done`), mark its todo `done` in that same turn — across every track, not
 only the last one to finish. Before you report closeout, audit the whole
-list: every todo is `done` or explicitly `drop`ped with a reason: an epic
+list: every todo is `done` or explicitly `drop`ped with a reason: work
 reported "shipped" with every todo still open means the tracks landed but
 nobody verified them as they went.
 
-Report at the end: track → subtask → PR → status table, how the integrated
-behavior was proven, anything deferred (as linked issues), integration
-worktree removed, and the todo list's final state.
+Report at the end: track → issue → PR → status table, how the integrated
+behavior was proven, anything deferred (as linked issues), every
+provisioned worktree retired, and — at board scope — what remains on
+`To Do` and why each item was not dispatched.

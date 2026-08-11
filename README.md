@@ -3,7 +3,7 @@
 An [omp](https://github.com/oh-my-pi) extension that packages a
 GitHub-issue-tracker-driven development workflow — ideas → epics/tasks →
 worktrees → TDD implementation → QA gate → (stacked) pull requests →
-operator merge — as reusable commands, skills, and agents. It carries no
+operator merge by default — as reusable commands, skills, and agents. It carries no
 hardcoded repo, org, or tech stack: every project-specific constant (repo,
 GitHub Projects v2 board, label vocabulary, commit-type set, package
 manager, check/verify/e2e commands) is resolved once by `/foreman:init`
@@ -34,7 +34,7 @@ this one is the reusable half.
 
 - **Commands** (`commands/*.md`, invoked as `/foreman:<name>` once
   installed): `init`, `doctor`, `help`, `intake`, `record`, `groom`, `chart`,
-  `work <issue>`, `orchestrate <epic>`, `report`, `triage`.
+  `work <issue>`, `orchestrate [epic]`, `report`, `triage`.
 - **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/foreman:init`),
   `doctor` (backs `/foreman:doctor` — config-drift detection and repair),
   `prd-intake`, `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`,
@@ -145,8 +145,8 @@ Restart the session (or `/reload-plugins`) after adding it.
 /foreman:record ...   # capture an idea
 /foreman:groom        # turn ideas into task/epic issues, or reject them
 /foreman:chart ...    # chart a foggy idea as decision tickets before grooming
-/foreman:work <n>     # deliver a task or bug end to end
-/foreman:orchestrate <n>  # deliver an epic via issue-worker subagents
+/foreman:work <n>     # deliver one task or bug via a dispatched issue-worker
+/foreman:orchestrate [n]  # work the board (or one epic) via issue-worker subagents
 /foreman:report       # board snapshot
 /foreman:triage ...   # file/triage a bug with a severity label
 ```
@@ -166,14 +166,19 @@ or agent) grounded in the live tree, not from memory.
   `.omp/foreman.json` (written by `/foreman:init`) for the repo, project
   board IDs, label vocabulary, commit types, package manager, and
   check/verify/e2e commands — see below.
-- **A document becomes a backlog through its reviewed coverage ledger, not
-  a transcription of its headings.** `/foreman:intake` captures and
-  reconciles each requirement before slicing it into outcomes; it breaks
-  down only the committed wave, because a breakdown written far ahead of
-  delivery is stale by the time anyone reads it.
-- **The operator always merges.** Every skill and agent treats "the
-  operator merges the PR" as the approval and "the operator commented on
-  the PR" as a change request — no agent merges on its own judgment.
+- **Mechanisms are configurable; invariants are not.** `policy` selects the
+  worktree provider, planner dispatch, TDD enforcement, QA gate, PR strategy,
+  and merge policy without making the workflow's guarantees optional. The
+  worktree skill is split into a contract plus per-strategy files, so a caller
+  names an operation rather than a `git worktree` command; adding a provider
+  therefore does not require changing six skills.
+- **The workflow ends at the merge.** Releases, changelogs, and version
+  bumps are deliberately out of scope: they belong to the repo's own release
+  automation (release-please, changesets, a tag-triggered pipeline), which
+  runs on what lands rather than per issue — foreman neither assumes one
+  exists nor replaces it. The one post-merge path foreman does own is
+  regression: a broken release enters as a bug through `/foreman:triage`,
+  gets a severity, and rides the same loop as any other issue.
 - **Rules advise; the extension enforces exactly one thing.** A rule is a
   prompt-level interrupt — it puts the objection in front of the agent as it
   reaches for the command, and an agent can still argue its way past. The
@@ -260,8 +265,13 @@ instead of assuming a repo, a board, or a toolchain:
     "prd": "<docs/prd, or null>",
     "outOfScope": ".out-of-scope"
   },
-  "epicLoop": {
-    "maxConcurrentTracks": 3
+  "policy": {
+    "worktree": { "strategy": "git" },
+    "plan": { "planner": "non-trivial" },
+    "tdd": { "enforcement": "required" },
+    "qa": { "gate": "required" },
+    "delivery": { "prStrategy": "stacked", "mergePolicy": "operator" },
+    "epicLoop": { "maxConcurrentTracks": 3, "dispatch": "subagent" }
   },
   "plugins": {
     "marketplace": "omp-foreman",
@@ -291,8 +301,29 @@ instead of assuming a repo, a board, or a toolchain:
   sit alongside an issue's type label: the former reserves a `To Do`
   task for a human, while the latter marks a wayfinding map and its
   decision tickets.
-- `epicLoop.maxConcurrentTracks` is a starting default (3), not a
-  detected value — tune it to the project's review bandwidth.
+- **Config selects mechanism, never invariants.**
+
+  | Key | Values (default first) | What it selects |
+  | --- | --- | --- |
+  | `policy.worktree.strategy` | `git` \| `herdr` \| `provided` \| a repo-relative `.md` path | Which worktree mechanism implements the operations. |
+  | `policy.plan.planner` | `non-trivial` \| `always` \| `never` | When the `planner` agent is dispatched. `never` still requires a written inline plan — it removes the subagent, not the plan. |
+  | `policy.tdd.enforcement` | `required` \| `encouraged` | `required` is test first, watch it fail, then implement. `encouraged` keeps test-first mandatory for new behavior and bug fixes, and leaves refactors/plumbing to judgment. Neither value permits shipping unproven behavior. |
+  | `policy.qa.gate` | `required` \| `advisory` \| `off` | `required` loops to `PASS` before the PR opens. `advisory` dispatches QA once and records its verdict on the PR without looping; Spec blockers are still reported. `off` skips dispatch; rung 3 verification remains mandatory. |
+  | `policy.delivery.prStrategy` | `stacked` \| `sequential` | How an epic chain ships. `sequential` dispatches plain PRs after the previous one merges; independent tracks are unaffected. |
+  | `policy.delivery.mergePolicy` | `operator` \| `agent-on-green` | Whether the operator merges, or the delivering agent merges after green CI, QA `PASS`, and no unresolved operator comment; it never bypasses the PR. |
+  | `policy.epicLoop.maxConcurrentTracks` | `3`, or any positive integer | How many orchestration tracks run concurrently — board scope and epic scope share the cap. |
+  | `policy.epicLoop.dispatch` | `subagent` \| `fleet` | How orchestration dispatches workers: in-process `issue-worker` subagents, or separate omp processes in herdr worktree workspaces via the operator's `fleet` CLI, with the orchestrating session as fleet boss. `fleet` requires `HERDR_ENV` and `fleet` on `PATH`; `/foreman:init` offers it as the default wherever it can execute. |
+
+  At every setting, work happens on a branch and lands through a PR; the
+  issue is claimed on the board before the first edit; one issue has one
+  branch and one writer; worktrees are provisioned and retired by the
+  orchestrating session, never by the worker inside them; the primary
+  checkout is the operator's; changed behavior is proven by something
+  observed, not asserted; and a task is not
+  done while its worktree exists. `policy.worktree.strategy` also accepts a
+  repo-relative `.md` path as an escape hatch when none of the three shipped
+  mechanisms fits. Every default reproduces foreman's standing behavior, so
+  an untouched block changes nothing.
 - `plugins.packs` is what `/foreman:init` concluded this repo needs
   from the packs above, installed at **project scope**. `craft` is
   always included because foreman requires it. The package-manager

@@ -74,8 +74,27 @@
     "prd": null,
     "outOfScope": null
   },
-  "epicLoop": {
-    "maxConcurrentTracks": 3
+  "policy": {
+    "worktree": {
+      "strategy": "git"
+    },
+    "plan": {
+      "planner": "non-trivial"
+    },
+    "tdd": {
+      "enforcement": "required"
+    },
+    "qa": {
+      "gate": "required"
+    },
+    "delivery": {
+      "prStrategy": "stacked",
+      "mergePolicy": "operator"
+    },
+    "epicLoop": {
+      "maxConcurrentTracks": 3,
+      "dispatch": "fleet"
+    }
   },
   "plugins": {
     "marketplace": "omp-foreman",

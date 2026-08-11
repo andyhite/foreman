@@ -4,11 +4,12 @@ description: Check .omp/foreman.json for drift against live GitHub/repo state, r
 
 Run a drift check. Read `skill://doctor`, then run its procedure exactly:
 gather every finding read-only first (labels, board identity, status role
-mapping, repo conventions, board hygiene), apply only the unambiguous
-repairs (cosmetic renames, a re-detected command that still resolves),
-and ask me before touching anything ambiguous (a vanished board-option
-ID, a project that no longer resolves, a config value that looks like a
-deliberate hand-edit).
+mapping, repo conventions, board hygiene, policy drift), apply only the
+unambiguous repairs (cosmetic renames, a re-detected command that still
+resolves), and ask me before touching anything ambiguous (a vanished
+board-option ID, a project that no longer resolves, a config value that
+looks like a deliberate hand-edit). Surface non-default policy values even
+when they are valid.
 
 If `.omp/foreman.json` doesn't exist yet, tell me to run `/foreman:init`
 instead — there's nothing to check drift against.

@@ -1,6 +1,6 @@
 ---
 name: bootstrap
-description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary (including the ready-for-human and chart modifiers), a GitHub Projects v2 board with a Status field, detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands, domain-doc layout) into .omp/foreman.json, and installing the required craft pack. Read when running /foreman:init or repairing a project's tracker config.
+description: Setting up GitHub issue tracking for a repo under the foreman workflow — repo check, label vocabulary (including the ready-for-human and chart modifiers), a GitHub Projects v2 board with a Status field, detecting this repo's own conventions (main branch, commit types, package manager, check/verify/e2e commands, domain-doc layout) and writing policy defaults into .omp/foreman.json, and installing the required craft pack. Read when running /foreman:init or repairing a project's tracker config.
 ---
 
 # Bootstrap — wire a repo into the foreman workflow
@@ -143,7 +143,7 @@ report that nothing enforces it.
 
 Find **every** lockfile at the repo root, not the first one that matches —
 a repo can legitimately have several, and each is evidence of a real
-toolchain that step 4 will need:
+toolchain that step 5 will need:
 
 | Lockfile                          | Package manager | Install command      |
 | ---------------------------------- | ---------------- | ---------------------- |
@@ -174,7 +174,7 @@ manager: the generic one whose install sets the repo up for the
 `check`/`verify`/`e2e` commands below. Where there's a Node ecosystem at
 all, that's normally its manager. The other ecosystems don't get
 `commands.*` entries of their own — they carry their own idiomatic commands
-and surface in step 4 as packs, and in the final report.
+and surface in step 5 as packs, and in the final report.
 
 ### Check / verify / e2e commands
 
@@ -218,7 +218,47 @@ already has nothing to say.
   no document has been ingested yet, and never that intake is blocked.
 - `docs.outOfScope` — `.out-of-scope` at the repo root, if it exists.
 
-## 4. Companion rule packs
+## 4. Detect and default workflow policy
+
+`policy` selects a mechanism for the foreman loop; it does not loosen the
+loop's invariants. Write every key below on every init so the config is an
+explicit record of today's behavior, not a partially implicit contract.
+
+| Key | Default | Allowed values | Init treatment |
+| --- | --- | --- | --- |
+| `policy.worktree.strategy` | `git` | `git`, `herdr`, `provided`, or a repo-relative `.md` path | Detect or ask as described below. |
+| `policy.plan.planner` | `non-trivial` | `non-trivial`, `always`, `never` | Write the default; never detect or ask. |
+| `policy.tdd.enforcement` | `required` | `required`, `encouraged` | Write the default; never detect or ask. |
+| `policy.qa.gate` | `required` | `required`, `advisory`, `off` | Write the default; never detect or ask. |
+| `policy.delivery.prStrategy` | `stacked` | `stacked`, `sequential` | Write the default; never detect or ask. |
+| `policy.delivery.mergePolicy` | `operator` | `operator`, `agent-on-green` | Write the default; never detect or ask. |
+| `policy.epicLoop.maxConcurrentTracks` | `3` | any positive integer | Write the default; never detect or ask. |
+| `policy.epicLoop.dispatch` | `subagent` | `subagent`, `fleet` | Detect or ask as described below. |
+
+For `policy.worktree.strategy`, detect `git` silently in the ordinary case:
+it exactly reproduces the standing mechanism. When `HERDR_ENV` is set **and**
+`herdr` is on `PATH`, that is ambiguous evidence, not a decision — the
+operator may run agents outside herdr panes — so ask which strategy to use,
+offering `git` as the default. Never detect `provided`: it describes a
+harness contract that no probe can observe and is only ever an explicit
+operator choice. A detector that guessed `provided` would silently stop
+creating worktrees.
+
+For `policy.epicLoop.dispatch`, fleet is the preferred mechanism wherever
+it can actually execute: when `HERDR_ENV` is set **and** the `fleet` CLI
+is on `PATH`, ask with **`fleet` as the offered default** — the
+orchestrating session becomes the fleet boss and dispatches separate omp
+workers; the operator declines it only when this checkout's agents run
+outside herdr panes. Without that evidence, write `subagent` silently —
+never write `fleet` undetected, since it cannot execute outside herdr.
+
+The other six choices are workflow-rigor decisions a project makes after it
+has run the loop a few times. Write their defaults at init; never detect,
+infer, or ask about them, and never turn first setup into a questionnaire
+before a single issue exists. They are documented in the README and
+hand-edited when the project wants a different mechanism.
+
+## 5. Companion rule packs
 
 The marketplace that ships foreman also ships standalone rule packs. This
 step installs the ones this repo actually needs, at **project scope**.
@@ -351,7 +391,7 @@ Node lockfile is authoritative" question in step 3, that answer picks the
 Node pack — don't ask again, and don't turn the repo's other ecosystems
 into a second question, since their packs follow from evidence alone.
 
-## 5. Write the config
+## 6. Write the config
 
 Write (or update) `.omp/foreman.json` at the repo root:
 
@@ -397,8 +437,13 @@ Write (or update) `.omp/foreman.json` at the repo root:
     "prd": "<detected PRD directory, or null>",
     "outOfScope": "<.out-of-scope, or null>"
   },
-  "epicLoop": {
-    "maxConcurrentTracks": 3
+  "policy": {
+    "worktree": { "strategy": "git" },
+    "plan": { "planner": "non-trivial" },
+    "tdd": { "enforcement": "required" },
+    "qa": { "gate": "required" },
+    "delivery": { "prStrategy": "stacked", "mergePolicy": "operator" },
+    "epicLoop": { "maxConcurrentTracks": 3, "dispatch": "subagent" }
   },
   "plugins": {
     "marketplace": "omp-foreman",
@@ -411,16 +456,19 @@ Write (or update) `.omp/foreman.json` at the repo root:
 board — it may not literally read "To Do"/"In Progress" if the board
 predates this setup; every foreman skill that mentions a status by one of
 those six names means the semantic role, resolved through this map.
-`epicLoop.maxConcurrentTracks` defaults to 3; raise or lower it if the
-project's review bandwidth or CI capacity says otherwise — it's a starting
-point, not a measured value, so don't dress it up as detected.
+
+`policy` selects mechanism, never invariants. Every default reproduces
+foreman's standing behavior exactly, so an untouched block is not a gap to
+fill. `policy.worktree.strategy` may also name a repo-relative `.md` path:
+that is the escape hatch for a project whose mechanism ships with neither
+`git`, `herdr`, nor `provided`.
 
 `docs.*` fields are `null` exactly when step 3's domain-doc detection
 found nothing at that path — an ordinary, silent absence, unlike a
 null `commands.check`, which is a gap worth flagging as a guess.
 Don't call out a null `docs.*` field in the init report as if it
 needed a decision; it doesn't.
-`plugins.packs` records what step 4 concluded this repo needs —
+`plugins.packs` records what step 5 concluded this repo needs —
 intent, not a mirror of what omp currently has installed. `craft` is
 the one exception: it's always in the list, because foreman requires
 it rather than recommending it. The package-manager entries are the
@@ -434,10 +482,12 @@ which is exactly the drift nothing else would catch.
 Commit it — it's small, stable, and every other skill needs it; don't
 gitignore it. If the repo already has one, diff before overwriting: a
 hand-edited value (a corrected `commands.verify`, a narrower
-`commitTypes`) is a deliberate project choice, not staleness — preserve it
-and only fill in fields that are genuinely still empty.
+`commitTypes`, or any non-default `policy.*` value) is a deliberate project
+choice, not staleness — preserve it and only fill in fields that are
+genuinely still empty. A non-default policy value is the most deliberate
+thing in this file; a repair pass must never reset it to a default.
 
-## 6. Report
+## 7. Report
 
 Confirm back: repo, project URL, which labels were created vs.
 already present (including the two modifier labels), the Status role
@@ -451,14 +501,15 @@ guess, so just state what was found. If step 2 hit the "don't
 replace" branch, say so explicitly — that board predates this run
 and needed careful merging, not blind creation.
 
-Then, separately, the rule packs: which were installed, which were
-skipped and on what evidence, whether the marketplace had to be
-registered or its catalog refreshed, and whether `.gitignore` needed
-the `.omp/plugins/` entry. `craft` doesn't need evidence — just
-confirm it installed. Name the lockfile behind each package-manager
-pack, so a second one reads as the polyglot repo it is rather than a
-mistake. If a detected manager has no pack yet, name it as a
-marketplace gap.
+Then report the resolved `policy.worktree.strategy` and the evidence behind
+it, and state in one line that every other policy knob was written at its
+default. Then, separately, the rule packs: which were installed, which were
+skipped and on what evidence, whether the marketplace had to be registered
+or its catalog refreshed, and whether `.gitignore` needed the `.omp/plugins/`
+entry. `craft` doesn't need evidence — just confirm it installed. Name the
+lockfile behind each package-manager pack, so a second one reads as the
+polyglot repo it is rather than a mistake. If a detected manager has no pack
+yet, name it as a marketplace gap.
 
 ## Hazards
 
@@ -478,7 +529,7 @@ marketplace gap.
 - A detected `commands.*` value is a cache, not a promise: if a script gets
   renamed and a run of `verification` finds it missing, update the config
   rather than letting it silently point at a dead command.
-- **A pack installed in step 4 is not active in the session that installed
+- **A pack installed in step 5 is not active in the session that installed
   it.** omp resolves rules when a session starts; `omp plugin install` writes
   the install record without rebuilding the running session's capability set.
   Tell the operator to run `/reload-plugins`, and to restart the session if

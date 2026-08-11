@@ -133,7 +133,30 @@ const pluginsById = new Map(pluginRoots.map((p) => [p.id, p]));
 {
   const catalog = JSON.parse(
     readFileSync(join(ROOT, ".omp-plugin", "marketplace.json"), "utf8"),
-  ) as { plugins?: { name?: unknown; source?: unknown }[] };
+  ) as {
+    metadata?: { version?: unknown };
+    plugins?: { name?: unknown; source?: unknown; version?: unknown }[];
+  };
+  // Version drift bit us once already: the catalog said 0.3.0 while the root
+  // package.json still said 0.1.0. A plugin's package.json (when it has one)
+  // must agree with its catalog entry, or installs report a version nobody
+  // tagged.
+  for (const entry of catalog.plugins ?? []) {
+    const source = String(entry.source);
+    if (!source.startsWith("./")) continue;
+    const pkgPath = join(resolve(ROOT, source), "package.json");
+    let pkg: { version?: unknown };
+    try {
+      pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    } catch {
+      continue; // prose-only pack: no package.json to disagree with
+    }
+    if (pkg.version !== undefined && pkg.version !== entry.version) {
+      errors.push(
+        `${join(source, "package.json")}: version "${String(pkg.version)}" disagrees with its marketplace entry "${String(entry.version)}" — bump both together`,
+      );
+    }
+  }
   const entries = catalog.plugins ?? [];
   const sources = new Set(entries.map((p) => String(p.source)));
   for (const plugin of pluginRoots) {
@@ -291,25 +314,24 @@ for (const plugin of pluginRoots) {
 
 // --- cross-reference checks across every markdown file in every plugin ---
 const allDirs = ["commands", "skills", "agents", "rules"];
+// Strategy documents nest beneath their skill; stopping after one directory
+// lets a broken reference there ship even though runtime will load the file.
 function walkMd(base: string): string[] {
   const out: string[] = [];
-  for (const top of allDirs) {
-    const dir = join(base, top);
+  function visit(dir: string): void {
     let entries: string[];
     try {
       entries = readdirSync(dir);
     } catch {
-      continue;
+      return;
     }
     for (const entry of entries) {
-      const p = join(dir, entry);
-      if (statSync(p).isDirectory()) {
-        for (const f of listMd(p)) out.push(join(p, f));
-      } else if (entry.endsWith(".md")) {
-        out.push(p);
-      }
+      const path = join(dir, entry);
+      if (statSync(path).isDirectory()) visit(path);
+      else if (entry.endsWith(".md")) out.push(path);
     }
   }
+  for (const top of allDirs) visit(join(base, top));
   return out;
 }
 
@@ -328,16 +350,34 @@ for (const plugin of pluginRoots) {
     const content = readFileSync(path, "utf8");
     const rel = path.slice(ROOT.length + 1);
 
-    for (const m of content.matchAll(/skill:\/\/([a-z0-9-]+)/g)) {
-      if (reachable.has(m[1])) continue;
-      const owner = pluginRoots.find((p) => p.id !== plugin.id && p.skills.has(m[1]));
-      errors.push(
-        owner
-          ? `${rel}: references skill://${m[1]}, which ${owner.id} defines but ${plugin.id} doesn't require — add "${owner.id}" to omp.requiresPlugins, or move the skill`
-          : plugin.standalone
-            ? `${rel}: references skill://${m[1]}, which ${plugin.id} doesn't define — a standalone plugin can't depend on another plugin's skills; add the skill here or inline the guidance`
-            : `${rel}: references skill://${m[1]}, which doesn't exist`,
-      );
+    // A subpath is a dependency too: finding its skill's root does not prove
+    // the strategy or companion document named by the caller can be loaded.
+    for (const m of content.matchAll(/skill:\/\/([a-z0-9-]+)(?:\/([A-Za-z0-9_-](?:[A-Za-z0-9_./-]*[A-Za-z0-9_-])?))?(?![A-Za-z0-9_/-])/g)) {
+      const [, skill, subpath] = m;
+      if (!reachable.has(skill)) {
+        const owner = pluginRoots.find((p) => p.id !== plugin.id && p.skills.has(skill));
+        errors.push(
+          owner
+            ? `${rel}: references skill://${skill}, which ${owner.id} defines but ${plugin.id} doesn't require — add "${owner.id}" to omp.requiresPlugins, or move the skill`
+            : plugin.standalone
+              ? `${rel}: references skill://${skill}, which ${plugin.id} doesn't define — a standalone plugin can't depend on another plugin's skills; add the skill here or inline the guidance`
+              : `${rel}: references skill://${skill}, which doesn't exist`,
+        );
+        continue;
+      }
+      if (!subpath) continue;
+      const owner =
+        plugin.skills.has(skill)
+          ? plugin
+          : pluginRoots.find((p) => plugin.requires.includes(p.id) && p.skills.has(skill))!;
+      const target = join(owner.dir, "skills", skill, subpath);
+      try {
+        if (!statSync(target).isFile()) throw new Error();
+      } catch {
+        errors.push(
+          `${rel}: references skill://${skill}/${subpath}, but ${owner.prefix}skills/${skill}/${subpath} doesn't exist — the skill resolves but this document cannot be loaded at runtime`,
+        );
+      }
     }
 
     // Commands resolve as /<plugin>:<command>. Referencing foreman's from a
