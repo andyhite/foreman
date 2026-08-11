@@ -70,11 +70,12 @@ Read `skill://<skill-name>` and follow it for the work below.
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
-**The first line is the invocation.** The mattpocock execution skills are marked
-`disable-model-invocation: true`, which means a worker will never reach for them
-on its own — they are user-invoked by design. Naming the skill in the first line
-of the prompt *is* the user invoking it. Without that line you get a generic
-agent doing generic work; with it you get the discipline the skill encodes.
+**The first line is what puts the skill in front of the worker.** The mattpocock
+execution skills are marked `disable-model-invocation: true`, so they are hidden
+from the list an agent selects from and a worker will not reach for one on its
+own. They stay reachable by URI, so an explicit instruction to read and follow
+one is how a worker gets it. Without that line you get a generic agent doing
+generic work; with it the worker is working from the skill's own procedure.
 
 **Do not include:** where to commit, whether to push, how to report back, or a
 reminder to stay in the worktree. `fleet` appends its own protocol block

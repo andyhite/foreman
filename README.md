@@ -39,7 +39,7 @@ graph LR
   U[User] <--> B["Orchestrator<br/>grill / to-spec / to-tickets"]
   B -->|"/fleet:implement"| W1["worker<br/>feat/a"]
   B -->|"/fleet:implement"| W2["worker<br/>feat/b"]
-  B -->|"/fleet:diagnose"| W3["worker<br/>fix/c"]
+  B -->|"/fleet:diagnosing-bugs"| W3["worker<br/>fix/c"]
   W1 -->|report| B
   W2 -->|"reply: which retry policy?"| B
   W3 -->|report| B
@@ -72,13 +72,14 @@ too, and `jq` on your PATH.
 That claims an orchestrator handle for the pane and adopts the role. From there
 the orchestrator interviews you, slices the objective, and dispatches:
 
-| Command | Worker runs |
-|---|---|
-| `/fleet:implement` | `skill://implement` |
-| `/fleet:diagnose` | `skill://diagnosing-bugs` |
-| `/fleet:research` | `skill://research` |
-| `/fleet:prototype` | `skill://prototype` |
-| `/fleet:review` | `skill://code-review` |
+Every dispatch command is named for the skill it delegates to, so the slash menu
+tells you where the work is going:
+
+`/fleet:implement` · `/fleet:diagnosing-bugs` · `/fleet:research` ·
+`/fleet:prototype` · `/fleet:code-review`
+
+Each one spawns a worker whose brief opens with
+`Read skill://<that same name> and follow it`.
 
 Details: [`herdr/README.md`](./herdr/README.md) for the CLI,
 [`plugins/fleet/README.md`](./plugins/fleet/README.md) for the commands.

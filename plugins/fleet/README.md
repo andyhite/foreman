@@ -28,7 +28,7 @@ separate `omp` processes, one per branch, running in parallel.
 - A session running inside a herdr pane (`HERDR_ENV=1`)
 
 Run `/setup-matt-pocock-skills` once per repo before using `/fleet:implement` or
-`/fleet:review` — both read `docs/agents/issue-tracker.md`.
+`/fleet:code-review` — both read `docs/agents/issue-tracker.md`.
 
 ## Install
 
@@ -50,10 +50,10 @@ Then dispatch, one command per kind of work:
 | Command | Worker runs | For |
 |---|---|---|
 | `/fleet:implement` | `skill://implement` | building a spec or set of tickets |
-| `/fleet:diagnose` | `skill://diagnosing-bugs` | a bug or performance regression |
+| `/fleet:diagnosing-bugs` | `skill://diagnosing-bugs` | a bug or performance regression |
 | `/fleet:research` | `skill://research` | a question needing primary sources |
 | `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
-| `/fleet:review` | `skill://code-review` | reviewing a branch a worker already produced |
+| `/fleet:code-review` | `skill://code-review` | reviewing a branch a worker already produced |
 
 Every dispatch command does the same three things: check that you can state the
 requirements precisely, write a brief to a file, and `fleet spawn` a worker
@@ -69,14 +69,16 @@ needs, the fixed point a review diffs against. Each command asks for its own.
 
 ## How dispatch actually works
 
-The execution skills are marked `disable-model-invocation: true`, so an agent
-never reaches for them on its own — they are user-invoked by design. A worker is
-a blank omp process whose first input is the brief, which begins:
+The execution skills are marked `disable-model-invocation: true`, so they are
+hidden from the list an agent selects from and it never reaches for one on its
+own. They stay reachable by URI. A worker is a blank omp process whose first
+input is the brief, which begins:
 
 ```
 Read `skill://implement` and follow it for the work below.
 ```
 
-That line is the invocation. `fleet` then appends its own protocol block telling
-the worker how to commit, how to file its report, and how to interrupt you with
-a question, so briefs never repeat any of it.
+That instruction is what puts the skill in front of the worker. `fleet` then
+appends its own protocol block telling the worker how to commit, how to file
+its report, and how to interrupt you with a question, so briefs never repeat
+any of it.

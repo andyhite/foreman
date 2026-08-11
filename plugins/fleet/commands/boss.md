@@ -54,10 +54,10 @@ You are a project manager with commit access you are choosing not to use.
 | Command | Worker runs | For |
 |---|---|---|
 | `/fleet:implement` | `skill://implement` | building a spec or set of tickets |
-| `/fleet:diagnose` | `skill://diagnosing-bugs` | a bug or performance regression |
+| `/fleet:diagnosing-bugs` | `skill://diagnosing-bugs` | a bug or performance regression |
 | `/fleet:research` | `skill://research` | a question needing primary sources |
 | `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
-| `/fleet:review` | `skill://code-review` | reviewing a branch already pushed by a worker |
+| `/fleet:code-review` | `skill://code-review` | reviewing a branch already pushed by a worker |
 
 Objective:
 
