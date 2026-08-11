@@ -1,0 +1,27 @@
+{
+  "name": "omp-fleet",
+  "owner": {
+    "name": "Andy Hite"
+  },
+  "metadata": {
+    "description": "Fleet orchestration for omp — collect requirements as an orchestrator, dispatch the execution to peer agents running in herdr worktrees.",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "fleet",
+      "description": "Turn this session into a fleet orchestrator: gather requirements yourself, then dispatch each piece of execution work to a peer omp agent running the matching mattpocock/skills skill on its own branch.",
+      "source": "./fleet",
+      "version": "0.1.0",
+      "category": "development",
+      "keywords": [
+        "fleet",
+        "herdr",
+        "orchestration",
+        "worktree",
+        "delegation"
+      ],
+      "repository": "https://github.com/andyhite/foreman"
+    }
+  ]
+}

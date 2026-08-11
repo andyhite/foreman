@@ -1,0 +1,22 @@
+id = "andyhite.fleet"
+name = "Fleet"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Dispatch peer coding agents into herdr worktree workspaces."
+platforms = ["linux", "macos"]
+
+# Installing the plugin puts fleet on PATH: agents invoke the CLI from ordinary
+# shells, and herdr has no mechanism for a plugin to export a binary.
+[[startup]]
+command = ["sh", "bin/fleet-link", "--quiet"]
+
+# Plugin actions take no arguments, so expose only the argument-less inventory
+# command here; everything else is driven from an agent's shell. It goes through
+# a wrapper rather than calling `bin/fleet ls` directly: actions run with cwd set
+# to the plugin root, and `fleet ls` scopes its inventory to the repo it runs in,
+# so the unwrapped call would always report on this plugin's own checkout.
+[[actions]]
+id = "ls"
+title = "List fleet workers"
+contexts = ["workspace"]
+command = ["./bin/fleet-ls"]

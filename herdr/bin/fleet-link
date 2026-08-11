@@ -1,0 +1,95 @@
+#!/bin/sh
+# Put only this plugin's fleet on PATH: never replace an unrelated executable.
+
+quiet=false
+case "${1-}" in
+  --quiet) quiet=true ;;
+  --help) printf 'usage: %s [--quiet]\n' "$0"; exit 0 ;;
+  '') ;;
+  *) printf 'fleet-link: unknown option: %s\n' "$1" >&2; exit 0 ;;
+esac
+
+resolve_path() {
+  path=$1
+  case "$path" in /*) ;; *) path="$(pwd -P)/$path" ;; esac
+  while [ -L "$path" ]; do
+    dir=$(CDPATH= cd -P "$(dirname "$path")" && pwd) || return 1
+    link=$(readlink "$path") || return 1
+    case "$link" in /*) path=$link ;; *) path=$dir/$link ;; esac
+  done
+  dir=$(CDPATH= cd -P "$(dirname "$path")" && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
+# The plugin id declared at the top of a herdr-plugin.toml. Only the top-level
+# table is scanned: `[[actions]]` entries carry their own `id`, so reading past
+# the first table header would happily return an action name.
+plugin_id_of() {
+  [ -f "$1" ] || return 1
+  awk '
+    /^[[:space:]]*\[/ { exit }
+    /^[[:space:]]*id[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*$/, "")
+      gsub(/"/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+# Whether the symlink already at the target belongs to this plugin.
+#
+# Ownership is decided by plugin id, never by shape. An earlier version accepted
+# any path of the form <a herdr plugin>/bin/fleet, which would silently steal the
+# command of a different plugin that happens to ship its own `bin/fleet`.
+#
+# A dangling link is never adopted. It cannot be identified, and a broken link is
+# an absence of evidence rather than proof of ownership — replacing it would
+# destroy the only remaining record of where the user had pointed it.
+link_is_ours() {
+  resolved_link=$1
+  [ -n "$resolved_link" ] && [ -e "$resolved_link" ] || return 1
+  [ -n "$self_id" ] || return 1
+  root=${resolved_link%/bin/fleet}
+  [ "$root" != "$resolved_link" ] || return 1
+  [ "$(plugin_id_of "$root/herdr-plugin.toml" 2>/dev/null)" = "$self_id" ]
+}
+
+source=$(resolve_path "$0") || exit 1
+source_dir=$(dirname "$source")
+source=$source_dir/fleet
+self_id=$(plugin_id_of "${source_dir%/bin}/herdr-plugin.toml" || true)
+target_dir=${FLEET_LINK_DIR:-"$HOME/.local/bin"}
+target=$target_dir/fleet
+mkdir -p "$target_dir" || exit 1
+
+if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+  ln -s "$source" "$target" || exit 1
+  $quiet || printf 'linked %s -> %s\n' "$target" "$source"
+elif [ -L "$target" ]; then
+  literal=$(readlink "$target") || exit 1
+  resolved=$(resolve_path "$target" 2>/dev/null || true)
+  if [ "$resolved" = "$source" ]; then
+    $quiet || printf 'already linked\n'
+  elif link_is_ours "$resolved"; then
+    rm "$target" && ln -s "$source" "$target" || exit 1
+    $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
+  elif [ -n "$resolved" ] && [ -e "$resolved" ]; then
+    printf 'fleet-link: warning: %s already points at %s; remove it or set FLEET_LINK_DIR\n' \
+      "$target" "$resolved" >&2
+    exit 0
+  else
+    printf 'fleet-link: warning: %s is a broken symlink to %s; remove it or set FLEET_LINK_DIR\n' \
+      "$target" "$literal" >&2
+    exit 0
+  fi
+else
+  printf 'fleet-link: warning: %s already exists; remove it or set FLEET_LINK_DIR\n' "$target" >&2
+  exit 0
+fi
+
+case ":${PATH-}:" in
+  *":$target_dir:"*) ;;
+  *) printf 'fleet-link: warning: %s is not on PATH; add it to your interactive shell PATH to use fleet there\n' "$target_dir" >&2 ;;
+esac

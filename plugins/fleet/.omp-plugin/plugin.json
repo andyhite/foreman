@@ -1,0 +1,9 @@
+{
+  "name": "fleet",
+  "version": "0.1.0",
+  "description": "Orchestrator-side commands that dispatch mattpocock/skills execution work to peer omp agents in herdr worktrees.",
+  "author": {
+    "name": "Andy Hite"
+  },
+  "homepage": "https://github.com/andyhite/foreman"
+}

@@ -1,0 +1,18 @@
+#!/bin/sh
+# `fleet ls` for the herdr command palette.
+#
+# Plugin actions run with cwd set to the plugin root, but `fleet ls` scopes its
+# inventory to the repo it is invoked from — so calling it directly here would
+# always report on this plugin's own checkout instead of the workspace the user
+# is looking at. herdr passes that workspace in HERDR_PLUGIN_CONTEXT_JSON.
+
+set -eu
+
+dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+
+cwd=$(printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -r '.workspace_cwd // empty')
+if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+  cd "$cwd"
+fi
+
+exec "$dir/fleet" ls

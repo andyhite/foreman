@@ -1,0 +1,84 @@
+# foreman
+
+Two plugins that let one agent act as a project manager and hand the actual
+engineering to peer agents running on their own branches.
+
+- **[`herdr/`](./herdr/)** — a herdr plugin providing the `fleet` CLI: create a
+  git worktree, start a separate `omp` in it, dispatch work, collect the report.
+- **[`plugins/fleet/`](./plugins/fleet/)** — an omp plugin providing the
+  orchestrator's slash commands, each of which dispatches the matching
+  [mattpocock/skills](https://github.com/mattpocock/skills) skill to a worker.
+
+## The idea
+
+omp's `task` subagents share one process: one context window, one working
+directory, one lifetime. That is the right tool for work that fits in the
+current checkout, and the wrong one for anything that wants a branch.
+
+herdr already has the primitives for the other case — worktrees, panes, named
+agents you can address later — and `fleet` is those primitives wired into one
+command per dispatch. A worker is a full `omp` with its own context window,
+sitting in its own worktree, reachable an hour later, and its deliverable is a
+branch rather than a message.
+
+On top of that, the mattpocock skills split along a line worth taking seriously:
+
+|  | needs the user in the room | needs only a checkout |
+|---|---|---|
+| | `grill-me`, `grill-with-docs`, `to-spec`, `to-tickets`, `triage`, `wayfinder` | `implement`, `diagnosing-bugs`, `research`, `prototype`, `code-review` |
+| runs | in seconds, interactively | for a long time, autonomously |
+| wants | your attention | a branch |
+
+Run both halves in one session and the long half blocks the interactive half.
+So the orchestrator keeps the left column — it interviews, specs, and slices —
+and every item in the right column is dispatched to a worker with a brief that
+starts `Read `skill://implement` and follow it`.
+
+```mermaid
+graph LR
+  U[User] <--> B["Orchestrator<br/>grill / to-spec / to-tickets"]
+  B -->|"/fleet:implement"| W1["worker<br/>feat/a"]
+  B -->|"/fleet:implement"| W2["worker<br/>feat/b"]
+  B -->|"/fleet:diagnose"| W3["worker<br/>fix/c"]
+  W1 -->|report| B
+  W2 -->|"reply: which retry policy?"| B
+  W3 -->|report| B
+```
+
+## Install
+
+Both halves are needed: the herdr plugin supplies the mechanism, the omp plugin
+supplies the commands.
+
+```sh
+herdr plugin install andyhite/foreman/herdr
+```
+
+```
+/marketplace add andyhite/foreman
+/marketplace install fleet@omp-fleet
+```
+
+You also need [mattpocock/skills](https://github.com/mattpocock/skills)
+installed at user scope, so that workers resolve `skill://implement` and friends
+too, and `jq` on your PATH.
+
+## Use
+
+```
+/fleet:boss Ship the webhook retry work in #412 and #413
+```
+
+That claims an orchestrator handle for the pane and adopts the role. From there
+the orchestrator interviews you, slices the objective, and dispatches:
+
+| Command | Worker runs |
+|---|---|
+| `/fleet:implement` | `skill://implement` |
+| `/fleet:diagnose` | `skill://diagnosing-bugs` |
+| `/fleet:research` | `skill://research` |
+| `/fleet:prototype` | `skill://prototype` |
+| `/fleet:review` | `skill://code-review` |
+
+Details: [`herdr/README.md`](./herdr/README.md) for the CLI,
+[`plugins/fleet/README.md`](./plugins/fleet/README.md) for the commands.
