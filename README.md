@@ -34,6 +34,12 @@ So the orchestrator keeps the left column — it interviews, specs, and slices �
 and every item in the right column is dispatched to a worker with a brief that
 starts `Read `skill://implement` and follow it`.
 
+That explicit line is what keeps a worker on the one skill named for it. The
+same discipline applies on your side of the split: the left-column skills all
+carry `disable-model-invocation: true`, so they don't show up in a skill menu
+either — you reach for `skill://grill-me` and the rest by URI too, instead of
+waiting for the model to offer them.
+
 ```mermaid
 graph LR
   U[User] <--> B["Orchestrator<br/>grill / to-spec / to-tickets"]

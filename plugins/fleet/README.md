@@ -28,7 +28,7 @@ separate `omp` processes, one per branch, running in parallel.
 - A session running inside a herdr pane (`HERDR_ENV=1`)
 
 `/fleet:backlog` reads `docs/agents/issue-tracker.md` and cannot run without
-it. Run `/setup-matt-pocock-skills` once per repo to create it.
+it. Run `skill://setup-matt-pocock-skills` once per repo to create it.
 
 ## Install
 
@@ -67,12 +67,13 @@ the worker reports, which is correct for one slice and fatal for a backlog: a
 dependent ticket reaches the frontier only when its blocker *closes*, and that
 needs a merge. Reporting and waiting stalls after the first wave.
 
-Every dispatch command does the same three things: check that you can state the
-requirements precisely, write a brief to a file, and `fleet spawn` a worker
-against it. What differs is *which* requirements that skill cannot proceed
-without — the seams `/tdd` will test at, the reproduction steps a feedback loop
-needs, the fixed point a review diffs against. Each command asks for its own;
-`/fleet:backlog` asks for a whole wave's worth in one round.
+Every dispatch command does the same three things: check that you can state
+the requirements precisely, write a brief to a file, and `fleet spawn` a
+worker against it. What differs is *which* requirements that skill cannot
+proceed without — the seams `skill://tdd` will test at, the reproduction
+steps a feedback loop needs, the fixed point a review diffs against. Each
+command asks for its own; `/fleet:backlog` asks for a whole wave's worth in
+one round.
 
 ## Skills
 
@@ -82,16 +83,22 @@ needs, the fixed point a review diffs against. Each command asks for its own;
 
 ## How dispatch actually works
 
-The execution skills are marked `disable-model-invocation: true`, so they are
-hidden from the list an agent selects from and it never reaches for one on its
-own. They stay reachable by URI. A worker is a blank omp process whose first
-input is the brief, which begins:
+A worker is a blank omp process whose first input is the brief, which begins:
 
 ```
 Read `skill://implement` and follow it for the work below.
 ```
 
-That instruction is what puts the skill in front of the worker. `fleet` then
-appends its own protocol block telling the worker how to commit, how to file
-its report, and how to interrupt you with a question, so briefs never repeat
-any of it.
+That instruction line is what makes dispatch reliable: naming the skill
+explicitly guarantees the worker works from *that* skill's own procedure,
+rather than trusting a blank agent to auto-select the right one out of a list
+of forty. `fleet` then appends its own protocol block telling the worker how
+to commit, how to file its report, and how to interrupt you with a question,
+so briefs never repeat any of it.
+
+`disable-model-invocation: true` lands on the other side of this split than
+you'd expect: it is set on the orchestrator's own interview skills —
+`triage`, `to-tickets`, `to-spec`, `grill-me`, `wayfinder` — not on the
+execution skills a worker runs. So it is *you*, not the worker, whose skill
+list is missing entries; you reach for those interview skills by URI for the
+same reason a brief opens with `Read skill://implement and follow it`.

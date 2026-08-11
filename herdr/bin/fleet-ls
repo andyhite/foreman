@@ -13,7 +13,7 @@ set -eu
 command -v jq >/dev/null 2>&1 \
   || { printf 'fleet-ls: jq is required but not on PATH\n' >&2; exit 1; }
 
-dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+dir=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
 
 cwd=$(printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -r '.workspace_cwd // empty')
 if [ -n "$cwd" ] && [ -d "$cwd" ]; then

@@ -51,11 +51,14 @@ Both are hard stops.
 2. **`docs/agents/issue-tracker.md`.** It is the only thing that knows how to
    list issues, read dependencies, comment, and close in this repo. If it is
    missing, the repo was never set up: stop and tell the user to run
-   `/setup-matt-pocock-skills`. Do not substitute a `gh` command you invented —
-   this tracker may not be GitHub.
+   `skill://setup-matt-pocock-skills`. Do not substitute a `gh` command you
+   invented — this tracker may not be GitHub.
 
-Read `docs/agents/triage-labels.md` too. The role names below are the canonical
-ones; that file maps them to the strings this repo actually uses.
+If `docs/agents/triage-labels.md` exists, read it — it maps the canonical
+role names below to the strings this repo actually uses. Setup writes that
+file only when the `triage` skill is installed; if it is missing, use the
+five canonical names as they are: `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`.
 
 Open a todo list with every in-fence ticket on it, now. Mark one done in the
 same turn you verify its merge — never in a batch at the end. A backlog reported
@@ -73,9 +76,10 @@ Then reduce the ready set to what is dispatchable now:
 - **`ready-for-agent` only.** That label means "fully specified, ready for an
   AFK agent", which is the same bar a fleet brief has to clear. Nothing without
   it goes to a worker.
-- **Drop anything already claimed.** An assignee means a human took it. Run
-  `fleet ls` too — a ticket whose worker is alive from an earlier run must not
-  be dispatched twice.
+- **Drop anything already claimed.** An assignee means the ticket is
+  claimed — by a human, or by another orchestrator's worker — either way it
+  is not yours. Run `fleet ls` too — a ticket whose worker is alive from an
+  earlier run must not be dispatched twice.
 - **Drop epics and parents.** Their status derives from their children. Work the
   children.
 
@@ -129,7 +133,7 @@ answers a given skill stalls without are in the ticket body:
 
 | Kind | Cannot start without |
 |---|---|
-| implement | the spec inline, or a reference the worker can fetch; the **seams** `/tdd` will test at, since it refuses an unconfirmed one; decisions already made — libraries, patterns, code to reuse |
+| implement | the spec inline, or a reference the worker can fetch; the **seams** `skill://tdd` will test at, since it refuses an unconfirmed one; decisions already made — libraries, patterns, code to reuse |
 | diagnosing-bugs | the exact symptom text; how to trigger it, including fixtures or services; how often; the known-good commit if any; environment |
 | research | the question, sharp enough to be answerable; which sources count as primary; where the write-up goes |
 | prototype | the design question it answers; what "runnable" means here; that the code is throwaway |
@@ -202,6 +206,13 @@ Add the context the worker cannot derive: constraints inherited from a parent
 epic, and for a choke-point ticket, that it owns a contract other tickets
 consume.
 
+Claim each ticket at the moment its worker spawns — not earlier in the
+batch, and not with an invented command. The tracker file documents its own
+claim mechanism (a GitHub tracker claims with `gh issue edit <n>
+--add-assignee @me`); use that one, immediately before the matching `fleet
+spawn` below. If the spawn fails, release the claim right away so the ticket
+is dispatchable again instead of sitting stuck looking taken.
+
 Then spawn the whole wave and block once:
 
 ```bash
@@ -219,11 +230,19 @@ checkout, so branch the reviewer off the tip under review —
 
 ## 6. Review, merge, recompute
 
-`fleet join` is a barrier — it returns when **every** live worker has settled,
-not one at a time. So this is a wave, not a rolling queue: you cannot backfill a
-finished worker's slot while its siblings are still running, and you should not
-try. Answer anything tagged `[fleet:<handle>]` with `fleet send` as it preempts
-you, then `fleet join` again; re-joining is safe.
+`fleet join` still waits for the whole wave, but not silently and not
+uninterruptibly: it prints each worker's result the moment that worker
+settles rather than holding all of them until the last one finishes, and it
+returns immediately — before the rest of the wave has settled — the instant
+any worker files a question with `fleet reply`. That preemption is what
+actually gets a blocked worker in front of you; omp steering alone does not,
+because a queued prompt is not read until the running tool call returns.
+Answer with `fleet send --raw <handle> <answer>` — `--raw` sends the answer
+alone, where the default would re-append fleet's protocol block onto a
+one-line reply — then `fleet join` again; re-joining is safe and skips
+workers already marked joined. It is still a wave, not a rolling queue: you
+cannot backfill a finished worker's slot while its siblings are still
+running, and you should not try.
 
 When the wave settles, take each report in turn:
 
@@ -234,10 +253,16 @@ When the wave settles, take each report in turn:
 2. **Merge the way this repo merges.** Match its history: a repo with one
    logical change per commit and conventional subjects wants a rebase merge, and
    a squash would collapse exactly what it is keeping. Delete the branch.
-3. **Confirm the ticket closed,** update any derived parent or epic status, mark
-   its todo done, and `fleet reap <handle>`. `reap` refuses a dirty worktree —
-   that refusal is protecting uncommitted work, so read the diff before reaching
-   for `--force`.
+3. **Confirm the ticket closed,** update any derived parent or epic status,
+   mark its todo done, and `fleet reap <handle>`. `reap` refuses a dirty
+   worktree — that refusal is protecting uncommitted work, so read the diff
+   before reaching for `--force`. If the worktree is already gone, removed
+   by hand outside fleet, `reap --forget <handle>` drops fleet's record
+   without touching a worktree that isn't there; without it that handle
+   sticks in `fleet ls` as `gone` forever. The mirror case is a handle whose
+   state exists but whose agent died: `fleet spawn <branch> --replace`
+   removes the recorded workspace and respawns under the same handle,
+   rather than refusing because the record is still there.
 
 Then recompute the frontier from step 1 and dispatch the next wave. Merge the
 whole settled wave before recomputing — one merge typically unblocks one or two

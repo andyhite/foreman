@@ -30,16 +30,73 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | Command | Description |
 | --- | --- |
 | `fleet boss [name] [--steal]` | Claim the orchestrator handle for this pane. |
-| `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--layout`, `--task`, `--task-file`, `--no-dispatch`. |
-| `fleet send <handle> <text>` | Dispatch work and return immediately. |
-| `fleet ask <handle> <text>` | Dispatch work and block for the response. |
-| `fleet join [handle...]` | Block on this repository's workers and print reports. |
+| `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
+| `fleet send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
+| `fleet ask [--raw] <handle> <text>` | Send, then block for the response. |
+| `fleet join [handle...]` | Collect this repository's workers and print each report as it settles. |
 | `fleet ls [--all-repos]` | List workers and their states. |
 | `fleet read <handle> [-n N]` | Read a worker's terminal. |
-| `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes. |
+| `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
 | `fleet report [-f file\|text]` | From a worker, file its report. |
-| `fleet reply <text>` | From a worker, interrupt the orchestrator. |
+| `fleet reply <text>` | From a worker, file a question and interrupt the orchestrator. |
 | `fleet whoami` | Print this pane's handle. |
+
+### Collecting
+
+`fleet join` polls every worker it is watching rather than waiting on them in
+order, so a worker that finishes first is printed first and a worker whose
+agent is no longer live is reported as `gone` instead of aborting the whole
+collection.
+
+A settle is recorded against the dispatch counter it answers. A bare
+`fleet join` skips workers already collected at their current counter, so
+re-joining terminates rather than returning instantly, forever, on a worker
+that ended its turn without ever running `fleet report`. A `fleet send` bumps
+that counter and makes the worker joinable again — which is exactly when
+re-joining means something. Naming a handle explicitly always joins it.
+
+`fleet reply` writes the question to disk *and* prompts the orchestrator.
+The file is the load-bearing half: herdr's prompt only reaches an orchestrator
+that is between tool calls, and one sitting inside `fleet join` does not read
+its input until that call returns. `join` polls for filed questions and
+returns as soon as one appears, which is what actually lets a blocked worker
+preempt the wave. Answer it with `fleet send --raw`.
+
+### `--raw`
+
+Without it, `send` and `ask` append fleet's protocol block — right for a task,
+wrong for a one-line answer. Re-appending "do not open a PR unless the task
+above says to" over an answer makes *that answer* the task above, which is how
+a worker talks itself out of the PR its original brief asked for. `--raw` is
+also the only way to put a bare keystroke into a worker blocked on an approval
+prompt.
+
+Raw text is steering, not a new tracked dispatch. It does not bump the dispatch
+counter or make the worker's eventual report for its original task look stale,
+and it does not wait for an agent lifecycle transition — a keystroke into a
+blocked approval UI may leave the agent blocked, and an answer queued behind a
+working turn has no transition of its own yet.
+
+A *re*-dispatch is accepted only from `idle` or `done`. Fleet refuses one while
+the worker is `working` or `blocked`: herdr exposes no turn id, so if dispatch
+2 were queued while dispatch 1 was running, dispatch 1's eventual report would
+read the now-current counter and label itself as dispatch 2. Use `--raw` to
+steer the current turn, or collect it before assigning another task.
+
+A worker's first dispatch is exempt, because there is no earlier report to
+mislabel. A freshly started omp may still be initializing or sitting on a
+first-run trust prompt, and refusing there would fail a `spawn` whose worktree,
+agent and layout already exist. Fleet submits and says it could not confirm
+pickup, rather than failing.
+
+### Recovering a dead worker
+
+A record with no live agent is a worker that died, not a free handle. `spawn`
+refuses it rather than overwriting `BRANCH`/`DIR`/`WORKSPACE` and stranding the
+old worktree where no fleet command can find it — branches collapse onto one
+handle easily, since `feat/x`, `feat_x` and `feat-x` all slugify to `feat-x`.
+Pass `--replace` to remove the recorded workspace and respawn, or clear the
+record with `fleet reap <handle> [--forget]`.
 
 ## Configuration
 
@@ -49,14 +106,48 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `FLEET_SPAWN_TIMEOUT_MS` | `120000` | Maximum milliseconds to wait for a fresh worker's named, input-ready omp startup; herdr clamps it to 300000. |
 | `FLEET_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `fleet ask` or `fleet join`. |
 | `FLEET_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
+| `FLEET_JOIN_POLL_MS` | `2000` | How often `fleet join` re-reads the workers it is watching. |
 | `FLEET_EDITOR` | `nvim` | Editor command run beside the agent in the `full` layout. |
 | `FLEET_GIT_UI` | `lazygit` | Git UI command run beside the agent in the `full` layout. |
 | `FLEET_LAYOUT_START_TIMEOUT_MS` | `15000` | Maximum milliseconds to verify that a layout's requested TUI became foreground before retrying. |
 | `FLEET_BOSS_HANDLE` | slugified repository-root name (or `boss` outside a repository) | Overrides the default orchestrator handle claimed by `fleet boss`. |
+| `FLEET_IGNORE_WORKSPACE_MANAGER` | unset | Set to `1` to skip the workspace-manager coexistence gate. |
+
+Every timeout above is a wall-clock budget computed as an absolute deadline.
+An inner herdr call is handed what remains of the budget rather than the whole
+of it, so a retry loop cannot multiply the bound by the number of attempts.
 
 ## Coexistence with workspace-manager
 
-`fleet spawn` checks whether the enabled `herdr-plugin-workspace-manager` has a configured workspace covering the repository. It compares configured path entries by git common directory, expands `~/` paths, and also recognizes a configured bare repository name. If covered, fleet refuses the spawn instead of racing workspace-manager to create or lay out the workspace.
+`fleet spawn` checks whether the enabled `herdr-plugin-workspace-manager` has a
+configured workspace covering the repository or the worktree about to be created
+in it. Enablement is read from `herdr plugin list --json`. The config is looked
+up the way the plugin itself looks it up: `$HERDR_WSM_CONFIG` wins outright,
+then the directory `herdr plugin config-dir` reports, then the legacy
+`~/.herdr/plugins/herdr-plugin-workspace-manager/config.yml`.
+
+Both kinds of entry under `workspaces:` are honoured. A `repo:` entry is
+compared by git common directory, with `~/` expanded, and a bare repository
+name is matched by basename. A `path:` entry is prefix-matched against the
+worktree path fleet is about to create, since that is what the plugin itself
+matches against.
+
+If covered, fleet refuses the spawn instead of racing workspace-manager to
+create or lay out the workspace. Set `FLEET_IGNORE_WORKSPACE_MANAGER=1` to
+proceed anyway — worth knowing about when the covering layout starts no agent
+of its own, since refusing outright otherwise makes the repository unusable by
+fleet without editing another plugin's global config.
+
+## Tests
+
+No framework, no dependencies beyond what fleet itself needs. Run them under
+the oldest bash you support as well; several cases only fail there.
+
+```sh
+herdr/test/fleet-test.sh          # the CLI
+herdr/test/fleet-link-test.sh     # the PATH symlink and its ownership receipt
+/bin/bash herdr/test/fleet-test.sh   # macOS system bash 3.2
+```
 
 For the agent-facing orchestration commands — the `/fleet:*` slash commands that
 dispatch work to these workers — see the companion omp plugin at

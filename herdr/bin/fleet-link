@@ -15,11 +15,11 @@ resolve_path() {
   path=$1
   case "$path" in /*) ;; *) path="$(pwd -P)/$path" ;; esac
   while [ -L "$path" ]; do
-    dir=$(CDPATH= cd -P "$(dirname "$path")" && pwd) || return 1
+    dir=$(CDPATH='' cd -P "$(dirname "$path")" && pwd) || return 1
     link=$(readlink "$path") || return 1
     case "$link" in /*) path=$link ;; *) path=$dir/$link ;; esac
   done
-  dir=$(CDPATH= cd -P "$(dirname "$path")" && pwd) || return 1
+  dir=$(CDPATH='' cd -P "$(dirname "$path")" && pwd) || return 1
   printf '%s/%s\n' "$dir" "$(basename "$path")"
 }
 
@@ -40,15 +40,66 @@ plugin_id_of() {
   ' "$1"
 }
 
+# Ownership receipt: where this script last pointed a given target. A plugin
+# id embedded in the resolved path is enough to prove ownership of a LIVE
+# link, but a dangling link resolves to nothing — there is no path left to
+# read an id out of. The receipt is the fallback: if we wrote the link, we
+# know what we pointed it at, so a dangling link whose literal text still
+# matches our own record is provably ours even though it no longer resolves.
+#
+# Kept as one flat file, one line per target formatted "<target>\t<dest>",
+# rather than one file per target, because the whole store is a handful of
+# lines, nothing else reads it, and a target path would otherwise have to be
+# encoded into a filename (it contains '/'). Rewritten atomically (temp file
+# + rename) on every write so a crash mid-write can't leave a truncated file
+# that then fails every future ownership check.
+receipt_file() {
+  printf '%s/link\n' "${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fleet}"
+}
+
+# Echoes the destination last recorded for $1, if any; fails if there is none.
+receipt_lookup() {
+  file=$(receipt_file)
+  [ -f "$file" ] || return 1
+  awk -F '\t' -v t="$1" '$1 == t { print $2; found = 1 } END { exit !found }' "$file"
+}
+
+# Records that $1 (a link path) now points at $2. Losing this is only ever an
+# inconvenience — a future dangling link at $1 falls back to being refused,
+# same as before this receipt existed — so failure here warns and returns
+# success rather than aborting a link that otherwise worked.
+receipt_record() {
+  target=$1
+  destination=$2
+  file=$(receipt_file)
+  if ! mkdir -p "$(dirname "$file")" 2>/dev/null; then
+    printf 'fleet-link: warning: could not create %s to record link ownership\n' "$(dirname "$file")" >&2
+    return 0
+  fi
+  tmp="$file.$$"
+  if [ -f "$file" ]; then
+    awk -F '\t' -v t="$target" '$1 != t' "$file" >"$tmp" 2>/dev/null
+  else
+    : >"$tmp" 2>/dev/null
+  fi
+  printf '%s\t%s\n' "$target" "$destination" >>"$tmp" 2>/dev/null
+  if ! mv "$tmp" "$file" 2>/dev/null; then
+    printf 'fleet-link: warning: could not record link ownership in %s\n' "$file" >&2
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
 # Whether the symlink already at the target belongs to this plugin.
 #
 # Ownership is decided by plugin id, never by shape. An earlier version accepted
 # any path of the form <a herdr plugin>/bin/fleet, which would silently steal the
 # command of a different plugin that happens to ship its own `bin/fleet`.
 #
-# A dangling link is never adopted. It cannot be identified, and a broken link is
-# an absence of evidence rather than proof of ownership — replacing it would
-# destroy the only remaining record of where the user had pointed it.
+# A dangling link cannot be identified this way — there's no path left to read
+# a plugin id out of — so this function still refuses one. See
+# dangling_link_is_ours below for the narrower, receipt-based check that
+# covers that case instead.
 link_is_ours() {
   resolved_link=$1
   [ -n "$resolved_link" ] && [ -e "$resolved_link" ] || return 1
@@ -56,6 +107,16 @@ link_is_ours() {
   root=${resolved_link%/bin/fleet}
   [ "$root" != "$resolved_link" ] || return 1
   [ "$(plugin_id_of "$root/herdr-plugin.toml" 2>/dev/null)" = "$self_id" ]
+}
+
+# Whether a DANGLING link at $1 (whose literal, unresolved text is $2) was put
+# there by this script. Unlike link_is_ours, this can't check a plugin id —
+# nothing resolves — so it trusts the receipt instead: if we last recorded
+# pointing this exact target at this exact destination, then a dangling link
+# there now is ours to repoint, not a user's broken symlink to something else.
+dangling_link_is_ours() {
+  recorded=$(receipt_lookup "$1") || return 1
+  [ -n "$recorded" ] && [ "$recorded" = "$2" ]
 }
 
 source=$(resolve_path "$0") || exit 1
@@ -68,6 +129,7 @@ mkdir -p "$target_dir" || exit 1
 
 if [ ! -e "$target" ] && [ ! -L "$target" ]; then
   ln -s "$source" "$target" || exit 1
+  receipt_record "$target" "$source"
   $quiet || printf 'linked %s -> %s\n' "$target" "$source"
 elif [ -L "$target" ]; then
   literal=$(readlink "$target") || exit 1
@@ -76,13 +138,18 @@ elif [ -L "$target" ]; then
     $quiet || printf 'already linked\n'
   elif link_is_ours "$resolved"; then
     rm "$target" && ln -s "$source" "$target" || exit 1
+    receipt_record "$target" "$source"
     $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   elif [ -n "$resolved" ] && [ -e "$resolved" ]; then
     printf 'fleet-link: warning: %s already points at %s; remove it or set FLEET_LINK_DIR\n' \
       "$target" "$resolved" >&2
     exit 0
+  elif dangling_link_is_ours "$target" "$literal"; then
+    rm "$target" && ln -s "$source" "$target" || exit 1
+    receipt_record "$target" "$source"
+    $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   else
-    printf 'fleet-link: warning: %s is a broken symlink to %s; remove it or set FLEET_LINK_DIR\n' \
+    printf 'fleet-link: warning: %s is a broken symlink to %s; fleet will not be on PATH until you remove it or set FLEET_LINK_DIR\n' \
       "$target" "$literal" >&2
     exit 0
   fi

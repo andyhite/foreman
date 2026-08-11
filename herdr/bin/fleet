@@ -36,8 +36,10 @@ SPAWN_TIMEOUT_MS="${FLEET_SPAWN_TIMEOUT_MS:-120000}"
 # of a worker is that it does something substantial.
 WAIT_TIMEOUT_MS="${FLEET_WAIT_TIMEOUT_MS:-3600000}"
 # A prompt that never lands is worse than a failed one: `fleet join` then waits
-# on an agent that is idle for the wrong reason. herdr already fails fast on a
-# stalled prompt; this is the second check, on the state it actually reached.
+# on an agent that is idle for the wrong reason. herdr only fails a stalled
+# prompt under `agent prompt --wait`, and that waits for a *settled* state
+# rather than a started one, so the check has to live here — on the state the
+# agent actually reached after submission.
 DISPATCH_SETTLE_MS="${FLEET_DISPATCH_SETTLE_MS:-15000}"
 # Commands the `full` layout runs beside the agent. Overridable because they
 # are a preference, not a mechanism.
@@ -46,6 +48,10 @@ FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
 # A new shell may still be loading zsh/mise/direnv when a layout command is
 # sent. Verify that the requested TUI actually became foreground and retry.
 LAYOUT_START_TIMEOUT_MS="${FLEET_LAYOUT_START_TIMEOUT_MS:-15000}"
+# How often `fleet join` re-reads every worker it is watching. One `agent list`
+# covers the whole wave per tick, so this is cheap; it only bounds how quickly
+# a settled worker or a filed question is noticed.
+JOIN_POLL_MS="${FLEET_JOIN_POLL_MS:-2000}"
 
 die() { printf 'fleet: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
@@ -73,6 +79,33 @@ h() {
   fi
   printf '%s' "$out"
 }
+
+# ── Timing ───────────────────────────────────────────────────────────────────
+#
+# Every bound in this file is wall-clock, computed as an absolute deadline up
+# front. Accumulating sleep intervals instead — `waited=$((waited + 500))` —
+# counts only the time spent asleep, so a loop whose body blocks on a herdr
+# call carrying its own multi-second timeout overruns its budget by orders of
+# magnitude. `start_worker_agent` did exactly that: a 120s bound bounded 240
+# iterations of a call that could itself take 120s.
+#
+# Second resolution is deliberate. bash 3.2 has no $EPOCHREALTIME, and every
+# budget here is seconds to minutes.
+
+deadline_ms() { printf '%s' "$(( $(date +%s) + ($1 + 999) / 1000 ))"; }
+expired() { [ "$(date +%s)" -ge "$1" ]; }
+
+# Milliseconds left on a deadline, floored at zero. Used to hand an inner
+# herdr call what remains of the budget rather than the whole of it.
+remaining_ms() {
+  local left=$(( ($1 - $(date +%s)) * 1000 ))
+  [ "$left" -gt 0 ] || left=0
+  printf '%s' "$left"
+}
+
+# Keeps the millisecond units of the constants above from leaking into every
+# call site. `sleep` takes a decimal on both platforms fleet supports.
+sleep_ms() { sleep "$(( $1 / 1000 )).$(printf '%03d' "$(( $1 % 1000 ))")"; }
 
 # ── Handles ──────────────────────────────────────────────────────────────────
 
@@ -162,41 +195,108 @@ repo_key() {
   ( cd "$top" && cd "$common" && pwd -P )
 }
 
-# Whether the enabled workspace-manager plugin declares this repo. This is the
-# deterministic coexistence gate: a covered repo belongs to the plugin for as
-# long as it is enabled; every other repo belongs to fleet. Letting both race
-# and inferring ownership from who started the agent first has an inverse race
-# where the loser can still apply its layout afterwards.
-workspace_manager_owns_repo() {
-  local repo=$1 line config_dir config configured candidate repo_id
-  line=$(herdr plugin list 2>/dev/null \
-    | sed -n '/^- herdr-plugin-workspace-manager /p')
-  case "$line" in *" enabled "*) ;; *) return 1 ;; esac
-  config_dir=$(herdr plugin config-dir herdr-plugin-workspace-manager 2>/dev/null) \
-    || return 1
-  config="$config_dir/config.yml"
-  [ -f "$config" ] || return 1
+# Whether the enabled workspace-manager plugin declares this repo, or the
+# worktree fleet is about to create inside it. This is the deterministic
+# coexistence gate: a covered repo belongs to the plugin for as long as it is
+# enabled; every other repo belongs to fleet. Letting both race and inferring
+# ownership from who started the agent first has an inverse race where the
+# loser can still apply its layout afterwards.
+#
+# $FLEET_IGNORE_WORKSPACE_MANAGER=1 turns the gate off. Refusing outright left
+# a covered repo unusable by fleet without editing a *different* plugin's
+# global config — a heavy price for a race the operator may know does not
+# apply, since a layout with no `agent:` pane never contends for one.
+WSM_PLUGIN_ID=herdr-plugin-workspace-manager
+
+workspace_manager_enabled() {
+  herdr plugin list --json 2>/dev/null \
+    | jq -e --arg id "$WSM_PLUGIN_ID" \
+        'any(.result.plugins[]?; .plugin_id == $id and .enabled == true)' \
+      >/dev/null 2>&1
+}
+
+# The plugin's own config lookup, in its own order: $HERDR_WSM_CONFIG wins
+# outright, then the herdr-managed config dir, then its legacy path under
+# ~/.herdr. Checking only the middle one — which is what fleet used to do —
+# reports "not covered" for a repo the plugin is in fact managing.
+workspace_manager_config() {
+  local dir f
+  if [ -n "${HERDR_WSM_CONFIG:-}" ]; then
+    [ -f "$HERDR_WSM_CONFIG" ] || return 1
+    printf '%s' "$HERDR_WSM_CONFIG"; return 0
+  fi
+  dir=$(herdr plugin config-dir "$WSM_PLUGIN_ID" 2>/dev/null || true)
+  if [ -n "$dir" ]; then
+    for f in "$dir/config.yml" "$dir/config.yaml"; do
+      [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+  fi
+  f="$HOME/.herdr/plugins/$WSM_PLUGIN_ID/config.yml"
+  [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  return 1
+}
+
+# `<key>\t<value>` for every `repo:` and `path:` under the top-level
+# `workspaces:` block. A YAML subset, like the plugin's own parser — but
+# scoped to the right block, where a global `sed` for `- repo:` matches a
+# `repo:` key anywhere in the file. It also reads `path:`, which the previous
+# parser ignored entirely: `path:` is a documented alternative to `repo:`, so
+# skipping it silently reported covered repos as uncovered.
+workspace_manager_entries() {
+  awk '
+    function emit(key, line) {
+      sub(/[[:space:]]+#.*$/, "", line)
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line != "") print key "\t" line
+    }
+    # Column zero is top level: entering `workspaces:` arms us, any other
+    # top-level key disarms us again.
+    /^[^[:space:]#]/ { inws = ($0 ~ /^workspaces[[:space:]]*:/); next }
+    !inws { next }
+    /^[[:space:]]*(-[[:space:]]*)?repo[[:space:]]*:/ { emit("repo", $0); next }
+    /^[[:space:]]*(-[[:space:]]*)?path[[:space:]]*:/ { emit("path", $0); next }
+  ' "$1"
+}
+
+workspace_manager_covers() {
+  local repo=$1 wtpath=$2 config repo_id kind value candidate
+
+  if [ "${FLEET_IGNORE_WORKSPACE_MANAGER:-}" = 1 ]; then return 1; fi
+  workspace_manager_enabled || return 1
+  config=$(workspace_manager_config) || return 1
   repo_id=$(repo_key "$repo")
 
-  while IFS= read -r configured; do
-    # `repo` accepts a path (including ~) or a bare repo name.
-    configured=${configured#"${configured%%[![:space:]]*}"}
-    configured=${configured%"${configured##*[![:space:]]}"}
-    case "$configured" in
-      \"*\") configured=${configured#\"}; configured=${configured%\"} ;;
-      \'*\') configured=${configured#\'}; configured=${configured%\'} ;;
+  while IFS=$'\t' read -r kind value; do
+    [ -n "$value" ] || continue
+    case "$value" in
+      \"*\") value=${value#\"}; value=${value%\"} ;;
+      \'*\') value=${value#\'}; value=${value%\'} ;;
     esac
-    case "$configured" in
-      \~/*) configured="$HOME/${configured#\~/}" ;;
-    esac
-    case "$configured" in
-      */*)
-        candidate=$(repo_key "$configured")
-        [ -n "$candidate" ] && [ "$candidate" = "$repo_id" ] && return 0
+    case "$value" in \~/*) value="$HOME/${value#\~/}" ;; esac
+    case "$kind" in
+      repo)
+        # `repo` accepts a path (including ~) or a bare repo name.
+        case "$value" in
+          */*)
+            candidate=$(repo_key "$value")
+            [ -n "$candidate" ] && [ "$candidate" = "$repo_id" ] && return 0
+            ;;
+          *) [ "$(basename "$repo")" = "$value" ] && return 0 ;;
+        esac
         ;;
-      *) [ "$(basename "$repo")" = "$configured" ] && return 0 ;;
+      path)
+        # The plugin prefix-matches a worktree's *checkout* path, so the thing
+        # to compare is the path fleet is about to create — not the repo it
+        # branches from. It does not exist yet, so this is a string prefix
+        # rather than a resolved one.
+        value=${value%/}
+        case "$wtpath" in "$value"|"$value"/*) return 0 ;; esac
+        ;;
     esac
-  done < <(sed -E -n 's/^[[:space:]]*-[[:space:]]*repo:[[:space:]]*(.*)$/\1/p' "$config")
+  done <<EOF
+$(workspace_manager_entries "$config")
+EOF
   return 1
 }
 
@@ -223,6 +323,31 @@ report_file() { printf '%s/report.md' "$(meta_dir "$1")"; }
 dispatch_file() { printf '%s/dispatched' "$(meta_dir "$1")"; }
 # The dispatch counter the current report answers, stamped by `fleet report`.
 report_token_file() { printf '%s/report.token' "$(meta_dir "$1")"; }
+# The question a worker filed with `fleet reply`, and the counter pair that
+# says whether the orchestrator has seen it. `fleet join` polls these: a queued
+# `agent prompt` does not reach an orchestrator that is inside a blocking tool
+# call, so herdr's own interrupt cannot preempt a join. Watching a file can.
+question_file() { printf '%s/question.md' "$(meta_dir "$1")"; }
+question_seq_file() { printf '%s/question.seq' "$(meta_dir "$1")"; }
+question_seen_file() { printf '%s/question.seen' "$(meta_dir "$1")"; }
+# The dispatch counter `fleet join` last reported a settled result for. A bare
+# `join` skips a worker whose settle has already been collected, so re-joining
+# terminates instead of returning instantly, forever, on a worker that ended
+# its turn without ever running `fleet report`.
+joined_token_file() { printf '%s/joined' "$(meta_dir "$1")"; }
+
+# Counters are compared as strings, never coerced to a number: "never
+# dispatched" and "dispatched zero times" must compare equal to each other and
+# unequal to everything else.
+counter_read() { if [ -f "$1" ]; then cat "$1"; fi; }
+
+counter_bump() {
+  local f=$1 n
+  mkdir -p "$(dirname "$f")"
+  n=$(counter_read "$f")
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$((n + 1))" >"$f"
+}
 
 meta_set() {
   local handle=$1; shift
@@ -256,7 +381,13 @@ meta_update() {
 meta_get() {
   local f; f=$(meta_file "$1")
   [ -f "$f" ] || return 0
-  ( set -a; # shellcheck disable=SC1090
+  # The key is unset inside the subshell before the file is sourced. `${!2}`
+  # otherwise falls through to the *environment* for a key the file does not
+  # carry, so a meta file written before REPO_KEY existed would silently read
+  # $REPO_KEY from the caller's environment and mis-scope every repo-scoped
+  # command.
+  ( unset "$2" 2>/dev/null || true
+    set -a; # shellcheck disable=SC1090
     . "$f"; printf '%s' "${!2:-}" )
 }
 
@@ -376,8 +507,9 @@ Your orchestrator is the agent \`$boss\`.
 - When finished, write your report last:
   \`fleet report -f <file>\` or \`fleet report "<summary>"\`.
   The orchestrator reads that file; terminal output does not reach it.
-- If you are blocked or need a decision, run \`fleet reply "<question>"\`. That
-  interrupts the orchestrator, so use it for questions, not progress updates.
+- If you are blocked or need a decision, run \`fleet reply "<question>"\`. It
+  files the question and interrupts the orchestrator, so a \`fleet join\` it is
+  sitting in returns immediately. Use it for questions, not progress updates.
 EOF
 }
 
@@ -393,6 +525,8 @@ usage: fleet spawn <branch> [options]
   --task <text>       task to dispatch once the agent is ready
   --task-file <path>  read the task from a file ('-' for stdin)
   --no-dispatch       build the worktree, agent, and layout without a task
+  --replace           reuse a handle whose record exists but whose agent is
+                      gone: removes the recorded workspace, then respawns
 
 layouts:
   agent   one pane, running omp. All a worker needs.
@@ -406,7 +540,7 @@ EOF
 cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
-  local layout=agent
+  local layout=agent replace=0
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
   case "$branch" in -*) usage_spawn ;; esac
@@ -420,6 +554,7 @@ cmd_spawn() {
       --task) task=${2:?}; shift 2 ;;
       --task-file) taskfile=${2:?}; shift 2 ;;
       --no-dispatch) dispatch=0; shift ;;
+      --replace) replace=1; shift ;;
       *) usage_spawn ;;
     esac
   done
@@ -432,12 +567,6 @@ cmd_spawn() {
   repo=${repo:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
   [ -n "$repo" ] || die "not in a git repo and --repo was not given"
   repo=$(cd "$repo" && pwd -P)
-  if workspace_manager_owns_repo "$repo"; then
-    die "workspace-manager is enabled and configured for $repo
-  fleet will not race it or depend on it; remove this repo from:
-  $(herdr plugin config-dir herdr-plugin-workspace-manager)/config.yml
-  or disable the plugin, then retry"
-  fi
 
   if [ -z "$base" ]; then
     # origin/HEAD is the branch the remote considers default; fall back to
@@ -457,6 +586,35 @@ cmd_spawn() {
   # The sibling-directory convention, so a worktree is visible next to its repo
   # rather than buried in ~/.herdr/worktrees.
   wtpath=${wtpath:-$(dirname "$repo")/$(basename "$repo")-$(slugify "$branch")}
+
+  # After the worktree path is known, because workspace-manager can be
+  # configured by checkout path as well as by repo.
+  if workspace_manager_covers "$repo" "$wtpath"; then
+    die "workspace-manager is enabled and configured for $repo
+  fleet will not race it or depend on it. Remove the entry from
+  $(workspace_manager_config)
+  or disable the plugin — or, if you know its layout starts no agent here,
+  re-run with FLEET_IGNORE_WORKSPACE_MANAGER=1"
+  fi
+
+  # A record with no live agent is a worker that died, not a free handle.
+  # Overwriting it — which an `agent_exists` check alone allows — repoints
+  # BRANCH/DIR/WORKSPACE at the new worktree and strands the old one where no
+  # fleet command can find it. Branches collapse onto the same handle easily
+  # (`feat/x`, `feat_x` and `feat-x` all slugify to `feat-x`), so this is
+  # reachable by accident rather than only by reuse.
+  if [ -d "$(meta_dir "$handle")" ]; then
+    if [ "$replace" != 1 ]; then
+      die "handle '$handle' still has a fleet record for branch '$(meta_get "$handle" BRANCH)'
+  its worktree: $(meta_get "$handle" DIR)
+  reuse it:     fleet spawn $branch --replace
+  or clear it:  fleet reap $handle            (removes the worktree)
+                fleet reap $handle --forget   (leaves the worktree alone)"
+    fi
+    note "fleet: replacing the dead worker '$handle' ($(meta_get "$handle" BRANCH))"
+    reap_one "$handle" 0 0 1 \
+      || die "could not clear the old '$handle'; reap it yourself, then retry"
+  fi
 
   if [ -n "$taskfile" ]; then
     if [ "$taskfile" = "-" ]; then task=$(cat); else task=$(cat "$taskfile"); fi
@@ -516,15 +674,18 @@ cmd_spawn() {
 # never participates in a layout race with it.
 start_worker_agent() {
   local handle=$1 ws=$2 pane=$3
-  # herdr caps `agent start --timeout` at 300000.
-  local start_ms=$SPAWN_TIMEOUT_MS
-  [ "$start_ms" -le 300000 ] || start_ms=300000
-
-  local waited=0 err="" found=""
+  # One wall-clock budget for the whole thing. Each attempt is handed what is
+  # *left* of it, clamped to herdr's own 300000 cap, so the retry loop cannot
+  # multiply the bound by the number of attempts.
+  local dl; dl=$(deadline_ms "$SPAWN_TIMEOUT_MS")
+  local err="" found="" left
 
   while :; do
+    left=$(remaining_ms "$dl")
+    [ "$left" -gt 0 ] || break
+    [ "$left" -le 300000 ] || left=300000
     if err=$(herdr agent start "$handle" --kind omp --pane "$pane" \
-               --timeout "$start_ms" 2>&1); then
+               --timeout "$left" 2>&1); then
       return 0
     fi
     # A failed CLI response can race with the agent it started becoming ready.
@@ -540,8 +701,7 @@ start_worker_agent() {
   fleet will not adopt or rename it
   clean up the worktree with: fleet reap $handle --force"
     fi
-    [ "$waited" -lt "$SPAWN_TIMEOUT_MS" ] || break
-    sleep 0.5; waited=$((waited + 500))
+    sleep 0.5
   done
 
   die "could not get an agent into workspace $ws within $((SPAWN_TIMEOUT_MS / 1000))s
@@ -627,10 +787,10 @@ run_pane_command() {
   fi
   h pane run "$pane" "$command" >/dev/null
 
-  local waited=0
-  while [ "$waited" -lt "$LAYOUT_START_TIMEOUT_MS" ]; do
+  local dl; dl=$(deadline_ms "$LAYOUT_START_TIMEOUT_MS")
+  while ! expired "$dl"; do
     if pane_runs "$pane" "$executable"; then return 0; fi
-    sleep 0.25; waited=$((waited + 250))
+    sleep 0.25
   done
   die "'$command' did not start in pane $pane within $((LAYOUT_START_TIMEOUT_MS / 1000))s"
 }
@@ -658,8 +818,8 @@ pane_has_command() {
 wait_shell_ready() {
   local pane=$1 id=${1//[:]/_}
   local marker="__fleet_shell_ready_${id}__"
-  local waited=0
-  while [ "$waited" -lt "$LAYOUT_START_TIMEOUT_MS" ]; do
+  local dl; dl=$(deadline_ms "$LAYOUT_START_TIMEOUT_MS")
+  while ! expired "$dl"; do
     # The full marker is assembled by printf, so terminal echo cannot satisfy
     # the wait. Repetition is harmless; marker output is the acknowledgement.
     h pane run "$pane" "printf '__fleet_shell_%s_${id}__\\n' ready" >/dev/null
@@ -667,7 +827,7 @@ wait_shell_ready() {
          --source recent-unwrapped --lines 20 --timeout 1000 >/dev/null 2>&1; then
       return 0
     fi
-    sleep 0.25; waited=$((waited + 1250))
+    sleep 0.25
   done
   die "pane $pane did not reach an interactive shell prompt within $((LAYOUT_START_TIMEOUT_MS / 1000))s"
 }
@@ -697,31 +857,81 @@ report_is_fresh() {
   [ "$want" = "$got" ]
 }
 
-# Submit and confirm the agent actually picked it up. herdr fails a stalled
-# prompt on its own, but "prompt accepted" is not "prompt started": without
-# this settle loop a following `fleet join` can match the agent's
-# *pre-dispatch* idle state and return instantly. Failing closed here is the
-# point — a spawn that reports success on a prompt that never ran is worse
-# than one that dies. The worktree and meta already exist at that point, so
-# `fleet read` and `fleet reap` still work on it.
+# Submit, then confirm the agent actually picked it up. herdr only fails a
+# stalled prompt under `agent prompt --wait`, and that waits for a *settled*
+# state — the opposite of what is wanted here. "Accepted" is not "started":
+# without this loop a following `fleet join` can match the agent's
+# pre-dispatch idle state and return instantly.
+#
+# The evidence is `state_change_seq`, not the status alone. A status of
+# `working` read straight after submission may be the turn that was already
+# running. Failing closed is the point — a dispatch that reports success on a
+# prompt that never ran is worse than one that dies, and the worktree and meta
+# already exist by then, so `fleet read` and `fleet reap` still work on it.
+#
+# The one exception is a worker's *first* dispatch, which is `fleet spawn`'s
+# own call. See the working|blocked branch below.
 dispatch_to() {
   local handle=$1 text=$2
-  local df n; df=$(dispatch_file "$handle")
+  local before_status before_seq prior
+  before_status=$(agent_field "$handle" agent_status)
+  before_seq=$(agent_field "$handle" state_change_seq)
+  # Whether this worker has ever been dispatched to. The identity hazard below
+  # needs an *earlier* report to steal the label of, so an empty counter means
+  # there is nothing to protect.
+  prior=$(counter_read "$(dispatch_file "$handle")")
+
+  case "$before_status" in
+    working|blocked)
+      if [ -n "$prior" ]; then
+        # There is no herdr turn id to stamp into a report. If dispatch 2 is
+        # queued while dispatch 1 is running, dispatch 1's eventual `fleet
+        # report` reads the now-current counter and labels itself as dispatch
+        # 2. Refusing is the only way to preserve report identity. Raw steering
+        # is deliberately untracked, so answers and approval input remain
+        # allowed.
+        die "$handle is $before_status and cannot accept a new tracked task yet
+  steer its current turn:  fleet send --raw $handle \"<answer>\"
+  or collect it first:     fleet join $handle"
+      fi
+      # A first dispatch is the `fleet spawn` path, and a freshly started omp
+      # can legitimately be initializing or sitting on a first-run trust
+      # prompt. Refusing here would fail a spawn *after* its worktree, agent
+      # and layout exist, which is worse than the stale-label risk this guard
+      # exists for — and that risk is zero with no prior dispatch. The settle
+      # check is skipped rather than failed: a dialog may absorb the text
+      # without ever producing a lifecycle transition to observe.
+      mkdir -p "$(meta_dir "$handle")"
+      counter_bump "$(dispatch_file "$handle")"
+      h agent prompt "$handle" "$text" >/dev/null
+      note "fleet: $handle was $before_status at its first dispatch; submitted without confirming pickup (check it with: fleet read $handle)"
+      return 0
+      ;;
+  esac
+
   mkdir -p "$(meta_dir "$handle")"
-  n=$(cat "$df" 2>/dev/null || true)
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  printf '%s' "$((n + 1))" >"$df"
+  counter_bump "$(dispatch_file "$handle")"
   h agent prompt "$handle" "$text" >/dev/null
-  local waited=0 status=""
-  while [ "$waited" -lt "$DISPATCH_SETTLE_MS" ]; do
+
+  local dl status="" seq=""
+  dl=$(deadline_ms "$DISPATCH_SETTLE_MS")
+  while ! expired "$dl"; do
     status=$(agent_field "$handle" agent_status)
+    seq=$(agent_field "$handle" state_change_seq)
     case "$status" in
-      working|blocked) return 0 ;;
+      # `state_change_seq` sharpens this check; it does not gate it. herdr
+      # 0.8.0 reports it on every agent, but a build that does not would leave
+      # both values blank — and failing closed on that would turn every
+      # dispatch into a DISPATCH_SETTLE_MS death. Blank degrades to the
+      # status-only check this replaced.
+      working|blocked)
+        if [ -z "$before_seq" ] || [ "$seq" != "$before_seq" ]; then return 0; fi
+        ;;
       # A task small enough to finish inside the settle window still counts,
       # but only on the evidence of a report answering *this* dispatch.
       idle|done) if report_is_fresh "$handle"; then return 0; fi ;;
     esac
-    sleep 0.5; waited=$((waited + 500))
+    sleep 0.5
   done
   die "$handle did not pick up the prompt within $((DISPATCH_SETTLE_MS / 1000))s (status: ${status:-gone})
   inspect it with: fleet read $handle"
@@ -734,33 +944,158 @@ with_protocol() {
        "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)")"
 }
 
-cmd_send() {
-  require_herdr
-  local handle=${1:?usage: fleet send <handle> <text...>}; shift
-  agent_exists "$handle" || die "no live agent named '$handle'"
+# The rest of the command line, or stdin. Reading stdin silently at a terminal
+# just looks like a hang, so a tty with no argument is a usage error instead.
+read_message() {
+  local what=$1; shift
   local text="$*"
   if [ -z "$text" ]; then
-    # Reading stdin is how a long brief gets in; doing it silently at a
-    # terminal just looks like a hang.
     if [ -t 0 ]; then
-      die "usage: fleet send <handle> <text...>   (or pipe the text on stdin)"
+      die "usage: fleet $what   (or pipe the text on stdin)"
     fi
     text=$(cat)
   fi
   [ -n "$text" ] || die "nothing to send"
-  dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
+  printf '%s' "$text"
+}
+# Raw text is steering, not a new tracked task. In particular, answering a
+# worker's question must not bump the dispatch counter and make the eventual
+# report for the original task look stale. It also cannot wait for a lifecycle
+# transition: a keystroke into an approval UI may leave the agent `blocked`,
+# and an answer queued behind a working turn has no transition of its own yet.
+prompt_raw() {
+  local handle=$1 text=$2 status
+  status=$(agent_field "$handle" agent_status)
+  h agent prompt "$handle" "$text" >/dev/null
+  [ "$status" != working ] \
+    || note "fleet: $handle was already working; the raw message is queued behind its current turn"
+}
+
+cmd_send() {
+  require_herdr
+  local raw=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --raw) raw=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  local handle=${1:?usage: fleet send [--raw] <handle> <text...>}; shift
+  case "${1:-}" in --raw) raw=1; shift ;; esac
+  agent_exists "$handle" || die "no live agent named '$handle'"
+  local text; text=$(read_message "send [--raw] <handle> <text...>" "$@")
+  if [ "$raw" = 1 ]; then
+    # No protocol block. A one-line answer does not want the contract
+    # restated, and re-appending "do not open a PR unless the task above says
+    # to" over an answer makes *that answer* "the task above" — which is how a
+    # worker talks itself out of the PR its original brief asked for. It is
+    # also the only way to put a bare keystroke into a blocked approval.
+    prompt_raw "$handle" "$text"
+  else
+    dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
+  fi
 }
 
 cmd_ask() {
   require_herdr
-  local handle=${1:?usage: fleet ask <handle> <text...>}; shift
-  cmd_send "$handle" "$@"
+  local a handle=""
+  for a in "$@"; do
+    case "$a" in --raw|--) continue ;; esac
+    handle=$a; break
+  done
+  [ -n "$handle" ] || die "usage: fleet ask [--raw] <handle> <text...>"
+  cmd_send "$@"
   cmd_join "$handle"
 }
 
-# Block until each worker settles, then print what it wrote. `herdr agent wait`
-# matches idle/done/blocked; `blocked` means the agent is sitting on an approval
-# or a question, which is a result worth reporting rather than waiting through.
+# Everything join prints for one worker.
+print_result() {
+  local handle=$1 status=$2 rf; rf=$(report_file "$handle")
+  printf '\n=== %s (%s) — branch %s\n' "$handle" "$status" "$(meta_get "$handle" BRANCH)"
+  if report_is_fresh "$handle"; then
+    cat "$rf"
+  elif [ "$status" = gone ]; then
+    printf '(the agent is no longer live and filed no report since its last dispatch)\n'
+    if [ -s "$rf" ]; then printf '(previous report follows)\n'; cat "$rf"; fi
+    printf '(recorded worktree path: %s)\n' "$(meta_get "$handle" DIR)"
+  elif [ "$status" = blocked ]; then
+    printf '(blocked, nothing reported since the last dispatch — last output below)\n'
+    h agent read "$handle" --source recent-unwrapped --lines 40
+  elif [ -s "$rf" ]; then
+    # Stale, but kept: a follow-up `fleet send` must not destroy the report a
+    # worker already filed, so staleness is dated rather than deleted.
+    printf '(nothing reported since the last dispatch; previous report follows)\n'
+    cat "$rf"
+  else
+    printf '(no report written; check with: fleet read %s)\n' "$handle"
+  fi
+}
+
+# A worker's `fleet reply` bumps question.seq; join records what it has shown
+# in question.seen. An unseen question means the worker is waiting on a person,
+# and nothing else in the wave matters until that is answered.
+question_pending() {
+  [ "$(counter_read "$(question_seq_file "$1")")" \
+    != "$(counter_read "$(question_seen_file "$1")")" ]
+}
+
+print_question() {
+  local handle=$1 qf sf; qf=$(question_file "$handle"); sf=$(question_seq_file "$handle")
+  printf '\n=== %s — QUESTION — branch %s\n' "$handle" "$(meta_get "$handle" BRANCH)"
+  if [ -s "$qf" ]; then cat "$qf"; fi
+  printf '\nanswer it with: fleet send --raw %s "<answer>"\nthen re-run:    fleet join\n' "$handle"
+  if [ -f "$sf" ]; then cp "$sf" "$(question_seen_file "$handle")"
+  else : >"$(question_seen_file "$handle")"; fi
+}
+
+mark_joined() {
+  local df; df=$(dispatch_file "$1")
+  if [ -f "$df" ]; then cp "$df" "$(joined_token_file "$1")"
+  else : >"$(joined_token_file "$1")"; fi
+}
+
+# Registered workers whose most recent dispatch has not been collected yet,
+# plus any worker holding an unanswered question. Deliberately `known`, not
+# `live`: a worker can die after dispatch and before join, and silently
+# filtering it out is the same lost-result bug as aborting on agent_not_found.
+joinable_workers() {
+  local handle
+  for handle in $(known_workers "${1-}"); do
+    if question_pending "$handle"; then printf '%s\n' "$handle"; continue; fi
+    if [ "$(counter_read "$(dispatch_file "$handle")")" \
+       = "$(counter_read "$(joined_token_file "$handle")")" ]; then continue; fi
+    printf '%s\n' "$handle"
+  done
+  true
+}
+
+snapshot_status() {
+  printf '%s' "$1" | jq -r --arg n "$2" \
+    '(.result.agents[]? | select(.name == $n) | .agent_status) // empty'
+}
+
+
+# Collect results. Three properties the old sequential `agent wait` loop did
+# not have:
+#
+#  - Fault tolerance. `herdr agent wait` errors with agent_not_found for a
+#    worker whose pane was closed, and `h` turns that into a fatal — so one
+#    dead worker discarded the reports of every worker already settled and
+#    every worker after it in the list.
+#  - Order independence. Waiting handle by handle hid a worker that finished
+#    first behind one that finishes last. Polling the whole set prints each
+#    result the moment it lands.
+#  - Termination. Nothing makes a worker call `fleet report`; an omp that ends
+#    its turn is simply idle, which settles instantly — so the documented
+#    "join again until everyone reports" spun. A settle is now recorded
+#    against the dispatch counter it answers, and a bare `join` skips workers
+#    already collected at their current counter. A `fleet send` bumps that
+#    counter and makes the worker joinable again, which is precisely when
+#    re-joining means something.
+#
+# And it returns early on a filed question, which is what actually lets a
+# blocked worker preempt the wave.
 cmd_join() {
   require_herdr
   # Built as a string, not an array: bash 3.2 (what ships on macOS) treats
@@ -769,29 +1104,45 @@ cmd_join() {
   local handles="$*" scope
   if [ -z "$handles" ]; then
     scope=$(scoped_key "fleet join" "run it from inside a repo, or name the handles to join")
-    handles=$(live_workers "$scope")
-  fi
-  [ -n "$handles" ] || die "no workers to join"
-
-  local handle status rf
-  for handle in $handles; do
-    h agent wait "$handle" --timeout "$WAIT_TIMEOUT_MS" >/dev/null
-    status=$(agent_field "$handle" agent_status)
-    rf=$(report_file "$handle")
-    printf '\n=== %s (%s) — branch %s\n' "$handle" "$status" "$(meta_get "$handle" BRANCH)"
-    if report_is_fresh "$handle"; then
-      cat "$rf"
-    elif [ "$status" = blocked ]; then
-      printf '(blocked, nothing reported since the last dispatch — last output below)\n'
-      h agent read "$handle" --source recent-unwrapped --lines 40
-    elif [ -s "$rf" ]; then
-      # Stale, but kept: a follow-up `fleet send` must not destroy the report a
-      # worker already filed, so staleness is dated rather than deleted.
-      printf '(nothing reported since the last dispatch; previous report follows)\n'
-      cat "$rf"
-    else
-      printf '(no report written; check with: fleet read %s)\n' "$handle"
+    handles=$(joinable_workers "$scope")
+    if [ -z "${handles// /}" ]; then
+      note "fleet: nothing to join — every worker in this repo has been collected since its last dispatch (see: fleet ls)"
+      return 0
     fi
+  fi
+  [ -n "${handles// /}" ] || die "no workers to join"
+
+  local dl pending="$handles" remaining handle status agents
+  dl=$(deadline_ms "$WAIT_TIMEOUT_MS")
+  while :; do
+    # One `agent list` per tick rather than one per worker per tick: a wave of
+    # five would otherwise be 150 herdr round-trips a minute for nothing.
+    agents=$(h agent list)
+    remaining=""
+    for handle in $pending; do
+      if question_pending "$handle"; then
+        print_question "$handle"
+        note "fleet: '$handle' is waiting on you; join returned early"
+        return 0
+      fi
+      status=$(snapshot_status "$agents" "$handle")
+
+      case "$status" in
+        '') print_result "$handle" gone; mark_joined "$handle" ;;
+        idle|done|blocked)
+          print_result "$handle" "$status"
+          mark_joined "$handle"
+          ;;
+        *) remaining="$remaining $handle" ;;
+      esac
+    done
+    pending=$remaining
+    [ -n "${pending// /}" ] || return 0
+    if expired "$dl"; then
+      note "fleet: gave up after $((WAIT_TIMEOUT_MS / 1000))s; still working:$pending"
+      return 1
+    fi
+    sleep_ms "$JOIN_POLL_MS"
   done
 }
 
@@ -809,10 +1160,15 @@ cmd_report() {
   require_herdr
   local me; me=$(self_handle)
   [ -n "$me" ] || die "this pane is not a named fleet worker"
+  # A registered worker always has a meta file, written by `fleet spawn` before
+  # its agent existed. Without this check `fleet report` in an orchestrator's
+  # own pane silently creates a state directory named after the orchestrator,
+  # which then shows up as a phantom worker in `fleet ls --all-repos`.
+  [ -f "$(meta_file "$me")" ] \
+    || die "'$me' is not a registered fleet worker; 'fleet report' is a worker command"
   local rf; rf=$(report_file "$me")
-  mkdir -p "$(dirname "$rf")"
   if [ "${1:-}" = "-f" ]; then
-    cp "${2:?}" "$rf"
+    cp "${2:?usage: fleet report -f <file>}" "$rf"
   elif [ $# -gt 0 ]; then
     printf '%s\n' "$*" >"$rf"
   else
@@ -827,18 +1183,29 @@ cmd_report() {
 
 cmd_reply() {
   require_herdr
-  local me boss; me=$(self_handle); boss=$(boss_handle)
-  agent_exists "$boss" || die "orchestrator '$boss' is not live"
-  local text="$*"
-  if [ -z "$text" ]; then
-    if [ -t 0 ]; then
-      die "usage: fleet reply <text...>   (or pipe the text on stdin)"
-    fi
-    text=$(cat)
+  local me; me=$(self_handle)
+  [ -n "$me" ] || die "this pane is not a named fleet worker"
+  [ -f "$(meta_file "$me")" ] \
+    || die "'$me' is not a registered fleet worker; 'fleet reply' is a worker command"
+  local boss; boss=$(boss_handle)
+  local text; text=$(read_message "reply <text...>" "$@")
+
+  # Filed first, delivered second. herdr's prompt only reaches an orchestrator
+  # that is between tool calls; one sitting inside `fleet join` does not read
+  # its input until that call returns, which for a default join is an hour
+  # away. The file is what `fleet join` polls, and it is what makes a blocked
+  # worker actually preempt the wave.
+  printf '%s\n' "$text" >"$(question_file "$me")"
+  counter_bump "$(question_seq_file "$me")"
+
+  if agent_exists "$boss"; then
+    h agent prompt "$boss" "[fleet:$me] $text" >/dev/null
+    printf 'asked %s (question filed for its next fleet join)\n' "$boss"
+  else
+    # No longer fatal: the question is on disk, so an orchestrator that comes
+    # back — or a different one — still collects it.
+    note "fleet: orchestrator '$boss' is not live; the question is filed and will surface on the next 'fleet join'"
   fi
-  [ -n "$text" ] || die "nothing to send"
-  h agent prompt "$boss" "[fleet:${me:-unknown}] $text" >/dev/null
-  printf 'sent to %s\n' "$boss"
 }
 
 # ── Inventory and teardown ───────────────────────────────────────────────────
@@ -897,13 +1264,17 @@ cmd_ls() {
 
 cmd_reap() {
   require_herdr
-  local force=0 all=0 all_repos=0 handles="" scope
+  local force=0 all=0 all_repos=0 forget=0 handles="" scope
+  # Not named `usage`: that is a function here, and shadowing it with a string
+  # reads like a call site that would silently do nothing.
+  local use="usage: fleet reap <handle>... | --all [--all-repos] [--force] [--forget]"
   while [ $# -gt 0 ]; do
     case $1 in
       --force) force=1; shift ;;
+      --forget) forget=1; shift ;;
       --all) all=1; shift ;;
       --all-repos) all_repos=1; shift ;;
-      -*) die "usage: fleet reap <handle>... | --all [--all-repos] [--force]" ;;
+      -*) die "$use" ;;
       *) handles="$handles $1"; shift ;;
     esac
   done
@@ -916,10 +1287,9 @@ cmd_reap() {
     scope=$(scoped_key "fleet reap --all" "pass --all-repos, or name the handles to reap")
     handles="$handles $(known_workers "$scope")"
   fi
-  [ -n "${handles// /}" ] || die "usage: fleet reap <handle>... | --all [--all-repos] [--force]"
+  [ -n "${handles// /}" ] || die "$use"
 
-  local handle ws
-  local -a args
+  local handle
   # Validated up front, before anything is removed: the `rm -rf` below joins a
   # handle onto $FLEET_STATE, so one that is not a handle — `../..`, an
   # absolute path — would delete outside it. Every other caller derives its
@@ -930,22 +1300,53 @@ cmd_reap() {
     valid_handle "$handle" || die "invalid handle '$handle'"
   done
 
+  local failed=0
   for handle in $handles; do
-    ws=$(meta_get "$handle" WORKSPACE)
-    if [ -n "$ws" ]; then
-      args=(worktree remove --workspace "$ws")
-      [ "$force" = 1 ] && args+=(--force)
-      # A worker with uncommitted work makes herdr refuse; that refusal is the
-      # safety net, so it is reported and skipped rather than forced silently.
-      if herdr "${args[@]}" >/dev/null 2>&1; then
-        note "fleet: removed $handle ($(meta_get "$handle" BRANCH))"
+    reap_one "$handle" "$force" "$forget" || failed=1
+  done
+  [ "$failed" = 0 ]
+}
+
+# Remove one worker: its workspace, then its record. Returns non-zero when the
+# workspace could not be removed, and in that case the record is deliberately
+# left behind — forgetting a worker whose worktree is still on disk is exactly
+# how a worktree becomes invisible to every fleet command.
+#
+# `--forget` is the inverse, and the missing half of teardown: a worktree
+# already removed by hand leaves a record `worktree remove` can never satisfy,
+# so before this the worker sat in `fleet ls` as `gone` permanently.
+reap_one() {
+  local handle=$1 force=$2 forget=$3 missing_ok=${4:-0} ws out code
+  ws=$(meta_get "$handle" WORKSPACE)
+  if [ "$forget" = 1 ]; then
+    note "fleet: forgot $handle ($(meta_get "$handle" BRANCH)); its worktree at $(meta_get "$handle" DIR) is untouched"
+  elif [ -n "$ws" ]; then
+    local -a args
+    args=(worktree remove --workspace "$ws")
+    [ "$force" = 1 ] && args+=(--force)
+    # A worker with uncommitted work makes herdr refuse; that refusal is the
+    # safety net, so it is reported and skipped rather than forced silently.
+    if out=$(herdr "${args[@]}" 2>&1); then
+      note "fleet: removed $handle ($(meta_get "$handle" BRANCH))"
+    else
+      code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null || true)
+      # `spawn --replace` is the one caller allowed to treat workspace_not_found
+      # as success: it is replacing a dead worker, and "remove the recorded
+      # workspace first" is already satisfied when somebody removed it by hand.
+      # Ordinary `reap` still requires the explicit --forget, preserving the
+      # rule that a failed removal never silently makes a worktree invisible.
+      if [ "$missing_ok" = 1 ] && [ "$code" = workspace_not_found ]; then
+        note "fleet: the old workspace for $handle is already gone; clearing its stale record"
       else
-        note "fleet: could not remove $handle — uncommitted changes? retry with --force"
-        continue
+        note "fleet: could not remove $handle's worktree ($(meta_get "$handle" DIR))
+  herdr said:             ${out:-no error payload}
+  uncommitted changes?   fleet reap $handle --force
+  already gone by hand?  fleet reap $handle --forget"
+        return 1
       fi
     fi
-    rm -rf "${FLEET_STATE:?}/$handle"
-  done
+  fi
+  rm -rf "${FLEET_STATE:?}/$handle"
 }
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -957,18 +1358,22 @@ fleet — dispatch peer coding agents into herdr worktree workspaces
 Orchestrator
   fleet boss [name] [--steal]    claim the orchestrator handle for this pane
   fleet spawn <branch> [opts]    create a worktree, start an agent, dispatch
-  fleet send <handle> <text>     dispatch work, return immediately
-  fleet ask <handle> <text>      dispatch and block until the report is in
-  fleet join [handle...]         block on this repo's workers, print reports
+  fleet send [--raw] <h> <text>  dispatch work, return immediately
+  fleet ask [--raw] <h> <text>   dispatch and block until the report is in
+  fleet join [handle...]         collect this repo's workers, print reports
   fleet ls [--all-repos]         list workers and their states
   fleet read <handle> [-n N]     read a worker's terminal directly
   fleet reap <handle>...|--all   remove worktrees and forget workers
-                                 [--all-repos] [--force]
+                                 [--all-repos] [--force] [--forget]
 
 Worker
   fleet report [-f file|text]    write the report the orchestrator collects
-  fleet reply <text>             interrupt the orchestrator with a question
+  fleet reply <text>             file a question and interrupt the orchestrator
   fleet whoami                   print this pane's handle
+
+--raw sends text alone; without it fleet appends its protocol block, which is
+right for a task and wrong for a one-line answer.
+--forget drops fleet's record and leaves the worktree alone.
 
 `fleet spawn --help` lists spawn options.
 EOF

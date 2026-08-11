@@ -12,6 +12,11 @@
 #
 #   /bin/bash herdr/test/fleet-test.sh    # macOS system bash 3.2
 
+# Several sections replace a sourced function with a stub, so the tests can
+# cover logic that would otherwise need a live herdr. shellcheck cannot see
+# that those definitions shadow something and reports each as unused.
+# shellcheck disable=SC1091,SC2329
+
 # Deliberately not `set -e`: a failing assertion must record itself and let the
 # rest of the suite run.
 set -uo pipefail
@@ -143,6 +148,217 @@ if [ "${HERDR_ENV:-}" = 1 ] && command -v herdr >/dev/null 2>&1 && command -v jq
 else
   printf '  skip  reap CLI cases (needs herdr, jq, and HERDR_ENV=1)\n'
 fi
+
+# ── meta round-trip ──────────────────────────────────────────────────────────
+#
+# `meta` is sourced, so every value goes through printf %q. meta_update rewrites
+# one key and must not drop the rest — restating all of them was the bug that
+# made it exist.
+
+printf '\nmeta\n'
+export FLEET_STATE="$sandbox/meta"
+meta_set m1 "BOSS=my boss" "BRANCH=feat/x'y\"z" "DIR=/tmp/a b" "WORKSPACE=w8" \
+  "REPO=/r" "REPO_KEY=/r/.git"
+is 'a value with a space round-trips'  "$(meta_get m1 BOSS)"   'my boss'
+is 'quotes and slashes round-trip'     "$(meta_get m1 BRANCH)" "feat/x'y\"z"
+
+meta_update m1 "BOSS=other"
+is 'meta_update rewrites its key'      "$(meta_get m1 BOSS)"   'other'
+is 'and preserves its siblings'        "$(meta_get m1 BRANCH)" "feat/x'y\"z"
+is 'and preserves the ones after it'   "$(meta_get m1 DIR)"    '/tmp/a b'
+
+is 'an absent key reads empty'         "$(meta_get m1 NOPE)"   ''
+is 'an absent worker reads empty'      "$(meta_get nosuch BOSS)" ''
+
+# meta_get used to expand ${!key} *after* sourcing without unsetting first, so
+# a key the file did not carry fell through to the environment. A stale meta
+# file plus an exported REPO_KEY silently mis-scoped every repo-scoped command.
+export REPO_KEY=leaked-from-the-environment
+is 'an absent key does not leak the environment' "$(meta_get m1 XREPO_KEY)" ''
+meta_set m2 "BOSS=b"
+is 'a missing REPO_KEY ignores the exported value' "$(meta_get m2 REPO_KEY)" ''
+unset REPO_KEY
+
+# ── counters ─────────────────────────────────────────────────────────────────
+
+printf '\ncounters\n'
+cf="$sandbox/counters/c"
+is 'an absent counter is empty, not zero' "$(counter_read "$cf")" ''
+counter_bump "$cf"; is 'first bump is 1'  "$(counter_read "$cf")" '1'
+counter_bump "$cf"; is 'second bump is 2' "$(counter_read "$cf")" '2'
+printf 'garbage' >"$cf"; counter_bump "$cf"
+is 'a non-numeric counter restarts at 1'  "$(counter_read "$cf")" '1'
+
+# ── timing ───────────────────────────────────────────────────────────────────
+#
+# Budgets are absolute deadlines, not accumulated sleep. Accumulating counted
+# only the time spent asleep, so `start_worker_agent`'s 120s bound actually
+# bounded 240 iterations of a call that could itself take 120s.
+
+printf '\ntiming\n'
+past=$(deadline_ms 0)
+sleep 1
+assert     'a zero-ms deadline expires'      expired "$past"
+is         'and has no time left'            "$(remaining_ms "$past")" '0'
+future=$(deadline_ms 60000)
+assert_not 'a 60s deadline has not expired'  expired "$future"
+left=$(remaining_ms "$future")
+assert 'and reports roughly a minute left' [ "$left" -gt 50000 ] 
+assert 'never more than it was given'      [ "$left" -le 60000 ]
+# sleep_ms must produce an argument `sleep` accepts on both platforms.
+assert 'sleep_ms accepts sub-second values' sleep_ms 10
+
+# ── slug collisions ──────────────────────────────────────────────────────────
+#
+# Three distinct branches reduce to one handle. That is tolerable while the
+# first worker is live — spawn refuses a handle in use — but its *record*
+# outliving its agent used to let the second spawn overwrite the first's
+# BRANCH/DIR/WORKSPACE and strand a worktree nothing could find.
+
+printf '\nslug collisions\n'
+is 'feat/x and feat_x collapse' "$(slugify feat/x)" "$(slugify feat_x)"
+is 'and so does feat-x'         "$(slugify feat-x)" "$(slugify feat/x)"
+
+# ── join bookkeeping ─────────────────────────────────────────────────────────
+#
+# What makes a re-join terminate, and what makes a question preempt one.
+
+printf '\njoin bookkeeping\n'
+export FLEET_STATE="$sandbox/join"
+for w in alive quiet asker; do mkdir -p "$(meta_dir "$w")"; : >"$(meta_file "$w")"; done
+# live_workers asks herdr; the bookkeeping under test does not.
+agent_exists() { case "$1" in alive|quiet|asker) return 0 ;; *) return 1 ;; esac; }
+
+assert_not 'an undispatched worker is not joinable' \
+  [ -n "$(joinable_workers | tr -d '[:space:]')" ]
+
+counter_bump "$(dispatch_file alive)"
+assert 'a dispatched worker is joinable' \
+  [ "$(joinable_workers | tr -d '[:space:]')" = alive ]
+
+mark_joined alive
+assert_not 'and stops being joinable once collected' \
+  [ -n "$(joinable_workers | tr -d '[:space:]')" ]
+
+# The spin: a worker that ends its turn without ever running `fleet report` is
+# simply idle, which settles instantly. Collecting it must be recorded even
+# though no report exists, or "join again until everyone reports" never ends.
+assert_not 'collected without a report is still collected' report_is_fresh alive
+
+counter_bump "$(dispatch_file alive)"
+assert 'a new dispatch makes it joinable again' \
+  [ "$(joinable_workers | tr -d '[:space:]')" = alive ]
+
+# `fleet spawn` makes a worker's first dispatch, and a freshly started omp can
+# still be initializing or sitting on a first-run trust prompt. Refusing there
+# would fail a spawn whose worktree, agent and layout already exist — and with
+# no prior dispatch there is no earlier report to mislabel, so it is submitted
+# with the settle check skipped rather than failed.
+out=$(
+  ( agent_field() { printf 'blocked'; }
+    herdr() { printf '{"id":"t","result":{}}'; }
+    dispatch_to quiet 'the first task' ) 2>&1
+)
+is 'a blocked worker accepts its FIRST dispatch'  "$?" '0'
+assert 'and says pickup was not confirmed' [ "${out#*without confirming pickup}" != "$out" ]
+is 'and records that dispatch' "$(counter_read "$(dispatch_file quiet)")" '1'
+
+# A second tracked task cannot be associated with its eventual report, though:
+# dispatch 1 would read dispatch 2's now-current counter when it reports. Fleet
+# must refuse, without bumping that counter or prompting the agent. Raw answers
+# remain allowed below.
+out=$(
+  ( agent_field() { printf 'working'; }
+    herdr() { printf '{"id":"t","result":{}}'; }
+    dispatch_to quiet 'a second tracked task' ) 2>&1
+)
+is 'a working worker refuses a REdispatch' "$?" '1'
+assert 'and explains the raw steering path' [ "${out#*fleet send --raw}" != "$out" ]
+is 'and leaves the counter alone' "$(counter_read "$(dispatch_file quiet)")" '1'
+
+# Raw answers are steering: no protocol block, no new dispatch counter.
+raw_before=$(counter_read "$(dispatch_file asker)")
+raw_after=$(
+  agent_field() { printf 'working'; }
+  herdr() { printf '{"id":"test","result":{}}'; }
+  prompt_raw asker 'use the existing RetryPolicy' 2>/dev/null
+  counter_read "$(dispatch_file asker)"
+)
+is 'a raw answer does not bump the dispatch counter' "$raw_after" "$raw_before"
+
+assert_not 'no question filed yet' question_pending asker
+printf 'which retry policy?\n' >"$(question_file asker)"
+counter_bump "$(question_seq_file asker)"
+assert 'fleet reply files a pending question' question_pending asker
+joinable=$(joinable_workers | tr -d '[:space:]')
+assert 'a question makes an already-collected worker joinable again' \
+  [ "${joinable#*asker}" != "$joinable" ]
+print_question asker >/dev/null
+assert_not 'and showing it clears the pending flag' question_pending asker
+unset -f agent_exists
+
+# ── workspace-manager coexistence ────────────────────────────────────────────
+#
+# The gate used to grep `- repo:` across the whole file and ignore `path:`
+# entirely, so a repo configured by checkout path read as uncovered and fleet
+# raced the plugin it exists to avoid racing.
+
+printf '\nworkspace-manager gate\n'
+wsm="$sandbox/wsm.yml"
+cat >"$wsm" <<'YAML'
+layouts:
+  - id: web-app
+    tabs:
+      - title: code
+        panes:
+          - title: agent
+            # a decoy: `repo:` outside the workspaces block
+            command: echo repo: /not/a/workspace
+workspaces:
+  - repo: ~/code/web-app        # trailing comment
+    defaultLayout: web-app
+  - repo: "quoted-name"
+  - path: /srv/checkouts
+YAML
+entries=$(workspace_manager_entries "$wsm")
+is 'reads three entries, not the decoy' "$(printf '%s\n' "$entries" | wc -l | tr -d ' ')" '3'
+assert 'expands nothing itself, just extracts' \
+  [ "${entries#*repo	~/code/web-app}" != "$entries" ]
+assert 'strips a trailing comment' \
+  [ "${entries#*# trailing}" = "$entries" ]
+assert 'reads a path: entry' [ "${entries#*path	/srv/checkouts}" != "$entries" ]
+
+# Cover the matcher without a real plugin installed.
+workspace_manager_enabled() { return 0; }
+workspace_manager_config() { printf '%s' "$wsm"; }
+assert     'a path: prefix covers a planned worktree' \
+  workspace_manager_covers /some/repo /srv/checkouts/web-app-feat-x
+assert_not 'an unrelated worktree is not covered' \
+  workspace_manager_covers /some/repo /home/me/code/other-feat-x
+assert     'a bare repo name still matches by basename' \
+  workspace_manager_covers /anywhere/quoted-name /tmp/quoted-name-feat-x
+# The override is the escape hatch for a repo the plugin covers but does not
+# actually contend for. Without it such a repo could not use fleet at all.
+FLEET_IGNORE_WORKSPACE_MANAGER=1 \
+  assert_not 'and the override really disables the check' \
+    workspace_manager_covers /some/repo /srv/checkouts/web-app-feat-x
+unset -f workspace_manager_enabled workspace_manager_config
+
+# ── reap --forget ────────────────────────────────────────────────────────────
+#
+# A worktree removed by hand leaves a record `worktree remove` can never
+# satisfy, so the worker used to sit in `fleet ls` as `gone` permanently with
+# no way to clear it.
+
+printf '\nreap --forget\n'
+export FLEET_STATE="$sandbox/forget"
+herdr() { return 1; }   # every `worktree remove` fails, as it would for a gone worktree
+meta_set stuck "BRANCH=feat/gone" "DIR=/tmp/gone" "WORKSPACE=w9"
+assert_not 'reap refuses when the workspace will not remove' reap_one stuck 0 0
+assert     'and leaves the record behind to try again' [ -d "$(meta_dir stuck)" ]
+assert     '--forget clears the record anyway'          reap_one stuck 0 1
+assert_not 'and the record is gone'                     [ -d "$(meta_dir stuck)" ]
+unset -f herdr
 
 printf '\n'
 if [ "$failures" = 0 ]; then

@@ -119,7 +119,10 @@ fleet spawn feat/c --task-file /tmp/c.md
 fleet join
 ```
 
-`join` waits for every live worker to settle and prints each report.
+`join` watches every live worker at once and prints each report the moment that
+worker settles, so the one that finishes first is the one you read first. A
+worker whose agent is no longer live prints as `gone` and the rest of the wave
+still comes back — one dead pane does not discard the collection.
 
 **One at a time.** `fleet ask <handle> "<task>"` dispatches and blocks for that
 one worker. Use it for a follow-up on an existing worker, or when the second
@@ -136,25 +139,57 @@ leaves the previous one intact. `join` dates it instead of trusting it: a report
 older than the most recent dispatch prints under `(nothing reported since the
 last dispatch)` rather than being mistaken for an answer to it.
 
+**Re-joining terminates.** Nothing forces a worker to run `fleet report` — an
+omp that ends its turn is simply idle, and idle settles instantly. So `join`
+records each settle against the dispatch it answers, and a bare `fleet join`
+skips workers already collected. Re-run it freely; it returns
+`nothing to join` once the wave is in, rather than spinning on a worker that
+quietly stopped. A `fleet send` makes that worker joinable again, which is
+precisely when re-joining is meaningful. Naming a handle explicitly always
+joins it, collected or not.
+
 ## When a worker interrupts you
 
-A worker that is blocked runs `fleet reply "<question>"`, which arrives here as
-a user message tagged `[fleet:<handle>]` — and **preempts whatever tool call you
-are in**, including a `fleet join`. That is deliberate: a worker waiting on a
-decision should not sit behind another worker's build.
+A blocked worker runs `fleet reply "<question>"`. That does two things: it
+prompts your pane, so the question arrives as a user message tagged
+`[fleet:<handle>]`, and it files the question to disk.
+
+The file is the half that matters. A herdr prompt only reaches you *between*
+tool calls — an orchestrator sitting inside `fleet join` does not read its
+input until that call returns, which by default is an hour away. So `join`
+polls for filed questions itself and returns the instant one appears, printing
+it. That is what actually lets a worker waiting on a decision jump the queue
+instead of sitting behind another worker's build.
 
 Answer it and resume:
 
 ```bash
-fleet send <handle> "Use the existing RetryPolicy in core/retry.ts; don't add a new one."
+fleet send --raw <handle> "Use the existing RetryPolicy in core/retry.ts; don't add a new one."
 fleet join
 ```
 
-`join` is safe to re-run — it re-waits on whoever is still working.
+**Use `--raw` for answers.** Without it `send` appends the whole protocol block,
+which is right for a task and wrong for a reply: re-stating "do not open a PR
+unless the task above says to" over a one-line answer makes *that answer* the
+task above, and the worker talks itself out of the PR its brief asked for.
+
+Raw text is steering, not a new tracked dispatch. It does not bump the dispatch
+counter or make the worker's eventual report for its original task look stale.
+That also means it does not wait for a lifecycle transition: an answer queued
+behind a working turn has no transition of its own until that turn yields.
+
+A *follow-up* tracked task is accepted only from `idle` or `done`. Fleet refuses
+one while the worker is `working` or `blocked`, because herdr exposes no turn
+id: queueing dispatch 2 behind dispatch 1 would let dispatch 1's eventual
+report label itself as dispatch 2. Use `--raw` to steer the current turn; use
+ordinary `fleet send` for follow-up work after that turn settles. A worker's
+first dispatch — the one `fleet spawn` makes — is exempt, since there is no
+earlier report to mislabel.
 
 If `join` reports a worker as `blocked`, that is herdr seeing an approval or
-question UI in the pane, not a `fleet reply`. Read the pane and answer it
-directly with `fleet send`.
+question UI in the pane, not a `fleet reply`. Read the pane with `fleet read`
+and answer it with `fleet send --raw` — a keystroke into an approval prompt
+must not carry a protocol block behind it.
 
 ## Finishing
 
@@ -162,14 +197,25 @@ Workers commit to their own branch and stop. They do not push and do not open
 PRs unless the task said to. Review the branches yourself, then:
 
 ```bash
-fleet ls                  # handles, states, branches, paths
-fleet reap <handle>       # remove one worktree
-fleet reap --all          # remove this repo's worktrees
+fleet ls                     # handles, states, branches, paths
+fleet reap <handle>          # remove one worktree
+fleet reap --all             # remove this repo's worktrees
+fleet reap <handle> --forget # drop the record, leave the worktree
 ```
 
 `reap` refuses a worktree with uncommitted changes. That refusal is the point —
 read the diff before reaching for `--force`. It removes the worktree, never the
 branch; the commits are the deliverable.
+
+`--forget` is the other direction: a worktree you already removed by hand
+leaves a record `reap` can never satisfy, and the worker would otherwise sit in
+`fleet ls` as `gone` forever.
+
+A record whose agent has died still owns its handle. `fleet spawn` refuses to
+reuse one rather than silently repointing it at a new worktree and stranding
+the old one — branches collide on handles easily, since `feat/x`, `feat_x` and
+`feat-x` all reduce to `feat-x`. Pass `--replace` to clear the old worktree and
+respawn in one step.
 
 Worker state is machine-global, so `ls`, a bare `join`, and `reap --all` are
 scoped to the current repo — otherwise they would block on, and delete, another

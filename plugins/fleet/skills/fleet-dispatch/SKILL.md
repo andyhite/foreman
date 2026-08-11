@@ -70,12 +70,17 @@ Read `skill://<skill-name>` and follow it for the work below.
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
-**The first line is what puts the skill in front of the worker.** The mattpocock
-execution skills are marked `disable-model-invocation: true`, so they are hidden
-from the list an agent selects from and a worker will not reach for one on its
-own. They stay reachable by URI, so an explicit instruction to read and follow
-one is how a worker gets it. Without that line you get a generic agent doing
+**The first line is what puts the skill in front of the worker.** Naming the
+skill explicitly is what guarantees the worker works from *that* skill's own
+procedure, rather than trusting a blank agent to auto-select the right one
+out of a list of forty. Without that line you get a generic agent doing
 generic work; with it the worker is working from the skill's own procedure.
+
+`disable-model-invocation: true` does not land on the execution skills here —
+it is set on your own interview skills instead: `triage`, `to-tickets`,
+`to-spec`, `grill-me`, `wayfinder`. Reading them by URI (`skill://triage` and
+the rest) rather than expecting them in a menu is the same discipline you are
+asking of the worker, applied to yourself.
 
 **Do not include:** where to commit, whether to push, how to report back, or a
 reminder to stay in the worktree. `fleet` appends its own protocol block
@@ -109,8 +114,12 @@ Then, once every independent slice is out:
 fleet join
 ```
 
-Answer anything tagged `[fleet:<handle>]`, re-join until everyone has reported,
-then review the branches and tell the user what landed where.
+Answer anything tagged `[fleet:<handle>]` with `fleet send --raw <handle>
+<answer>` — `--raw` sends the answer alone; the default re-appends fleet's
+protocol block, which fits a fresh brief and nothing else. Raw answers are
+steering rather than new tracked dispatches, so they do not make the eventual
+report for the worker's original task look stale. Re-join until everyone has
+reported, then review the branches and tell the user what landed where.
 
 ## Sizing a slice
 
