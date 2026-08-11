@@ -242,7 +242,8 @@ printf '\nportable plugin prose\n'
 plugin_dir=$(cd "$(dirname "$0")/../../plugins/fleet" 2>/dev/null && pwd)
 if [ -n "$plugin_dir" ]; then
   offenders=""
-  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/README.md; do
+  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
+           "$plugin_dir"/README.md "$plugin_dir/../../README.md"; do
     [ -f "$f" ] || continue
     if [ -n "$(sed -n '/skill:\/\//p' "$f")" ]; then
       offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
@@ -507,6 +508,139 @@ assert     'and leaves the record behind to try again' [ -d "$(meta_dir stuck)" 
 assert     '--forget clears the record anyway'          reap_one stuck 0 1
 assert_not 'and the record is gone'                     [ -d "$(meta_dir stuck)" ]
 unset -f herdr
+
+# ── join validates explicit handles ─────────────────────────────────────────────
+
+printf '\njoin validates explicit handles\n'
+export FLEET_STATE="$sandbox/state-join-validate"
+require_herdr() { :; }
+
+out=$( (cmd_join 'no-such-worker') 2>&1 )
+rc=$?
+assert     'join fails for nonexistent worker' [ "$rc" != 0 ]
+assert     'output contains no fleet record for' [ "${out#*no fleet record for}" != "$out" ]
+assert_not 'output contains no === result' [ "${out#*===}" != "$out" ]
+
+out=$( (cmd_join '../evil') 2>&1 )
+rc=$?
+assert     'join fails for invalid handle' [ "$rc" != 0 ]
+assert     'output contains invalid handle' [ "${out#*invalid handle}" != "$out" ]
+unset -f require_herdr
+
+# ── tracked send refuses unregistered agents ────────────────────────────────────
+
+printf '\ntracked send refuses unregistered agents\n'
+export FLEET_STATE="$sandbox/state-send-unregistered"
+agent_exists() { return 0; }
+require_herdr() { :; }
+
+out=$( (cmd_send intruder 'hi') 2>&1 )
+rc=$?
+assert     'send fails for unregistered agent' [ "$rc" != 0 ]
+assert     'output contains not registered' [ "${out#*not a registered fleet worker}" != "$out" ]
+assert     'output suggests fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
+assert_not 'no state dir created for handle' [ -d "$FLEET_STATE/intruder" ]
+unset -f agent_exists require_herdr
+
+# ── ask rejects --raw ────────────────────────────────────────────────────────────
+
+printf '\nask rejects --raw\n'
+export FLEET_STATE="$sandbox/state-ask-raw"
+require_herdr() { :; }
+
+out=$( (cmd_ask --raw intruder 'hi') 2>&1 )
+rc=$?
+assert 'ask --raw dies' [ "$rc" != 0 ]
+assert 'output mentions fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
+
+# cmd_send also honors --raw in the position right after the handle, so ask
+# must refuse it there too — not just in the leading position.
+out=$( (cmd_ask intruder --raw 'hi') 2>&1 )
+rc=$?
+assert 'ask <handle> --raw dies too' [ "$rc" != 0 ]
+assert 'trailing form also points at fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
+unset -f require_herdr
+
+# ── spawn flag conflicts ─────────────────────────────────────────────────────────
+
+printf '\nspawn flag conflicts\n'
+export FLEET_STATE="$sandbox/state-spawn-flags"
+herdr() { printf 'herdr was called\n' >&2; return 1; }
+
+out=$( (cmd_spawn br --task x --task-file y) 2>&1 )
+rc=$?
+assert     'spawn dies on task/task-file conflict' [ "$rc" != 0 ]
+assert     'output contains mutually exclusive' [ "${out#*mutually exclusive}" != "$out" ]
+assert_not 'herdr was not called' [ "${out#*herdr was called}" != "$out" ]
+
+out=$( (cmd_spawn br --no-dispatch --task x) 2>&1 )
+rc=$?
+assert     'spawn dies on --no-dispatch --task conflict' [ "$rc" != 0 ]
+assert     'output contains --no-dispatch cannot be combined' [ "${out#*--no-dispatch cannot be combined}" != "$out" ]
+assert_not 'herdr was not called' [ "${out#*herdr was called}" != "$out" ]
+unset -f herdr
+
+# ── join --timeout validation ───────────────────────────────────────────────────
+
+printf '\njoin --timeout validation\n'
+export FLEET_STATE="$sandbox/state-join-timeout"
+require_herdr() { :; }
+
+out=$( (cmd_join --timeout abc h) 2>&1 )
+rc=$?
+assert 'join --timeout dies on non-numeric value' [ "$rc" != 0 ]
+assert 'output contains usage: fleet join' [ "${out#*usage: fleet join}" != "$out" ]
+unset -f require_herdr
+
+# ── reply appends an uncollected question ────────────────────────────────────────
+
+printf '\nreply appends an uncollected question\n'
+export FLEET_STATE="$sandbox/state-reply-append"
+mkdir -p "$FLEET_STATE/w1"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
+self_handle() { printf 'w1'; }
+boss_handle() { printf 'me'; }
+agent_exists() { return 1; }
+require_herdr() { :; }
+
+cmd_reply 'first question' >/dev/null 2>&1
+cmd_reply 'second question' >/dev/null 2>&1
+
+qf="$FLEET_STATE/w1/question.md"
+assert     'question.md exists' [ -f "$qf" ]
+assert     'question.md contains first question' [ -n "$(grep -F 'first question' "$qf")" ]
+assert     'question.md contains second question' [ -n "$(grep -F 'second question' "$qf")" ]
+assert     'question.md contains separator' [ -n "$(grep -F -- '---' "$qf")" ]
+is         'question.seq reads 2' "$(counter_read "$FLEET_STATE/w1/question.seq")" '2'
+unset -f self_handle boss_handle agent_exists require_herdr
+
+# ── fleet version ───────────────────────────────────────────────────────────────
+
+printf '\nfleet version\n'
+is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.2.0'
+
+# ── ls shows a pending question ──────────────────────────────────────────────────
+
+printf '\nls shows a pending question\n'
+export FLEET_STATE="$sandbox/state-ls-q"
+mkdir -p "$FLEET_STATE/w2"
+meta_set w2 "BOSS=boss" "BRANCH=feat/q" "DIR=/tmp/q" "KIND=omp" "REPO_KEY=k"
+: >"$FLEET_STATE/w2/question.md"
+counter_bump "$(cat "$FLEET_STATE/w2/question.seq" 2>/dev/null || echo "$FLEET_STATE/w2/question.seq")"
+
+agent_field() { printf ''; }
+require_herdr() { :; }
+scoped_key() { printf 'k'; }
+
+ls_out=$(cmd_ls 2>&1)
+assert 'ls header contains Q column' [ "${ls_out#* Q }" != "$ls_out" ]
+assert 'ls row shows ? for pending question' [ "${ls_out#*w2*\?}" != "$ls_out" ]
+unset -f agent_field require_herdr scoped_key
+
+# ── widen the skill:// sweep ────────────────────────────────────────────────────
+
+# Modify existing sweep test to add repo root README.md
+# The sweep test was around lines 241-264, so update the for loop to include repo root README
 
 printf '\n'
 if [ "$failures" = 0 ]; then

@@ -480,6 +480,78 @@ cmd_whoami() {
   printf '%s\n' "$me"
 }
 
+cmd_doctor() {
+  local failed=0
+
+  # 1. HERDR_ENV = 1
+  if [ "${HERDR_ENV:-}" = 1 ]; then
+    printf '%-6s %s\n' 'ok' 'inside herdr'
+  else
+    printf '%-6s %s\n' 'fail' 'not inside herdr (HERDR_ENV is unset)'
+    failed=1
+  fi
+
+  # 2. command -v herdr
+  if command -v herdr >/dev/null 2>&1; then
+    printf '%-6s %s\n' 'ok' "$(herdr --version 2>/dev/null | head -1) on PATH"
+  else
+    printf '%-6s %s\n' 'fail' 'herdr not found on PATH'
+    failed=1
+  fi
+
+  # 3. command -v jq
+  if command -v jq >/dev/null 2>&1; then
+    printf '%-6s %s\n' 'ok' 'jq found'
+  else
+    printf '%-6s %s\n' 'fail' 'jq not found on PATH'
+    failed=1
+  fi
+
+  # 4. HERDR_PANE_ID set
+  if [ -n "${HERDR_PANE_ID:-}" ]; then
+    printf '%-6s %s\n' 'ok' 'HERDR_PANE_ID is set'
+  else
+    printf '%-6s %s\n' 'warn' 'HERDR_PANE_ID is unset (fleet report/reply/boss need a pane; run: fleet boss)'
+  fi
+
+  # 5. Only if checks 1-4 all passed: self_handle non-empty
+  if [ "$failed" = 0 ]; then
+    local me; me=$(self_handle 2>/dev/null) || true
+    if [ -n "$me" ]; then
+      printf '%-6s %s\n' 'ok' "agent handle: $me"
+    else
+      printf '%-6s %s\n' 'warn' 'this pane has no agent handle (run: fleet boss)'
+    fi
+  fi
+
+  # 6. $FLEET_STATE writable
+  local probe_file
+  if mkdir -p "$FLEET_STATE" 2>/dev/null && probe_file=$(mktemp "$FLEET_STATE/.probe.XXXXXX" 2>/dev/null) && rm -f "$probe_file" 2>/dev/null; then
+    printf '%-6s %s\n' 'ok' "$FLEET_STATE is writable"
+  else
+    printf '%-6s %s\n' 'fail' "$FLEET_STATE is not writable"
+    failed=1
+  fi
+
+  # 7. command -v fleet resolves
+  if command -v fleet >/dev/null 2>&1; then
+    printf '%-6s %s\n' 'ok' "fleet at $(command -v fleet)"
+  else
+    printf '%-6s %s\n' 'warn' 'fleet not on PATH (run fleet-link or add ~/.local/bin to PATH)'
+  fi
+
+  # 8. Inside a git repo (repo_key non-empty)
+  local key; key=$(repo_key 2>/dev/null) || true
+  if [ -n "$key" ]; then
+    local count; count=$(known_workers "$key" 2>/dev/null | wc -l | tr -d ' ')
+    printf '%-6s %s\n' 'ok' "registered workers for this repo: $count"
+  else
+    printf '%-6s %s\n' 'warn' 'not in a git repo (repo-scoped commands need a repo)'
+  fi
+
+  [ "$failed" = 0 ]
+}
+
 # Resolve who to report to. A worker learns this from its own meta file, which
 # `fleet spawn` wrote before the worker existed.
 boss_handle() {
@@ -533,6 +605,14 @@ fleet_script_dir() {
   done
   cd -P "$(dirname "$path")" && pwd
 }
+
+fleet_version() {
+  local toml; toml="$(fleet_script_dir)/../herdr-plugin.toml"
+  [ -f "$toml" ] || { printf 'unknown'; return 0; }
+  awk '/^[[:space:]]*\[/ { exit } /^[[:space:]]*version[[:space:]]*=/ { gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit }' "$toml"
+}
+
+cmd_version() { printf 'fleet %s\n' "$(fleet_version)"; }
 
 # Ordered from explicit override, to fleet's bundled skills, to project scope,
 # then user scope. Every supported harness uses the Agent Skills
@@ -694,6 +774,14 @@ cmd_spawn() {
     esac
   done
 
+  # Validated before anything is created, like the handle validity check.
+  if [ -n "$task" ] && [ -n "$taskfile" ]; then
+    die "--task and --task-file are mutually exclusive"
+  fi
+  if [ "$dispatch" = 0 ] && { [ -n "$task" ] || [ -n "$taskfile" ]; }; then
+    die "--no-dispatch cannot be combined with --task or --task-file"
+  fi
+
   case "$layout" in
     agent|full) ;;
     *) die "unknown layout '$layout' (expected: agent, full)" ;;
@@ -725,6 +813,10 @@ cmd_spawn() {
   # The sibling-directory convention, so a worktree is visible next to its repo
   # rather than buried in ~/.herdr/worktrees.
   wtpath=${wtpath:-$(dirname "$repo")/$(basename "$repo")-$(slugify "$branch")}
+  # The path is recorded in meta and told to the worker before it exists, and
+  # workspace_manager_covers prefix-matches it as a string, so a relative form
+  # breaks both.
+  case "$wtpath" in /*) ;; *) wtpath="$(pwd -P)/$wtpath" ;; esac
 
   # After the worktree path is known, because workspace-manager can be
   # configured by checkout path as well as by repo.
@@ -1132,6 +1224,10 @@ cmd_send() {
   case "${1:-}" in --raw) raw=1; shift ;; esac
   agent_exists "$handle" || die "no live agent named '$handle'"
   local text; text=$(read_message "send [--raw] <handle> <text...>" "$@")
+  if [ "$raw" != 1 ] && [ ! -f "$(meta_file "$handle")" ]; then
+    die "'$handle' is live but not a registered fleet worker; a tracked task would send it a broken protocol block and mint a phantom record
+  steer it instead: fleet send --raw $handle \"<text>\""
+  fi
   if [ "$raw" = 1 ]; then
     # No protocol block. A one-line answer does not want the contract
     # restated, and re-appending "do not open a PR unless the task above says
@@ -1146,14 +1242,33 @@ cmd_send() {
 
 cmd_ask() {
   require_herdr
-  local a handle=""
+  local timeout=""
+  if [ "${1:-}" = --timeout ]; then
+    timeout=${2:?usage: fleet ask [--timeout <seconds>] <handle> <text...>}
+    shift 2
+  fi
+  # Rejected in both positions cmd_send would honor it — before the handle and
+  # immediately after it. A raw send has no pickup confirmation, so the join
+  # that follows would match the agent's pre-dispatch idle state and return a
+  # stale report: the exact race dispatch_to's settle check exists to prevent.
+  local raw_refused="fleet ask dispatches a tracked task and waits for its report; --raw steering files no report to wait for
+  send it instead:  fleet send --raw <handle> \"<text>\"
+  then if needed:   fleet join <handle>"
+  local a handle="" after_handle=0
   for a in "$@"; do
-    case "$a" in --raw|--) continue ;; esac
-    handle=$a; break
+    if [ "$after_handle" = 1 ]; then
+      case "$a" in --raw) die "$raw_refused" ;; esac
+      break
+    fi
+    case "$a" in
+      --raw) die "$raw_refused" ;;
+      --) continue ;;
+      *) handle=$a; after_handle=1 ;;
+    esac
   done
-  [ -n "$handle" ] || die "usage: fleet ask [--raw] <handle> <text...>"
+  [ -n "$handle" ] || die "usage: fleet ask [--timeout <seconds>] <handle> <text...>"
   cmd_send "$@"
-  cmd_join "$handle"
+  if [ -n "$timeout" ]; then cmd_join --timeout "$timeout" "$handle"; else cmd_join "$handle"; fi
 }
 
 # Everything join prints for one worker.
@@ -1168,7 +1283,9 @@ print_result() {
     printf '(recorded worktree path: %s)\n' "$(meta_get "$handle" DIR)"
   elif [ "$status" = blocked ]; then
     printf '(blocked, nothing reported since the last dispatch — last output below)\n'
-    h agent read "$handle" --source recent-unwrapped --lines 40
+    herdr agent read "$handle" --source recent-unwrapped --lines 40 2>/dev/null \
+      || printf '(could not read the pane; the agent may have just exited)\n'
+    printf '\nunblock it:       fleet send --raw %s "<answer or keystroke>"\nthen collect it:  fleet join %s\n' "$handle" "$handle"
   elif [ -s "$rf" ]; then
     # Stale, but kept: a follow-up `fleet send` must not destroy the report a
     # worker already filed, so staleness is dated rather than deleted.
@@ -1197,6 +1314,7 @@ print_question() {
 }
 
 mark_joined() {
+  mkdir -p "$(meta_dir "$1")"
   local df; df=$(dispatch_file "$1")
   if [ -f "$df" ]; then cp "$df" "$(joined_token_file "$1")"
   else : >"$(joined_token_file "$1")"; fi
@@ -1248,7 +1366,37 @@ cmd_join() {
   # Built as a string, not an array: bash 3.2 (what ships on macOS) treats
   # ${#arr[@]} on an empty array as an unbound-variable error under `set -u`,
   # and handles are whitespace-free by construction.
-  local handles="$*" scope
+  local timeout_ms=$WAIT_TIMEOUT_MS handle handles="" scope
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --timeout)
+        case "${2-}" in
+          ''|*[!0-9]*) die "usage: fleet join [--timeout <seconds>] [handle...]" ;;
+        esac
+        timeout_ms=$(($2 * 1000))
+        shift 2
+        ;;
+      --*)
+        die "usage: fleet join [--timeout <seconds>] [handle...]"
+        ;;
+      *)
+        handles="$handles $1"
+        shift
+        ;;
+    esac
+  done
+  handles=${handles# }
+
+  # Validated before anything prints, like cmd_reap, so one typo cannot abort a
+  # wave that already printed results.
+  if [ -n "$handles" ]; then
+    for handle in $handles; do
+      valid_handle "$handle" || die "invalid handle '$handle'"
+      [ -d "$(meta_dir "$handle")" ] || die "no fleet record for '$handle' (see: fleet ls)"
+    done
+  fi
+
   if [ -z "$handles" ]; then
     scope=$(scoped_key "fleet join" "run it from inside a repo, or name the handles to join")
     handles=$(joinable_workers "$scope")
@@ -1259,8 +1407,8 @@ cmd_join() {
   fi
   [ -n "${handles// /}" ] || die "no workers to join"
 
-  local dl pending="$handles" remaining handle status agents
-  dl=$(deadline_ms "$WAIT_TIMEOUT_MS")
+  local dl pending="$handles" remaining status agents
+  dl=$(deadline_ms "$timeout_ms")
   while :; do
     # One `agent list` per tick rather than one per worker per tick: a wave of
     # five would otherwise be 150 herdr round-trips a minute for nothing.
@@ -1286,7 +1434,7 @@ cmd_join() {
     pending=$remaining
     [ -n "${pending// /}" ] || return 0
     if expired "$dl"; then
-      note "fleet: gave up after $((WAIT_TIMEOUT_MS / 1000))s; still working:$pending"
+      note "fleet: gave up after $((timeout_ms / 1000))s; still working:$pending"
       return 1
     fi
     sleep_ms "$JOIN_POLL_MS"
@@ -1342,7 +1490,14 @@ cmd_reply() {
   # its input until that call returns, which for a default join is an hour
   # away. The file is what `fleet join` polls, and it is what makes a blocked
   # worker actually preempt the wave.
-  printf '%s\n' "$text" >"$(question_file "$me")"
+  # A second question filed before the first is collected must not destroy
+  # the first.
+  local qf; qf=$(question_file "$me")
+  if question_pending "$me" && [ -s "$qf" ]; then
+    printf -- '\n---\n%s\n' "$text" >>"$qf"
+  else
+    printf '%s\n' "$text" >"$qf"
+  fi
   counter_bump "$(question_seq_file "$me")"
 
   if agent_exists "$boss"; then
@@ -1399,8 +1554,8 @@ cmd_ls() {
   if [ "${1:-}" != "--all-repos" ]; then
     scope=$(scoped_key "fleet ls" "run it from inside a repo, or pass --all-repos")
   fi
-  local handle status kind
-  printf '%-20s %-9s %-8s %-28s %s\n' HANDLE STATUS KIND BRANCH DIR
+  local handle status kind q
+  printf '%-20s %-9s %-2s %-8s %-28s %s\n' HANDLE STATUS Q KIND BRANCH DIR
   for handle in $(known_workers "$scope"); do
     status=$(agent_field "$handle" agent_status)
     [ -n "$status" ] || status=gone
@@ -1408,7 +1563,10 @@ cmd_ls() {
     # the honest fallback rather than an unknown marker.
     kind=$(meta_get "$handle" KIND)
     [ -n "$kind" ] || kind=omp
-    printf '%-20s %-9s %-8s %-28s %s\n' "$handle" "$status" "$kind" \
+    # A filed question is invisible outside fleet join.
+    q=-
+    if question_pending "$handle"; then q='?'; fi
+    printf '%-20s %-9s %-2s %-8s %-28s %s\n' "$handle" "$status" "$q" "$kind" \
       "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)"
   done
 }
@@ -1510,8 +1668,9 @@ Orchestrator
   fleet boss [name] [--steal]    claim the orchestrator handle for this pane
   fleet spawn <branch> [opts]    create a worktree, start an agent, dispatch
   fleet send [--raw] <h> <text>  dispatch work, return immediately
-  fleet ask [--raw] <h> <text>   dispatch and block until the report is in
+  fleet ask <h> <text>           dispatch and block until the report is in
   fleet join [handle...]         collect this repo's workers, print reports
+                                 [--timeout <seconds>] bounds either wait
   fleet ls [--all-repos]         list workers, their kinds, and their states
   fleet read <handle> [-n N]     read a worker's terminal directly
   fleet reap <handle>...|--all   remove worktrees and forget workers
@@ -1523,6 +1682,8 @@ Worker
   fleet whoami                   print this pane's handle
 
 Both
+  fleet doctor                   check prerequisites
+  fleet version                  print the fleet version
   fleet skill <name>             print a named skill for any agent harness
 
 --raw sends text alone; without it fleet appends its protocol block, which is
@@ -1550,6 +1711,8 @@ main() {
     reply)   cmd_reply "$@" ;;
     ls|list) cmd_ls "$@" ;;
     reap)    cmd_reap "$@" ;;
+    doctor)  cmd_doctor "$@" ;;
+    version|--version|-V) cmd_version ;;
     -h|--help|help) usage ;;
     *) die "unknown command '$cmd' (try: fleet --help)" ;;
   esac
