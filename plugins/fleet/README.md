@@ -1,9 +1,11 @@
-# fleet
+# Fleet (agent plugin)
 
-Harness-portable orchestrator commands for [fleet](../../herdr/). They turn an
-agent session into a project manager: keep interactive requirements work with
-the user, then dispatch autonomous execution to separate coding-agent processes
-in herdr worktrees.
+Harness-portable orchestrator commands — one of the two Fleet plugins the
+Foreman marketplace publishes. This plugin supplies the orchestrator's
+`/fleet:*` commands; the companion [herdr plugin](../../herdr/) supplies the
+`fleet` CLI those commands drive. Together they turn an agent session into a
+project manager: keep interactive requirements work with the user, then dispatch
+autonomous execution to separate coding-agent processes in herdr worktrees.
 
 The orchestrator and worker harnesses are independent. An omp orchestrator can
 run Claude, Codex, Cursor, or any other kind supported by
@@ -23,7 +25,7 @@ separate agent processes, one per branch, running in parallel.
 
 ## Requirements
 
-- The [herdr fleet plugin](../../herdr/), which puts `fleet` on `PATH`
+- [Fleet's herdr plugin](../../herdr/), which puts `fleet` on `PATH`
 - [mattpocock/skills](https://github.com/mattpocock/skills) installed in a
   standard Agent Skills root
 - An agent session running inside a herdr pane (`HERDR_ENV=1`)
@@ -44,29 +46,33 @@ tree. Tiny manifests adapt that same content to each plugin loader.
 
 ```text
 /marketplace add andyhite/foreman
-/marketplace install fleet@omp-fleet
+/marketplace install fleet@foreman
 ```
 
 ### Claude Code
 
 ```text
 /plugin marketplace add andyhite/foreman
-/plugin install fleet@omp-fleet
+/plugin install fleet@foreman
 ```
 
 Verified by installing this tree from a local checkout with
-`claude plugin marketplace add` and `claude plugin install fleet@omp-fleet`.
+`claude plugin marketplace add` and `claude plugin install`.
 
 ### Codex
 
 ```bash
 codex plugin marketplace add andyhite/foreman
-codex plugin add fleet@omp-fleet
+codex plugin add fleet@foreman
 ```
 
-Verified the same way. Codex has no catalog of its own here: it falls back to
+Verified that Codex has no catalog of its own here: it falls back to
 `.claude-plugin/marketplace.json` and resolves the plugin from that entry, so
 the two harnesses install from one catalog.
+
+The marketplace is named `foreman` after the repository that publishes it; the
+plugin inside it keeps the name `fleet`, so the install target reads
+`fleet@foreman`.
 
 That catalog's entry is `"source": "./plugins/fleet"` — a path from the
 repository root, with no `pluginRoot`. `.omp-plugin/marketplace.json` keeps

@@ -1,13 +1,19 @@
-# foreman
+# Foreman
 
-Two plugins that let one agent act as a project manager and hand the actual
-engineering to peer agents running on their own branches.
+Foreman is the marketplace. **Fleet** is what it publishes: two plugins that let
+one agent act as a project manager and hand the actual engineering to peer agents
+running on their own branches.
 
 - **[`herdr/`](./herdr/)** — a herdr plugin providing the `fleet` CLI: create a
-  git worktree, start a separate `omp` in it, dispatch work, collect the report.
-- **[`plugins/fleet/`](./plugins/fleet/)** — an omp plugin providing the
-  orchestrator's slash commands, each of which dispatches the matching
-  [mattpocock/skills](https://github.com/mattpocock/skills) skill to a worker.
+  git worktree, start a separate coding agent in it, dispatch work, collect the
+  report.
+- **[`plugins/fleet/`](./plugins/fleet/)** — a harness-portable agent plugin
+  providing the orchestrator's slash commands, each of which dispatches the
+  matching [mattpocock/skills](https://github.com/mattpocock/skills) skill to a
+  worker.
+
+Both plugins are Fleet; the marketplace is named for the repository that
+publishes them. That is why the install target below reads `fleet@foreman`.
 
 ## The idea
 
@@ -17,9 +23,10 @@ current checkout, and the wrong one for anything that wants a branch.
 
 herdr already has the primitives for the other case — worktrees, panes, named
 agents you can address later — and `fleet` is those primitives wired into one
-command per dispatch. A worker is a full `omp` with its own context window,
-sitting in its own worktree, reachable an hour later, and its deliverable is a
-branch rather than a message.
+command per dispatch. A worker is a full coding-agent process — omp by default,
+any kind herdr supports — with its own context window, sitting in its own
+worktree, reachable an hour later, and its deliverable is a branch rather than a
+message.
 
 On top of that, the mattpocock skills split along a line worth taking seriously:
 
@@ -32,13 +39,13 @@ On top of that, the mattpocock skills split along a line worth taking seriously:
 Run both halves in one session and the long half blocks the interactive half.
 So the orchestrator keeps the left column — it interviews, specs, and slices —
 and every item in the right column is dispatched to a worker with a brief that
-starts `Read `skill://implement` and follow it`.
+starts with an instruction to run `fleet skill implement` and follow what it prints.
 
 That explicit line is what keeps a worker on the one skill named for it. The
 same discipline applies on your side of the split: the left-column skills all
-carry `disable-model-invocation: true`, so they don't show up in a skill menu
-either — you reach for `skill://grill-me` and the rest by URI too, instead of
-waiting for the model to offer them.
+carry `disable-model-invocation: true`, so they do not show up in a skill menu
+either — you invoke them explicitly by name rather than waiting for the model
+to offer them.
 
 ```mermaid
 graph LR
@@ -53,7 +60,7 @@ graph LR
 
 ## Install
 
-Both halves are needed: the herdr plugin supplies the mechanism, the omp plugin
+Both halves are needed: the herdr plugin supplies the mechanism, the agent plugin
 supplies the commands.
 
 ```sh
@@ -62,12 +69,15 @@ herdr plugin install andyhite/foreman/herdr
 
 ```
 /marketplace add andyhite/foreman
-/marketplace install fleet@omp-fleet
+/marketplace install fleet@foreman
 ```
 
+Claude Code and Codex install the same plugin from the same repository; see
+[`plugins/fleet/README.md`](./plugins/fleet/README.md) for those commands.
+
 You also need [mattpocock/skills](https://github.com/mattpocock/skills)
-installed at user scope, so that workers resolve `skill://implement` and friends
-too, and `jq` on your PATH.
+installed at user scope so that `fleet skill implement` and friends resolve on
+any harness, and `jq` on your PATH.
 
 ## Use
 
@@ -84,8 +94,7 @@ tells you where the work is going:
 `/fleet:implement` · `/fleet:diagnosing-bugs` · `/fleet:research` ·
 `/fleet:prototype` · `/fleet:code-review`
 
-Each one spawns a worker whose brief opens with
-`Read skill://<that same name> and follow it`.
+Each one spawns a worker whose brief opens with an instruction to run `fleet skill <that same name>` and follow it.
 
 When the work is already in the tracker rather than in the conversation, one
 command does the whole loop:

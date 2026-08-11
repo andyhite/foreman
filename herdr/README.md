@@ -1,6 +1,6 @@
-# Fleet
+# Fleet (herdr plugin)
 
-Fleet packages the `fleet` CLI as a herdr plugin. omp's own `task` subagents share one process, context, and current directory; a fleet worker is a separate `omp` in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
+Fleet is one of two plugins published by the Foreman marketplace (`andyhite/foreman`): this herdr plugin supplies the `fleet` CLI, the mechanism that spawns and manages workers; the companion agent plugin at [`../plugins/fleet/`](../plugins/fleet/) supplies the `/fleet:*` orchestrator commands that drive it. omp's own `task` subagents share one process, context, and current directory; a fleet worker is a separate coding-agent process (`fleet spawn --kind`, default `omp`) in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
 
 ## Requirements
 
@@ -30,16 +30,19 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | Command | Description |
 | --- | --- |
 | `fleet boss [name] [--steal]` | Claim the orchestrator handle for this pane. |
-| `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
+| `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--kind`, `--skill`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
 | `fleet send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
-| `fleet ask [--raw] <handle> <text>` | Send, then block for the response. |
-| `fleet join [handle...]` | Collect this repository's workers and print each report as it settles. |
-| `fleet ls [--all-repos]` | List workers and their states. |
+| `fleet ask <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. |
+| `fleet join [handle...] [--timeout <seconds>]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FLEET_WAIT_TIMEOUT_MS` for this call. |
+| `fleet ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose question has not been collected, `-` when idle. |
 | `fleet read <handle> [-n N]` | Read a worker's terminal. |
 | `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
 | `fleet report [-f file\|text]` | From a worker, file its report. |
 | `fleet reply <text>` | From a worker, file a question and interrupt the orchestrator. |
 | `fleet whoami` | Print this pane's handle. |
+| `fleet skill <name>` | Print a skill's instructions; the mechanism worker briefs use to reach skills. |
+| `fleet version` | Print the fleet version. |
+| `fleet doctor` | Check environment sanity: herdr, jq, `HERDR_ENV`, pane, state dir, and PATH link. Exits nonzero on a hard failure. |
 
 ### Collecting
 
@@ -61,6 +64,10 @@ that is between tool calls, and one sitting inside `fleet join` does not read
 its input until that call returns. `join` polls for filed questions and
 returns as soon as one appears, which is what actually lets a blocked worker
 preempt the wave. Answer it with `fleet send --raw`.
+
+### Timeout control
+
+`fleet join [--timeout <seconds>]` and `fleet ask --timeout <seconds>` override `FLEET_WAIT_TIMEOUT_MS` for a single call. Non-numeric values cause an error with usage displayed.
 
 ### `--raw`
 
@@ -84,7 +91,7 @@ read the now-current counter and label itself as dispatch 2. Use `--raw` to
 steer the current turn, or collect it before assigning another task.
 
 A worker's first dispatch is exempt, because there is no earlier report to
-mislabel. A freshly started omp may still be initializing or sitting on a
+mislabel. A freshly started worker may still be initializing or sitting on a
 first-run trust prompt, and refusing there would fail a `spawn` whose worktree,
 agent and layout already exist. Fleet submits and says it could not confirm
 pickup, rather than failing.
@@ -103,7 +110,8 @@ record with `fleet reap <handle> [--forget]`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FLEET_STATE` | `${XDG_STATE_HOME:-$HOME/.local/state}/fleet` | Directory holding fleet's machine-local worker metadata. |
-| `FLEET_SPAWN_TIMEOUT_MS` | `120000` | Maximum milliseconds to wait for a fresh worker's named, input-ready omp startup; herdr clamps it to 300000. |
+| `FLEET_SPAWN_TIMEOUT_MS` | `120000` | Maximum milliseconds to wait for a fresh worker's named, input-ready startup; herdr clamps it to 300000. |
+| `FLEET_AGENT_KIND` | `omp` | Harness started for new workers unless `fleet spawn --kind` overrides it. |
 | `FLEET_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `fleet ask` or `fleet join`. |
 | `FLEET_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
 | `FLEET_JOIN_POLL_MS` | `2000` | How often `fleet join` re-reads the workers it is watching. |
@@ -150,5 +158,5 @@ herdr/test/fleet-link-test.sh     # the PATH symlink and its ownership receipt
 ```
 
 For the agent-facing orchestration commands — the `/fleet:*` slash commands that
-dispatch work to these workers — see the companion omp plugin at
-[`../plugins/fleet/`](../plugins/fleet/).
+dispatch work to these workers — see the companion agent plugin at
+[`../plugins/fleet/`](../plugins/fleet/). It is harness-portable (omp, Claude Code, Codex; Cursor untested).

@@ -1,10 +1,10 @@
 {
-  "name": "omp-fleet",
+  "name": "foreman",
   "owner": {
     "name": "Andy Hite"
   },
   "metadata": {
-    "description": "Fleet orchestration \u2014 collect requirements as an orchestrator and dispatch execution to peer coding agents in herdr worktrees."
+    "description": "Foreman — the marketplace publishing Fleet: orchestrator commands that keep requirements work with the user and dispatch execution to peer coding agents in herdr worktrees."
   },
   "plugins": [
     {
