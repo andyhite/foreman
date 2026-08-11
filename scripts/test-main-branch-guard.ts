@@ -85,6 +85,12 @@ assert.equal(decision("git branch -i --list MAIN", "main"), undefined);
 // Creation-compatible options keep the inference alive.
 assert.ok(decision("git branch -q main origin/main", "feat/guard"));
 assert.ok(decision("git branch --track main origin/main", "feat/guard"));
+assert.ok(decision("git branch --track=inherit main origin/main", "feat/guard"));
+assert.ok(decision("git branch --no-track main origin/main", "feat/guard"));
+assert.ok(decision("git branch --create-reflog main origin/main", "feat/guard"));
+assert.ok(decision("git branch --no-create-reflog main origin/main", "feat/guard"));
+assert.ok(decision("git branch --recurse-submodules main origin/main", "feat/guard"));
+assert.ok(decision("git branch -q --create-reflog --track main origin/main", "feat/guard"));
 
 // Renames and force-writes reach the same ref by another route.
 assert.ok(decision("git branch -m main old-main", "feat/guard"));

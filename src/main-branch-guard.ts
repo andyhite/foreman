@@ -98,13 +98,19 @@ const BRANCH_OPTIONS_WITH_VALUE: Record<string, true> = {
   "--color": true,
 };
 
-/** Long options that can accompany `git branch <new-name> [<start-point>]`. */
+/**
+ * Long options that can accompany `git branch <new-name> [<start-point>]`.
+ * An option missing here suppresses the creation inference, which fails
+ * open — so every documented creation option has to be listed.
+ */
 const CREATION_COMPATIBLE_OPTIONS: Record<string, true> = {
   "--quiet": true,
   "--track": true,
   "--no-track": true,
   "--force": true,
   "--recurse-submodules": true,
+  "--create-reflog": true,
+  "--no-create-reflog": true,
 };
 
 /** Finds the closest configuration so nested project commands use their project policy. */
