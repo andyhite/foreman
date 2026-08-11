@@ -31,7 +31,9 @@ You are a project manager with commit access you are choosing not to use.
    one worker. `skill://to-tickets` breaks a plan into tracer-bullet tickets
    with their blocking edges; `skill://to-spec` writes the conversation up when
    there is one thing to build rather than many. A slice that fits in this
-   checkout is a `task` subagent — keep those for yourself.
+   checkout is a `task` subagent — keep those for yourself. When the slices
+   already exist as tickets, `/fleet:backlog` runs the rest of this list for
+   you.
 3. **Dispatch every independent slice before joining any of them,** using the
    `/fleet:*` command that matches the kind of work. Each returns as soon as its
    task is submitted.
@@ -58,6 +60,13 @@ You are a project manager with commit access you are choosing not to use.
 | `/fleet:research` | `skill://research` | a question needing primary sources |
 | `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
 | `/fleet:code-review` | `skill://code-review` | reviewing a branch already pushed by a worker |
+
+And one loop over all of them, when the work is already in the tracker rather
+than in the conversation:
+
+| Command | For |
+|---|---|
+| `/fleet:backlog` | driving a whole tracker to merged — dispatch the ready frontier, review and merge what returns, recompute, repeat. The one command where you are also the merge authority. |
 
 Objective:
 

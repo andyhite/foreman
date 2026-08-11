@@ -81,5 +81,17 @@ tells you where the work is going:
 Each one spawns a worker whose brief opens with
 `Read skill://<that same name> and follow it`.
 
+When the work is already in the tracker rather than in the conversation, one
+command does the whole loop:
+
+```
+/fleet:backlog wave 1
+```
+
+It walks the tracker's dependency graph, dispatches the ready frontier, reviews
+and merges what comes back, then recomputes and dispatches again. Merging is the
+part that makes it a loop — a dependent ticket reaches the frontier only when its
+blocker closes.
+
 Details: [`herdr/README.md`](./herdr/README.md) for the CLI,
 [`plugins/fleet/README.md`](./plugins/fleet/README.md) for the commands.

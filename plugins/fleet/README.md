@@ -27,8 +27,9 @@ separate `omp` processes, one per branch, running in parallel.
   reachable as `skill://<name>` (user scope, so workers see them too)
 - A session running inside a herdr pane (`HERDR_ENV=1`)
 
-Run `/setup-matt-pocock-skills` once per repo before using `/fleet:implement` or
-`/fleet:code-review` — both read `docs/agents/issue-tracker.md`.
+Run `/setup-matt-pocock-skills` once per repo before using `/fleet:implement`,
+`/fleet:code-review`, or `/fleet:backlog` — they read
+`docs/agents/issue-tracker.md`, and `/fleet:backlog` cannot run without it.
 
 ## Install
 
@@ -55,11 +56,24 @@ Then dispatch, one command per kind of work:
 | `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
 | `/fleet:code-review` | `skill://code-review` | reviewing a branch a worker already produced |
 
+And one command that runs that whole loop for you, when the work is already in
+the tracker rather than in the conversation:
+
+| Command | For |
+|---|---|
+| `/fleet:backlog` | walk the tracker's dependency graph, dispatch every ready ticket to the skill that matches it, review and merge what comes back, recompute the frontier, repeat |
+
+`/fleet:backlog` is the only one that merges. The per-ticket commands stop when
+the worker reports, which is correct for one slice and fatal for a backlog: a
+dependent ticket reaches the frontier only when its blocker *closes*, and that
+needs a merge. Reporting and waiting stalls after the first wave.
+
 Every dispatch command does the same three things: check that you can state the
 requirements precisely, write a brief to a file, and `fleet spawn` a worker
 against it. What differs is *which* requirements that skill cannot proceed
 without — the seams `/tdd` will test at, the reproduction steps a feedback loop
-needs, the fixed point a review diffs against. Each command asks for its own.
+needs, the fixed point a review diffs against. Each command asks for its own;
+`/fleet:backlog` asks for a whole wave's worth in one round.
 
 ## Skills
 
