@@ -152,6 +152,28 @@ assert 'reports repointed, not a warning'   [ "${out#*repointed}" != "$out" ]
 assert 'link resolves again'                [ -e "$s/bin/fleet" ]
 is     'points back at the installed checkout' "$(readlink "$s/bin/fleet")" "$s/installed/bin/fleet"
 is     'and the command actually runs'      "$("$s/bin/fleet")" 'fleet.test.s7'
+assert_not 'repoint left no temp debris' [ -n "$(ls "$s/bin"/*.tmp.* 2>/dev/null)" ]
+
+# ── target dir path contains a space ──────────────────────────────────────────
+
+printf '\ntarget dir path contains a space\n'
+s="$sandbox/s9"; mkdir -p "$s"
+make_checkout "$s/ck" fleet.test.s9
+linkdir="$s/with space/bin"
+mkdir -p "$linkdir"
+( FLEET_LINK_DIR="$linkdir" FLEET_STATE="$s/state" sh "$s/ck/bin/fleet-link" 2>&1 )
+assert 'symlink exists in space-containing dir' [ -L "$linkdir/fleet" ]
+is     'resolves to the plugin checkout' "$(readlink "$linkdir/fleet")" "$s/ck/bin/fleet"
+
+# ── fleet-ls: parse guard against malformed JSON ───────────────────────────────
+
+printf '\nfleet-ls: parse guard against malformed JSON\n'
+s="$sandbox/s10"; mkdir -p "$s"
+FLEET_LS=$(cd "$(dirname "$FLEET_LINK")/.." && pwd)/bin/fleet-ls
+[ -f "$FLEET_LS" ] || { printf 'cannot find fleet-ls at %s\n' "$FLEET_LS" >&2; exit 1; }
+out=$(HERDR_PLUGIN_CONTEXT_JSON='not json' sh "$FLEET_LS" 2>&1); rc=$?
+is     'exits nonzero'                 "$rc" '1'
+assert 'stderr mentions parse failure' [ "${out#*could not parse}" != "$out" ]
 
 printf '\n'
 if [ "$failures" = 0 ]; then

@@ -125,6 +125,13 @@ source=$source_dir/fleet
 self_id=$(plugin_id_of "${source_dir%/bin}/herdr-plugin.toml" || true)
 target_dir=${FLEET_LINK_DIR:-"$HOME/.local/bin"}
 target=$target_dir/fleet
+# Replace the link in one rename: between an rm and a fresh ln -s the command
+# is off PATH, and a failed ln strands that gap until the next startup hook.
+repoint() {
+  tmp_link="$1.tmp.$$"
+  ln -s "$2" "$tmp_link" || return 1
+  mv -f "$tmp_link" "$1" || { rm -f "$tmp_link"; return 1; }
+}
 mkdir -p "$target_dir" || exit 1
 
 if [ ! -e "$target" ] && [ ! -L "$target" ]; then
@@ -137,7 +144,7 @@ elif [ -L "$target" ]; then
   if [ "$resolved" = "$source" ]; then
     $quiet || printf 'already linked\n'
   elif link_is_ours "$resolved"; then
-    rm "$target" && ln -s "$source" "$target" || exit 1
+    repoint "$target" "$source" || exit 1
     receipt_record "$target" "$source"
     $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   elif [ -n "$resolved" ] && [ -e "$resolved" ]; then
@@ -145,7 +152,7 @@ elif [ -L "$target" ]; then
       "$target" "$resolved" >&2
     exit 0
   elif dangling_link_is_ours "$target" "$literal"; then
-    rm "$target" && ln -s "$source" "$target" || exit 1
+    repoint "$target" "$source" || exit 1
     receipt_record "$target" "$source"
     $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   else
