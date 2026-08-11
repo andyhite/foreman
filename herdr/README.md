@@ -107,12 +107,20 @@ dashboard` typed in any pane.
 
 It opens as a popup, not a split or a tab, because a popup is something you
 open, act in, and dismiss, and it leaves the tiled layout — including the
-agent panes it is reporting on — exactly as it found it. herdr refuses to
-open one while Settings, Copy mode, or another modal already owns the screen.
-The action reports that refusal rather than failing silently: herdr's own
-message goes to the plugin log, and to a top-right toast as well when
-`ui.toast.delivery` is on — it defaults to `off`, so the log is the half that
-is always there.
+agent panes it is reporting on — exactly as it found it.
+
+A popup is a singleton, and the command palette is itself a popup: at the
+moment the palette dispatches the action, the palette still holds the slot and
+herdr answers "popup already open". The action waits the slot out rather than
+reporting it — up to `FLEET_DASHBOARD_OPEN_TIMEOUT_S`, which is long enough
+for the palette to close and short enough that a Settings pane you left open
+does not look like a hang. Anything that is not a modal in the way fails on
+the first attempt instead.
+
+When the slot never frees, the action says so rather than failing silently:
+herdr's own message goes to the plugin log, and to a top-right toast as well
+when `ui.toast.delivery` is on — it defaults to `off`, so the log is the half
+that is always there.
 
 | Keys | Action |
 | --- | --- |
@@ -184,6 +192,7 @@ record with `fleet reap <handle> [--forget]`.
 | `FLEET_IGNORE_WORKSPACE_MANAGER` | unset | Set to `1` to skip the workspace-manager coexistence gate. |
 | `FLEET_DASHBOARD_POLL_MS` | `2000` | How long the dashboard waits for a keystroke before redrawing; also its whole polling cost, one `agent list` per tick. |
 | `FLEET_DASHBOARD_TAIL_LINES` | `200` | Lines of a worker's terminal the dashboard's `t` key pulls. |
+| `FLEET_DASHBOARD_OPEN_TIMEOUT_S` | `3` | Seconds the palette action waits for herdr's single popup slot to free before reporting that it could not open. |
 
 Every timeout above is a wall-clock budget computed as an absolute deadline.
 An inner herdr call is handed what remains of the budget rather than the whole

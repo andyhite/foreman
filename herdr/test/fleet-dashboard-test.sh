@@ -112,6 +112,57 @@ $(printf '%s\n' "$DASH_HELP" | awk '/^  Row flags/ { exit } /^    [a-zA-Z?]/ { p
 EOF
 is 'every key the help advertises is bound' "${missing# }" ''
 
+# ── key decoding ─────────────────────────────────────────────────────────────
+#
+# This was read with bash's `read -n 1`, which reprograms the terminal to
+# VMIN=1/VTIME=0 for the duration of the call and so overrode the `stty time`
+# the whole loop is built on. A lone Escape blocked until the next keystroke
+# arrived and then swallowed it — Escape never closed the dashboard, and the
+# key after it was misread — and the poll read never timed out, so the list
+# stopped refreshing on its own. Reading through `dd` restores the driver's
+# behaviour; these assertions pin the decoding that sits on top of it.
+
+printf '\nkey decoding\n'
+dash_tty_saved=$DASH_TTY
+DASH_TTY=/dev/null
+stty() { :; }
+
+# The byte source, scripted: dash_key is the thing under test, not the tty.
+# The queue is a file rather than a variable because dash_key consumes bytes
+# through command substitution — a subshell, where an assignment would be lost
+# and every call would hand back the same first byte.
+byteq="$sandbox/bytes"
+dash_byte() {
+  local first
+  first=$(sed -n '1p' "$byteq")
+  sed '1d' "$byteq" >"$byteq.tmp" && mv "$byteq.tmp" "$byteq"
+  printf '%s' "$first"
+}
+# shellcheck disable=SC2086  # the argument is a byte list and must word-split
+press() { printf '%s\n' $1 >"$byteq"; dash_key; }
+
+is 'a bare Escape is Escape, not the start of a sequence' "$(press '1b')" 'esc'
+is 'and Escape closes the dashboard' "$(dash_action_for_key "$(press '1b')")" 'quit'
+is 'the down arrow survives the same decoder' "$(press '1b 5b 42')" 'down'
+is 'so does the up arrow'                     "$(press '1b 5b 41')" 'up'
+is 'and right, which focuses'                 "$(press '1b 5b 43')" 'right'
+is 'an unrecognised sequence is not a key'    "$(press '1b 5b 5a')" 'unknown'
+is 'a plain key is itself'                    "$(press '71')" 'q'
+is 'a shifted key keeps its case'             "$(press '58')" 'X'
+is 'carriage return is enter'                 "$(press '0d')" 'enter'
+is 'so is newline'                            "$(press '0a')" 'enter'
+
+# The tick is what makes the list live: with no key pressed the read has to come
+# back empty so the loop can redraw, rather than blocking until the user types.
+is 'no byte within the timeout is a poll tick' "$(press '')" 'tick'
+is 'and a tick redraws instead of acting' "$(dash_action_for_key "$(press '')")" 'tick'
+
+is 'a sequence decodes from its bytes alone' "$(dash_decode_escape 5b44)" 'left'
+is 'and an empty tail is a bare Escape'      "$(dash_decode_escape '')" 'esc'
+
+unset -f stty dash_byte
+DASH_TTY=$dash_tty_saved
+
 # ── truncation ───────────────────────────────────────────────────────────────
 
 printf '\ntruncation\n'
@@ -392,6 +443,77 @@ is 'and the last worker is reachable' "$(dash_selected)" 'w39'
 
 unset -f stty dash_out
 DASH_TTY=$dash_tty_real
+
+# ── opening the popup ────────────────────────────────────────────────────────
+#
+# A popup is a singleton session resource and the command palette is itself a
+# popup, so the palette — the advertised way to reach this action — is still
+# holding the slot at the moment it dispatches the action. Opening once and
+# giving up returned "popup already open" for every palette invocation, which
+# is every invocation a new user makes.
+
+printf '\nopening the popup\n'
+openbin="$sandbox/openbin"
+mkdir -p "$openbin"
+cat >"$openbin/herdr" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "plugin pane")
+    n=$(cat "$OPEN_COUNTER" 2>/dev/null || printf 0)
+    n=$((n + 1)); printf '%s' "$n" >"$OPEN_COUNTER"
+    case "$OPEN_SCENARIO" in
+      ok) printf '{"result":{"type":"ok"}}\n'; exit 0 ;;
+      busy-then-ok)
+        [ "$n" -ge 3 ] && { printf '{"result":{"type":"ok"}}\n'; exit 0; }
+        printf '{"error":{"code":"plugin_pane_open_failed","message":"popup already open"}}\n'
+        exit 1 ;;
+      always-busy)
+        printf '{"error":{"code":"plugin_pane_open_failed","message":"popup already open"}}\n'
+        exit 1 ;;
+      fatal)
+        printf '{"error":{"code":"entrypoint_not_found","message":"no such entrypoint"}}\n'
+        exit 1 ;;
+    esac ;;
+  "notification show") printf 'toast\n' >>"$OPEN_NOTIFY"; exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$openbin/herdr"
+
+export HERDR_BIN_PATH="$openbin/herdr"
+export OPEN_COUNTER="$sandbox/open-count"
+export OPEN_NOTIFY="$sandbox/open-notify"
+export FLEET_DASHBOARD_OPEN_TIMEOUT_S=1
+
+run_open() {
+  export OPEN_SCENARIO=$1
+  : >"$OPEN_COUNTER"; : >"$OPEN_NOTIFY"
+  "$BIN/fleet-dashboard-open" >/dev/null 2>&1
+}
+
+run_open ok
+is 'a free popup slot opens on the first attempt' "$?$(cat "$OPEN_COUNTER")" '01'
+
+run_open busy-then-ok
+rc=$?
+is 'the palette holding the slot is waited out, not reported' "$rc" '0'
+assert 'and it took more than one attempt' [ "$(cat "$OPEN_COUNTER")" -gt 1 ]
+is 'with no toast, because nothing failed' "$(cat "$OPEN_NOTIFY")" ''
+
+run_open always-busy
+rc=$?
+is 'a slot that never frees is reported' "$rc" '1'
+assert 'after retrying rather than after one attempt' [ "$(cat "$OPEN_COUNTER")" -gt 1 ]
+is 'and it says so' "$(cat "$OPEN_NOTIFY")" 'toast'
+
+# Retrying a real misconfiguration for the whole budget delays the only useful
+# signal by the whole budget.
+run_open fatal
+rc=$?
+is 'an error that is not a modal fails immediately' "$rc" '1'
+is 'on the first attempt' "$(cat "$OPEN_COUNTER")" '1'
+
+unset HERDR_BIN_PATH OPEN_COUNTER OPEN_NOTIFY OPEN_SCENARIO FLEET_DASHBOARD_OPEN_TIMEOUT_S
 
 # ── plugin wiring ────────────────────────────────────────────────────────────
 #
