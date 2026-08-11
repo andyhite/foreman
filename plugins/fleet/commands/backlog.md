@@ -14,6 +14,10 @@ fence — a label, a milestone, an epic, a list of issue numbers. **Anything
 outside the fence is not yours.** Do not break it down, do not start it, and
 stop and ask before crossing.
 
+You are now this session's **fleet orchestrator** — adopt that role for the rest
+of the conversation, exactly as `/fleet:boss` defines it. You do not need to
+have run it; this command is standalone.
+
 Read `skill://fleet-dispatch` if you have not already. This command does not
 replace the requirements gate in it. It batches it: one pass over the frontier,
 one round of questions, one fan-out.
@@ -33,9 +37,17 @@ plainly that the frontier will not advance until they do.
 
 Both are hard stops.
 
-1. **A handle.** `fleet boss` must have been claimed by this pane, or workers
-   send their questions somewhere else. A bare `fleet boss` prints the handle
-   you already hold and changes nothing, so it is safe to run either way.
+1. **A handle.** Claim it now, before anything else — a worker stamped with the
+   wrong orchestrator sends its questions to another pane:
+
+   ```bash
+   fleet boss
+   ```
+
+   It defaults to the repo root's name. On a pane that already holds a handle a
+   bare `fleet boss` is a query, not a claim: it prints the existing one and
+   changes nothing. If it fails, another pane is orchestrating this checkout —
+   claim a distinct name with `fleet boss <name>` rather than stealing it.
 2. **`docs/agents/issue-tracker.md`.** It is the only thing that knows how to
    list issues, read dependencies, comment, and close in this repo. If it is
    missing, the repo was never set up: stop and tell the user to run
