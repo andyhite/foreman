@@ -175,7 +175,7 @@ Two things decide who is in the wave:
 
 ## 5. Dispatch
 
-Write every brief to `/tmp/fleet-<n>.md` before spawning anything. Use the shape
+Write every brief to `/tmp/fleet-<handle>.md` before spawning anything. Use the shape
 printed by `fleet skill fleet-dispatch`: the answers from step 3, then scope and
 acceptance. `fleet spawn --skill <name>` prepends the portable skill instruction,
 so the brief itself starts with its concrete content:
@@ -217,8 +217,8 @@ is dispatchable again instead of sitting stuck looking taken.
 Then spawn the whole wave and block once:
 
 ```bash
-fleet spawn feat/412-webhook-retry --base origin/main --skill implement --task-file /tmp/fleet-412.md
-fleet spawn fix/418-duplicate-send --base origin/main --skill diagnosing-bugs --task-file /tmp/fleet-418.md
+fleet spawn feat/412-webhook-retry --base origin/main --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
+fleet spawn fix/418-duplicate-send --base origin/main --skill diagnosing-bugs --task-file /tmp/fleet-fix-418-duplicate-send.md
 fleet join
 ```
 
@@ -227,7 +227,7 @@ parallelize.
 
 Reviews are the exception to `--base`: the `code-review` skill diffs in its own
 checkout, so branch the reviewer off the tip under review:
-`fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-412-review.md`.
+`fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-review-412.md`.
 
 ## 6. Review, merge, recompute
 

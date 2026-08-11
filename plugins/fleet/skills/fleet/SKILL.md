@@ -225,6 +225,32 @@ scoped to the current repo — otherwise they would block on, and delete, anothe
 checkout's fleet. `--all-repos` widens `ls` and `reap` deliberately. Outside a
 git repo there is nothing to scope to, and they refuse rather than guess.
 
+## Worker states
+
+The orchestrator sees each worker in one of four states:
+
+**`working`** — A turn is running. The worker's current output is in the pane.
+
+**`idle` or `done`** — A turn ended. A report may have been filed
+(`fleet report`), or the turn may have simply completed without one. Either
+way, the worker is joinable: `fleet join` will settle it.
+
+**`blocked`** — An approval or question UI in the pane is waiting for input.
+`fleet join` prints its last output and notes the blockage. Re-join the worker
+by name — `fleet join <handle>` — after unblocking it with `fleet send --raw`;
+a bare join will not resurface it.
+
+**`gone`** — The agent process died. The report file, if it exists, survives
+and `join` prints it; the handle remains in `fleet ls` until `fleet reap`
+or `fleet reap --forget` releases it.
+
+`fleet join --timeout <seconds>` and `fleet ask --timeout <seconds>` override
+`FLEET_WAIT_TIMEOUT_MS` for one call. `fleet ask` rejects `--raw`: raw
+steering files no report to wait for. `fleet ls` has a Q column — `?` marks a
+worker whose question has not been collected, `-` everyone else. `fleet doctor`
+checks environment sanity and exits nonzero on a hard failure; `fleet version`
+prints the CLI version.
+
 ## What this is not for
 
 - Anything that fits in one repo checkout. Keep it here or use your harness's

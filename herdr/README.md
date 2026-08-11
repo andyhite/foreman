@@ -32,17 +32,17 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `fleet boss [name] [--steal]` | Claim the orchestrator handle for this pane. |
 | `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--kind`, `--skill`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
 | `fleet send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
-| `fleet ask <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. |
+| `fleet ask [--timeout <seconds>] <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. For ask the flag comes first. |
 | `fleet join [handle...] [--timeout <seconds>]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FLEET_WAIT_TIMEOUT_MS` for this call. |
-| `fleet ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose question has not been collected, `-` when idle. |
+| `fleet ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose filed question has not been collected by a join, `-` everyone else. |
 | `fleet read <handle> [-n N]` | Read a worker's terminal. |
 | `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
 | `fleet report [-f file\|text]` | From a worker, file its report. |
 | `fleet reply <text>` | From a worker, file a question and interrupt the orchestrator. |
 | `fleet whoami` | Print this pane's handle. |
 | `fleet skill <name>` | Print a skill's instructions; the mechanism worker briefs use to reach skills. |
-| `fleet version` | Print the fleet version. |
-| `fleet doctor` | Check environment sanity: herdr, jq, `HERDR_ENV`, pane, state dir, and PATH link. Exits nonzero on a hard failure. |
+| `fleet version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
+| `fleet doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FLEET_STATE` writability, the PATH symlink, and the current repo's worker count. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose fleet misbehavior. |
 
 ### Collecting
 
@@ -67,11 +67,11 @@ preempt the wave. Answer it with `fleet send --raw`.
 
 ### Timeout control
 
-`fleet join [--timeout <seconds>]` and `fleet ask --timeout <seconds>` override `FLEET_WAIT_TIMEOUT_MS` for a single call. Non-numeric values cause an error with usage displayed.
+`fleet join [--timeout <seconds>]` and `fleet ask [--timeout <seconds>]` (flag first for ask) override `FLEET_WAIT_TIMEOUT_MS` for a single call. Non-numeric values cause an error with usage displayed.
 
 ### `--raw`
 
-Without it, `send` and `ask` append fleet's protocol block — right for a task,
+Without `--raw`, `send` and `ask` both append fleet's protocol block — right for a task,
 wrong for a one-line answer. Re-appending "do not open a PR unless the task
 above says to" over an answer makes *that answer* the task above, which is how
 a worker talks itself out of the PR its original brief asked for. `--raw` is

@@ -102,7 +102,7 @@ quoting. Write it, spawn, and move on to the next slice:
 ```bash
 # 1. write the brief to /tmp/fleet-<handle>.md
 # 2. spawn with the execution skill named explicitly
-fleet spawn feat/412-webhook-retry --skill implement --task-file /tmp/fleet-412.md
+fleet spawn feat/412-webhook-retry --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
 ```
 
 Branch names follow the repo's convention if it has one. Otherwise:
