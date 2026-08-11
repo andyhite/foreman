@@ -157,6 +157,10 @@ dash_decode_escape() {
 
 # One keystroke, named.
 dash_key() {
+  # LC_ALL=C for the same reason valid_handle needs it: the control-byte arm
+  # below is a glob range, and a locale that interleaves case in its collation
+  # order widens `[0-9a-f]` past the bytes it is meant to name.
+  local LC_ALL=C
   local b rest
   b=$(dash_byte)
   case "$b" in
