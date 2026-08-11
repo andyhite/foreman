@@ -40,6 +40,12 @@ open_popup() { "$herdr_bin" plugin pane open --plugin "$plugin" --entrypoint das
 # An absolute deadline rather than a countdown of sleeps: the loop body is a
 # herdr round trip of its own, and accumulating only the time spent asleep is
 # how a bound gets overrun by an order of magnitude.
+#
+# `date +%s` is whole seconds, so the real budget is anywhere from one second
+# less than asked for to exactly it, depending on where in the current second
+# the first attempt lands. That slop is why the default is three rather than
+# one: at one second a deadline computed at x.99 expires before the first
+# retry, which is a single attempt wearing a retry loop's clothes.
 deadline=$(( $(date +%s) + budget ))
 while :; do
   if out=$(open_popup); then exit 0; fi

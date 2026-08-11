@@ -483,7 +483,11 @@ chmod +x "$openbin/herdr"
 export HERDR_BIN_PATH="$openbin/herdr"
 export OPEN_COUNTER="$sandbox/open-count"
 export OPEN_NOTIFY="$sandbox/open-notify"
-export FLEET_DASHBOARD_OPEN_TIMEOUT_S=1
+# Two whole seconds, not one. The opener's deadline is `date +%s` arithmetic,
+# so a one-second budget computed at x.99 expires before the first retry and
+# the suite fails on the boundary rather than on the behaviour — the same
+# whole-second trap the report-freshness protocol already exists to dodge.
+export FLEET_DASHBOARD_OPEN_TIMEOUT_S=2
 
 run_open() {
   export OPEN_SCENARIO=$1
