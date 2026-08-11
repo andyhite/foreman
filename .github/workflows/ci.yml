@@ -14,17 +14,23 @@ jobs:
         run: /bin/bash herdr/test/fleet-test.sh
       - name: Run fleet-link test suite
         run: /bin/bash herdr/test/fleet-link-test.sh
+      - name: Run fleet dashboard test suite
+        run: /bin/bash herdr/test/fleet-dashboard-test.sh
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check bash syntax and run tests with modern bash
-        run: bash -n herdr/bin/fleet && bash herdr/test/fleet-test.sh
+        run: |
+          bash -n herdr/bin/fleet
+          bash -n herdr/bin/fleet-dashboard
+          bash herdr/test/fleet-test.sh
+          bash herdr/test/fleet-dashboard-test.sh
       - name: Lint bash scripts
-        run: shellcheck --severity=warning -s bash herdr/bin/fleet herdr/test/fleet-test.sh herdr/test/fleet-link-test.sh
+        run: shellcheck --severity=warning -s bash herdr/bin/fleet herdr/bin/fleet-dashboard herdr/test/fleet-test.sh herdr/test/fleet-link-test.sh herdr/test/fleet-dashboard-test.sh
       - name: Lint POSIX shell scripts
-        run: shellcheck --severity=warning -s sh herdr/bin/fleet-link herdr/bin/fleet-ls herdr/install.sh
+        run: shellcheck --severity=warning -s sh herdr/bin/fleet-link herdr/bin/fleet-ls herdr/bin/fleet-dashboard-open herdr/install.sh
       - name: Check version consistency
         run: |
           herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)

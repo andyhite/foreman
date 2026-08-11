@@ -11,7 +11,7 @@
       "name": "fleet",
       "description": "Turn this session into a fleet orchestrator: gather requirements yourself, then dispatch each piece of execution work to a peer coding agent running the matching mattpocock/skills skill on its own branch.",
       "source": "./plugins/fleet",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development",
       "keywords": [
         "fleet",

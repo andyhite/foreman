@@ -1,6 +1,6 @@
 id = "andyhite.fleet"
 name = "Fleet"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.8.0"
 description = "Dispatch peer coding agents into herdr worktree workspaces."
 platforms = ["linux", "macos"]
@@ -10,13 +10,36 @@ platforms = ["linux", "macos"]
 [[startup]]
 command = ["sh", "bin/fleet-link", "--quiet"]
 
-# Plugin actions take no arguments, so expose only the argument-less inventory
-# command here; everything else is driven from an agent's shell. It goes through
-# a wrapper rather than calling `bin/fleet ls` directly: actions run with cwd set
-# to the plugin root, and `fleet ls` scopes its inventory to the repo it runs in,
-# so the unwrapped call would always report on this plugin's own checkout.
+# Plugin actions take no arguments, so the two exposed here are the two that
+# need none. Both go through a wrapper rather than calling `bin/fleet` directly:
+# actions run with cwd set to the plugin root, and fleet scopes its inventory to
+# the repo it runs in, so an unwrapped call would always report on this plugin's
+# own checkout.
 [[actions]]
 id = "ls"
 title = "List fleet workers"
 contexts = ["workspace"]
 command = ["./bin/fleet-ls"]
+
+# The dashboard is the interactive half of `ls`, and the one worth binding a key
+# to. It needs an action to reach it: the palette and `[[keys.command]]` both
+# address actions, never pane entrypoints.
+[[actions]]
+id = "dashboard"
+title = "Fleet dashboard"
+description = "Inspect and operate this workspace's fleet in a popup."
+contexts = ["workspace"]
+command = ["./bin/fleet-dashboard-open"]
+
+# A popup rather than a split or a tab: the dashboard is something you open, act
+# in, and dismiss, and a popup leaves the tiled layout — including the agent
+# panes it reports on — exactly as it found it. Unlike an action, a pane
+# entrypoint receives its own $HERDR_PLUGIN_CONTEXT_JSON, so the dashboard reads
+# the workspace it belongs to without being told.
+[[panes]]
+id = "dashboard"
+title = "Fleet"
+placement = "popup"
+width = "85%"
+height = "80%"
+command = ["bash", "bin/fleet-dashboard"]

@@ -10,16 +10,18 @@ that publish the same plugin tree under the name `foreman`.
 
 ## Verify
 
-Run both suites under the oldest supported bash — several shipped bugs only
+Run every suite under the oldest supported bash — several shipped bugs only
 reproduce there:
 
 ```sh
 /bin/bash herdr/test/fleet-test.sh        # macOS system bash 3.2
 /bin/bash herdr/test/fleet-link-test.sh
+/bin/bash herdr/test/fleet-dashboard-test.sh
 ```
 
-shellcheck with `-s bash` for `herdr/bin/fleet` and both test files, `-s sh`
-for `fleet-link`, `fleet-ls`, and `install.sh`. CI runs exactly this plus a
+shellcheck with `-s bash` for `herdr/bin/fleet`, `herdr/bin/fleet-dashboard`
+and the test files, `-s sh` for `fleet-link`, `fleet-ls`,
+`fleet-dashboard-open`, and `install.sh`. CI runs exactly this plus a
 version-consistency check.
 
 ## Shell constraints

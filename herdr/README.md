@@ -35,6 +35,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `fleet ask [--timeout <seconds>] <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. For ask the flag comes first. |
 | `fleet join [handle...] [--timeout <seconds>]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FLEET_WAIT_TIMEOUT_MS` for this call. |
 | `fleet ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose filed question has not been collected by a join, `-` everyone else. |
+| `fleet dashboard [--all-repos]` | Interactive counterpart to `fleet ls`; also aliased `dash`. |
 | `fleet read <handle> [-n N]` | Read a worker's terminal. |
 | `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
 | `fleet report [-f file\|text]` | From a worker, file its report. |
@@ -96,6 +97,67 @@ first-run trust prompt, and refusing there would fail a `spawn` whose worktree,
 agent and layout already exist. Fleet submits and says it could not confirm
 pickup, rather than failing.
 
+### Dashboard
+
+`fleet dashboard` is the interactive counterpart to `fleet ls`: the same
+inventory, but with a cursor and the operations that act on a row attached to
+that row. Reach it three ways — the command palette action "Fleet dashboard",
+a `[[keys.command]]` binding on `andyhite.fleet.dashboard`, or `fleet
+dashboard` typed in any pane.
+
+It opens as a popup, not a split or a tab, because a popup is something you
+open, act in, and dismiss, and it leaves the tiled layout — including the
+agent panes it is reporting on — exactly as it found it. herdr refuses to
+open one while Settings, Copy mode, or another modal already owns the screen.
+The action reports that refusal rather than failing silently: herdr's own
+message goes to the plugin log, and to a top-right toast as well when
+`ui.toast.delivery` is on — it defaults to `off`, so the log is the half that
+is always there.
+
+| Keys | Action |
+| --- | --- |
+| `j`/`down`, `k`/`up` | move the selection |
+| `g`, `G` | jump to the first or last worker |
+| `A` | toggle between this repository and every repository on the machine |
+| `R` | refresh now (the list also refreshes on its own) |
+| `r` | view the worker's full filed report |
+| `t` | view the last lines of the worker's terminal |
+| `l` | view this dashboard's own operation log |
+| `?` | view this keymap |
+| `enter` | focus the worker's agent and close the dashboard |
+| `s` / `S` | dispatch a task (`fleet send`) / steer the current turn (`fleet send --raw`) |
+| `a` | answer a pending question |
+| `n` | spawn a new worker (`fleet spawn`, in the background) |
+| `x` / `X` | reap the worker (`fleet reap`) / reap and discard uncommitted work (`fleet reap --force`) |
+| `q` / `esc` | quit |
+
+Each row carries a `D R J` flag group that `fleet ls` has no room for: the
+send/report/collect state a plain listing cannot show. `D` is the dispatch
+counter — how many tasks the worker has been given. `R` is `+` when a report
+answering that current dispatch is on disk and `-` when it is not. `J` is `^`
+when that dispatch has not yet been collected by a `fleet join` and `.` when
+it has.
+
+The glyph in front of a row is `>` working, `!` blocked, `*` done, `o` idle,
+`x` no live agent, or `?` — an unanswered question, which outranks every
+other status because a worker waiting on you is the one thing in a wave that
+stops everything else from mattering.
+
+Two things about how it is built are worth knowing. Every mutation shells out
+to the `fleet` subcommand that already owns that operation rather than
+reimplementing dispatch inline, so the semantics have exactly one
+implementation. And `enter` does not focus the worker directly: the popup is
+session-modal, so a focus issued while it is still open lands underneath it;
+the dashboard closes first and issues the focus from a detached child a beat
+later, once the modal is actually gone.
+
+Answering a question with `a` is a raw send plus the acknowledgement `fleet
+join` would have written on collection — without it the question would stay
+pending forever, since nothing else records that it was seen. `n` runs `fleet
+spawn` detached rather than inline, because spawn blocks for as long as an
+agent takes to boot, and a session-modal popup would freeze for that whole
+duration instead of showing the worker the moment herdr names it.
+
 ### Recovering a dead worker
 
 A record with no live agent is a worker that died, not a free handle. `spawn`
@@ -120,6 +182,8 @@ record with `fleet reap <handle> [--forget]`.
 | `FLEET_LAYOUT_START_TIMEOUT_MS` | `15000` | Maximum milliseconds to verify that a layout's requested TUI became foreground before retrying. |
 | `FLEET_BOSS_HANDLE` | slugified repository-root name (or `boss` outside a repository) | Overrides the default orchestrator handle claimed by `fleet boss`. |
 | `FLEET_IGNORE_WORKSPACE_MANAGER` | unset | Set to `1` to skip the workspace-manager coexistence gate. |
+| `FLEET_DASHBOARD_POLL_MS` | `2000` | How long the dashboard waits for a keystroke before redrawing; also its whole polling cost, one `agent list` per tick. |
+| `FLEET_DASHBOARD_TAIL_LINES` | `200` | Lines of a worker's terminal the dashboard's `t` key pulls. |
 
 Every timeout above is a wall-clock budget computed as an absolute deadline.
 An inner herdr call is handed what remains of the budget rather than the whole
@@ -154,6 +218,7 @@ the oldest bash you support as well; several cases only fail there.
 ```sh
 herdr/test/fleet-test.sh          # the CLI
 herdr/test/fleet-link-test.sh     # the PATH symlink and its ownership receipt
+herdr/test/fleet-dashboard-test.sh   # the dashboard
 /bin/bash herdr/test/fleet-test.sh   # macOS system bash 3.2
 ```
 

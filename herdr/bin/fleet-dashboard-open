@@ -1,0 +1,37 @@
+#!/bin/sh
+# Open the fleet dashboard as a herdr popup.
+#
+# The palette lists actions, not panes, so reaching a `[[panes]]` entrypoint
+# from a keybinding or the palette needs an action that opens it. A wrapper
+# rather than a bare argv command because plugin commands are not run through a
+# shell: $HERDR_BIN_PATH is the portable way to reach the running herdr, and
+# nothing expands it inside a manifest array.
+#
+# The popup does not need the workspace passed to it. Unlike `fleet-ls`, which
+# runs in the plugin root and has to be told where to look, a plugin pane
+# receives $HERDR_PLUGIN_CONTEXT_JSON of its own; the dashboard reads the
+# workspace cwd from there.
+
+set -eu
+
+herdr_bin=${HERDR_BIN_PATH:-herdr}
+plugin=${HERDR_PLUGIN_ID:-andyhite.fleet}
+
+if out=$("$herdr_bin" plugin pane open --plugin "$plugin" --entrypoint dashboard 2>&1); then
+  exit 0
+fi
+
+# herdr refuses a popup while Settings, Copy mode, or another modal owns the
+# screen. That is a normal thing to hit from a keybinding, and an action that
+# fails silently looks like a broken binding.
+#
+# The plugin log is the reliable half of the report: `notification show` is a
+# no-op unless the user has turned toasts on (`ui.toast.delivery` defaults to
+# `off`), so it is attempted rather than relied on. herdr's own message goes in
+# the body, since "which modal" is the thing you need to know; the body is
+# capped at 240 characters.
+printf 'fleet-dashboard-open: %s\n' "$out" >&2
+"$herdr_bin" notification show 'Fleet dashboard' \
+  --body "Could not open: $(printf '%.200s' "$out")" \
+  --position top-right >/dev/null 2>&1 || true
+exit 1

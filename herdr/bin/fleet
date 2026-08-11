@@ -1658,6 +1658,16 @@ reap_one() {
   rm -rf "${FLEET_STATE:?}/$handle"
 }
 
+# The dashboard is a separate program rather than a cmd_* in here: it is also
+# the plugin's popup pane entrypoint, which herdr launches directly, and it
+# sources this file for its state helpers. Exec'ing it keeps one copy on disk
+# and lets `fleet dashboard` and the palette action reach the same code.
+cmd_dashboard() {
+  local bin; bin="$(fleet_script_dir)/fleet-dashboard"
+  [ -x "$bin" ] || die "fleet-dashboard is missing from $(fleet_script_dir)"
+  exec "$bin" "$@"
+}
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 usage() {
@@ -1672,6 +1682,7 @@ Orchestrator
   fleet join [handle...]         collect this repo's workers, print reports
                                  [--timeout <seconds>] bounds either wait
   fleet ls [--all-repos]         list workers, their kinds, and their states
+  fleet dashboard [--all-repos]  inspect and operate the fleet interactively
   fleet read <handle> [-n N]     read a worker's terminal directly
   fleet reap <handle>...|--all   remove worktrees and forget workers
                                  [--all-repos] [--force] [--forget]
@@ -1710,6 +1721,7 @@ main() {
     report)  cmd_report "$@" ;;
     reply)   cmd_reply "$@" ;;
     ls|list) cmd_ls "$@" ;;
+    dashboard|dash) cmd_dashboard "$@" ;;
     reap)    cmd_reap "$@" ;;
     doctor)  cmd_doctor "$@" ;;
     version|--version|-V) cmd_version ;;
