@@ -1,0 +1,8 @@
+{
+  "name": "secrets-hygiene",
+  "version": "0.1.0",
+  "description": "Keeps credentials out of the repo and out of transcripts: writing .env and key files, staging them, dumping an environment, and inline passwords in shell commands.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

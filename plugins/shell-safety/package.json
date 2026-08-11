@@ -1,0 +1,8 @@
+{
+  "name": "shell-safety",
+  "version": "0.1.0",
+  "description": "Guards for irreversible or over-privileged shell operations: rm -rf, sudo, world-writable chmod, curl | sh, and truncating > redirects into source files. Complements git-hygiene, which owns the git-specific commands.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

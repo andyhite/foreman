@@ -1,0 +1,8 @@
+{
+  "name": "uv",
+  "version": "0.1.0",
+  "description": "For Python repos managed by uv: blocks pip/poetry/pipenv/conda installs that bypass uv.lock, hand-edited uv.lock, --system/--break-system-packages, and bare python where uv run belongs.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

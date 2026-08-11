@@ -1,0 +1,8 @@
+{
+  "name": "npm",
+  "version": "0.1.0",
+  "description": "For repos whose package manager is npm: blocks pnpm/yarn/bun invocations, hand-edited package-lock.json, npm install where npm ci belongs, and --legacy-peer-deps/--force escape hatches.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

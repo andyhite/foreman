@@ -1,0 +1,8 @@
+{
+  "name": "yarn",
+  "version": "0.1.0",
+  "description": "For repos whose package manager is yarn (Classic and Berry): blocks npm/pnpm/bun invocations, hand-edited yarn.lock, mutable installs (--no-immutable/--pure-lockfile), and --ignore-engines/--ignore-integrity.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

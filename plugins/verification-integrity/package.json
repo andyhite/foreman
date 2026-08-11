@@ -1,0 +1,8 @@
+{
+  "name": "verification-integrity",
+  "version": "0.1.0",
+  "description": "Guards against faking a green build: narrowing the test suite (.only/.skip, retries, blind snapshot updates) and bypassing git hooks with --no-verify. Workflow-agnostic.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

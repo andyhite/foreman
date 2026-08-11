@@ -1,0 +1,8 @@
+{
+  "name": "pnpm",
+  "version": "0.1.0",
+  "description": "For repos whose package manager is pnpm: blocks npm/yarn/bun/npx invocations, hand-edited pnpm-lock.yaml, --no-frozen-lockfile, and unscoped workspace-root installs.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

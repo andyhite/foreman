@@ -1,0 +1,8 @@
+{
+  "name": "craft",
+  "version": "0.1.1",
+  "description": "Ten model-invoked reference skills for the thinking around a change: grilling a decision to settle it, domain modeling (CONTEXT.md + ADRs), deep-module design vocabulary, what makes a test worth keeping, two-axis code review, the hard-bug diagnosis loop, prototyping, primary-source research, merge-conflict resolution, and writing documents agents consume. Adapted from mattpocock/skills (MIT).",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

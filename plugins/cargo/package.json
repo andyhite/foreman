@@ -1,0 +1,8 @@
+{
+  "name": "cargo",
+  "version": "0.1.0",
+  "description": "For Rust repos: blocks hand-edited Cargo.lock, blanket cargo update, command-line clippy suppression (--cap-lints allow, -A clippy::all), and cargo publish without a dry run.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

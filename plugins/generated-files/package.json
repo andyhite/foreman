@@ -1,0 +1,8 @@
+{
+  "name": "generated-files",
+  "version": "0.1.0",
+  "description": "Stops hand-edits to machine-generated artifacts: *.generated.*, __generated__/, protobuf stubs, GraphQL schemas, ORM migrations, and OpenAPI clients. Edit the source and re-run the generator. Excludes package-manager lockfiles \u2014 those live in the per-manager packs.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

@@ -1,0 +1,8 @@
+{
+  "name": "pip",
+  "version": "0.1.0",
+  "description": "For Python repos using pip and virtualenv directly: blocks installs outside a venv (sudo pip, --user, --break-system-packages), unpinned ad-hoc installs, hand-edited pip-compile output, and --no-deps/--force-reinstall.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

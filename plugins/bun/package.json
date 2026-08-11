@@ -1,0 +1,8 @@
+{
+  "name": "bun",
+  "version": "0.1.0",
+  "description": "For repos whose package manager is bun: blocks npm/pnpm/yarn/npx invocations, hand-edited bun.lock and bun.lockb (binary), and --force/--no-save installs.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

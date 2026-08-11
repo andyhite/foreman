@@ -1,0 +1,8 @@
+{
+  "name": "git-hygiene",
+  "version": "0.2.0",
+  "description": "Guards for irreversible git operations and for the default branch: destructive commands (reset --hard, clean -fd, branch -D, stash drop), bare --force pushes, direct pushes and local merges to main, and a standing rule that the default branch is read-only. Workflow-agnostic.",
+  "private": true,
+  "license": "MIT",
+  "omp": {}
+}

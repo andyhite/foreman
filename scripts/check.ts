@@ -137,23 +137,41 @@ const pluginsById = new Map(pluginRoots.map((p) => [p.id, p]));
     metadata?: { version?: unknown };
     plugins?: { name?: unknown; source?: unknown; version?: unknown }[];
   };
-  // Version drift bit us once already: the catalog said 0.3.0 while the root
-  // package.json still said 0.1.0. A plugin's package.json (when it has one)
-  // must agree with its catalog entry, or installs report a version nobody
-  // tagged.
+  // Every plugin directory needs a package.json carrying an `omp` (or `pi`)
+  // manifest key. omp's loader skips a plugin root that has neither, so a
+  // prose-only pack installs, reports enabled, and contributes nothing —
+  // 46 pack rules shipped unreachable that way before this check existed.
+  // Name and version must agree with the catalog too: version drift bit us
+  // once already (catalog 0.3.0 against a root package.json still on 0.1.0),
+  // and a name mismatch breaks the /<plugin>:<command> prefix.
   for (const entry of catalog.plugins ?? []) {
     const source = String(entry.source);
     if (!source.startsWith("./")) continue;
-    const pkgPath = join(resolve(ROOT, source), "package.json");
-    let pkg: { version?: unknown };
+    const where = join(source, "package.json");
+    let pkg: { name?: unknown; version?: unknown; omp?: unknown; pi?: unknown };
     try {
-      pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      pkg = JSON.parse(
+        readFileSync(join(resolve(ROOT, source), "package.json"), "utf8"),
+      );
     } catch {
-      continue; // prose-only pack: no package.json to disagree with
-    }
-    if (pkg.version !== undefined && pkg.version !== entry.version) {
       errors.push(
-        `${join(source, "package.json")}: version "${String(pkg.version)}" disagrees with its marketplace entry "${String(entry.version)}" — bump both together`,
+        `${where}: missing or unparseable — omp's plugin loader skips a plugin root without one, so every rule and skill in this pack would load as nothing`,
+      );
+      continue;
+    }
+    if (pkg.omp === undefined && pkg.pi === undefined) {
+      errors.push(
+        `${where}: no "omp" key — the loader treats a package.json without one as a non-plugin and skips the directory; an empty object is enough`,
+      );
+    }
+    if (pkg.name !== entry.name) {
+      errors.push(
+        `${where}: name "${String(pkg.name)}" disagrees with its marketplace entry "${String(entry.name)}"`,
+      );
+    }
+    if (pkg.version !== entry.version) {
+      errors.push(
+        `${where}: version "${String(pkg.version)}" disagrees with its marketplace entry "${String(entry.version)}" — bump both together`,
       );
     }
   }
