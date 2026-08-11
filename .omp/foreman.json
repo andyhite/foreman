@@ -1,0 +1,90 @@
+{
+  "repo": "andyhite/omp-foreman",
+  "mainBranch": "main",
+  "commitTypes": [
+    "feat",
+    "fix",
+    "docs",
+    "refactor",
+    "perf",
+    "test",
+    "build",
+    "ci",
+    "chore",
+    "style",
+    "revert"
+  ],
+  "labels": {
+    "idea": "idea",
+    "epic": "epic",
+    "task": "task",
+    "bug": "bug",
+    "bugSeverities": [
+      "sev0",
+      "sev1",
+      "sev2",
+      "sev3"
+    ],
+    "readyForHuman": "ready-for-human",
+    "chart": "chart"
+  },
+  "board": {
+    "owner": "andyhite",
+    "projectNumber": 5,
+    "projectNodeId": "PVT_kwHOAAESt84Bf-2S",
+    "statusFieldId": "PVTSSF_lAHOAAESt84Bf-2SzhaNyZY",
+    "statuses": {
+      "backlog": {
+        "name": "Backlog",
+        "id": "5b92a208"
+      },
+      "todo": {
+        "name": "To Do",
+        "id": "f75ad846"
+      },
+      "inProgress": {
+        "name": "In Progress",
+        "id": "47fc9ee4"
+      },
+      "review": {
+        "name": "Review",
+        "id": "c189468b"
+      },
+      "done": {
+        "name": "Done",
+        "id": "98236657"
+      },
+      "rejected": {
+        "name": "Rejected",
+        "id": "bc29622c"
+      }
+    }
+  },
+  "commands": {
+    "packageManager": "npm",
+    "install": "npm install",
+    "check": "bun scripts/check.ts",
+    "verify": null,
+    "e2e": null
+  },
+  "docs": {
+    "context": null,
+    "contextMap": null,
+    "adr": null,
+    "prd": null,
+    "outOfScope": null
+  },
+  "epicLoop": {
+    "maxConcurrentTracks": 3
+  },
+  "plugins": {
+    "marketplace": "omp-foreman",
+    "packs": [
+      "craft",
+      "git-hygiene",
+      "shell-safety",
+      "secrets-hygiene",
+      "npm"
+    ]
+  }
+}
