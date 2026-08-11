@@ -5,33 +5,44 @@ description: Delivering a chain of dependent subtasks as GitHub stacked pull req
 
 # Stacked PRs — a dependency chain ships as one stack
 
-GitHub stacked pull requests turn a chain of dependent branches into linked
-PRs: each layer targets the branch below it, reviewers see one focused diff
-per layer, and GitHub handles the cascading rebases and retargeting as
-layers land. That maps one-to-one onto an epic **track**: a run of subtasks
-where each depends on the previous one — the worker keeps building upward
-instead of waiting for merges.
+`policy.delivery.prStrategy` (`.omp/foreman.json`, default `stacked`)
+selects this skill. Under `stacked`, GitHub stacked pull requests turn a
+chain of dependent branches into linked PRs: each layer targets the branch
+below it, reviewers see one focused diff per layer, and GitHub handles the
+cascading rebases and retargeting as layers land. That maps one-to-one onto
+an epic **track**: a run of subtasks where each depends on the previous one
+— the worker keeps building upward instead of waiting for merges.
 
-The operator-merge protocol composes cleanly: PRs merge **bottom-up**, so
-the operator merging layer K approves layers 1…K in one gesture (merging
-the top approves the whole stack), and a comment on any layer is a change
-request for that layer.
+Under `sequential`, the chain ships as plain sequential PRs and
+`epic-loop` never reaches this skill: dispatch each layer only after the
+previous layer merges. The same wave model is also the forced path when
+`stacked` is selected but `gh stack` is unavailable. One path is chosen by
+policy; the other is forced by capability. A repository that repeatedly
+hits that fallback must set `policy.delivery.prStrategy` to `sequential`
+deliberately rather than relying on an error path — a fallback that fires
+every run is configuration nobody wrote down.
+
+The merge protocol differs by `policy.delivery.mergePolicy`
+(`.omp/foreman.json`, default `operator`), as described in “While the
+stack is open.”
 
 ## Prerequisites — check, don't assume
 
 - `gh extension list | grep gh-stack` (install: `gh extension install
-github/gh-stack`).
+  github/gh-stack`).
 - The feature may be preview/subject to change on some GitHub plans: if any
-  `gh stack` command fails as unavailable, fall back to the wave model —
-  deliver the chain sequentially as plain PRs, each dispatched only after
-  the previous one merges — and tell the operator the stack path was
-  unavailable.
+  `gh stack` command fails as unavailable, use the same sequential wave
+  model selected by `policy.delivery.prStrategy: sequential`: deliver the
+  chain as plain PRs, each dispatched only after the previous one merges,
+  and tell the operator that capability forced the selected mechanism.
 
 ## Conventions
 
 - One **track = one worker = one worktree = one stack**. The track
-  worktree is named `<repo-slug>-<epic>-<track-slug>`; each layer's branch
-  keeps the normal issue convention `<type>/<issue>-<slug>`.
+  worktree is provisioned by the orchestrator through `skill://worktree`'s
+  `create` operation and arrives in the worker's brief; its name is
+  `<repo-slug>-<epic>-<track-slug>`. The worker never creates it. Each
+  layer's branch keeps the normal issue convention `<type>/<issue>-<slug>`.
 - One **layer = one subtask issue = one PR**. Every layer passes the full
   inner dev loop (TDD, verification rungs 1–2, QA gate on the layer's diff)
   before it is submitted. The layer's QA diff is `git diff
@@ -90,9 +101,15 @@ after anything lands:
   sync aborts on a genuinely diverged stack instead of guessing — resolve
   divergence deliberately (`gh stack unstack` + `gh stack init` to rebuild
   tracking).
-- **`gh stack merge` is the operator's decision**, on every layer, always —
-  run it yourself only on the operator's explicit instruction (remember a
-  mid-stack merge takes every layer below it).
+- `policy.delivery.mergePolicy` (`.omp/foreman.json`, default `operator`)
+  decides who invokes `gh stack merge`:
+  - `operator`: it is the operator's decision on every layer; run it
+    yourself only on the operator's explicit instruction.
+  - `agent-on-green`: the delivering agent may merge only when CI is green,
+    the QA gate returned `PASS`, and no operator comment is unresolved.
+    Merge bottom-up, one layer at a time, and re-check that gate for each
+    layer. Merging layer K takes every layer below it, so never merge the
+    top as a shortcut.
 
 ### Conflicts during a cascade
 
@@ -120,6 +137,8 @@ operator has already merged or queued.
 ## When the track is done
 
 All layers merged: `gh stack sync --prune` (deletes merged local
-branches), confirm every subtask issue is `Done`, remove the track worktree
-(`worktree` skill). The stack object dissolves with its last merge; nothing
-to clean up on GitHub.
+branches), confirm every subtask issue is `Done`, then report the track
+worktree's state — the orchestrator retires it through
+`skill://worktree`'s `remove`, and the track is not done while it exists.
+The stack object dissolves with its last merge; nothing to clean up on
+GitHub.

@@ -72,5 +72,3 @@ thing."
 - **Rejected alternatives when the rejection is non-obvious.** If
   you considered GraphQL and picked REST for subtle reasons, record
   it — otherwise someone will suggest GraphQL again in six months.
-</content>
-<parameter name="i">Write domain-modeling ADR-FORMAT.md

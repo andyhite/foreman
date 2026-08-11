@@ -21,6 +21,9 @@ any other docs the issue names. The docs win over the issue text when they
 disagree; flag any step that contradicts a recorded ADR in Risks rather than
 quietly overriding it.
 
+Read `policy.tdd.enforcement` from `.omp/foreman.json` before planning; its
+default is `required`.
+
 Return exactly this shape:
 
 ## Understanding
@@ -31,13 +34,18 @@ Two or three sentences: what is wrong or missing, and what done looks like
 ## Steps
 
 An ordered list. Each step names: the files and symbols it touches, the
-change, and **the test that proves it — written first** at a seam agreed in
-the issue's `## Test seams` section. If a step needs a seam that was not
-agreed, raise it as a Risk rather than making the decision alone. Steps
-should be independently verifiable; flag the ones that can run in parallel.
-Respect this repo's own conventions for shared rules/validation — if it
-centralizes a predicate somewhere, extend that, don't re-derive it at a call
-site; never truncate content silently; never hand-edit a generated file.
+change, and its proof at a seam agreed in the issue's `## Test seams`
+section. `policy.tdd.enforcement` (`.omp/foreman.json`, default `required`)
+decides the form: under `required`, every step names the test that proves it,
+written first; under `encouraged`, new behavior and bug fixes still name that
+test first, while a refactor or plumbing step whose proof is exercised
+behavior rather than a test must say so explicitly and name what will be
+observed. If a step needs a seam that was not agreed, raise it as a Risk
+rather than making the decision alone. Steps should be independently
+verifiable; flag the ones that can run in parallel. Respect this repo's own
+conventions for shared rules/validation — if it centralizes a predicate
+somewhere, extend that, don't re-derive it at a call site; never truncate
+content silently; never hand-edit a generated file.
 
 ## Risks
 

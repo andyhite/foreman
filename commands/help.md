@@ -20,11 +20,13 @@ Present, compactly — tables over prose, one screen if you can:
 1. **The lifecycle in one breath.** A document enters through
    `/foreman:intake`, single ideas still enter through `/foreman:record`, and
    both converge on `/foreman:groom`: they are groomed into a task or an epic
-   — or rejected — before delivery (`/foreman:work <issue>` for a task or
-   bug, `/foreman:orchestrate <epic>` for an epic), and land on the main
-   branch only through a PR that **I** merge — the merge is the approval.
-   Bugs enter through `/foreman:triage` with a severity label and skip the
-   idea stage. `/foreman:report` snapshots the board without moving
+   — or rejected — before delivery (`/foreman:work <issue>` for a single
+   task or bug, `/foreman:orchestrate` for an epic or, bare, the whole
+   board — either way the orchestrating session provisions the worktrees
+   its issue-workers deliver in), and land on the main
+   branch only through a PR; under the default, **I** merge — the merge is
+   the approval. Bugs enter through `/foreman:triage` with a severity label and skip
+   the idea stage. `/foreman:report` snapshots the board without moving
    anything. `/foreman:init` is the one-time (or repair) setup step
    everything else depends on; `/foreman:doctor` is the maintenance pass
    that catches drift after init (renamed labels, edited board options,
@@ -40,8 +42,9 @@ Present, compactly — tables over prose, one screen if you can:
 4. **Agents.** What `planner`, `qa`, and `issue-worker` each do and who
    dispatches them.
 5. **The rules that bite.** One issue, one branch, one worktree, one
-   writer; claim before the first edit and keep the board current; agents
-   never merge; a task is not done while its worktree exists.
+   writer; claim before the first edit and keep the board current; the
+   operator merges unless the project configured otherwise; a task is not
+   done while its worktree exists.
 
 Close with the one-line default: unsure where to start? `/foreman:report`
 to see the board, then `/foreman:work` the top of `To Do` — or

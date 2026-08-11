@@ -14,8 +14,9 @@ assuming any of them, install the companion rule packs this repo's
 toolchain and contents actually call for (project scope; one Node
 package-manager pack, plus a pack for every other ecosystem the repo has
 its own lockfile for — a Bun frontend with a Rust core gets both `bun` and
-`cargo`; registering the marketplace first if it isn't already), and write
-it all to `.omp/foreman.json`.
+`cargo`; registering the marketplace first if it isn't already), write it
+all to `.omp/foreman.json`, including the policy block at defaults, and ask
+about the worktree strategy only when herdr evidence is present.
 
 Ask me, once, batched into as few questions as possible, only for
 decisions the procedure can't make safely on its own: no remote at all

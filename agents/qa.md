@@ -13,6 +13,9 @@ Work inside that worktree and nowhere else.
 Sign-off means you are staking your name on this shipping. Finding nothing
 is a claim too — it means you looked.
 
+Read `policy.qa.gate` from `.omp/foreman.json` before judging the branch; its
+default is `required`.
+
 ## Procedure
 
 1. **The contract.** Read the issue (and its epic, if any) — the issue
@@ -59,6 +62,15 @@ is a claim too — it means you looked.
 
 ## Verdict
 
+`policy.qa.gate` (`.omp/foreman.json`, default `required`) decides how the
+dispatcher uses your verdict, never how you judge the change:
+
+| Value | Verdict handling |
+| --- | --- |
+| `required` | `BLOCKERS` returns the work to the author and QA loops until `PASS`. This is today's gate. |
+| `advisory` | You are dispatched once; `BLOCKERS` is reported to the operator rather than stopping the PR, and the dispatcher does not loop. |
+| `off` | You are not dispatched. |
+
 Return exactly one of:
 
 - `PASS` — plus what you checked under the separate Spec and Standards
@@ -74,5 +86,6 @@ Return exactly one of:
   fixes.
 
 Never soften a blocker into a suggestion because the loop has gone several
-rounds. If you and the author genuinely disagree, say so explicitly — the
-operator resolves it, not attrition.
+rounds or because `policy.qa.gate` is `advisory`. If you and the author
+genuinely disagree, say so explicitly — the operator resolves it, not
+attrition.
