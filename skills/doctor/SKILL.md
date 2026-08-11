@@ -89,11 +89,12 @@ it's what `/foreman:doctor` runs.
 7. **Domain doc paths.** Re-run bootstrap's domain-doc layout
    detection and compare each `docs.*` field with the repo:
    - A non-null path that no longer exists → set its field to `null`.
-     The repo deleted that glossary, map, ADR directory, or
-     out-of-scope directory, and that's allowed.
+     The repo deleted that glossary, map, ADR directory, PRD directory,
+     or out-of-scope directory, and that's allowed.
    - A null field whose conventional path now exists → fill it in,
-     using bootstrap's ordered ADR probe and requiring an
-     `NNNN-`-prefixed markdown file there.
+     using bootstrap's ordered ADR probe and its `NNNN-`-prefixed
+     markdown-file requirement, or its ordered PRD probe and its
+     at-least-one-markdown-file requirement.
    Both are ordinary drift, not errors. Repair them without asking;
    closing known drift is the point of doctor.
 

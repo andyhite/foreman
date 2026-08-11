@@ -10,6 +10,12 @@ researches and recommends, the operator decides, the agent applies. Never
 silently accept or reject an idea on the operator's behalf. Tracker
 mechanics (labels, statuses, sub-issues) live in the `tracker` skill.
 
+Ideas arrive one at a time through `/foreman:record`; a whole document's
+worth arrives already sliced and sequenced from `skill://prd-intake`.
+Intake-created epics beyond the committed wave deliberately land at
+`Backlog` without a breakdown. Breaking them down when they come near is
+grooming's job, not an intake omission to correct.
+
 ## The sizing rule
 
 **A task without an epic must be tiny**: one small PR, roughly a day or
@@ -121,6 +127,10 @@ The quality bar per subtask: independently deliverable as **one PR**,
 testable on its own, with a clear seam to its siblings. Name the
 cross-task contracts (interfaces, schemas, ownership) in the epic body —
 the epic orchestrator dispatches from them.
+
+When an epic came from intake, its ledger under `docs.prd` carries the
+requirement rows, constraints, and sequencing rationale behind it; read that
+before re-deriving the breakdown from the epic body alone.
 
 Record the dependency graph as real GitHub issue dependencies, not just
 an ordering in prose:

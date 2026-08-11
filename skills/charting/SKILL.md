@@ -12,6 +12,11 @@ reach it are still hidden by fog. It turns those decisions into tracker
 issues and resolves them until grooming can derive a real epic breakdown
 instead of inventing one.
 
+Charting is also reached from `skill://prd-intake`: when a region of a
+product document has a clear outcome but a fogged route, intake routes it to
+a chart rather than guessing a breakdown. The chart graduates to an epic by
+the same hand-off described in [Graduate to an epic](#graduate-to-an-epic).
+
 Read `skill://tracker` before changing any issue, label, dependency, or
 board status. Read every constant from `.omp/foreman.json`; names below such
 as `labels.chart` and `labels.epic` are config keys, not literal labels.

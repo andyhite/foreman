@@ -17,9 +17,10 @@ inert until `/foreman:init` runs.
 
 Present, compactly — tables over prose, one screen if you can:
 
-1. **The lifecycle in one breath.** Ideas are recorded cheaply
-   (`/foreman:record`), groomed into a task or an epic — or rejected
-   (`/foreman:groom`), delivered (`/foreman:work <issue>` for a task or
+1. **The lifecycle in one breath.** A document enters through
+   `/foreman:intake`, single ideas still enter through `/foreman:record`, and
+   both converge on `/foreman:groom`: they are groomed into a task or an epic
+   — or rejected — before delivery (`/foreman:work <issue>` for a task or
    bug, `/foreman:orchestrate <epic>` for an epic), and land on the main
    branch only through a PR that **I** merge — the merge is the approval.
    Bugs enter through `/foreman:triage` with a severity label and skip the
