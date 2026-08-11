@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "The foreman dev workflow (commands, skills, agents) plus a library of standalone, opt-in rule packs for omp",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "foreman",
-      "description": "GitHub-issue-tracker-driven dev workflow — ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge — as reusable commands (invoked as /foreman:<name>), skills, and agents. Config-driven via .omp/foreman.json; no hardcoded repo or toolchain.",
+      "description": "GitHub-issue-tracker-driven dev workflow — PRDs/ideas -> epics/tasks -> worktrees -> stacked PRs -> operator merge — as reusable commands (invoked as /foreman:<name>), skills, and agents. Config-driven via .omp/foreman.json; no hardcoded repo or toolchain.",
       "source": "./",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "productivity",
       "homepage": "https://github.com/andyhite/omp-foreman",
       "repository": "https://github.com/andyhite/omp-foreman",
@@ -23,14 +23,17 @@
         "issues",
         "project-board",
         "workflow",
-        "dev-loop"
+        "dev-loop",
+        "prd",
+        "backlog",
+        "intake"
       ]
     },
     {
       "name": "craft",
       "description": "Ten model-invoked reference skills for the thinking around a change: grilling a decision to settle it, domain modeling (CONTEXT.md + ADRs), deep-module design vocabulary, what makes a test worth keeping, two-axis code review, the hard-bug diagnosis loop, prototyping, primary-source research, merge-conflict resolution, and writing documents agents consume. Adapted from mattpocock/skills (MIT).",
       "source": "./plugins/craft",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "development",
       "homepage": "https://github.com/andyhite/omp-foreman/tree/main/plugins/craft",
       "repository": "https://github.com/andyhite/omp-foreman",

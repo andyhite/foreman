@@ -196,9 +196,11 @@ doesn't have that file yet, and that's an ordinary, silent outcome —
 not a gap, not a guess, and not something to create or offer to
 create. `skill://domain-modeling` creates `CONTEXT.md`, a
 `CONTEXT-MAP.md`, an ADR, or an out-of-scope file lazily, at the
-moment there's a first term or a first decision worth recording; a
-scaffolded empty glossary is worse than none, because it reads as a
-glossary that already has nothing to say.
+moment there's a first term or a first decision worth recording;
+`skill://prd-intake` likewise creates its directory on first intake
+and writes the path it chose back into `docs.prd`. A scaffolded empty
+glossary is worse than none, because it reads as a glossary that
+already has nothing to say.
 
 - `docs.contextMap` — `CONTEXT-MAP.md` at the repo root, if it
   exists.
@@ -209,6 +211,11 @@ glossary that already has nothing to say.
 - `docs.adr` — the first of `docs/adr`, `docs/adrs`, `docs/decisions`,
   `doc/adr`, `adr` (checked in that order) that both exists and
   contains at least one `NNNN-`-prefixed markdown file.
+- `docs.prd` — the first of `docs/prd`, `docs/prds`, `docs/product`
+  (checked in that order) that both exists and contains at least one
+  markdown file. Left `null`, the first `/foreman:intake` adopts
+  `docs/prd`, creates it, and fills this field in — so a null here means
+  no document has been ingested yet, and never that intake is blocked.
 - `docs.outOfScope` — `.out-of-scope` at the repo root, if it exists.
 
 ## 4. Companion rule packs
@@ -387,6 +394,7 @@ Write (or update) `.omp/foreman.json` at the repo root:
     "context": "<CONTEXT.md, or null>",
     "contextMap": "<CONTEXT-MAP.md, or null>",
     "adr": "<detected ADR directory, or null>",
+    "prd": "<detected PRD directory, or null>",
     "outOfScope": "<.out-of-scope, or null>"
   },
   "epicLoop": {

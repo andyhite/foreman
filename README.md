@@ -33,12 +33,12 @@ this one is the reusable half.
 ## What it gives you
 
 - **Commands** (`commands/*.md`, invoked as `/foreman:<name>` once
-  installed): `init`, `doctor`, `help`, `record`, `groom`, `chart`, `work
-  <issue>`, `orchestrate <epic>`, `report`, `triage`.
+  installed): `init`, `doctor`, `help`, `intake`, `record`, `groom`, `chart`,
+  `work <issue>`, `orchestrate <epic>`, `report`, `triage`.
 - **Skills** (`skills/*/SKILL.md`): `bootstrap` (backs `/foreman:init`),
   `doctor` (backs `/foreman:doctor` — config-drift detection and repair),
-  `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`, `charting`,
-  `bug-triage`, `verification`, `stacked-prs`.
+  `prd-intake`, `tracker`, `worktree`, `dev-loop`, `epic-loop`, `grooming`,
+  `charting`, `bug-triage`, `verification`, `stacked-prs`.
 - **Agents** (`agents/*.md`): `planner`, `qa`, `issue-worker`.
 - **Rules** (`rules/*.md`): five tool-call interrupts for the workflow's own
   sharp edges — pushing at the main branch, closing issues by hand, worktree
@@ -141,6 +141,7 @@ Restart the session (or `/reload-plugins`) after adding it.
 ```
 /foreman:init         # one-time (or repair) setup: labels + project board + .omp/foreman.json
 /foreman:doctor       # drift check: labels/board/detected-commands still match reality
+/foreman:intake <doc> # turn a document into a reviewed backlog
 /foreman:record ...   # capture an idea
 /foreman:groom        # turn ideas into task/epic issues, or reject them
 /foreman:chart ...    # chart a foggy idea as decision tickets before grooming
@@ -149,6 +150,9 @@ Restart the session (or `/reload-plugins`) after adding it.
 /foreman:report       # board snapshot
 /foreman:triage ...   # file/triage a bug with a severity label
 ```
+
+A document enters through `/foreman:intake`, single ideas still enter through
+`/foreman:record`, and both converge on `/foreman:groom`.
 
 `/foreman:help` explains all of the above (and any single command, skill,
 or agent) grounded in the live tree, not from memory.
@@ -162,6 +166,11 @@ or agent) grounded in the live tree, not from memory.
   `.omp/foreman.json` (written by `/foreman:init`) for the repo, project
   board IDs, label vocabulary, commit types, package manager, and
   check/verify/e2e commands — see below.
+- **A document becomes a backlog through its reviewed coverage ledger, not
+  a transcription of its headings.** `/foreman:intake` captures and
+  reconciles each requirement before slicing it into outcomes; it breaks
+  down only the committed wave, because a breakdown written far ahead of
+  delivery is stale by the time anyone reads it.
 - **The operator always merges.** Every skill and agent treats "the
   operator merges the PR" as the approval and "the operator commented on
   the PR" as a change request — no agent merges on its own judgment.
@@ -248,6 +257,7 @@ instead of assuming a repo, a board, or a toolchain:
     "context": "CONTEXT.md",
     "contextMap": null,
     "adr": "docs/adr",
+    "prd": "<docs/prd, or null>",
     "outOfScope": ".out-of-scope"
   },
   "epicLoop": {
@@ -271,9 +281,12 @@ instead of assuming a repo, a board, or a toolchain:
   predates foreman doesn't need to be renamed to fit it.
 - `docs.context`, `docs.contextMap`, `docs.adr`, and
   `docs.outOfScope` record the domain-doc layout that already exists.
-  A `null` here is ordinary absence, not a guess or a setup gap:
-  `skill://domain-modeling` creates these files lazily when the first
-  term or decision is worth recording.
+  `docs.prd` holds PRD coverage ledgers and source snapshots. A `null`
+  here is ordinary absence, not a guess or a setup gap:
+  `skill://domain-modeling` creates the domain-doc files lazily when the
+  first term or decision is worth recording, and `/foreman:intake` creates
+  `docs/prd` on its first run and fills `docs.prd` in — neither is
+  scaffolded ahead of having something to put in it.
 - `labels.readyForHuman` and `labels.chart` are modifier labels. They
   sit alongside an issue's type label: the former reserves a `To Do`
   task for a human, while the latter marks a wayfinding map and its
