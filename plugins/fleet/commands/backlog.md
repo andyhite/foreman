@@ -215,7 +215,7 @@ parallelize.
 
 Reviews are the exception to `--base`: `skill://code-review` diffs in its own
 checkout, so branch the reviewer off the tip under review —
-`fleet spawn review/412 --base feat/412-webhook-retry`.
+`fleet spawn review/412 --base feat/412-webhook-retry --task-file /tmp/fleet-412-review.md`.
 
 ## 6. Review, merge, recompute
 

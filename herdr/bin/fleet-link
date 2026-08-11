@@ -6,7 +6,9 @@ case "${1-}" in
   --quiet) quiet=true ;;
   --help) printf 'usage: %s [--quiet]\n' "$0"; exit 0 ;;
   '') ;;
-  *) printf 'fleet-link: unknown option: %s\n' "$1" >&2; exit 0 ;;
+  # A usage error, unlike the environment conditions below: exiting 0 here
+  # would report a successful startup hook that never linked anything.
+  *) printf 'fleet-link: unknown option: %s\n' "$1" >&2; exit 2 ;;
 esac
 
 resolve_path() {

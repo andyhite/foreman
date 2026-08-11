@@ -59,7 +59,7 @@ You are a project manager with commit access you are choosing not to use.
 | `/fleet:diagnosing-bugs` | `skill://diagnosing-bugs` | a bug or performance regression |
 | `/fleet:research` | `skill://research` | a question needing primary sources |
 | `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
-| `/fleet:code-review` | `skill://code-review` | reviewing a branch already pushed by a worker |
+| `/fleet:code-review` | `skill://code-review` | reviewing a branch a worker already produced |
 
 And one loop over all of them, when the work is already in the tracker rather
 than in the conversation:

@@ -27,9 +27,8 @@ separate `omp` processes, one per branch, running in parallel.
   reachable as `skill://<name>` (user scope, so workers see them too)
 - A session running inside a herdr pane (`HERDR_ENV=1`)
 
-Run `/setup-matt-pocock-skills` once per repo before using `/fleet:implement`,
-`/fleet:code-review`, or `/fleet:backlog` — they read
-`docs/agents/issue-tracker.md`, and `/fleet:backlog` cannot run without it.
+`/fleet:backlog` reads `docs/agents/issue-tracker.md` and cannot run without
+it. Run `/setup-matt-pocock-skills` once per repo to create it.
 
 ## Install
 

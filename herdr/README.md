@@ -36,7 +36,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `fleet join [handle...]` | Block on this repository's workers and print reports. |
 | `fleet ls [--all-repos]` | List workers and their states. |
 | `fleet read <handle> [-n N]` | Read a worker's terminal. |
-| `fleet reap <handle>\|--all` | Remove worktrees and forget workers. |
+| `fleet reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes. |
 | `fleet report [-f file\|text]` | From a worker, file its report. |
 | `fleet reply <text>` | From a worker, interrupt the orchestrator. |
 | `fleet whoami` | Print this pane's handle. |

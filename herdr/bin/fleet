@@ -58,12 +58,18 @@ require_herdr() {
   need jq
 }
 
-# herdr prints JSON on stdout and JSON errors on stderr with exit 1. Surfacing
-# the raw payload beats a generic failure message every time.
+# herdr prints JSON on stdout and JSON errors on stderr with exit 1. The two
+# streams are captured separately: folding stderr into stdout would let any
+# warning herdr writes on a *successful* call land in the JSON that callers
+# hand to jq. Surfacing the raw payload still beats a generic failure message.
 h() {
-  local out
-  if ! out=$(herdr "$@" 2>&1); then
-    die "herdr $* failed: $out"
+  local out err errfile rc=0
+  errfile=$(mktemp) || die "mktemp failed"
+  out=$(herdr "$@" 2>"$errfile") || rc=$?
+  err=$(cat "$errfile")
+  rm -f "$errfile"
+  if [ "$rc" != 0 ]; then
+    die "herdr $* failed: ${err:-$out}"
   fi
   printf '%s' "$out"
 }
@@ -82,8 +88,15 @@ slugify() {
   local s
   s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
     | sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//')
-  # A leading digit is legal in a branch and illegal in a herdr agent name.
-  case "$s" in [a-z]*) ;; *) s="w-$s" ;; esac
+  if [ -z "$s" ]; then
+    # Nothing survived the reduction (a branch like `---`). Every such branch
+    # would otherwise collapse onto the same handle, so key them by checksum
+    # rather than letting them collide.
+    s="w-$(printf '%s' "$1" | cksum | tr -cd '0-9' | cut -c1-8)"
+  else
+    # A leading digit is legal in a branch and illegal in a herdr agent name.
+    case "$s" in [a-z]*) ;; *) s="w-$s" ;; esac
+  fi
   # Truncating can leave a trailing hyphen, which the grammar also rejects.
   printf '%.32s' "$s" | sed -E -e 's/-+$//'
 }
@@ -104,7 +117,14 @@ agent_field() {
 agent_exists() { [ -n "$(agent_field "$1" pane_id)" ]; }
 
 # herdr's agent-name grammar: [a-z][a-z0-9_-]{0,31}.
+#
+# LC_ALL=C is load-bearing. A glob range is collation-ordered, and most locales
+# interleave case (aAbBcC…), so under the bash 3.2 macOS ships `[a-z]` matches
+# `W` — `valid_handle Webapp` returned true and the name went on to be rejected
+# by herdr itself, after the worktree it was supposed to guard already existed.
+# Under C the ranges are byte ranges.
 valid_handle() {
+  local LC_ALL=C
   case "$1" in
     [a-z]*) ;;
     *) return 1 ;;
@@ -191,10 +211,18 @@ workspace_manager_owns_repo() {
 meta_dir() { printf '%s/%s' "$FLEET_STATE" "$1"; }
 meta_file() { printf '%s/meta' "$(meta_dir "$1")"; }
 report_file() { printf '%s/report.md' "$(meta_dir "$1")"; }
-# Touched immediately before every dispatch, so a report can be compared
-# against it. That is what keeps a follow-up `fleet send` from having to
-# truncate the report the worker already filed just to avoid re-reading it.
+# Holds a counter bumped immediately before every dispatch, so a report can be
+# matched against the dispatch it answers. That is what keeps a follow-up
+# `fleet send` from having to truncate the report the worker already filed just
+# to avoid re-reading it.
+#
+# A counter rather than a timestamp: `test -nt` compares whole seconds under
+# the bash 3.2 that macOS ships, so a worker reporting inside the same second
+# as its dispatch read as stale — which made a fast task look like a dispatch
+# that never landed.
 dispatch_file() { printf '%s/dispatched' "$(meta_dir "$1")"; }
+# The dispatch counter the current report answers, stamped by `fleet report`.
+report_token_file() { printf '%s/report.token' "$(meta_dir "$1")"; }
 
 meta_set() {
   local handle=$1; shift
@@ -459,6 +487,7 @@ cmd_spawn() {
   meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
     "REPO=$repo" "REPO_KEY=$(repo_key "$repo")"
   : >"$(report_file "$handle")"
+  : >"$(report_token_file "$handle")"
 
   start_worker_agent "$handle" "$ws" "$pane"
   # After the agent, deliberately. The agent is the deliverable; the rest of
@@ -540,6 +569,19 @@ workspace_ready_agent() {
 # does in the background, and it must not yank the view out from under whoever
 # is reading something else.
 apply_layout() {
+  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
+  # Best-effort, in a subshell. The agent is the deliverable and the rest of
+  # the layout is scenery: a pane split that fails, a TUI still starting, a
+  # shell that has not finished sourcing its rc files — none of that is worth
+  # failing a spawn over. Aborting here would skip the dispatch and never even
+  # print the handle of the worker that is already up and running.
+  if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" ); then
+    note "fleet: the '$layout' layout did not finish; the agent pane is up regardless"
+  fi
+  return 0
+}
+
+build_layout() {
   local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
   h tab rename "$tab" agent >/dev/null
   h pane rename "$root" omp >/dev/null
@@ -641,6 +683,20 @@ pane_runs() {
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
+# Whether the report on disk answers the most recent dispatch, matched by
+# dispatch counter rather than mtime.
+#
+# A worker with no dispatch on record — spawned `--no-dispatch`, then prompted
+# by hand — has neither file, and an empty token matching an empty counter is
+# the right answer: whatever it wrote is all there is.
+report_is_fresh() {
+  local handle=$1 want="" got="" f
+  [ -s "$(report_file "$handle")" ] || return 1
+  f=$(dispatch_file "$handle"); if [ -f "$f" ]; then want=$(cat "$f"); fi
+  f=$(report_token_file "$handle"); if [ -f "$f" ]; then got=$(cat "$f"); fi
+  [ "$want" = "$got" ]
+}
+
 # Submit and confirm the agent actually picked it up. herdr fails a stalled
 # prompt on its own, but "prompt accepted" is not "prompt started": without
 # this settle loop a following `fleet join` can match the agent's
@@ -650,9 +706,11 @@ pane_runs() {
 # `fleet read` and `fleet reap` still work on it.
 dispatch_to() {
   local handle=$1 text=$2
-  local rf df; rf=$(report_file "$handle"); df=$(dispatch_file "$handle")
+  local df n; df=$(dispatch_file "$handle")
   mkdir -p "$(meta_dir "$handle")"
-  : >"$df"
+  n=$(cat "$df" 2>/dev/null || true)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$((n + 1))" >"$df"
   h agent prompt "$handle" "$text" >/dev/null
   local waited=0 status=""
   while [ "$waited" -lt "$DISPATCH_SETTLE_MS" ]; do
@@ -660,8 +718,8 @@ dispatch_to() {
     case "$status" in
       working|blocked) return 0 ;;
       # A task small enough to finish inside the settle window still counts,
-      # but only on the evidence of a report written after the dispatch.
-      idle|done) if [ -s "$rf" ] && [ "$rf" -nt "$df" ]; then return 0; fi ;;
+      # but only on the evidence of a report answering *this* dispatch.
+      idle|done) if report_is_fresh "$handle"; then return 0; fi ;;
     esac
     sleep 0.5; waited=$((waited + 500))
   done
@@ -681,7 +739,15 @@ cmd_send() {
   local handle=${1:?usage: fleet send <handle> <text...>}; shift
   agent_exists "$handle" || die "no live agent named '$handle'"
   local text="$*"
-  [ -n "$text" ] || text=$(cat)
+  if [ -z "$text" ]; then
+    # Reading stdin is how a long brief gets in; doing it silently at a
+    # terminal just looks like a hang.
+    if [ -t 0 ]; then
+      die "usage: fleet send <handle> <text...>   (or pipe the text on stdin)"
+    fi
+    text=$(cat)
+  fi
+  [ -n "$text" ] || die "nothing to send"
   dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
 }
 
@@ -707,13 +773,13 @@ cmd_join() {
   fi
   [ -n "$handles" ] || die "no workers to join"
 
-  local handle status rf df
+  local handle status rf
   for handle in $handles; do
     h agent wait "$handle" --timeout "$WAIT_TIMEOUT_MS" >/dev/null
     status=$(agent_field "$handle" agent_status)
-    rf=$(report_file "$handle"); df=$(dispatch_file "$handle")
+    rf=$(report_file "$handle")
     printf '\n=== %s (%s) — branch %s\n' "$handle" "$status" "$(meta_get "$handle" BRANCH)"
-    if [ -s "$rf" ] && { [ ! -e "$df" ] || [ "$rf" -nt "$df" ]; }; then
+    if report_is_fresh "$handle"; then
       cat "$rf"
     elif [ "$status" = blocked ]; then
       printf '(blocked, nothing reported since the last dispatch — last output below)\n'
@@ -752,6 +818,10 @@ cmd_report() {
   else
     cat >"$rf"
   fi
+  # Stamp the report with the dispatch it answers, so the orchestrator can tell
+  # a fresh report from the one this worker filed before its last instruction.
+  local df tf; df=$(dispatch_file "$me"); tf=$(report_token_file "$me")
+  if [ -f "$df" ]; then cp "$df" "$tf"; else : >"$tf"; fi
   printf 'reported %s bytes to %s\n' "$(wc -c <"$rf" | tr -d ' ')" "$me"
 }
 
@@ -760,7 +830,13 @@ cmd_reply() {
   local me boss; me=$(self_handle); boss=$(boss_handle)
   agent_exists "$boss" || die "orchestrator '$boss' is not live"
   local text="$*"
-  [ -n "$text" ] || text=$(cat)
+  if [ -z "$text" ]; then
+    if [ -t 0 ]; then
+      die "usage: fleet reply <text...>   (or pipe the text on stdin)"
+    fi
+    text=$(cat)
+  fi
+  [ -n "$text" ] || die "nothing to send"
   h agent prompt "$boss" "[fleet:${me:-unknown}] $text" >/dev/null
   printf 'sent to %s\n' "$boss"
 }
@@ -821,21 +897,39 @@ cmd_ls() {
 
 cmd_reap() {
   require_herdr
-  local force=0 handles="" scope
+  local force=0 all=0 all_repos=0 handles="" scope
   while [ $# -gt 0 ]; do
     case $1 in
       --force) force=1; shift ;;
-      --all)
-        scope=$(scoped_key "fleet reap --all" "pass --all-repos, or name the handles to reap")
-        handles="$handles $(known_workers "$scope")"; shift ;;
-      --all-repos) handles="$handles $(known_workers)"; shift ;;
+      --all) all=1; shift ;;
+      --all-repos) all_repos=1; shift ;;
+      -*) die "usage: fleet reap <handle>... | --all [--all-repos] [--force]" ;;
       *) handles="$handles $1"; shift ;;
     esac
   done
+  # Resolved once the whole line is parsed, not as each flag is seen: scoping
+  # `--all` on sight made `fleet reap --all --all-repos` fail outside a repo by
+  # telling the user to pass the flag they had already passed.
+  if [ "$all_repos" = 1 ]; then
+    handles="$handles $(known_workers)"
+  elif [ "$all" = 1 ]; then
+    scope=$(scoped_key "fleet reap --all" "pass --all-repos, or name the handles to reap")
+    handles="$handles $(known_workers "$scope")"
+  fi
   [ -n "${handles// /}" ] || die "usage: fleet reap <handle>... | --all [--all-repos] [--force]"
 
   local handle ws
   local -a args
+  # Validated up front, before anything is removed: the `rm -rf` below joins a
+  # handle onto $FLEET_STATE, so one that is not a handle — `../..`, an
+  # absolute path — would delete outside it. Every other caller derives its
+  # handles from state or validates them at spawn; these came off the command
+  # line. Checking the whole list first also keeps a bad third argument from
+  # reaping the two good ones ahead of it.
+  for handle in $handles; do
+    valid_handle "$handle" || die "invalid handle '$handle'"
+  done
+
   for handle in $handles; do
     ws=$(meta_get "$handle" WORKSPACE)
     if [ -n "$ws" ]; then
@@ -868,7 +962,8 @@ Orchestrator
   fleet join [handle...]         block on this repo's workers, print reports
   fleet ls [--all-repos]         list workers and their states
   fleet read <handle> [-n N]     read a worker's terminal directly
-  fleet reap <handle>|--all      remove worktrees and forget workers
+  fleet reap <handle>...|--all   remove worktrees and forget workers
+                                 [--all-repos] [--force]
 
 Worker
   fleet report [-f file|text]    write the report the orchestrator collects
@@ -900,4 +995,6 @@ main() {
   esac
 }
 
-main "$@"
+# Executed normally; sourced by the test suite, which wants the functions
+# without running a command.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
