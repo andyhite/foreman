@@ -83,6 +83,30 @@ const PUSH_OPTIONS_WITH_VALUE: Record<string, true> = {
   "-o": true,
 };
 
+type BranchRefMode = "create" | "delete" | "move" | "copy" | "force";
+
+const BRANCH_OPTIONS_WITH_VALUE: Record<string, true> = {
+  "-u": true,
+  "--set-upstream-to": true,
+  "--contains": true,
+  "--no-contains": true,
+  "--merged": true,
+  "--no-merged": true,
+  "--points-at": true,
+  "--sort": true,
+  "--format": true,
+  "--color": true,
+};
+
+/** Long options that can accompany `git branch <new-name> [<start-point>]`. */
+const CREATION_COMPATIBLE_OPTIONS: Record<string, true> = {
+  "--quiet": true,
+  "--track": true,
+  "--no-track": true,
+  "--force": true,
+  "--recurse-submodules": true,
+};
+
 /** Finds the closest configuration so nested project commands use their project policy. */
 export function discoverForemanConfig(cwd: string, fs: ForemanConfigFileSystem): ForemanConfigDiscovery {
   let directory = resolve(cwd);
@@ -259,26 +283,40 @@ export function decideMainBranchGuard(input: GuardDecisionInput): GuardBlock | u
       reason: `Foreman blocked an apparent Git mutation because ${config.path} is malformed or unreadable. Repair .omp/foreman.json before continuing; default-branch changes must come through a PR, and topic branches/worktrees are allowed.`,
     };
   }
-  if (config.kind === "missing" || !branch) return undefined;
+  if (config.kind === "missing") return undefined;
 
-  if (analysis.ambiguous) {
+  if (analysis.ambiguous && branch) {
     return {
       block: true,
       reason: `Foreman blocked an ambiguous shell command containing apparent git ${mutation} on branch "${branch}". Default-branch changes must come through a PR; use a topic branch or worktree instead.`,
     };
   }
 
-  if (branch === config.mainBranch) {
+  // Two kinds of rule, and conflating them is what produced both a false
+  // positive and a hole. Most mutations act on whatever is checked out, so
+  // they are judged by the current branch. `git branch` and `git push` name
+  // their target explicitly, so they are judged by that name — which is why
+  // they stay reachable from a detached HEAD, where there is no current
+  // branch to compare against.
+  const checkoutScoped = analysis.mutations.find((candidate) => candidate !== "branch") ?? mutation;
+  if (branch === config.mainBranch && checkoutScoped !== "branch") {
     return {
       block: true,
-      reason: `Foreman blocked git ${mutation} on configured default branch "${branch}". Default-branch changes must come through a PR; use a topic branch or worktree instead.`,
+      reason: `Foreman blocked git ${checkoutScoped} on configured default branch "${branch}". Default-branch changes must come through a PR; use a topic branch or worktree instead.`,
+    };
+  }
+
+  if (branchMutatesDefaultBranch(analysis.fragments, config.mainBranch, branch)) {
+    return {
+      block: true,
+      reason: `Foreman blocked git branch because it deletes, renames, or force-writes configured default branch "${config.mainBranch}". Default-branch changes must come through a PR; delete or rename a topic branch instead.`,
     };
   }
 
   if (pushesDefaultBranch(analysis.fragments, config.mainBranch)) {
     return {
       block: true,
-      reason: `Foreman blocked git push from branch "${branch}" because it explicitly targets configured default branch "${config.mainBranch}". Default-branch changes must come through a PR; use a topic branch or worktree instead.`,
+      reason: `Foreman blocked git push because it explicitly targets configured default branch "${config.mainBranch}". Default-branch changes must come through a PR; use a topic branch or worktree instead.`,
     };
   }
 
@@ -342,14 +380,136 @@ function classifyGitSubcommand(subcommand: string, args: readonly string[]): Git
   if (MUTATING_SUBCOMMANDS[subcommand]) return subcommand as GitMutation;
   if (subcommand === "pull") return args.includes("--ff-only") ? undefined : "pull";
   if (subcommand === "switch" && args.includes("--discard-changes")) return "switch";
-  if (subcommand === "branch" && (args.includes("-d") || args.includes("-D") || args.includes("--delete"))) {
-    return "branch";
-  }
+  if (subcommand === "branch") return branchRefMode(args) ? "branch" : undefined;
   const separator = args.indexOf("--");
   if (subcommand === "checkout" && (separator >= 0 && separator < args.length - 1 || args.includes("-f"))) {
     return "checkout";
   }
   return undefined;
+}
+
+/**
+ * Which local ref a `git branch` invocation writes, if any.
+ *
+ * Creation is *inferred* rather than flagged, so it is inferred only when
+ * every option present is compatible with creating a branch. Anything else —
+ * `--list`, `-a`, `-v`, `--format=…`, `--contains=…`, `--set-upstream-to=…` —
+ * means the positionals are match patterns or an existing branch being
+ * described, not a ref being written. A whitelist keeps that judgement
+ * conservative as git grows options; an enumeration of listing flags would
+ * silently start guessing wrong.
+ *
+ * `-r`/`--remotes` confines the operation to remote-tracking refs under
+ * `refs/remotes/`, which can never be the local default branch.
+ */
+function branchRefMode(args: readonly string[]): { mode: BranchRefMode; remotes: boolean } | undefined {
+  let mode: BranchRefMode | undefined;
+  let force = false;
+  let remotes = false;
+  let creationCompatible = true;
+
+  for (const arg of args) {
+    if (arg === "--") break;
+    if (!arg.startsWith("-")) continue;
+
+    if (arg === "--delete") mode ??= "delete";
+    else if (arg === "--move") mode ??= "move";
+    else if (arg === "--copy") mode ??= "copy";
+    else if (arg === "--force") force = true;
+    else if (arg === "--remotes") remotes = true;
+    else if (/^-[A-Za-z]+$/.test(arg)) {
+      // Short flags cluster, so `-qD` has to be read letter by letter rather
+      // than compared against the literal string "-D".
+      for (const letter of arg.slice(1)) {
+        if (letter === "d" || letter === "D") mode ??= "delete";
+        else if (letter === "m" || letter === "M") mode ??= "move";
+        else if (letter === "c" || letter === "C") mode ??= "copy";
+        else if (letter === "f") force = true;
+        else if (letter === "r") remotes = true;
+        else if (letter !== "q" && letter !== "t") creationCompatible = false;
+        if (letter === "D" || letter === "M" || letter === "C") force = true;
+      }
+    } else if (!CREATION_COMPATIBLE_OPTIONS[arg.split("=")[0]!]) {
+      creationCompatible = false;
+    }
+  }
+
+  if (!mode && force) mode = "force";
+  // Creation still writes a ref, and writing one named for the default branch
+  // is never what anyone meant in a repo that already has it.
+  if (!mode && !remotes && creationCompatible && branchPositionals(args).length > 0) mode = "create";
+
+  return mode ? { mode, remotes } : undefined;
+}
+
+function branchPositionals(args: readonly string[]): string[] {
+  const positional: string[] = [];
+  let index = 0;
+
+  for (; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") {
+      index += 1;
+      break;
+    }
+    if (arg.startsWith("-")) {
+      if (BRANCH_OPTIONS_WITH_VALUE[arg]) index += 1;
+      continue;
+    }
+    positional.push(arg);
+  }
+  for (; index < args.length; index += 1) positional.push(args[index]!);
+
+  return positional;
+}
+
+/**
+ * True only when the invocation writes the default branch's own ref. Deleting
+ * or renaming an unrelated topic branch leaves the default branch untouched,
+ * so the current branch is irrelevant here — and a detached HEAD is no excuse.
+ */
+function branchMutatesDefaultBranch(
+  fragments: readonly string[],
+  mainBranch: string,
+  currentBranch: string | undefined,
+): boolean {
+  for (const fragment of fragments) {
+    const invocation = parseGitInvocation(fragment);
+    if (invocation?.mutation !== "branch") continue;
+
+    const args = invocation.words.slice(1);
+    const classified = branchRefMode(args);
+    if (!classified) continue;
+    // `-r` operates on refs/remotes/*, so deleting `origin/main`'s cached
+    // tracking ref never touches the local default branch.
+    if (classified.remotes) continue;
+
+    const positional = branchPositionals(args);
+    let written: (string | undefined)[];
+    switch (classified.mode) {
+      case "delete":
+        written = positional;
+        break;
+      case "move":
+        // `-m <new>` renames whatever is checked out; `-m <old> <new>` names
+        // both, and either end landing on the default branch destroys it.
+        written = positional.length >= 2 ? positional.slice(0, 2) : [currentBranch, ...positional];
+        break;
+      case "copy":
+        // Only the destination is written; copying *from* the default branch
+        // reads it.
+        written = positional.length >= 2 ? [positional[1]] : positional;
+        break;
+      case "create":
+      case "force":
+        written = positional.slice(0, 1);
+        break;
+    }
+
+    if (written.some((name) => name === mainBranch || name === `refs/heads/${mainBranch}`)) return true;
+  }
+
+  return false;
 }
 
 
