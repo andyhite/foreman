@@ -446,11 +446,12 @@ DASH_TTY=$dash_tty_real
 
 # ── opening the popup ────────────────────────────────────────────────────────
 #
-# A popup is a singleton session resource and the command palette is itself a
-# popup, so the palette — the advertised way to reach this action — is still
-# holding the slot at the moment it dispatches the action. Opening once and
-# giving up returned "popup already open" for every palette invocation, which
-# is every invocation a new user makes.
+# A popup is a singleton and the command palette is itself a popup, so the
+# palette is holding the slot when it dispatches this action — and it only
+# closes once the action returns. Retrying in the foreground therefore held
+# open the modal it was waiting on and could never succeed. The open is handed
+# to a detached child instead, which is why every assertion here waits for that
+# child rather than reading an exit code.
 
 printf '\nopening the popup\n'
 openbin="$sandbox/openbin"
@@ -481,43 +482,63 @@ STUB
 chmod +x "$openbin/herdr"
 
 export HERDR_BIN_PATH="$openbin/herdr"
+export HERDR_PLUGIN_STATE_DIR="$sandbox/openstate"
 export OPEN_COUNTER="$sandbox/open-count"
 export OPEN_NOTIFY="$sandbox/open-notify"
-# Two whole seconds, not one. The opener's deadline is `date +%s` arithmetic,
-# so a one-second budget computed at x.99 expires before the first retry and
-# the suite fails on the boundary rather than on the behaviour — the same
+# Two whole seconds, not one. The deadline is `date +%s` arithmetic, so a
+# one-second budget computed at x.99 expires before the first retry and the
+# suite fails on the boundary rather than on the behaviour — the same
 # whole-second trap the report-freshness protocol already exists to dodge.
 export FLEET_DASHBOARD_OPEN_TIMEOUT_S=2
+openlog="$HERDR_PLUGIN_STATE_DIR/dashboard-open.log"
 
+# The action returns before the work happens, so every assertion has to wait
+# for the child's verdict rather than for the process.
 run_open() {
   export OPEN_SCENARIO=$1
-  : >"$OPEN_COUNTER"; : >"$OPEN_NOTIFY"
+  mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+  : >"$OPEN_COUNTER"; : >"$OPEN_NOTIFY"; : >"$openlog"
   "$BIN/fleet-dashboard-open" >/dev/null 2>&1
+  local waited=0
+  while [ "$waited" -lt 100 ]; do
+    [ -s "$openlog" ] && return 0
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
+verdict() { sed -n '1s/^[^ ]* [^ ]* //p' "$openlog"; }
+
 run_open ok
-is 'a free popup slot opens on the first attempt' "$?$(cat "$OPEN_COUNTER")" '01'
+is 'the action itself never blocks the palette' "$?" '0'
+is 'and a free slot opens on the first attempt' "$(verdict)" 'opened'
+is 'in one attempt' "$(cat "$OPEN_COUNTER")" '1'
 
 run_open busy-then-ok
-rc=$?
-is 'the palette holding the slot is waited out, not reported' "$rc" '0'
+is 'the palette holding the slot is waited out, not reported' "$(verdict)" 'opened'
 assert 'and it took more than one attempt' [ "$(cat "$OPEN_COUNTER")" -gt 1 ]
 is 'with no toast, because nothing failed' "$(cat "$OPEN_NOTIFY")" ''
 
 run_open always-busy
-rc=$?
-is 'a slot that never frees is reported' "$rc" '1'
+case "$(verdict)" in
+  'failed: '*'popup already open'*) ok 'a slot that never frees is reported' ;;
+  *) bad "a slot that never frees is reported — got [$(verdict)]" ;;
+esac
 assert 'after retrying rather than after one attempt' [ "$(cat "$OPEN_COUNTER")" -gt 1 ]
 is 'and it says so' "$(cat "$OPEN_NOTIFY")" 'toast'
 
 # Retrying a real misconfiguration for the whole budget delays the only useful
 # signal by the whole budget.
 run_open fatal
-rc=$?
-is 'an error that is not a modal fails immediately' "$rc" '1'
+case "$(verdict)" in
+  'failed: '*'entrypoint_not_found'*) ok 'an error that is not a modal is reported as itself' ;;
+  *) bad "an error that is not a modal is reported as itself — got [$(verdict)]" ;;
+esac
 is 'on the first attempt' "$(cat "$OPEN_COUNTER")" '1'
 
-unset HERDR_BIN_PATH OPEN_COUNTER OPEN_NOTIFY OPEN_SCENARIO FLEET_DASHBOARD_OPEN_TIMEOUT_S
+unset HERDR_BIN_PATH HERDR_PLUGIN_STATE_DIR OPEN_COUNTER OPEN_NOTIFY OPEN_SCENARIO
+unset FLEET_DASHBOARD_OPEN_TIMEOUT_S
 
 # ── plugin wiring ────────────────────────────────────────────────────────────
 #

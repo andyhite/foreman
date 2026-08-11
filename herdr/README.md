@@ -101,26 +101,39 @@ pickup, rather than failing.
 
 `fleet dashboard` is the interactive counterpart to `fleet ls`: the same
 inventory, but with a cursor and the operations that act on a row attached to
-that row. Reach it three ways — the command palette action "Fleet dashboard",
-a `[[keys.command]]` binding on `andyhite.fleet.dashboard`, or `fleet
-dashboard` typed in any pane.
+that row. Reach it three ways — `fleet dashboard` typed in any pane, the
+command palette action "Fleet dashboard", or a keybinding:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "shell"
+description = "fleet dashboard"
+command = "herdr plugin pane open --plugin andyhite.fleet --entrypoint dashboard"
+```
+
+`type = "shell"`, not `type = "plugin_action"`. herdr runs a shell binding
+detached, which is what this needs; see below.
 
 It opens as a popup, not a split or a tab, because a popup is something you
 open, act in, and dismiss, and it leaves the tiled layout — including the
 agent panes it is reporting on — exactly as it found it.
 
-A popup is a singleton, and the command palette is itself a popup: at the
-moment the palette dispatches the action, the palette still holds the slot and
-herdr answers "popup already open". The action waits the slot out rather than
-reporting it — up to `FLEET_DASHBOARD_OPEN_TIMEOUT_S`, which is long enough
-for the palette to close and short enough that a Settings pane you left open
-does not look like a hang. Anything that is not a modal in the way fails on
-the first attempt instead.
+A popup is a singleton, and the command palette is itself a popup. At the
+moment the palette dispatches the action it is still holding the slot, and
+herdr answers "popup already open" — so the obvious fix, retrying until the
+slot frees, cannot work: the palette closes when the action it dispatched
+returns, so retrying in the foreground holds open the very modal it is waiting
+on. The action hands the open to a detached child and returns immediately.
+The child waits out any modal that is genuinely in the way, up to
+`FLEET_DASHBOARD_OPEN_TIMEOUT_S`; anything that is not a modal is reported on
+the first attempt.
 
-When the slot never frees, the action says so rather than failing silently:
-herdr's own message goes to the plugin log, and to a top-right toast as well
-when `ui.toast.delivery` is on — it defaults to `off`, so the log is the half
-that is always there.
+Because the action is gone by then, the child keeps its own record rather than
+the plugin log: `dashboard-open.log` in the plugin's herdr state directory
+(`herdr plugin config-dir` names the sibling config one). It also attempts a
+top-right toast, which shows up only when `ui.toast.delivery` is on — it
+defaults to `off`, so the log is the half that is always written.
 
 | Keys | Action |
 | --- | --- |

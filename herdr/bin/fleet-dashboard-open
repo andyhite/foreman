@@ -2,32 +2,51 @@
 # Open the fleet dashboard as a herdr popup.
 #
 # The palette lists actions, not panes, so reaching a `[[panes]]` entrypoint
-# from a keybinding or the palette needs an action that opens it. A wrapper
-# rather than a bare argv command because plugin commands are not run through a
-# shell: $HERDR_BIN_PATH is the portable way to reach the running herdr, and
-# nothing expands it inside a manifest array.
+# from the palette needs an action that opens it. A wrapper rather than a bare
+# argv command because plugin commands are not run through a shell:
+# $HERDR_BIN_PATH is the portable way to reach the running herdr, and nothing
+# expands it inside a manifest array.
 #
 # The popup does not need the workspace passed to it. Unlike `fleet-ls`, which
 # runs in the plugin root and has to be told where to look, a plugin pane
 # receives $HERDR_PLUGIN_CONTEXT_JSON of its own; the dashboard reads the
 # workspace cwd from there.
+#
+# ── Why this detaches ────────────────────────────────────────────────────────
+#
+# A popup is a singleton session resource and the command palette is itself a
+# popup, so the palette is still holding the slot at the moment it dispatches
+# this action. herdr answers "popup already open".
+#
+# Waiting for the slot from inside the action cannot work, and made it worse:
+# the palette closes when the action it dispatched finishes, so a retry loop
+# running in the foreground holds open the very modal it is waiting on. Three
+# seconds of retries bought three seconds of guaranteed failure.
+#
+# So the work is handed to a detached child and the action returns at once.
+# That is exactly what herdr's own `type = "shell"` keybindings do — the
+# documented default config says so, and it is how the other popup TUI plugin
+# in the ecosystem opens its own. The child outliving the action is verified
+# behaviour, not an assumption: herdr does not reap the process group.
 
 set -eu
 
 herdr_bin=${HERDR_BIN_PATH:-herdr}
 plugin=${HERDR_PLUGIN_ID:-andyhite.fleet}
-# How long to keep trying for the popup slot. Seconds, because the deadline is
-# computed from `date +%s` and this is the only bound in the script.
+# How long the child keeps trying for the slot. Seconds, because the deadline
+# is `date +%s` arithmetic — whole-second resolution means the real budget is
+# anywhere from one second less than this to exactly it, which is why the
+# default is not 1.
 budget=${FLEET_DASHBOARD_OPEN_TIMEOUT_S:-3}
 
-# A popup is a singleton session resource, and the command palette is itself a
-# popup — so the palette, which is the advertised way to reach this action, is
-# still holding the slot at the moment it dispatches us. herdr answers
-# `plugin_pane_open_failed` / "popup already open", the palette closes a beat
-# later, and the second attempt lands.
-#
+# The action's own stderr goes to the plugin log, but the action is gone before
+# the child knows anything, so the child needs a log of its own. herdr provides
+# a state directory for exactly this.
+state_dir=${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}}
+log="$state_dir/dashboard-open.log"
+
 # Only a modal in the way is retried. A misconfigured entrypoint or a disabled
-# plugin should fail on the first attempt rather than after the whole budget.
+# plugin should be reported on the first attempt rather than after the budget.
 transient() {
   case $1 in
     *'popup already open'*|*ui_busy*) return 0 ;;
@@ -35,34 +54,36 @@ transient() {
   esac
 }
 
-open_popup() { "$herdr_bin" plugin pane open --plugin "$plugin" --entrypoint dashboard 2>&1; }
+(
+  mkdir -p "$state_dir" 2>/dev/null || true
 
-# An absolute deadline rather than a countdown of sleeps: the loop body is a
-# herdr round trip of its own, and accumulating only the time spent asleep is
-# how a bound gets overrun by an order of magnitude.
-#
-# `date +%s` is whole seconds, so the real budget is anywhere from one second
-# less than asked for to exactly it, depending on where in the current second
-# the first attempt lands. That slop is why the default is three rather than
-# one: at one second a deadline computed at x.99 expires before the first
-# retry, which is a single attempt wearing a retry loop's clothes.
-deadline=$(( $(date +%s) + budget ))
-while :; do
-  if out=$(open_popup); then exit 0; fi
-  transient "$out" || break
-  [ "$(date +%s)" -lt "$deadline" ] || break
-  sleep 0.1
-done
+  # Long enough for herdr to tear down the palette now that the action it was
+  # running has returned, short enough not to feel like lag on a keybinding
+  # where no modal was open at all.
+  sleep 0.2
 
-# An action that fails silently looks like a broken binding.
-#
-# The plugin log is the reliable half of the report: `notification show` is a
-# no-op unless the user has turned toasts on (`ui.toast.delivery` defaults to
-# `off`), so it is attempted rather than relied on. herdr's own message goes in
-# the body, since "which modal" is the thing you need to know; the body is
-# capped at 240 characters.
-printf 'fleet-dashboard-open: %s\n' "$out" >&2
-"$herdr_bin" notification show 'Fleet dashboard' \
-  --body "Could not open: $(printf '%.200s' "$out")" \
-  --position top-right >/dev/null 2>&1 || true
-exit 1
+  # An absolute deadline rather than a countdown of sleeps: the loop body is a
+  # herdr round trip of its own, and accumulating only the time spent asleep is
+  # how a bound gets overrun by an order of magnitude.
+  deadline=$(( $(date +%s) + budget ))
+  while :; do
+    if out=$("$herdr_bin" plugin pane open --plugin "$plugin" --entrypoint dashboard 2>&1); then
+      printf '%s opened\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$log"
+      exit 0
+    fi
+    transient "$out" || break
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 0.1
+  done
+
+  # Nothing upstream is listening any more, so this is the whole report.
+  # `notification show` is a no-op unless the user turned toasts on
+  # (`ui.toast.delivery` defaults to `off`), so it is attempted rather than
+  # relied on; the log is the half that is always written.
+  printf '%s failed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$out" >>"$log"
+  "$herdr_bin" notification show 'Fleet dashboard' \
+    --body "Could not open: $(printf '%.200s' "$out")" \
+    --position top-right >/dev/null 2>&1 || true
+) >/dev/null 2>&1 &
+
+exit 0

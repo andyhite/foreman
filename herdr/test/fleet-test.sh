@@ -617,7 +617,7 @@ unset -f self_handle boss_handle agent_exists require_herdr
 # ── fleet version ───────────────────────────────────────────────────────────────
 
 printf '\nfleet version\n'
-is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.3.1'
+is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.3.2'
 
 # ── ls shows a pending question ──────────────────────────────────────────────────
 
