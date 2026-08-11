@@ -16,7 +16,7 @@ The `code-review` skill diffs `HEAD` against a fixed point *in its own checkout*
 So a reviewer is spawned **from the branch under review**, not alongside it:
 
 ```bash
-fleet spawn review/<slug> --base <branch-under-review> --skill code-review --task-file <brief>
+fleet spawn review/<slug> --base <branch-under-review> --tier standard --skill code-review --task-file <brief>
 ```
 
 `--base` branches the reviewer's worktree off the tip being reviewed, so its
@@ -60,8 +60,19 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 Then spawn from the branch under review:
 
 ```bash
-fleet spawn review/<slug> --base <branch-under-review> --skill code-review --task-file /tmp/fleet-<handle>.md
+fleet spawn review/<slug> --base <branch-under-review> --tier standard --skill code-review --task-file /tmp/fleet-<handle>.md
 ```
+
+## Delegation
+
+The `code-review` skill already runs the Standards and Spec axes as parallel
+local subagents. The worker pins the fixed point, finds the spec and standards
+sources, pastes the smell baseline into the Standards prompt, and aggregates
+the two reports without reranking.
+
+Keep that split in the brief: the worker does the setup and the aggregation;
+the reading stays inside the two subagents. Do not ask the worker to re-read
+the whole diff itself after they return.
 
 Reviewing several worker branches is a clean fan-out — one reviewer per branch,
 all spawned before any `fleet join`.

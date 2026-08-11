@@ -226,8 +226,8 @@ is dispatchable again instead of sitting stuck looking taken.
 Then spawn the whole wave and block once:
 
 ```bash
-fleet spawn feat/412-webhook-retry --base origin/main --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
-fleet spawn fix/418-duplicate-send --base origin/main --skill diagnosing-bugs --task-file /tmp/fleet-fix-418-duplicate-send.md
+fleet spawn feat/412-webhook-retry --base origin/main --tier deep --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
+fleet spawn fix/418-duplicate-send --base origin/main --tier deep --skill diagnosing-bugs --task-file /tmp/fleet-fix-418-duplicate-send.md
 fleet join
 ```
 
@@ -275,8 +275,8 @@ criteria too: a reviewer is a fresh agent that may have no tracker access, so a
 bare issue number is not a spec.
 
 ```bash
-fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-review-412.md
-fleet spawn review/418 --base fix/418-duplicate-send --skill code-review --task-file /tmp/fleet-review-418.md
+fleet spawn review/412 --base feat/412-webhook-retry --tier standard --skill code-review --task-file /tmp/fleet-review-412.md
+fleet spawn review/418 --base fix/418-duplicate-send --tier standard --skill code-review --task-file /tmp/fleet-review-418.md
 fleet join
 ```
 

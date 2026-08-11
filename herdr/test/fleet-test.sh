@@ -118,11 +118,29 @@ assert_not 'rejects an agent-kind option injection' valid_agent_kind '--kind'
 assert_not 'rejects an agent-kind path' valid_agent_kind '../omp'
 assert_not 'rejects an uppercase agent kind' valid_agent_kind 'Claude'
 
+printf '\nagent tiers and models\n'
+assert 'accepts standard' valid_agent_tier 'standard'
+assert 'accepts deep' valid_agent_tier 'deep'
+assert_not 'rejects an unknown tier' valid_agent_tier 'cheap'
+assert_not 'rejects an empty tier' valid_agent_tier ''
+assert 'accepts a role selector' valid_agent_model '@task'
+assert 'accepts a provider/model selector' valid_agent_model 'anthropic/claude-sonnet-5'
+assert_not 'rejects a model option injection' valid_agent_model '--model'
+assert_not 'rejects a model with spaces' valid_agent_model 'claude sonnet'
+is 'omp standard maps to @task' "$(worker_agent_args omp standard '')" $'--model\n@task'
+is 'omp deep maps to @default' "$(worker_agent_args omp deep '')" $'--model\n@default'
+is 'claude standard maps to sonnet' "$(worker_agent_args claude standard '')" $'--model\nsonnet'
+is 'explicit --model wins the plan' "$(worker_agent_args omp '' '@smol')" $'--model\n@smol'
+is 'no tier and no model yields nothing' "$(worker_agent_args omp '' '')" ''
+
 herdr_args="$sandbox/herdr-args"
 herdr() { printf '%s\n' "$*" >"$herdr_args"; }
 start_worker_agent worker ws pane claude
 is 'threads the selected kind into herdr agent start' "$(cat "$herdr_args")" \
   'agent start worker --kind claude --pane pane --timeout 120000'
+start_worker_agent worker ws pane omp --model '@task'
+is 'threads model args after --' "$(cat "$herdr_args")" \
+  'agent start worker --kind omp --pane pane --timeout 120000 -- --model @task'
 unset -f herdr
 
 # ── report freshness ─────────────────────────────────────────────────────────
@@ -205,7 +223,7 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # rather than abort the whole run.
   ( cd "$spawn_repo" \
     && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
-       cmd_spawn feat/x --kind claude --skill implement \
+       cmd_spawn feat/x --kind claude --tier deep --skill implement \
          --task 'Add exponential backoff to the dispatcher.' ) >/dev/null 2>&1
 
   assert 'a --skill spawn dispatches a prompt' [ -s "$prompt_file" ]
@@ -225,6 +243,29 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x KIND)" 'claude'
   is 'the skill is recorded for later inspection' \
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILL)" 'implement'
+  is 'the tier is recorded for later inspection' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x TIER)" 'deep'
+  is 'the mapped model is recorded for later inspection' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x MODEL)" 'opus'
+  assert 'the mapped model reached agent start' \
+    [ "${started_cmd#*--model opus}" != "$started_cmd" ]
+
+  # `$FLEET_AGENT_TIER` must yield to an explicit `--model`, and the env-derived
+  # tier must not be recorded beside it. Without that, exporting the documented
+  # default makes the escape hatch unusable.
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  ( cd "$spawn_repo" \
+    && FLEET_STATE="$sandbox/spawn-state" FLEET_AGENT_TIER=deep \
+       HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/y --kind claude --model sonnet --skill implement \
+         --task 'Prove --model wins over FLEET_AGENT_TIER.' ) >/dev/null 2>&1
+  started_cmd=$(cat "$start_args" 2>/dev/null || true)
+  is 'env-tier + --model records no tier' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-y TIER)" ''
+  is 'env-tier + --model records the explicit model' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-y MODEL)" 'sonnet'
+  assert 'the explicit --model reached agent start' \
+    [ "${started_cmd#*--model sonnet}" != "$started_cmd" ]
 
   unset -f herdr
 else
@@ -251,6 +292,20 @@ if [ -n "$plugin_dir" ]; then
   done
   is 'no skill:// URI survives in the plugin prose' "${offenders# }" ''
 
+  offenders=""
+  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
+           "$plugin_dir"/README.md "$plugin_dir/../../README.md"; do
+    [ -f "$f" ] || continue
+    # Harness-specific model selectors and omp-only verbs belong in
+    # herdr/bin/fleet, not in the portable plugin. A bare `orchestrate` in a
+    # brief would also silently arm omp's orchestration contract.
+    if [ -n "$(sed -n -E '/(^|[^[:alnum:]_-])(orchestrate|@smol|@task|@slow|@default|--smol)([^[:alnum:]_-]|$)/p' "$f")" ]; then
+      offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
+    fi
+  done
+  is 'no harness-specific model vocab survives in the plugin prose' "${offenders# }" ''
+
+
   # Each dispatch command must name the skill it dispatches, or the worker gets
   # the brief with no procedure attached.
   missing=""
@@ -260,6 +315,14 @@ if [ -n "$plugin_dir" ]; then
     [ -n "$(sed -n "/--skill $c/p" "$f")" ] || missing="$missing $c"
   done
   is 'every dispatch command passes its own --skill' "${missing# }" ''
+
+  missing=""
+  for c in implement diagnosing-bugs research prototype code-review; do
+    f="$plugin_dir/commands/$c.md"
+    [ -f "$f" ] || continue
+    [ -n "$(sed -n '/--tier /p' "$f")" ] || missing="$missing $c"
+  done
+  is 'every dispatch command names a --tier' "${missing# }" ''
 else
   printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
 fi
@@ -578,6 +641,25 @@ rc=$?
 assert     'spawn dies on --no-dispatch --task conflict' [ "$rc" != 0 ]
 assert     'output contains --no-dispatch cannot be combined' [ "${out#*--no-dispatch cannot be combined}" != "$out" ]
 assert_not 'herdr was not called' [ "${out#*herdr was called}" != "$out" ]
+
+out=$( (cmd_spawn br --tier deep --model opus --task x) 2>&1 )
+rc=$?
+assert     'spawn dies on --tier/--model conflict' [ "$rc" != 0 ]
+assert     'output contains tier/model mutually exclusive' [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
+assert_not 'herdr was not called for tier/model' [ "${out#*herdr was called}" != "$out" ]
+
+# `$FLEET_AGENT_TIER` is a default, not a flag. An explicit `--model` must
+# override it; otherwise exporting the documented env default makes the escape
+# hatch unusable. This used to die "--tier and --model are mutually exclusive".
+out=$( (FLEET_AGENT_TIER=deep cmd_spawn br --model opus --task x) 2>&1 )
+assert_not 'env FLEET_AGENT_TIER does not block --model' \
+  [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
+
+out=$( (cmd_spawn br --kind codex --tier deep --task x) 2>&1 )
+rc=$?
+assert     'spawn dies when kind has no --tier mapping' [ "$rc" != 0 ]
+assert     'output contains no --tier mapping' [ "${out#*no --tier mapping}" != "$out" ]
+assert_not 'herdr was not called for unmapped kind+tier' [ "${out#*herdr was called}" != "$out" ]
 unset -f herdr
 
 # ── join --timeout validation ───────────────────────────────────────────────────
@@ -617,7 +699,7 @@ unset -f self_handle boss_handle agent_exists require_herdr
 # ── fleet version ───────────────────────────────────────────────────────────────
 
 printf '\nfleet version\n'
-is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.3.2'
+is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.4.0'
 
 # ── ls shows a pending question ──────────────────────────────────────────────────
 

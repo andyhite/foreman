@@ -48,6 +48,10 @@ FLEET_EDITOR="${FLEET_EDITOR:-nvim}"
 FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
 # Harness started for new workers unless `fleet spawn --kind` overrides it.
 FLEET_AGENT_KIND="${FLEET_AGENT_KIND:-omp}"
+# Model tier applied when `fleet spawn` names neither `--tier` nor `--model`.
+# Empty keeps today's behaviour: the harness's own default model. Commands in
+# plugins/fleet print an explicit `--tier`, so this is only a boss-side default.
+FLEET_AGENT_TIER="${FLEET_AGENT_TIER:-}"
 # A new shell may still be loading zsh/mise/direnv when a layout command is
 # sent. Verify that the requested TUI actually became foreground and retry.
 LAYOUT_START_TIMEOUT_MS="${FLEET_LAYOUT_START_TIMEOUT_MS:-15000}"
@@ -593,6 +597,52 @@ valid_agent_kind() {
   case "$kind" in *[!a-z0-9_-]*) return 1 ;; esac
 }
 
+# Worker model tiers are harness-neutral labels that `plugins/fleet` commands
+# may print. The mapping onto a harness's `--model` flag lives only here — the
+# plugin must not name `@task`, `sonnet`, or any other harness-specific selector.
+valid_agent_tier() {
+  case "$1" in standard|deep) return 0 ;; *) return 1 ;; esac
+}
+
+# A model selector becomes an `herdr agent start … --` argument. Keep it to one
+# shell-safe token so a crafted value cannot inject further flags; the harness
+# remains the authority on whether the selector is a real model.
+valid_agent_model() {
+  local LC_ALL=C
+  local model=$1
+  [ -n "$model" ] && [ ${#model} -le 128 ] || return 1
+  case "$model" in -*) return 1 ;; esac
+  case "$model" in *[!a-zA-Z0-9@/_:.+-]*) return 1 ;; esac
+}
+
+# Print the argv that follows `herdr agent start … --`, one token per line.
+# `--model` wins by construction (callers treat the two flags as mutually
+# exclusive); `--tier` is mapped per kind. Kinds without a mapping must pass
+# `--model` rather than guess at a selector that silently no-ops.
+worker_agent_args() {
+  local kind=$1 tier=$2 model=$3
+  if [ -n "$model" ]; then
+    printf '%s\n' --model "$model"
+    return 0
+  fi
+  [ -n "$tier" ] || return 0
+  case "$kind" in
+    omp)
+      case "$tier" in
+        standard) printf '%s\n' --model '@task' ;;
+        deep)     printf '%s\n' --model '@default' ;;
+      esac ;;
+    claude)
+      case "$tier" in
+        standard) printf '%s\n' --model 'sonnet' ;;
+        deep)     printf '%s\n' --model 'opus' ;;
+      esac ;;
+    *)
+      die "no --tier mapping for kind '$kind'
+  pass --model <selector> instead, or use --kind omp|claude" ;;
+  esac
+}
+
 # Resolve through the PATH symlink herdr installs, so fleet's own skills remain
 # reachable from the same repository/cache checkout without copying them into
 # every harness's user skill directory.
@@ -733,6 +783,10 @@ usage: fleet spawn <branch> [options]
   --path <path>       worktree location (default: sibling <repo>-<slug>)
   --handle <name>     agent handle (default: derived from the branch)
   --kind <kind>       agent harness (default: $FLEET_AGENT_KIND or omp)
+  --tier <tier>       worker model tier: standard | deep
+                      (default: $FLEET_AGENT_TIER, or the harness default)
+  --model <selector>  pass --model <selector> to the harness (escape hatch;
+                      mutually exclusive with --tier)
   --skill <name>      load this skill before the dispatched task
   --layout <shape>    agent (default) | full — see below
   --task <text>       task to dispatch once the agent is ready
@@ -740,6 +794,12 @@ usage: fleet spawn <branch> [options]
   --no-dispatch       build the worktree, agent, and layout without a task
   --replace           reuse a handle whose record exists but whose agent is
                       gone: removes the recorded workspace, then respawns
+
+tiers:
+  standard  mid-high model for orchestration that mostly delegates
+            (omp: @task, claude: sonnet)
+  deep      high model for judgement-heavy orchestration
+            (omp: @default, claude: opus)
 
 layouts:
   agent   one pane, running the selected agent. All a worker needs.
@@ -754,6 +814,7 @@ cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
   local layout=agent replace=0 kind=$FLEET_AGENT_KIND skill=""
+  local tier=$FLEET_AGENT_TIER model="" tier_explicit=0
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
   case "$branch" in -*) usage_spawn ;; esac
@@ -765,6 +826,8 @@ cmd_spawn() {
       --handle) handle=${2:?}; shift 2 ;;
       --layout) layout=${2:?}; shift 2 ;;
       --kind) kind=${2:?}; shift 2 ;;
+      --tier) tier=${2:?}; tier_explicit=1; shift 2 ;;
+      --model) model=${2:?}; shift 2 ;;
       --skill) skill=${2:?}; shift 2 ;;
       --task) task=${2:?}; shift 2 ;;
       --task-file) taskfile=${2:?}; shift 2 ;;
@@ -790,6 +853,24 @@ cmd_spawn() {
     || die "agent kind '$kind' is not a safe herdr kind"
   [ -z "$skill" ] || valid_skill_name "$skill" \
     || die "invalid skill name '$skill'"
+  # Only an *explicit* `--tier` conflicts with `--model`. `$FLEET_AGENT_TIER` is
+  # a default, and an explicit `--model` must override it — otherwise exporting
+  # the documented env default makes the escape hatch unusable.
+  if [ "$tier_explicit" = 1 ] && [ -n "$model" ]; then
+    die "--tier and --model are mutually exclusive"
+  fi
+  # `--model` wins over an env-derived tier so meta TIER/MODEL stay coherent.
+  [ -z "$model" ] || tier=""
+  [ -z "$tier" ] || valid_agent_tier "$tier" \
+    || die "unknown tier '$tier' (expected: standard, deep)"
+  [ -z "$model" ] || valid_agent_model "$model" \
+    || die "model selector '$model' is not a safe --model value"
+  # Kind↔tier mapping lives in worker_agent_args and dies for unmapped kinds.
+  # Check it here — before the worktree/workspace/pane exist — so a boss that
+  # pastes a command's `--tier` with `--kind codex` fails clean instead of
+  # leaving state that needs `fleet reap`. Only runs when --tier is set;
+  # --model is a raw passthrough and needs no kind mapping.
+  [ -z "$tier" ] || worker_agent_args "$kind" "$tier" "" >/dev/null
 
   repo=${repo:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
   [ -n "$repo" ] || die "not in a git repo and --repo was not given"
@@ -881,12 +962,32 @@ cmd_spawn() {
   # spawn that dies further down — no agent could be started, herdr refused a
   # rename — must still leave something `fleet ls` shows and `fleet reap` can
   # remove. Otherwise the failure orphans a worktree no fleet command can see.
+  # Tier→model mapping was already validated above; this call only builds the
+  # argv plan and the MODEL value recorded beside TIER.
+  local agent_args resolved_model=$model arg
+  agent_args=$(worker_agent_args "$kind" "$tier" "$model")
+  # When the boss passed --tier, record the mapped selector so `meta_get MODEL`
+  # answers the same question for both flags.
+  if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
+    resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
+  fi
   meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
-    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "KIND=$kind" "SKILL=$skill"
+    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "KIND=$kind" "SKILL=$skill" \
+    "TIER=$tier" "MODEL=$resolved_model"
   : >"$(report_file "$handle")"
   : >"$(report_token_file "$handle")"
 
-  start_worker_agent "$handle" "$ws" "$pane" "$kind"
+  # Forward mapped `--model` tokens as separate argv entries. bash 3.2 has no
+  # `${arr[@]}` at a call site without a named array, so rebuild "$@" from the
+  # newline-separated plan and hand that to start_worker_agent.
+  set --
+  while IFS= read -r arg || [ -n "$arg" ]; do
+    [ -n "$arg" ] || continue
+    set -- "$@" "$arg"
+  done <<EOF
+$agent_args
+EOF
+  start_worker_agent "$handle" "$ws" "$pane" "$kind" "$@"
   # After the agent, deliberately. The agent is the deliverable; the rest of
   # the layout is scenery, and a worker that works beats a tidy dead workspace.
   apply_layout "$layout" "$ws" "$tab" "$pane" "$wtpath" "$kind"
@@ -913,6 +1014,16 @@ cmd_spawn() {
 # never participates in a layout race with it.
 start_worker_agent() {
   local handle=$1 ws=$2 pane=$3 kind=$4
+  shift 4
+  # Remaining arguments are forwarded after `--` to the harness (typically
+  # `--model <selector>`). Empty means the harness's own default — today's
+  # behaviour, and what a spawn without `--tier`/`--model` still does.
+  #
+  # Branched rather than `"${arr[@]}"`: under bash 3.2 with `set -u`, expanding
+  # an empty array is an unbound-variable error, which turned a no-model spawn
+  # into a 120s retry storm.
+  local has_agent_args=0
+  [ $# -gt 0 ] && has_agent_args=1
   # One wall-clock budget for the whole thing. Each attempt is handed what is
   # *left* of it, clamped to herdr's own 300000 cap, so the retry loop cannot
   # multiply the bound by the number of attempts.
@@ -923,9 +1034,16 @@ start_worker_agent() {
     left=$(remaining_ms "$dl")
     [ "$left" -gt 0 ] || break
     [ "$left" -le 300000 ] || left=300000
-    if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
-               --timeout "$left" 2>&1); then
-      return 0
+    if [ "$has_agent_args" = 1 ]; then
+      if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
+                 --timeout "$left" -- "$@" 2>&1); then
+        return 0
+      fi
+    else
+      if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
+                 --timeout "$left" 2>&1); then
+        return 0
+      fi
     fi
     # A failed CLI response can race with the agent it started becoming ready.
     # Recover only if that agent already has the requested handle; a differently

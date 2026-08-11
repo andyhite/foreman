@@ -69,7 +69,7 @@ harness in the workspace's own pane under a handle derived from the branch,
 builds the selected layout, and submits the task:
 
 ```bash
-fleet spawn feat/412-webhook-retry --kind claude --skill implement \
+fleet spawn feat/412-webhook-retry --kind claude --tier deep --skill implement \
   --task "Add exponential backoff to the webhook dispatcher. Tests in
 tests/webhooks/. Do not change the public dispatch() signature."
 ```
@@ -84,14 +84,18 @@ Long tasks read better from a file, and a brief worth dispatching is almost
 always long:
 
 ```bash
-fleet spawn fix/301-null-guard --skill diagnosing-bugs --task-file /tmp/task-301.md
+fleet spawn fix/301-null-guard --tier deep --skill diagnosing-bugs --task-file /tmp/task-301.md
 ```
 
 `--kind` chooses any harness supported by `herdr agent start` and defaults to
 `$FLEET_AGENT_KIND`, then `omp`. The orchestrator and worker kinds are
-independent: an omp session can dispatch Claude or Codex workers. `--base`
-overrides the branch point (default: `origin/HEAD`). `--no-dispatch` creates the
-worktree and starts its agent without assigning work.
+independent: an omp session can dispatch Claude or Codex workers. `--tier
+standard|deep` selects a worker model band (mapped per kind inside the CLI);
+`--model <selector>` is the escape hatch that passes a harness selector
+straight through. The two are mutually exclusive. `$FLEET_AGENT_TIER` sets a
+default when neither flag is passed. `--base` overrides the branch point
+(default: `origin/HEAD`). `--no-dispatch` creates the worktree and starts its
+agent without assigning work.
 
 `--layout agent` (the default) is the worker shape: one `agent` tab, one pane
 named for the selected harness. `--layout full` is for a worktree a human will
@@ -117,9 +121,9 @@ Two modes, and picking the wrong one is the main way this goes badly.
 each returns as soon as its task is submitted — then block once:
 
 ```bash
-fleet spawn feat/a --skill implement --task-file /tmp/a.md
-fleet spawn feat/b --skill implement --task-file /tmp/b.md
-fleet spawn feat/c --skill implement --task-file /tmp/c.md
+fleet spawn feat/a --tier deep --skill implement --task-file /tmp/a.md
+fleet spawn feat/b --tier deep --skill implement --task-file /tmp/b.md
+fleet spawn feat/c --tier deep --skill implement --task-file /tmp/c.md
 fleet join
 ```
 

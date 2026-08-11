@@ -78,6 +78,12 @@ out of a list of forty. Fleet prepends an instruction to run
 with its base directory. Without `--skill` you get a generic agent doing
 generic work; with it the worker follows the named skill's own procedure.
 
+**`--tier` picks the worker's model band.** Each `/fleet:*` command prints the
+tier that fits its skill — `standard` for dispatch-heavy work, `deep` when the
+worker itself has to hold judgement. The CLI maps the label onto the selected
+harness; do not put harness-specific model names in a brief. `--model` is the
+escape hatch when a boss needs a selector the tier table does not cover.
+
 `disable-model-invocation: true` lands mostly on the other side of this split
 than you would expect. Every one of your own interview skills sets it —
 `triage`, `to-tickets`, `to-spec`, `grill-me`, `wayfinder` — while among the
@@ -102,7 +108,7 @@ quoting. Write it, spawn, and move on to the next slice:
 ```bash
 # 1. write the brief to /tmp/fleet-<handle>.md
 # 2. spawn with the execution skill named explicitly
-fleet spawn feat/412-webhook-retry --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
+fleet spawn feat/412-webhook-retry --tier deep --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
 ```
 
 Branch names follow the repo's convention if it has one. Otherwise:

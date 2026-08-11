@@ -136,8 +136,8 @@ one round.
 The spawn is always this shape:
 
 ```bash
-fleet spawn <branch> --kind <worker-harness> --skill <execution-skill> \
-  --task-file <brief>
+fleet spawn <branch> --kind <worker-harness> --tier <standard|deep> \
+  --skill <execution-skill> --task-file <brief>
 ```
 
 `--skill` prepends one universal instruction:

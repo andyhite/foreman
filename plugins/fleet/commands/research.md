@@ -49,8 +49,20 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 Then:
 
 ```bash
-fleet spawn spike/<slug> --skill research --task-file /tmp/fleet-<handle>.md
+fleet spawn spike/<slug> --tier standard --skill research --task-file /tmp/fleet-<handle>.md
 ```
+
+## Delegation
+
+The worker is the acceptance gate, not the researcher. The `research` skill
+already spins a background agent to investigate and write the cited Markdown;
+the worker's job is to frame the question and reject a write-up that leans on
+secondary sources or fails to answer what was asked.
+
+Tell the worker, in the brief's Done-when, to keep that split: chunky reading
+goes to a local subagent that returns a compact summary, and only the verdict
+stays with the worker. Many tiny questions over material already in its context
+cost more than they save — leave those local.
 
 Research parallelizes better than anything else here — independent questions are
 independent workers. Spawn all of them, then `fleet join` once.

@@ -57,8 +57,19 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 Then:
 
 ```bash
-fleet spawn spike/<slug> --skill prototype --task-file /tmp/fleet-<handle>.md
+fleet spawn spike/<slug> --tier deep --skill prototype --task-file /tmp/fleet-<handle>.md
 ```
+
+## Delegation
+
+Choosing the prototype branch (logic HTML vs UI variations) and judging whether
+the artifact answers the design question stay with the worker. Construction of
+the artifact — the HTML file, the variation routes, the floating switcher — is
+mechanical and should go to a local subagent that returns the path and a short
+walkthrough.
+
+Keep the brief's "which branch" decision explicit so the worker does not spend
+its judgement budget re-litigating it.
 
 Several competing answers to the *same* question is a legitimate fan-out: spawn
 one worker per approach on its own branch and compare the branches.

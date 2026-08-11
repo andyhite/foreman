@@ -55,8 +55,19 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 Then:
 
 ```bash
-fleet spawn feat/<slug> --skill implement --task-file /tmp/fleet-<handle>.md
+fleet spawn feat/<slug> --tier deep --skill implement --task-file /tmp/fleet-<handle>.md
 ```
+
+## Delegation
+
+The worker keeps the judgement: confirming seams, driving the red-green loop at
+those seams, and accepting or rejecting the result. Chunky exploration of the
+tree and bulk mechanical edits go to local subagents that return a compact
+summary — that is where the spend drops, because only the summary joins the
+worker's context for the rest of the session.
+
+Do not fan the tight red-green loop out to subagents. Many small questions over
+material the worker already has warm cost more than keeping them local.
 
 One branch per independently shippable piece. If the work splits into several,
 write and spawn all of them before running `fleet join`.

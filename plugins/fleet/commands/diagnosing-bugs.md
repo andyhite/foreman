@@ -60,8 +60,18 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 Then:
 
 ```bash
-fleet spawn fix/<slug> --skill diagnosing-bugs --task-file /tmp/fleet-<handle>.md
+fleet spawn fix/<slug> --tier deep --skill diagnosing-bugs --task-file /tmp/fleet-<handle>.md
 ```
+
+## Delegation
+
+Phase 1 — building the feedback loop that goes red on *this* bug — stays with
+the worker. Hypothesis ranking and the decision that the loop is faithful are
+the skill's centre and do not delegate well.
+
+Once the loop exists, chunky exploration and bulk mechanical edits go to local
+subagents that return a compact summary. Leave tiny follow-ups about already-
+warm context on the worker; those lose to its prompt cache.
 
 If the symptom might have several independent causes, that is still one worker.
 Diagnosis is a serial hunt; splitting it just duplicates the reproduction work.
