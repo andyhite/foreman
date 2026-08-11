@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # fleet — dispatch peer coding agents into herdr worktree workspaces.
 #
-# The problem this solves: omp's own `task` subagents live inside one omp
-# process, so they share its context window, its cwd, and its lifetime. Work
+# The problem this solves: local subagents (`task` in omp) live inside one
+# harness process, so they share its context window, cwd, and lifetime. Work
 # that wants a real branch, a real checkout, and an agent you can still talk to
-# an hour later needs separate omp processes. herdr already has every primitive
-# for that (`worktree create`, `agent start/prompt/read/wait`), but stringing
-# them together per dispatch is several commands, a JSON dig, and knowing which
-# of them yields an agent herdr will actually recognise and address. This is
-# that sequence, done once, correctly.
+# an hour later needs a separate agent process. herdr already has every
+# primitive for that (`worktree create`, `agent start/prompt/read/wait`), but
+# stringing them together per dispatch is several commands, a JSON dig, and
+# knowing which of them yields an agent herdr will actually recognise and
+# address. This is that sequence, done once, correctly.
 #
-# The other half is addressing. Two omp processes cannot see each other —
-# `hub`, `history://` and `agent://` are all scoped to a single process — so
-# every message between orchestrator and worker rides herdr's agent surface
-# instead. `herdr agent prompt <name>` writes into a live agent's input, which
+# The other half is addressing. Harness-local direct channels do not cross
+# process boundaries, so every message between orchestrator and worker rides
+# herdr's agent surface instead. `herdr agent prompt <name>` writes into a live
+# agent's input, which
 # means the channel is symmetric: a worker answers its orchestrator with the
 # same command the orchestrator used to reach it. What each side needs to know
 # about the other lives under $FLEET_STATE, keyed by herdr agent name, so
@@ -28,9 +28,10 @@ set -euo pipefail
 
 FLEET_STATE="${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fleet}"
 
-# Bound on getting a named, input-ready omp into a fresh worktree. `agent
-# start` blocks until herdr has detected the agent, so this covers omp's own
-# boot; herdr caps its --timeout at 300000 and the value is clamped to that.
+# Bound on getting a named, input-ready agent into a fresh worktree. `agent
+# start` blocks until herdr has detected the selected harness, so this covers
+# the agent's own boot; herdr caps its --timeout at 300000 and the value is
+# clamped to that.
 SPAWN_TIMEOUT_MS="${FLEET_SPAWN_TIMEOUT_MS:-120000}"
 # Bound on a single `fleet ask`/`fleet join`. Long by default: the whole point
 # of a worker is that it does something substantial.
@@ -45,6 +46,8 @@ DISPATCH_SETTLE_MS="${FLEET_DISPATCH_SETTLE_MS:-15000}"
 # are a preference, not a mechanism.
 FLEET_EDITOR="${FLEET_EDITOR:-nvim}"
 FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
+# Harness started for new workers unless `fleet spawn --kind` overrides it.
+FLEET_AGENT_KIND="${FLEET_AGENT_KIND:-omp}"
 # A new shell may still be loading zsh/mise/direnv when a layout command is
 # sent. Verify that the requested TUI actually became foreground and retry.
 LAYOUT_START_TIMEOUT_MS="${FLEET_LAYOUT_START_TIMEOUT_MS:-15000}"
@@ -486,11 +489,139 @@ boss_handle() {
   printf '%s' "${b:-$(default_boss)}"
 }
 
+# ── Skills ───────────────────────────────────────────────────────────────────
+#
+# One portable path to a named skill, for every harness. Each one names and
+# invokes skills differently — `skill://x`, `/x`, `$x` — and a per-harness table
+# of those forms fails silently when an entry is wrong: the worker simply does
+# generic work. `fleet skill <name>` sidesteps the whole question by printing
+# the skill instead of invoking it, which every harness can do through bash.
+
+# A skill name becomes part of a path below. Agent Skills names are lowercase,
+# at most 64 characters, and use hyphens as separators.
+#
+# LC_ALL=C is load-bearing for the same reason it is in valid_handle(): a glob
+# range is collation-ordered, and most locales interleave case, so under the
+# bash 3.2 macOS ships `[a-z]` matches `I` and `Implement` passed as a name.
+valid_skill_name() {
+  local LC_ALL=C
+  local name=$1
+  [ -n "$name" ] && [ ${#name} -le 64 ] || return 1
+  case "$name" in [a-z0-9]*) ;; *) return 1 ;; esac
+  case "$name" in *[!a-z0-9-]*|*-) return 1 ;; esac
+}
+
+# A harness kind is passed to `herdr agent start --kind`. Keep command-line
+# input to one shell-safe token; herdr remains the authority on supported kinds.
+valid_agent_kind() {
+  local LC_ALL=C
+  local kind=$1
+  [ -n "$kind" ] && [ ${#kind} -le 32 ] || return 1
+  case "$kind" in [a-z]*) ;; *) return 1 ;; esac
+  case "$kind" in *[!a-z0-9_-]*) return 1 ;; esac
+}
+
+# Resolve through the PATH symlink herdr installs, so fleet's own skills remain
+# reachable from the same repository/cache checkout without copying them into
+# every harness's user skill directory.
+fleet_script_dir() {
+  local path=${BASH_SOURCE[0]} dir target
+  while [ -L "$path" ]; do
+    dir=$(cd -P "$(dirname "$path")" && pwd)
+    target=$(readlink "$path")
+    case "$target" in /*) path=$target ;; *) path="$dir/$target" ;; esac
+  done
+  cd -P "$(dirname "$path")" && pwd
+}
+
+# Ordered from explicit override, to fleet's bundled skills, to project scope,
+# then user scope. Every supported harness uses the Agent Skills
+# `<root>/<name>/SKILL.md` layout even though their discovery roots differ.
+# Empty and missing roots are harmless.
+skill_roots() {
+  local root old_ifs top="" script_dir
+  old_ifs=$IFS
+  IFS=:
+  for root in ${FLEET_SKILL_PATH:-}; do
+    [ -n "$root" ] && printf '%s\n' "$root"
+  done
+  IFS=$old_ifs
+
+  script_dir=$(fleet_script_dir)
+  printf '%s\n' "$script_dir/../../plugins/fleet/skills"
+
+  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$top" ]; then
+    printf '%s\n' \
+      "$top/.agents/skills" "$top/.agent/skills" "$top/.claude/skills" \
+      "$top/.omp/skills" "$top/.codex/skills" "$top/.cursor/skills" \
+      "$top/.gemini/skills" "$top/.opencode/skills" "$top/.opencode/skill" \
+      "$top/.pi/skills"
+  fi
+
+  printf '%s\n' \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" \
+    "$HOME/.agents/skills" "$HOME/.agent/skills" "$HOME/.omp/agent/skills" \
+    "$HOME/.codex/skills" "$HOME/.cursor/skills" "$HOME/.gemini/skills" \
+    "$HOME/.config/opencode/skills" "$HOME/.config/opencode/skill" \
+    "$HOME/.config/amp/skills" "$HOME/.pi/agent/skills"
+}
+
+resolve_skill() {
+  local name=$1 root
+  valid_skill_name "$name" || return 1
+  while IFS= read -r root; do
+    [ -f "$root/$name/SKILL.md" ] || continue
+    printf '%s' "$root/$name/SKILL.md"
+    return 0
+  done < <(skill_roots)
+  return 1
+}
+
+strip_skill_frontmatter() {
+  local file=$1 first="" line="" closed=0
+  {
+    IFS= read -r first || return 0
+    if [ "$first" != "---" ]; then
+      printf '%s\n' "$first"
+      cat
+      return 0
+    fi
+    while IFS= read -r line; do
+      if [ "$line" = "---" ]; then closed=1; break; fi
+    done
+    [ "$closed" = 1 ] || die "skill at $file has unclosed YAML frontmatter"
+    cat
+  } <"$file"
+}
+
+cmd_skill() {
+  local name=${1:-}
+  [ $# = 1 ] && valid_skill_name "$name" \
+    || die "usage: fleet skill <name>"
+  local file
+  file=$(resolve_skill "$name") \
+    || die "skill '$name' was not found (set FLEET_SKILL_PATH to add roots)"
+  # Normalized, because the bundled root is reached through `../..` from the
+  # script's own directory. An agent is told to resolve the skill's relative
+  # asset paths against this, so it has to read as a real location.
+  local base; base=$(cd -P "$(dirname "$file")" && pwd)
+  printf '## Skill: %s\n\nBase directory: `%s`\n' "$name" "$base"
+  printf 'Follow the instructions below. Resolve relative paths from the base directory.\n\n'
+  strip_skill_frontmatter "$base/SKILL.md"
+}
+
+skill_instruction() {
+  local name=$1
+  valid_skill_name "$name" || die "invalid skill name '$name'"
+  printf 'Before doing any other work, run `fleet skill %s` and follow the instructions it prints.' "$name"
+}
+
 # ── Spawning ─────────────────────────────────────────────────────────────────
 
-# The protocol block appended to every dispatched task. Workers are ordinary
-# omp sessions with no orchestration instructions of their own, so the contract
-# has to travel with the work.
+# The protocol block appended to every dispatched task. Workers are blank agent
+# sessions with no orchestration instructions of their own, so the contract has
+# to travel with the work.
 protocol_block() {
   local handle=$1 boss=$2 branch=$3 dir=$4
   cat <<EOF
@@ -521,6 +652,8 @@ usage: fleet spawn <branch> [options]
   --repo <path>       repo to branch from (default: current repo)
   --path <path>       worktree location (default: sibling <repo>-<slug>)
   --handle <name>     agent handle (default: derived from the branch)
+  --kind <kind>       agent harness (default: $FLEET_AGENT_KIND or omp)
+  --skill <name>      load this skill before the dispatched task
   --layout <shape>    agent (default) | full — see below
   --task <text>       task to dispatch once the agent is ready
   --task-file <path>  read the task from a file ('-' for stdin)
@@ -529,8 +662,8 @@ usage: fleet spawn <branch> [options]
                       gone: removes the recorded workspace, then respawns
 
 layouts:
-  agent   one pane, running omp. All a worker needs.
-  full    omp with an editor beside it, plus shell and review tabs, for a
+  agent   one pane, running the selected agent. All a worker needs.
+  full    the agent with an editor beside it, plus shell and review tabs, for a
           worktree you intend to sit in yourself. $FLEET_EDITOR (nvim) and
           $FLEET_GIT_UI (lazygit) choose the commands.
 EOF
@@ -540,7 +673,7 @@ EOF
 cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
-  local layout=agent replace=0
+  local layout=agent replace=0 kind=$FLEET_AGENT_KIND skill=""
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
   case "$branch" in -*) usage_spawn ;; esac
@@ -551,6 +684,8 @@ cmd_spawn() {
       --path) wtpath=${2:?}; shift 2 ;;
       --handle) handle=${2:?}; shift 2 ;;
       --layout) layout=${2:?}; shift 2 ;;
+      --kind) kind=${2:?}; shift 2 ;;
+      --skill) skill=${2:?}; shift 2 ;;
       --task) task=${2:?}; shift 2 ;;
       --task-file) taskfile=${2:?}; shift 2 ;;
       --no-dispatch) dispatch=0; shift ;;
@@ -563,6 +698,10 @@ cmd_spawn() {
     agent|full) ;;
     *) die "unknown layout '$layout' (expected: agent, full)" ;;
   esac
+  valid_agent_kind "$kind" \
+    || die "agent kind '$kind' is not a safe herdr kind"
+  [ -z "$skill" ] || valid_skill_name "$skill" \
+    || die "invalid skill name '$skill'"
 
   repo=${repo:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
   [ -n "$repo" ] || die "not in a git repo and --repo was not given"
@@ -620,6 +759,14 @@ cmd_spawn() {
     if [ "$taskfile" = "-" ]; then task=$(cat); else task=$(cat "$taskfile"); fi
   fi
 
+  if [ -n "$skill" ]; then
+    [ "$dispatch" = 1 ] \
+      || die "--skill cannot be combined with --no-dispatch"
+    [ -n "$task" ] \
+      || die "--skill requires --task or --task-file"
+    task="$(skill_instruction "$skill")"$'\n\n'"$task"
+  fi
+
   # The spawner is the boss, by definition. boss_handle() would be wrong here:
   # it reads the caller's own BOSS record, and only workers have one, so an
   # orchestrator that claimed a custom handle silently stamped the default
@@ -627,7 +774,7 @@ cmd_spawn() {
   local boss; boss=$(self_handle)
   [ -n "$boss" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
 
-  note "fleet: creating $branch at $wtpath (from $base)"
+  note "fleet: creating $branch at $wtpath with $kind (from $base)"
   local created ws tab pane
   created=$(h worktree create --cwd "$repo" --branch "$branch" --base "$base" \
     --path "$wtpath" --no-focus)
@@ -643,14 +790,14 @@ cmd_spawn() {
   # rename — must still leave something `fleet ls` shows and `fleet reap` can
   # remove. Otherwise the failure orphans a worktree no fleet command can see.
   meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
-    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")"
+    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "KIND=$kind" "SKILL=$skill"
   : >"$(report_file "$handle")"
   : >"$(report_token_file "$handle")"
 
-  start_worker_agent "$handle" "$ws" "$pane"
+  start_worker_agent "$handle" "$ws" "$pane" "$kind"
   # After the agent, deliberately. The agent is the deliverable; the rest of
   # the layout is scenery, and a worker that works beats a tidy dead workspace.
-  apply_layout "$layout" "$ws" "$tab" "$pane" "$wtpath"
+  apply_layout "$layout" "$ws" "$tab" "$pane" "$wtpath" "$kind"
 
   printf '%s\n' "$handle"
 
@@ -659,13 +806,13 @@ cmd_spawn() {
   fi
 }
 
-# Put a named, input-ready omp in the worktree's own pane.
+# Put a named, input-ready coding agent in the worktree's own pane.
 #
 # `worktree create` hands back the workspace's root pane, so there is nothing
-# to discover: `agent start` launches omp there, takes the name up front, and
-# returns only once herdr has detected it and considers it ready for input.
-# That one call replaces a poll for `interactive_ready` followed by a rename,
-# and it means fleet no longer needs a layout plugin to start an agent.
+# to discover: `agent start` launches the selected harness there, takes the name
+# up front, and returns only once herdr has detected it and considers it ready
+# for input. That one call replaces a poll for `interactive_ready` followed by
+# a rename, and it means fleet no longer needs a layout plugin to start an agent.
 #
 # `agent start` is a loop because it requires the pane to be *at its interactive
 # shell prompt*, and a brand-new worktree pane is not — zsh, mise and direnv
@@ -673,7 +820,7 @@ cmd_spawn() {
 # workspace-manager is rejected before worktree creation, so this function
 # never participates in a layout race with it.
 start_worker_agent() {
-  local handle=$1 ws=$2 pane=$3
+  local handle=$1 ws=$2 pane=$3 kind=$4
   # One wall-clock budget for the whole thing. Each attempt is handed what is
   # *left* of it, clamped to herdr's own 300000 cap, so the retry loop cannot
   # multiply the bound by the number of attempts.
@@ -684,7 +831,7 @@ start_worker_agent() {
     left=$(remaining_ms "$dl")
     [ "$left" -gt 0 ] || break
     [ "$left" -le 300000 ] || left=300000
-    if err=$(herdr agent start "$handle" --kind omp --pane "$pane" \
+    if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
                --timeout "$left" 2>&1); then
       return 0
     fi
@@ -721,30 +868,30 @@ workspace_ready_agent() {
 # removing a layout plugin costs a fleet worktree nothing.
 #
 # `agent` is the default and is the whole job for a worker: the single pane
-# `worktree create` returned, running omp. `full` is for a worktree you intend
-# to sit in yourself — editor beside the agent, a shell, and a git UI — and is
-# the shape worth pairing with `--no-dispatch`.
+# `worktree create` returned, running the selected harness. `full` is for a
+# worktree you intend to sit in yourself — editor beside the agent, a shell,
+# and a git UI — and is the shape worth pairing with `--no-dispatch`.
 #
 # Panes and tabs are created unfocused: spawning is something an orchestrator
 # does in the background, and it must not yank the view out from under whoever
 # is reading something else.
 apply_layout() {
-  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
+  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5 kind=$6
   # Best-effort, in a subshell. The agent is the deliverable and the rest of
   # the layout is scenery: a pane split that fails, a TUI still starting, a
   # shell that has not finished sourcing its rc files — none of that is worth
   # failing a spawn over. Aborting here would skip the dispatch and never even
   # print the handle of the worker that is already up and running.
-  if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" ); then
+  if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" "$kind" ); then
     note "fleet: the '$layout' layout did not finish; the agent pane is up regardless"
   fi
   return 0
 }
 
 build_layout() {
-  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
+  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5 kind=$6
   h tab rename "$tab" agent >/dev/null
-  h pane rename "$root" omp >/dev/null
+  h pane rename "$root" "$kind" >/dev/null
   [ "$layout" = full ] || return 0
 
   local editor shell review created
@@ -1252,12 +1399,16 @@ cmd_ls() {
   if [ "${1:-}" != "--all-repos" ]; then
     scope=$(scoped_key "fleet ls" "run it from inside a repo, or pass --all-repos")
   fi
-  local handle status
-  printf '%-20s %-9s %-28s %s\n' HANDLE STATUS BRANCH DIR
+  local handle status kind
+  printf '%-20s %-9s %-8s %-28s %s\n' HANDLE STATUS KIND BRANCH DIR
   for handle in $(known_workers "$scope"); do
     status=$(agent_field "$handle" agent_status)
     [ -n "$status" ] || status=gone
-    printf '%-20s %-9s %-28s %s\n' "$handle" "$status" \
+    # Every worker recorded before --kind existed was started as omp, so that is
+    # the honest fallback rather than an unknown marker.
+    kind=$(meta_get "$handle" KIND)
+    [ -n "$kind" ] || kind=omp
+    printf '%-20s %-9s %-8s %-28s %s\n' "$handle" "$status" "$kind" \
       "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)"
   done
 }
@@ -1361,7 +1512,7 @@ Orchestrator
   fleet send [--raw] <h> <text>  dispatch work, return immediately
   fleet ask [--raw] <h> <text>   dispatch and block until the report is in
   fleet join [handle...]         collect this repo's workers, print reports
-  fleet ls [--all-repos]         list workers and their states
+  fleet ls [--all-repos]         list workers, their kinds, and their states
   fleet read <handle> [-n N]     read a worker's terminal directly
   fleet reap <handle>...|--all   remove worktrees and forget workers
                                  [--all-repos] [--force] [--forget]
@@ -1370,6 +1521,9 @@ Worker
   fleet report [-f file|text]    write the report the orchestrator collects
   fleet reply <text>             file a question and interrupt the orchestrator
   fleet whoami                   print this pane's handle
+
+Both
+  fleet skill <name>             print a named skill for any agent harness
 
 --raw sends text alone; without it fleet appends its protocol block, which is
 right for a task and wrong for a one-line answer.
@@ -1385,6 +1539,7 @@ main() {
   local cmd=$1; shift
   case "$cmd" in
     boss)    cmd_boss "$@" ;;
+    skill)   cmd_skill "$@" ;;
     whoami)  cmd_whoami "$@" ;;
     spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;

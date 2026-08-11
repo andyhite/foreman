@@ -1,5 +1,6 @@
 ---
 description: Drive the repo's backlog to merged — read the dependency graph, dispatch every ready ticket to the matching fleet worker, review and merge, recompute, repeat
+disable-model-invocation: true
 ---
 
 Drive the backlog to merged. The tickets are the objective, you dispatch every
@@ -18,9 +19,9 @@ You are now this session's **fleet orchestrator** — adopt that role for the re
 of the conversation, exactly as `/fleet:boss` defines it. You do not need to
 have run it; this command is standalone.
 
-Read `skill://fleet-dispatch` if you have not already. This command does not
-replace the requirements gate in it. It batches it: one pass over the frontier,
-one round of questions, one fan-out.
+Run `fleet skill fleet-dispatch` if you have not already and follow the
+instructions it prints. This command does not replace its requirements gate.
+It batches it: one pass over the frontier, one round of questions, one fan-out.
 
 ## Why this one merges
 
@@ -96,7 +97,7 @@ What falls out still needs saying. Report it once, in one block:
 
 | Role | What you do with it |
 |---|---|
-| `needs-triage` | Offer to run `skill://triage` here. It is interview work; it stays with you. |
+| `needs-triage` | Offer to run `fleet skill triage` here. It is interview work; it stays with you. |
 | `needs-info` | Blocked on a person. Name the ticket and who owes the answer. |
 | `ready-for-human` | Never dispatch. Count it. |
 | `wontfix` | Ignore. |
@@ -105,26 +106,26 @@ What falls out still needs saying. Report it once, in one block:
 
 | The ticket is | Worker reads | Branch |
 |---|---|---|
-| a change to build against a spec | `skill://implement` | `feat/<n>-<slug>` |
-| something broken or slow, with a symptom | `skill://diagnosing-bugs` | `fix/<n>-<slug>` |
-| a question whose deliverable is a committed write-up | `skill://research` | `spike/<n>-<slug>` |
-| a design question needing something runnable | `skill://prototype` | `spike/<n>-<slug>` |
-| a review of a branch that already exists | `skill://code-review` | `review/<n>-<slug>` |
+| a change to build against a spec | `fleet skill implement` | `feat/<n>-<slug>` |
+| something broken or slow, with a symptom | `fleet skill diagnosing-bugs` | `fix/<n>-<slug>` |
+| a question whose deliverable is a committed write-up | `fleet skill research` | `spike/<n>-<slug>` |
+| a design question needing something runnable | `fleet skill prototype` | `spike/<n>-<slug>` |
+| a review of a branch that already exists | `fleet skill code-review` | `review/<n>-<slug>` |
 
 Follow the repo's branch convention where it has one; the above is the fallback.
 
 **Two kinds of ticket never reach a worker.**
 
 *Decisions.* A ticket whose deliverable is an answer recorded on the ticket —
-not a branch, not a PR — is yours. Resolve it here with `scout` or `librarian`
-subagents in parallel, or a `task` subagent in a scratch directory when it needs
-something runnable. Then record the resolution on the ticket, close it, and
-update whatever parent or map indexes it **in the same pass**. An index that
-lags its tickets is worse than none. Do these early: a decision the rest of the
-backlog is shaped around is worth knowing before you dispatch into it.
+not a branch, not a PR — is yours. Resolve it here, using your harness's local
+subagents in parallel when available (`scout`, `librarian`, or `task` in omp).
+Then record the resolution on the ticket, close it, and update whatever parent
+or map indexes it **in the same pass**. An index that lags its tickets is worse
+than none. Do these early: a decision the rest of the backlog is shaped around
+is worth knowing before you dispatch into it.
 
-*Trivia.* A one-line diff, a version bump, a doc typo. Do it yourself with a
-`task` subagent and say you did. A branch is more ceremony than the change.
+*Trivia.* A one-line diff, a version bump, a doc typo. Do it yourself or use a
+local subagent and say you did. A branch is more ceremony than the change.
 
 ## 3. Close the gaps in one round
 
@@ -167,19 +168,19 @@ the fence in the scope line, and the escalation list in step 6.
 Two things decide who is in the wave:
 
 - **The cap.** Three concurrent code workers unless the repo says otherwise. A
-  fleet worker is a full `omp` process, not a subagent; they are not free, and a
-  worker blocked waiting on your attention is worse than one that starts later.
+  fleet worker is a full agent process, not a local subagent; they are not free,
+  and one blocked waiting on your attention is worse than one that starts later.
 - **File overlap.** Two workers editing the same files produce conflicting
   branches and nothing resolves that for you. Hold the second back and say why.
 
 ## 5. Dispatch
 
-Write every brief to `/tmp/fleet-<n>.md` before spawning anything. The shape is
-the one in `skill://fleet-dispatch` — an invocation line, then the answers from
-step 3, then scope and acceptance:
+Write every brief to `/tmp/fleet-<n>.md` before spawning anything. Use the shape
+printed by `fleet skill fleet-dispatch`: the answers from step 3, then scope and
+acceptance. `fleet spawn --skill <name>` prepends the portable skill instruction,
+so the brief itself starts with its concrete content:
 
 ```markdown
-Read `skill://<the skill for this kind>` and follow it for the work below.
 
 ## <Spec | Symptom + Reproduction | Question | Design question | Fixed point>
 <the answers from step 3, in full>
@@ -216,17 +217,17 @@ is dispatchable again instead of sitting stuck looking taken.
 Then spawn the whole wave and block once:
 
 ```bash
-fleet spawn feat/412-webhook-retry --base origin/main --task-file /tmp/fleet-412.md
-fleet spawn fix/418-duplicate-send --base origin/main --task-file /tmp/fleet-418.md
+fleet spawn feat/412-webhook-retry --base origin/main --skill implement --task-file /tmp/fleet-412.md
+fleet spawn fix/418-duplicate-send --base origin/main --skill diagnosing-bugs --task-file /tmp/fleet-418.md
 fleet join
 ```
 
 Never a chain of `fleet ask` — that serializes the thing you came here to
 parallelize.
 
-Reviews are the exception to `--base`: `skill://code-review` diffs in its own
-checkout, so branch the reviewer off the tip under review —
-`fleet spawn review/412 --base feat/412-webhook-retry --task-file /tmp/fleet-412-review.md`.
+Reviews are the exception to `--base`: the `code-review` skill diffs in its own
+checkout, so branch the reviewer off the tip under review:
+`fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-412-review.md`.
 
 ## 6. Review, merge, recompute
 

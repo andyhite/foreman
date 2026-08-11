@@ -1,9 +1,10 @@
 ---
-description: Dispatch implementation work to a fleet worker running skill://implement on its own branch
+description: Dispatch implementation work to a fleet worker on its own branch
+disable-model-invocation: true
 ---
 
-Dispatch the implementation below to a fleet worker. Follow the brief contract
-in `skill://fleet-dispatch`.
+Dispatch the implementation below to a fleet worker. Run
+`fleet skill fleet-dispatch` and follow the brief contract it prints.
 
 Work to implement:
 
@@ -11,15 +12,15 @@ $ARGUMENTS
 
 ## Before you dispatch
 
-`skill://implement` drives `skill://tdd` at pre-agreed seams and closes with
-`skill://code-review`. Both of those need decisions the worker cannot make
+The `implement` skill drives the `tdd` skill at pre-agreed seams and closes with
+the `code-review` skill. Both of those need decisions the worker cannot make
 alone, so settle them here:
 
 - **The spec or tickets.** A ticket reference is enough *only* if the worker can
   read it — a tracker ID it can fetch, or a spec file in the repo. Otherwise
-  inline the whole thing. If neither exists yet, stop and build one with
-  `skill://to-spec` or `skill://to-tickets` first.
-- **The seams to test at.** `skill://tdd` refuses to write a test at an
+  inline the whole thing. If neither exists yet, stop and run
+  `fleet skill to-spec` or `fleet skill to-tickets` first.
+- **The seams to test at.** The `tdd` skill refuses to write a test at an
   unconfirmed seam, so a worker without them will either stall on a `fleet
   reply` or guess. Name the public interfaces under test.
 - **Decisions already made.** Libraries chosen, patterns to follow, existing
@@ -27,16 +28,14 @@ alone, so settle them here:
   re-litigates.
 - **Non-goals.** The adjacent thing it must not touch.
 
-Ask the user for anything missing before spawning. Use `skill://grilling` if
-there is more than a question or two.
+Ask the user for anything missing before spawning. Run `fleet skill grilling`
+if there is more than a question or two.
 
 ## Dispatch
 
 Write the brief to `/tmp/fleet-<handle>.md`:
 
 ```markdown
-Read `skill://implement` and follow it for the work below.
-
 ## Spec
 <the tickets or spec, inline or a reference the worker can read>
 
@@ -56,7 +55,7 @@ Read `skill://implement` and follow it for the work below.
 Then:
 
 ```bash
-fleet spawn feat/<slug> --task-file /tmp/fleet-<handle>.md
+fleet spawn feat/<slug> --skill implement --task-file /tmp/fleet-<handle>.md
 ```
 
 One branch per independently shippable piece. If the work splits into several,

@@ -1,9 +1,10 @@
 ---
-description: Dispatch a design question to a fleet worker running skill://prototype on a throwaway branch
+description: Dispatch a design question to a fleet worker on a throwaway branch
+disable-model-invocation: true
 ---
 
-Dispatch the prototype below to a fleet worker. Follow the brief contract in
-`skill://fleet-dispatch`.
+Dispatch the prototype below to a fleet worker. Run `fleet skill fleet-dispatch`
+and follow the brief contract it prints.
 
 Design question to answer:
 
@@ -11,7 +12,7 @@ $ARGUMENTS
 
 ## Before you dispatch
 
-`skill://prototype` branches on the *kind* of question, and the two branches
+The `prototype` skill branches on the *kind* of question, and the two branches
 produce completely different artifacts. Getting it wrong wastes the whole
 prototype, so decide here rather than letting the worker guess:
 
@@ -37,8 +38,6 @@ this well — the prototype is captured as a primary source and main stays clean
 Write the brief to `/tmp/fleet-<handle>.md`:
 
 ```markdown
-Read `skill://prototype` and follow it for the question below.
-
 ## Question
 <the design question>
 
@@ -58,7 +57,7 @@ Read `skill://prototype` and follow it for the question below.
 Then:
 
 ```bash
-fleet spawn spike/<slug> --task-file /tmp/fleet-<handle>.md
+fleet spawn spike/<slug> --skill prototype --task-file /tmp/fleet-<handle>.md
 ```
 
 Several competing answers to the *same* question is a legitimate fan-out: spawn

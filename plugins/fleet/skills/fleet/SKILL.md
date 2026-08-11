@@ -1,25 +1,25 @@
 ---
 name: fleet
-description: Operate the `fleet` CLI — create a worktree per task, dispatch a separate omp process into each, collect reports, and answer questions the workers send back. Use when acting as an orchestrator dispatching parallel branch work, or when the user says fleet, orchestrator, dispatch, or asks for agents working on separate branches. Not for `task` subagents, which stay inside this process.
+description: Operate the `fleet` CLI — create a worktree per task, dispatch a separate coding-agent process into each, collect reports, and answer worker questions. Use when orchestrating parallel branch work or when the user says fleet, orchestrator, or dispatch. Not for local subagents that stay inside this process.
+user-invocable: false
 ---
 
 # Fleet
 
-Dispatch work to omp processes that are not yours.
+Dispatch work to coding-agent processes that are not yours.
 
-`task` subagents share this process: one context window, one cwd, one lifetime,
-and they die when this session does. A fleet worker is a separate `omp` running
-in its own herdr pane, in its own git worktree, on its own branch. It has a full
-context window, it can be talked to an hour from now, and its output is a branch
-rather than a message.
+Local subagents (`task` in omp) share this process: one context window, one cwd,
+one lifetime, and they die when this session does. A fleet worker is a separate
+agent process running in its own herdr pane, in its own git worktree, on its own
+branch. It has a full context window, it can be talked to an hour from now, and
+its output is a branch rather than a message.
 
-That independence is also the cost. `hub`, `history://` and `agent://` are all
-scoped to a single omp process, so **none of them reach a worker**. Every
-message in both directions goes through herdr's agent surface, which `fleet`
-wraps.
+That independence is also the cost. Harness-local channels such as omp's `hub`,
+`history://`, and `agent://` do not reach a separate process. Every message in
+both directions goes through herdr's agent surface, which `fleet` wraps.
 
 This skill is the CLI contract. For *what to put in a worker's brief* — the
-orchestrator's actual job — read `skill://fleet-dispatch`.
+orchestrator's actual job — run `fleet skill fleet-dispatch`.
 
 ## Requirements
 
@@ -64,37 +64,41 @@ the fleet of whoever it displaces.
 
 ## Dispatching
 
-One worker per branch. `spawn` creates the worktree, starts an omp in the
-workspace's own pane under a handle derived from the branch, builds the selected
-layout, and submits the task.
+One worker per branch. `spawn` creates the worktree, starts the selected agent
+harness in the workspace's own pane under a handle derived from the branch,
+builds the selected layout, and submits the task:
 
 ```bash
-fleet spawn feat/412-webhook-retry \
+fleet spawn feat/412-webhook-retry --kind claude --skill implement \
   --task "Add exponential backoff to the webhook dispatcher. Tests in
 tests/webhooks/. Do not change the public dispatch() signature."
 ```
 
-Write the task the way you would write a `task` assignment: target files,
-concrete change, acceptance criteria. The worker has no memory of this
-conversation — every requirement must be in the text. `fleet` appends the
-protocol block (report, reply, commit, stay-in-worktree) itself, so do not
-repeat those instructions.
+Write the task the way you would write a local subagent assignment: target
+files, concrete change, acceptance criteria. The worker has no memory of this
+conversation — every requirement must be in the text. `--skill` prepends the
+portable instruction that loads its procedure; `fleet` appends the protocol
+block (report, reply, commit, stay-in-worktree), so repeat neither one.
 
 Long tasks read better from a file, and a brief worth dispatching is almost
 always long:
 
 ```bash
-fleet spawn fix/301-null-guard --task-file /tmp/task-301.md
+fleet spawn fix/301-null-guard --skill diagnosing-bugs --task-file /tmp/task-301.md
 ```
 
-`--base` overrides the branch point (default: `origin/HEAD`). `--no-dispatch`
-creates the worktree and starts its agent without assigning work.
+`--kind` chooses any harness supported by `herdr agent start` and defaults to
+`$FLEET_AGENT_KIND`, then `omp`. The orchestrator and worker kinds are
+independent: an omp session can dispatch Claude or Codex workers. `--base`
+overrides the branch point (default: `origin/HEAD`). `--no-dispatch` creates the
+worktree and starts its agent without assigning work.
 
-`--layout agent` (the default) is the worker shape: one `agent` tab, one `omp`
-pane. `--layout full` is for a worktree a human will also occupy:
+`--layout agent` (the default) is the worker shape: one `agent` tab, one pane
+named for the selected harness. `--layout full` is for a worktree a human will
+also occupy:
 
 ```text
-agent tab:  omp | nvim
+agent tab:  <agent> | nvim
 shell tab:  zsh
 review tab: lazygit (or a shell when lazygit is unavailable)
 ```
@@ -113,9 +117,9 @@ Two modes, and picking the wrong one is the main way this goes badly.
 each returns as soon as its task is submitted — then block once:
 
 ```bash
-fleet spawn feat/a --task-file /tmp/a.md
-fleet spawn feat/b --task-file /tmp/b.md
-fleet spawn feat/c --task-file /tmp/c.md
+fleet spawn feat/a --skill implement --task-file /tmp/a.md
+fleet spawn feat/b --skill implement --task-file /tmp/b.md
+fleet spawn feat/c --skill implement --task-file /tmp/c.md
 fleet join
 ```
 
@@ -129,10 +133,9 @@ one worker. Use it for a follow-up on an existing worker, or when the second
 task genuinely depends on the first one's result. Never use it to start a batch
 — it serializes the thing you came here to parallelize.
 
-Reports come from files, not the terminal. omp runs on the alternate screen, so
-its output never enters herdr's scrollback and cannot be scraped back;
-`fleet read <handle>` shows only the visible viewport and is a debugging aid,
-not a way to collect results.
+Reports come from files, not the terminal. Interactive agent TUIs do not provide
+a reliable scrollback transport through herdr; `fleet read <handle>` shows the
+visible terminal and is a debugging aid, not a way to collect durable results.
 
 A report is overwritten only by its own worker, so a follow-up `fleet send`
 leaves the previous one intact. `join` dates it instead of trusting it: a report
@@ -197,7 +200,7 @@ Workers commit to their own branch and stop. They do not push and do not open
 PRs unless the task said to. Review the branches yourself, then:
 
 ```bash
-fleet ls                     # handles, states, branches, paths
+fleet ls                     # handles, states, kinds, branches, paths
 fleet reap <handle>          # remove one worktree
 fleet reap --all             # remove this repo's worktrees
 fleet reap <handle> --forget # drop the record, leave the worktree
@@ -224,8 +227,8 @@ git repo there is nothing to scope to, and they refuse rather than guess.
 
 ## What this is not for
 
-- Anything that fits in one repo checkout. Use `task` subagents; they are
-  faster, cheaper, and you can talk to them with `hub`.
-- Read-only investigation. Use a `scout` subagent.
+- Anything that fits in one repo checkout. Keep it here or use your harness's
+  local subagents; they are faster, cheaper, and have a direct message channel.
+- Read-only investigation that a local research subagent can do.
 - Work with a strict serial dependency chain. A fleet's value is concurrency; a
-  chain of one-at-a-time `fleet ask` calls is a slow, expensive `task` loop.
+  chain of one-at-a-time `fleet ask` calls is a slow, expensive local-agent loop.

@@ -1,6 +1,7 @@
 ---
 name: fleet-dispatch
 description: How an orchestrator turns requirements into a fleet worker brief that runs a specific mattpocock/skills skill. Use when dispatching implementation, diagnosis, research, prototyping, or review to a peer agent, or when a /fleet:* command asks for the dispatch contract.
+user-invocable: false
 ---
 
 # Fleet dispatch
@@ -8,12 +9,12 @@ description: How an orchestrator turns requirements into a fleet worker brief th
 You are the project manager, not the implementer.
 
 Your job is to *know what is wanted* and to *say it precisely enough that a
-stranger could build it*. A fleet worker is exactly that stranger: a blank omp
-process with no memory of this conversation, no access to your context, and no
-way to guess. Everything it needs travels in one block of text.
+stranger could build it*. A fleet worker is exactly that stranger: a blank
+agent process with no memory of this conversation, no access to your context,
+and no way to guess. Everything it needs travels in one block of text.
 
-This skill is the contract for writing that text. `skill://fleet` is the CLI
-underneath it.
+This skill is the contract for writing that text. Run `fleet skill fleet` for
+the CLI contract underneath it.
 
 ## The split
 
@@ -23,18 +24,18 @@ worker.
 
 | Stays with you (the orchestrator) | Goes to a worker |
 |---|---|
-| `skill://grill-me`, `skill://grill-with-docs` — interviewing the user | `skill://implement` — build the spec or tickets |
-| `skill://to-spec`, `skill://to-tickets` — turning the conversation into work | `skill://diagnosing-bugs` — reproduce, fix, regression-test |
-| `skill://triage`, `skill://wayfinder` — shaping the backlog | `skill://research` — investigate and write up |
-| `skill://domain-modeling`, `skill://codebase-design` — deciding the shape | `skill://prototype` — throwaway answer to a design question |
-| Reviewing branches, answering `[fleet:*]` questions, merging | `skill://code-review` — two-axis review of a branch |
+| `fleet skill grill-me`, `fleet skill grill-with-docs` — interviewing the user | `fleet skill implement` — build the spec or tickets |
+| `fleet skill to-spec`, `fleet skill to-tickets` — turning the conversation into work | `fleet skill diagnosing-bugs` — reproduce, fix, regression-test |
+| `fleet skill triage`, `fleet skill wayfinder` — shaping the backlog | `fleet skill research` — investigate and write up |
+| `fleet skill domain-modeling`, `fleet skill codebase-design` — deciding the shape | `fleet skill prototype` — throwaway answer to a design question |
+| Reviewing branches, answering `[fleet:*]` questions, merging | `fleet skill code-review` — two-axis review of a branch |
 
 If you catch yourself editing source files, you have stopped orchestrating.
 Dispatch it.
 
 Concurrency is the whole point. Slices that do not depend on each other are
-spawned **before** anything is joined. A slice that fits in this checkout is a
-`task` subagent, not a worker.
+spawned **before** anything is joined. A slice that fits in this checkout stays
+here or uses the orchestrator harness's local subagent mechanism (`task` in omp).
 
 ## The requirements gate
 
@@ -46,8 +47,8 @@ able to state, without hedging:
 - every decision already made, so the worker does not re-litigate it
 
 If any of those is fuzzy, that is a question for the user, not for the worker.
-Use `skill://grilling` to interview them until it is sharp. One clarifying round
-now is cheaper than a worker that builds the wrong thing for an hour.
+Run `fleet skill grilling` to interview them until it is sharp. One clarifying
+round now is cheaper than a worker that builds the wrong thing for an hour.
 
 The exception is a decision the worker is *better placed* to make because it
 depends on what the code turns out to look like. Say so explicitly in the brief
@@ -55,11 +56,10 @@ and tell the worker to `fleet reply` if it needs you to choose.
 
 ## Anatomy of a brief
 
-An invocation line, then three sections. Nothing else.
+Three sections. Nothing else. The skill invocation does not belong in the file:
+`fleet spawn --skill <name>` prepends it deterministically.
 
 ```markdown
-Read `skill://<skill-name>` and follow it for the work below.
-
 ## <what this is>
 <the concrete brief: the change, the bug, the question — in full>
 
@@ -70,11 +70,13 @@ Read `skill://<skill-name>` and follow it for the work below.
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
-**The first line is what puts the skill in front of the worker.** Naming the
+**`--skill` is what puts the procedure in front of the worker.** Naming the
 skill explicitly is what guarantees the worker works from *that* skill's own
 procedure, rather than trusting a blank agent to auto-select the right one
-out of a list of forty. Without that line you get a generic agent doing
-generic work; with it the worker is working from the skill's own procedure.
+out of a list of forty. Fleet prepends an instruction to run
+`fleet skill <name>`, which works in every harness and prints the skill body
+with its base directory. Without `--skill` you get a generic agent doing
+generic work; with it the worker follows the named skill's own procedure.
 
 `disable-model-invocation: true` does not land on the execution skills here —
 it is set on your own interview skills instead: `triage`, `to-tickets`,
@@ -95,9 +97,9 @@ Briefs are multi-line, so pass them as a file rather than fighting shell
 quoting. Write it, spawn, and move on to the next slice:
 
 ```bash
-# 1. write the brief to /tmp/fleet-<handle>.md with the `write` tool
-# 2. spawn
-fleet spawn feat/412-webhook-retry --task-file /tmp/fleet-412.md
+# 1. write the brief to /tmp/fleet-<handle>.md
+# 2. spawn with the execution skill named explicitly
+fleet spawn feat/412-webhook-retry --skill implement --task-file /tmp/fleet-412.md
 ```
 
 Branch names follow the repo's convention if it has one. Otherwise:

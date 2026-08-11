@@ -77,6 +77,54 @@ assert_not 'rejects absolute paths'     valid_handle '/etc'
 assert_not 'rejects an embedded slash'  valid_handle 'a/b'
 assert_not 'rejects 33 characters'      valid_handle 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
+# ── portable skills and agent kinds ──────────────────────────────────────────
+
+printf '\nskills\n'
+skill_root="$sandbox/skills"
+fallback_root="$sandbox/fallback-skills"
+mkdir -p "$skill_root/implement" "$fallback_root/implement"
+cat >"$skill_root/implement/SKILL.md" <<'EOF'
+---
+name: implement
+description: Build an agreed change.
+---
+
+# Implement
+
+Do the work.
+EOF
+printf 'wrong root\n' >"$fallback_root/implement/SKILL.md"
+export FLEET_SKILL_PATH="$skill_root:$fallback_root"
+
+is 'resolves the first configured skill root' "$(resolve_skill implement)" \
+  "$skill_root/implement/SKILL.md"
+# The base directory is normalized by cmd_skill, and $TMPDIR on macOS is itself a
+# symlink, so the expectation has to be normalized the same way.
+skill_base=$(cd -P "$skill_root/implement" && pwd)
+expected=$(printf '## Skill: implement\n\nBase directory: `%s`\nFollow the instructions below. Resolve relative paths from the base directory.\n\n\n# Implement\n\nDo the work.' \
+  "$skill_base")
+is 'prints a portable prompt without YAML frontmatter' "$(cmd_skill implement)" "$expected"
+is 'renders one universal worker instruction' "$(skill_instruction implement)" \
+  'Before doing any other work, run `fleet skill implement` and follow the instructions it prints.'
+assert 'resolves fleet-dispatch from its bundled plugin tree' \
+  [ -f "$(resolve_skill fleet-dispatch)" ]
+assert_not 'skill names reject traversal' valid_skill_name '../implement'
+assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
+
+printf '\nagent kinds\n'
+assert 'accepts a herdr agent kind' valid_agent_kind 'claude'
+assert 'accepts a compound agent kind' valid_agent_kind 'cursor-agent'
+assert_not 'rejects an agent-kind option injection' valid_agent_kind '--kind'
+assert_not 'rejects an agent-kind path' valid_agent_kind '../omp'
+assert_not 'rejects an uppercase agent kind' valid_agent_kind 'Claude'
+
+herdr_args="$sandbox/herdr-args"
+herdr() { printf '%s\n' "$*" >"$herdr_args"; }
+start_worker_agent worker ws pane claude
+is 'threads the selected kind into herdr agent start' "$(cat "$herdr_args")" \
+  'agent start worker --kind claude --pane pane --timeout 120000'
+unset -f herdr
+
 # ── report freshness ─────────────────────────────────────────────────────────
 #
 # Whether a report answers the most recent dispatch. This was an mtime
@@ -114,6 +162,74 @@ assert 'and does not destroy it' [ -s "$(report_file "$h")" ]
 
 printf 'answer2\n' >"$(report_file "$h")"; stamp "$h"
 assert 'the answer to the second dispatch is fresh' report_is_fresh "$h"
+
+# ── dispatched prompt composition ────────────────────────────────────────────
+#
+# The contract a worker actually receives: the portable skill instruction first,
+# then the brief, then fleet's own protocol block. herdr is stubbed so the whole
+# composition is asserted without creating a worktree or starting an agent.
+
+printf '\ndispatched prompt\n'
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  spawn_repo="$sandbox/repo"
+  mkdir -p "$spawn_repo"
+  ( cd "$spawn_repo" && git init -q . \
+    && git -c user.email=t@example.com -c user.name=t \
+         commit -q --allow-empty -m init ) >/dev/null 2>&1
+
+  prompt_file="$sandbox/prompt.txt"
+  started_file="$sandbox/started"
+  start_args="$sandbox/start-args"
+  rm -f "$prompt_file" "$started_file" "$start_args"
+
+  # `agent start` flips the roster: before it the handle must be free, after it
+  # the worker has to look live and busy or dispatch_to would never settle.
+  herdr() {
+    case "$1 $2" in
+      'agent list')
+        if [ -f "$started_file" ]; then
+          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"},{"name":"feat-x","pane_id":"p1","agent_status":"working","interactive_ready":true,"workspace_id":"w1"}]}}'
+        else
+          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"}]}}'
+        fi ;;
+      'plugin list') printf '' ;;
+      'worktree create')
+        printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"p1"}}}' ;;
+      'agent start') printf '%s\n' "$*" >"$start_args"; : >"$started_file" ;;
+      'agent prompt') printf '%s' "$4" >"$prompt_file"; printf '{}' ;;
+      *) printf '{}' ;;
+    esac
+  }
+
+  # A subshell, because `die` exits: a regression here must fail one assertion
+  # rather than abort the whole run.
+  ( cd "$spawn_repo" \
+    && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/x --kind claude --skill implement \
+         --task 'Add exponential backoff to the dispatcher.' ) >/dev/null 2>&1
+
+  assert 'a --skill spawn dispatches a prompt' [ -s "$prompt_file" ]
+  prompt=$(cat "$prompt_file" 2>/dev/null || true)
+  is 'the worker is told to load the skill first' "$(printf '%s' "$prompt" | sed -n 1p)" \
+    'Before doing any other work, run `fleet skill implement` and follow the instructions it prints.'
+  assert 'the brief follows the instruction' \
+    [ "${prompt#*Add exponential backoff to the dispatcher.}" != "$prompt" ]
+  assert 'fleets own protocol block is still appended' \
+    [ "${prompt#*fleet report}" != "$prompt" ]
+  assert_not 'no skill:// URI reaches the worker' \
+    [ "${prompt#*skill://}" != "$prompt" ]
+  started_cmd=$(cat "$start_args" 2>/dev/null || true)
+  assert 'the requested kind reached agent start' \
+    [ "${started_cmd#*--kind claude}" != "$started_cmd" ]
+  is 'the kind is recorded for later inspection' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x KIND)" 'claude'
+  is 'the skill is recorded for later inspection' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILL)" 'implement'
+
+  unset -f herdr
+else
+  printf '  skip  dispatched prompt cases (needs git and jq)\n'
+fi
 
 # ── reap argument handling ───────────────────────────────────────────────────
 #

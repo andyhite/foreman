@@ -1,9 +1,10 @@
 ---
-description: Dispatch a bug or performance regression to a fleet worker running skill://diagnosing-bugs on its own branch
+description: Dispatch a bug or performance regression to a fleet worker on its own branch
+disable-model-invocation: true
 ---
 
-Dispatch the diagnosis below to a fleet worker. Follow the brief contract in
-`skill://fleet-dispatch`.
+Dispatch the diagnosis below to a fleet worker. Run
+`fleet skill fleet-dispatch` and follow the brief contract it prints.
 
 Bug to diagnose:
 
@@ -11,7 +12,7 @@ $ARGUMENTS
 
 ## Before you dispatch
 
-Phase 1 of `skill://diagnosing-bugs` is building a feedback loop that goes red
+Phase 1 of the `diagnosing-bugs` skill is building a feedback loop that goes red
 on *this* bug, and everything after it is mechanical. A worker that cannot
 reproduce the symptom will burn its whole context failing to start. So the brief
 lives or dies on reproduction detail:
@@ -37,8 +38,6 @@ reproduction needs credentials, tell it which env vars carry them and to write
 Write the brief to `/tmp/fleet-<handle>.md`:
 
 ```markdown
-Read `skill://diagnosing-bugs` and follow it for the bug below.
-
 ## Symptom
 <exact error text or wrong behaviour>
 
@@ -61,7 +60,7 @@ Read `skill://diagnosing-bugs` and follow it for the bug below.
 Then:
 
 ```bash
-fleet spawn fix/<slug> --task-file /tmp/fleet-<handle>.md
+fleet spawn fix/<slug> --skill diagnosing-bugs --task-file /tmp/fleet-<handle>.md
 ```
 
 If the symptom might have several independent causes, that is still one worker.

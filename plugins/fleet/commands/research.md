@@ -1,9 +1,10 @@
 ---
-description: Dispatch a research question to a fleet worker running skill://research on its own branch
+description: Dispatch a research question to a fleet worker on its own branch
+disable-model-invocation: true
 ---
 
-Dispatch the research below to a fleet worker. Follow the brief contract in
-`skill://fleet-dispatch`.
+Dispatch the research below to a fleet worker. Run `fleet skill fleet-dispatch`
+and follow the brief contract it prints.
 
 Question to research:
 
@@ -11,7 +12,7 @@ $ARGUMENTS
 
 ## Before you dispatch
 
-`skill://research` investigates against primary sources and lands a single cited
+The `research` skill investigates against primary sources and lands a single cited
 Markdown file in the repo. It is cheap to dispatch and easy to waste — a vague
 question returns a vague document nobody reads. Pin down:
 
@@ -32,8 +33,6 @@ resist over-specifying the answer. Specify the question.
 Write the brief to `/tmp/fleet-<handle>.md`:
 
 ```markdown
-Read `skill://research` and follow it for the question below.
-
 ## Question
 <the question, phrased so it can be answered wrong>
 
@@ -50,7 +49,7 @@ Read `skill://research` and follow it for the question below.
 Then:
 
 ```bash
-fleet spawn spike/<slug> --task-file /tmp/fleet-<handle>.md
+fleet spawn spike/<slug> --skill research --task-file /tmp/fleet-<handle>.md
 ```
 
 Research parallelizes better than anything else here — independent questions are
