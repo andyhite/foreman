@@ -103,8 +103,9 @@ command does the whole loop:
 /fleet:backlog wave 1
 ```
 
-It walks the tracker's dependency graph, dispatches the ready frontier, reviews
-and merges what comes back, then recomputes and dispatches again. Merging is the
+It walks the tracker's dependency graph, dispatches the ready frontier to the
+skill each ticket calls for, sends every branch that comes back to a review
+worker, merges what passes, then recomputes and dispatches again. Merging is the
 part that makes it a loop — a dependent ticket reaches the frontier only when its
 blocker closes.
 

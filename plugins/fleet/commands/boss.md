@@ -68,7 +68,7 @@ than in the conversation:
 
 | Command | For |
 |---|---|
-| `/fleet:backlog` | driving a whole tracker to merged — dispatch the ready frontier, review and merge what returns, recompute, repeat. The one command where you are also the merge authority. |
+| `/fleet:backlog` | driving a whole tracker to merged — dispatch the ready frontier, send every branch that comes back to a `code-review` worker, merge what passes, recompute, repeat. The one command where you are also the merge authority. |
 
 Objective:
 

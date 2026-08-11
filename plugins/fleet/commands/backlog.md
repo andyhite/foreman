@@ -1,5 +1,5 @@
 ---
-description: Drive the repo's backlog to merged — read the dependency graph, dispatch every ready ticket to the matching fleet worker, review and merge, recompute, repeat
+description: Drive the repo's backlog to merged — read the dependency graph, dispatch every ready ticket to the matching fleet worker, send every branch that comes back to a review worker, merge, recompute, repeat
 disable-model-invocation: true
 ---
 
@@ -114,6 +114,10 @@ What falls out still needs saying. Report it once, in one block:
 
 Follow the repo's branch convention where it has one; the above is the fallback.
 
+That last row is a ticket that *asks* for some existing branch to be reviewed.
+You do not need a ticket to review this run's own output — step 6 sends every
+branch a worker hands back to a reviewer automatically.
+
 **Two kinds of ticket never reach a worker.**
 
 *Decisions.* A ticket whose deliverable is an answer recorded on the ticket —
@@ -163,13 +167,15 @@ backlog, and a yes/no per wave turns an autonomous drain back into a meeting:
 |---|---|---|---|---|---|
 
 The things that genuinely stop you are elsewhere: an unanswerable gap in step 3,
-the fence in the scope line, and the escalation list in step 6.
+the fence in the scope line, and the escalation list in step 7.
 
 Two things decide who is in the wave:
 
 - **The cap.** Three concurrent code workers unless the repo says otherwise. A
   fleet worker is a full agent process, not a local subagent; they are not free,
   and one blocked waiting on your attention is worse than one that starts later.
+  The cap counts this wave only — step 6's reviewers run after these have
+  settled, so they are not competing for the same slots.
 - **File overlap.** Two workers editing the same files produce conflicting
   branches and nothing resolves that for you. Hold the second back and say why.
 
@@ -195,13 +201,16 @@ so the brief itself starts with its concrete content:
 Open a PR against <base> when the work is done, move the ticket to review per
 this repo's tracker conventions, then `fleet report` with the PR number and one
 line on how you proved it. Do not merge — I do that, and my merge is the
-approval you are waiting for.
+approval you are waiting for. A reviewer reads your branch after you report, so
+expect change requests and address them in this worktree.
 ```
 
 That Handoff section is the one thing a backlog brief adds. `fleet`'s own
 protocol block tells the worker to commit, report, reply, and stay in its
 worktree — never repeat any of that — but it stops short of a PR, and a merge
-authority needs one to review.
+authority needs one to review. Everything a worker commits is reviewed before
+it merges, so the brief says so rather than letting a change request arrive as
+a surprise.
 
 Add the context the worker cannot derive: constraints inherited from a parent
 epic, and for a choke-point ticket, that it owns a contract other tickets
@@ -225,11 +234,11 @@ fleet join
 Never a chain of `fleet ask` — that serializes the thing you came here to
 parallelize.
 
-Reviews are the exception to `--base`: the `code-review` skill diffs in its own
-checkout, so branch the reviewer off the tip under review:
-`fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-review-412.md`.
+Reviewers are the exception to `--base`, and step 6 spawns one for every branch
+that comes back: the `code-review` skill diffs in its own checkout, so a
+reviewer branches off the tip under review rather than off the merge target.
 
-## 6. Review, merge, recompute
+## 6. Collect the wave, then review it
 
 `fleet join` still waits for the whole wave, but not silently and not
 uninterruptibly: it prints each worker's result the moment that worker
@@ -245,38 +254,85 @@ workers already marked joined. It is still a wave, not a rolling queue: you
 cannot backfill a finished worker's slot while its siblings are still
 running, and you should not try.
 
-When the wave settles, take each report in turn:
+When the wave settles, every branch that carries code goes straight back out —
+to a `code-review` worker, before you read a line of the diff. Reviewing them
+here is the same mistake as fixing them here: you would be reading diffs in the
+pane that should be dispatching the next wave, and doing by eye what the skill
+runs as two parallel sub-agents (Standards and Spec) in a checkout that already
+has the branch. The code workers have settled, so this costs no concurrency —
+it is a second wave, not a wider one.
 
-1. **Verify against the tracker and the base branch, not the report.** The PR
-   exists, CI is green, the ticket is at review, and the acceptance criteria in
-   the ticket body are actually met *by the diff*. A worker's summary of its own
-   work is a claim, not evidence.
+Two kinds of branch skip it. `research` and `prototype` deliver a write-up or a
+throwaway spike rather than code to merge — read those yourself. Trivia you did
+inline never had a branch.
+
+One reviewer per branch, all spawned before any `fleet join`. Two different
+refs are in play and swapping them wastes a worker: `--base` is the **tip under
+review**, so the reviewer's checkout contains the work, while the fixed point it
+diffs against — the `--base` you dispatched the *worker* from, typically
+`origin/main` — is a line in the task file, not a flag. Inline the acceptance
+criteria too: a reviewer is a fresh agent that may have no tracker access, so a
+bare issue number is not a spec.
+
+```bash
+fleet spawn review/412 --base feat/412-webhook-retry --skill code-review --task-file /tmp/fleet-review-412.md
+fleet spawn review/418 --base fix/418-duplicate-send --skill code-review --task-file /tmp/fleet-review-418.md
+fleet join
+```
+
+Each report is committed in its reviewer's worktree — `fleet ls` prints the
+directory. Those `review/*` branches are scratch: read them, never merge them.
+
+An `implement` worker closes by running the `code-review` skill on its own
+branch. That is the author reviewing the author; it does not replace this step.
+Read it if the worker linked it, but the independent reviewer is the one whose
+finding blocks a merge.
+
+Leave each code worker alive until its review clears. `fleet reap` deletes the
+worktree, and a change request needs the worker that wrote the branch, in the
+worktree it wrote it in.
+
+## 7. Merge, recompute, repeat
+
+Take each ticket in turn:
+
+1. **Verify against the tracker, the diff, and the review report — never the
+   worker's summary of its own work.** The PR exists, CI is green, the ticket is
+   at review, the acceptance criteria in the ticket body are met *by the diff*,
+   and the reviewer found nothing blocking. A clean review on a red PR is not
+   mergeable, and neither is a green PR its reviewer flagged.
 2. **Merge the way this repo merges.** Match its history: a repo with one
    logical change per commit and conventional subjects wants a rebase merge, and
    a squash would collapse exactly what it is keeping. Delete the branch.
 3. **Confirm the ticket closed,** update any derived parent or epic status,
-   mark its todo done, and `fleet reap <handle>`. `reap` refuses a dirty
-   worktree — that refusal is protecting uncommitted work, so read the diff
-   before reaching for `--force`. If the worktree is already gone, removed
-   by hand outside fleet, `reap --forget <handle>` drops fleet's record
-   without touching a worktree that isn't there; without it that handle
-   sticks in `fleet ls` as `gone` forever. The mirror case is a handle whose
-   state exists but whose agent died: `fleet spawn <branch> --replace`
-   removes the recorded workspace and respawns under the same handle,
-   rather than refusing because the record is still there.
+   mark its todo done, and `fleet reap` **both handles** — the worker and its
+   reviewer. `reap` refuses a dirty worktree — that refusal is protecting
+   uncommitted work, so read the diff before reaching for `--force`. If the
+   worktree is already gone, removed by hand outside fleet,
+   `reap --forget <handle>` drops fleet's record without touching a worktree
+   that isn't there; without it that handle sticks in `fleet ls` as `gone`
+   forever. The mirror case is a handle whose state exists but whose agent
+   died: `fleet spawn <branch> --replace` removes the recorded workspace and
+   respawns under the same handle, rather than refusing because the record is
+   still there.
 
 Then recompute the frontier from step 1 and dispatch the next wave. Merge the
 whole settled wave before recomputing — one merge typically unblocks one or two
 tickets, and computing the frontier halfway through leaves them out of it.
 
-**A failing review goes back to its worker.** Comment the change request on the
-PR, `fleet send` the worker to address it, move the ticket back. Do not fix it
-yourself — you would be reviewing your own patch on the next pass.
+**A blocking finding goes back to its worker.** Comment the change request on
+the PR, `fleet send` the worker to address it, move the ticket back. Do not fix
+it yourself — you would be reviewing your own patch on the next pass. When the
+fix lands, check it against the specific findings yourself; a targeted fix does
+not earn a second full review. Re-dispatch a reviewer only when the worker
+reworked the approach instead of patching it, re-spawning it with `--replace`
+so it rebuilds off the new tip under the same handle.
 
 **Escalate instead of merging** when CI is red and the worker says it is
-unrelated; when a PR changes a shared contract beyond what its ticket describes;
-when a worker reports it could not meet an acceptance criterion; or when two PRs
-conflict in a way that needs a scope decision.
+unrelated; when a worker and its reviewer disagree about whether an acceptance
+criterion is met; when a PR changes a shared contract beyond what its ticket
+describes; when a worker reports it could not meet an acceptance criterion; or
+when two PRs conflict in a way that needs a scope decision.
 
 Stop when the fence is empty, when everything left is gap-blocked or
 human-blocked, or when the user says stop. Then report once: ticket → PR →

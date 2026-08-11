@@ -112,9 +112,10 @@ Then dispatch one command per kind of work:
 | `/fleet:code-review` | `code-review` | reviewing a branch a worker already produced |
 
 `/fleet:backlog` walks the tracker's dependency graph, dispatches every ready
-ticket to its matching skill, reviews and merges what comes back, recomputes the
-frontier, and repeats. It is the only command that merges; per-ticket commands
-stop when their worker reports.
+ticket to its matching skill, sends every branch that comes back to a
+`code-review` worker, merges what passes, recomputes the frontier, and repeats.
+It is the only command that merges; per-ticket commands stop when their worker
+reports.
 
 The `/fleet:` prefix works on omp and Claude Code alike: both namespace plugin
 commands as `<plugin>:<command>`, and Claude Code reaches them *only* that way —
