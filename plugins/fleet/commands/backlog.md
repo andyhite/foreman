@@ -254,5 +254,7 @@ deferred as a linked ticket, and the final state of the todo list.
 - **You do not dispatch what is not ready.** The triage label and the dependency
   graph are the gates. Promoting past either is the user's call, made here, on
   purpose.
-- **You do not run waves of one** when the frontier had five. Serial dispatch is
-  a slow, expensive `task` loop.
+- **You fill the slots you have.** Every wave takes as many ready, independent,
+  non-overlapping tickets as the cap allows. A wave of one is correct when the
+  frontier holds one; it is a mistake when three were ready and two are still
+  sitting in the queue. Serial dispatch is a slow, expensive `task` loop.
