@@ -1443,24 +1443,38 @@ snapshot_status() {
 #
 # And it returns early on a filed question, which is what actually lets a
 # blocked worker preempt the wave.
+#
+# `--once` runs exactly that inner tick — no deadline, no `sleep_ms` — and
+# returns whatever settled (possibly nothing). It exists so something outside
+# this process can poll cheaply on its own schedule: the omp fleet extension
+# runs it from a session-owned timer to deliver worker reports as a
+# non-interrupting aside instead of the orchestrator blocking a tool call for
+# up to `WAIT_TIMEOUT_MS`. A blocked orchestrator can't be reached by an
+# outside interrupt (see the note above `question_file`), but a timer ticking
+# inside the *same* process the orchestrator's tool call would otherwise be
+# stuck in has no such wall to hit — there is no blocking call to preempt.
 cmd_join() {
   require_herdr
   # Built as a string, not an array: bash 3.2 (what ships on macOS) treats
   # ${#arr[@]} on an empty array as an unbound-variable error under `set -u`,
   # and handles are whitespace-free by construction.
-  local timeout_ms=$WAIT_TIMEOUT_MS handle handles="" scope
+  local timeout_ms=$WAIT_TIMEOUT_MS handle handles="" scope once=0
 
   while [ $# -gt 0 ]; do
     case $1 in
       --timeout)
         case "${2-}" in
-          ''|*[!0-9]*) die "usage: fleet join [--timeout <seconds>] [handle...]" ;;
+          ''|*[!0-9]*) die "usage: fleet join [--timeout <seconds>] [--once] [handle...]" ;;
         esac
         timeout_ms=$(($2 * 1000))
         shift 2
         ;;
+      --once)
+        once=1
+        shift
+        ;;
       --*)
-        die "usage: fleet join [--timeout <seconds>] [handle...]"
+        die "usage: fleet join [--timeout <seconds>] [--once] [handle...]"
         ;;
       *)
         handles="$handles $1"
@@ -1483,7 +1497,9 @@ cmd_join() {
     scope=$(scoped_key "fleet join" "run it from inside a repo, or name the handles to join")
     handles=$(joinable_workers "$scope")
     if [ -z "${handles// /}" ]; then
-      note "fleet: nothing to join — every worker in this repo has been collected since its last dispatch (see: fleet ls)"
+      # A poller calling `--once` every few seconds hits this constantly while
+      # a wave is quiet; noting it every tick would drown real output.
+      [ "$once" = 1 ] || note "fleet: nothing to join — every worker in this repo has been collected since its last dispatch (see: fleet ls)"
       return 0
     fi
   fi
@@ -1499,7 +1515,7 @@ cmd_join() {
     for handle in $pending; do
       if question_pending "$handle"; then
         print_question "$handle"
-        note "fleet: '$handle' is waiting on you; join returned early"
+        [ "$once" = 1 ] || note "fleet: '$handle' is waiting on you; join returned early"
         return 0
       fi
       status=$(snapshot_status "$agents" "$handle")
@@ -1515,6 +1531,7 @@ cmd_join() {
     done
     pending=$remaining
     [ -n "${pending// /}" ] || return 0
+    if [ "$once" = 1 ]; then return 0; fi
     if expired "$dl"; then
       note "fleet: gave up after $((timeout_ms / 1000))s; still working:$pending"
       return 1
@@ -1759,6 +1776,7 @@ Orchestrator
   fleet ask <h> <text>           dispatch and block until the report is in
   fleet join [handle...]         collect this repo's workers, print reports
                                  [--timeout <seconds>] bounds either wait
+                                 [--once] single non-blocking poll tick
   fleet ls [--all-repos]         list workers and their states
   fleet dashboard [--all-repos]  inspect and operate the fleet interactively
   fleet read <handle> [-n N]     read a worker's terminal directly

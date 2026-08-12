@@ -21,6 +21,11 @@ interface FleetExecResult {
 
 interface FleetToolCtx {
   cwd: string;
+  // Managed timer handles — see `omp://extensions.md` "Background work". Used
+  // by `ensureJoinPoller` below; isolated from the callback's own throws and
+  // auto-cleared on session shutdown, unlike a raw `setInterval`.
+  setInterval: (fn: () => void | Promise<void>, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
   [key: string]: unknown;
 }
 
@@ -151,6 +156,73 @@ export default function fleetExtension(pi: ExtensionAPI) {
     return { stdout, stderr, exitCode };
   }
 
+  // ---------------------------------------------------------------------
+  // Background join poller — delivers worker settlement/questions as a
+  // non-interrupting aside instead of the orchestrator blocking a tool call.
+  // ---------------------------------------------------------------------
+
+  let joinPollTimer: unknown = null;
+  let joinPollFailures = 0;
+  const joinPollMs = Number(process.env.FLEET_ASIDE_POLL_MS) || 5000;
+
+  /**
+   * Starts (once per session) a `ctx.setInterval` tick that runs
+   * `fleet join --once` — a single, non-blocking poll pass, never the
+   * deadline/`sleep_ms` loop `fleet join` uses on its own. Any output (a
+   * settled worker's report, or a filed question) is delivered as a
+   * `followUp` custom message: queued behind whatever the orchestrator is
+   * doing rather than interrupting it — the same non-interrupting-aside
+   * shape `hub`'s own IRC delivery uses for a running recipient — and it
+   * starts a turn on its own if the orchestrator is idle. This is what lets
+   * the orchestrator keep working after `fleet_spawn` instead of blocking a
+   * `fleet_join` tool call for up to an hour. Idempotent, so every
+   * orchestrator-side tool can call it unconditionally.
+   */
+  function ensureJoinPoller(ctx: FleetToolCtx) {
+    if (joinPollTimer) return;
+    joinPollTimer = ctx.setInterval(async () => {
+      let result: FleetExecResult;
+      try {
+        result = (await pi.exec(fleetBin, ["join", "--once"], { cwd: ctx.cwd })) as FleetExecResult;
+      } catch (err) {
+        // A transient herdr hiccup shouldn't kill the poller, but a missing
+        // binary never recovers on its own — stop instead of erroring on
+        // every tick for the rest of the session.
+        if (isMissingBinaryError(err) && joinPollTimer) {
+          ctx.clearTimer(joinPollTimer);
+          joinPollTimer = null;
+        }
+        return;
+      }
+
+      if (result.code !== 0) {
+        // Most commonly "not in a git repo" if the boss's cwd changed out
+        // from under it. Five in a row means polling itself is broken, not
+        // that nothing happened — stop rather than repeat the same die()
+        // text as a steer message forever.
+        joinPollFailures += 1;
+        if (joinPollFailures >= 5 && joinPollTimer) {
+          ctx.clearTimer(joinPollTimer);
+          joinPollTimer = null;
+        }
+        return;
+      }
+      joinPollFailures = 0;
+
+      const text = result.stdout.trim();
+      if (!text) return;
+      await pi.sendMessage(
+        {
+          customType: "fleet:update",
+          content: text,
+          display: true,
+          attribution: "user",
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    }, joinPollMs);
+  }
+
   function cancelled() {
     return { content: [{ type: "text" as const, text: "Cancelled" }] };
   }
@@ -173,6 +245,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["boss"];
       if (params.name) args.push(params.name);
       if (params.steal) args.push("--steal");
@@ -217,6 +290,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["spawn", params.branch];
       let taskFile: string | undefined;
       if (params.task) {
@@ -300,7 +374,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     name: "fleet_join",
     label: "Fleet Join",
     description:
-      "Block on the given worker handles (or every known worker in this repo if none given), streaming each report as it settles.",
+      "Explicit blocking wait on the given worker handles (or every known worker in this repo if none given). Rarely needed: once fleet_spawn has run, worker reports and questions already arrive on their own as non-interrupting asides — use this only when there is truly nothing else to do and you want to sit until something lands.",
     parameters: z.object({
       handles: z
         .array(z.string())

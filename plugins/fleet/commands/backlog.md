@@ -230,7 +230,9 @@ claim mechanism (a GitHub tracker claims with `gh issue edit <n>
 `fleet_spawn` call below. If the spawn fails, release the claim right away so the ticket
 is dispatchable again instead of sitting stuck looking taken.
 
-Then spawn the whole wave and block once:
+Then spawn the whole wave. Reports and questions arrive on their own from
+here — call `fleet_join({})` only if you have nothing else to do and want to
+sit until the next one lands:
 
 ```
 fleet_spawn({ branch: "feat/412-webhook-retry", base: "origin/main", tier: "deep", skill: "implement", task: "orchestrate this ticket: <the brief above>" })
@@ -247,13 +249,15 @@ reviewer branches off the tip under review rather than off the merge target.
 
 ## 6. Collect the wave, then review it
 
-`fleet_join` still waits for the whole wave, but not silently and not
+Worker reports and questions now arrive on their own, tagged
+`[fleet:<handle>]`, as soon as they land — no blocking call required. If you
+do call `fleet_join`, it waits for the whole wave, but not silently and not
 uninterruptibly: it prints each worker's result the moment that worker
 settles rather than holding all of them until the last one finishes, and it
 returns immediately — before the rest of the wave has settled — the instant
-any worker files a question with `fleet reply`. That preemption is what
-actually gets a blocked worker in front of you; omp steering alone does not,
-because a queued prompt is not read until the running tool call returns.
+any worker files a question with `fleet reply`. Either path gets a blocked
+worker in front of you the moment it happens, not only when a `fleet_join`
+tool call happens to be outstanding.
 Answer with `fleet_send({ handle, text: <answer>, raw: true })` — `raw: true`
 sends the answer alone, where the default would re-append fleet's protocol
 block onto a one-line reply — then call `fleet_join({})` again; re-joining is

@@ -126,19 +126,17 @@ branch, so keep branches distinguishable in their first 32 characters.
 Claim your own handle with `fleet_boss({})` before the first spawn — a worker
 stamped with the wrong orchestrator sends its questions to the wrong pane.
 
-Then, once every independent slice is out:
-
-```
-fleet_join({})
-```
-
-Answer anything tagged `[fleet:<handle>]` with
+Then, once every independent slice is out, keep working. Reports and
+questions arrive on their own, tagged `[fleet:<handle>]`, as each worker
+settles — no blocking wait required. Answer any of them with
 `fleet_send({ handle, text: <answer>, raw: true })` — `raw: true` sends the
 answer alone; the default re-appends fleet's protocol block, which fits a
 fresh brief and nothing else. Raw answers are steering rather than new
 tracked dispatches, so they do not make the eventual report for the worker's
-original task look stale. Re-join until everyone has reported, then review
-the branches and tell the user what landed where.
+original task look stale. Call `fleet_join({})` only if you have genuinely
+nothing else to do and want to sit until the next one lands — it is a
+fallback, not the primary way results reach you. Once everyone has reported,
+review the branches and tell the user what landed where.
 
 ## Sizing a slice
 

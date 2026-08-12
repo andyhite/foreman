@@ -633,6 +633,66 @@ assert 'join --timeout dies on non-numeric value' [ "$rc" != 0 ]
 assert 'output contains usage: fleet join' [ "${out#*usage: fleet join}" != "$out" ]
 unset -f require_herdr
 
+# ── join --once ──────────────────────────────────────────────────────────────
+#
+# The single-tick mode the omp fleet extension polls on a timer to deliver
+# worker reports as a non-interrupting aside, instead of the orchestrator
+# blocking a tool call. It must never enter the deadline/sleep loop — a
+# poller calling this every few seconds must never itself block.
+
+printf '\njoin --once\n'
+export FLEET_STATE="$sandbox/state-join-once"
+mkdir -p "$(meta_dir w1)"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+counter_bump "$(dispatch_file w1)"
+require_herdr() { :; }
+scoped_key() { printf 'k'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w1","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+out=$(cmd_join --once 2>&1)
+rc=$?
+is     'join --once exits 0 on a settled worker' "$rc" '0'
+assert 'join --once prints the settled worker' [ "${out#*w1 (idle)}" != "$out" ]
+is     'join --once marks the worker joined' \
+  "$(counter_read "$(joined_token_file w1)")" "$(counter_read "$(dispatch_file w1)")"
+unset -f herdr
+
+# A still-working worker must return after exactly one tick, not fall through
+# to the normal deadline/`sleep_ms` loop — `sleep_ms` here would hang the
+# test (and, for real, block the poller) for a full `JOIN_POLL_MS`.
+export FLEET_STATE="$sandbox/state-join-once-working"
+mkdir -p "$(meta_dir w2)"
+meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+counter_bump "$(dispatch_file w2)"
+sleep_ms() { bad 'join --once must not call sleep_ms'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w2","agent_status":"working"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+out2=$(cmd_join --once 2>&1)
+rc2=$?
+is     'join --once returns 0 while a worker is still working' "$rc2" '0'
+is     'join --once leaves a still-working worker unjoined' \
+  "$(counter_read "$(joined_token_file w2)")" ''
+unset -f herdr sleep_ms
+
+# A poller ticks every few seconds; with nothing joinable it must stay silent
+# rather than repeat "nothing to join" on every tick.
+export FLEET_STATE="$sandbox/state-join-once-empty"
+out3=$( (cmd_join --once) 2>&1 )
+rc3=$?
+is 'join --once with nothing joinable exits 0' "$rc3" '0'
+is 'join --once with nothing joinable prints nothing' "$out3" ''
+unset -f require_herdr scoped_key
+
 # ── reply appends an uncollected question ────────────────────────────────────────
 
 printf '\nreply appends an uncollected question\n'

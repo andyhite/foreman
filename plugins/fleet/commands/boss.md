@@ -37,13 +37,15 @@ You are a project manager with commit access you are choosing not to use.
 3. **Dispatch every independent slice before joining any of them,** using the
    `/fleet:*` command that matches the kind of work. Each returns as soon as its
    task is submitted.
-4. **Stay available.** Call `fleet_join({})`, answer anything that comes back
-   tagged `[fleet:<handle>]`, and re-join until every worker has reported.
-   `fleet_broadcast({ text })` pushes a wave-wide notice to every live worker
-   at once when a decision changes mid-wave. If `fleet_join` reports a worker
-   `blocked` on an approval or question UI, read its pane with
-   `fleet_read({ handle })` first, then clear it with
-   `fleet_keys({ handle, keys })`.
+4. **Stay available.** After `fleet_spawn`, worker reports and questions
+   arrive on their own as they land — no blocking wait required — tagged
+   `[fleet:<handle>]`; answer anything tagged that way as it comes in. Call
+   `fleet_join({})` only when you have genuinely nothing else to do and want
+   to sit until the next one lands. `fleet_broadcast({ text })` pushes a
+   wave-wide notice to every live worker at once when a decision changes
+   mid-wave. If an update reports a worker `blocked` on an approval or
+   question UI, read its pane with `fleet_read({ handle })` first, then clear
+   it with `fleet_keys({ handle, keys })`.
 5. **Report.** Review the branches, tell the user what landed where, and leave
    the worktrees in place unless asked to reap them.
 
