@@ -21,7 +21,7 @@ both directions goes through herdr's agent surface, which `fleet` wraps.
 This skill is the CLI contract. For *what to put in a worker's brief* — the
 orchestrator's actual job — read `skill://fleet-dispatch`.
 
-Every `fleet_*` custom tool (`fleet_boss`, `fleet_spawn`, `fleet_send`, …) is
+Every `fleet_*` custom tool (`fleet_foreman`, `fleet_spawn`, `fleet_send`, …) is
 the CLI subcommand of the same name, one parameter for one flag. The CLI is
 the contract; the tools are the interface — call the tool when one is
 registered, and fall back to the shell form shown in this doc only where no
@@ -42,30 +42,30 @@ Every command must run inside a herdr pane (`HERDR_ENV=1`) and needs `jq`.
 ## Before anything else
 
 ```bash
-fleet boss
+fleet foreman
 ```
 
 Claims a handle for this pane, defaulting to the repo root's name — `webapp`
 in `~/Code/acme/webapp`. Workers address their questions to it, so nothing
 can be dispatched until it exists. On a pane that already has a handle, a bare
-`fleet boss` is a query rather than a claim: it prints the existing one and
+`fleet foreman` is a query rather than a claim: it prints the existing one and
 changes nothing.
 
 Nothing limits how many orchestrators exist; each just needs a handle no live
 agent is using. The repo-root default is only a default — it stops one checkout
-from monopolizing a shared name, and `fleet boss <name>` in the same checkout is
+from monopolizing a shared name, and `fleet foreman <name>` in the same checkout is
 a second, equally valid orchestrator. Two unrelated checkouts with the same
 directory name derive the same default, and the second one has to name itself.
 Claiming a taken handle fails and names the pane holding it:
 
 ```bash
-fleet boss fleetlead        # any [a-z][a-z0-9_-]{0,31} name
-fleet boss webapp --steal   # take it over; the holder is renamed aside, not unnamed
+fleet foreman fleetlead        # any [a-z][a-z0-9_-]{0,31} name
+fleet foreman webapp --steal   # take it over; the holder is renamed aside, not unnamed
 ```
 
 Claim the handle **before** spawning. Whichever handle this pane holds at spawn
 time is stamped into each worker, and that is where its `fleet reply` goes.
-Renaming an orchestrator afterwards is safe — `fleet boss <newname>` repoints
+Renaming an orchestrator afterwards is safe — `fleet foreman <newname>` repoints
 every worker that reported to the old handle, and `--steal` does the same for
 the fleet of whoever it displaces.
 

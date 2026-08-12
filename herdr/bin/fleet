@@ -20,7 +20,7 @@
 # nothing is written into the repo and no environment has to be injected.
 #
 # Vocabulary: the ORCHESTRATOR (default handle: the repo root's name) is
-# `fleet boss`. A WORKER is an agent `fleet spawn` created. A HANDLE is a herdr
+# `fleet foreman`. A WORKER is an agent `fleet spawn` created. A HANDLE is a herdr
 # agent name — `[a-z][a-z0-9_-]{0,31}` — and is the only identifier used here;
 # workspace and pane IDs stay inside this script.
 
@@ -47,8 +47,9 @@ DISPATCH_SETTLE_MS="${FLEET_DISPATCH_SETTLE_MS:-15000}"
 FLEET_EDITOR="${FLEET_EDITOR:-nvim}"
 FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
 # Model tier applied when `fleet spawn` names neither `--tier` nor `--model`.
-# Empty keeps today's behaviour: the harness's own default model. Commands in
-# plugins/fleet print an explicit `--tier`, so this is only a boss-side default.
+# Empty keeps today's behaviour: the harness's own default model. The agent
+# plugin's commands print an explicit `--tier`, so this is only a foreman-side
+# default.
 FLEET_AGENT_TIER="${FLEET_AGENT_TIER:-}"
 # A new shell may still be loading zsh/mise/direnv when a layout command is
 # sent. Verify that the requested TUI actually became foreground and retry.
@@ -398,27 +399,27 @@ meta_get() {
 
 # ── Orchestrator identity ────────────────────────────────────────────────────
 
-# The handle `fleet boss` claims when none is named. A constant default would
+# The handle `fleet foreman` claims when none is named. A constant default would
 # let exactly one repo on the machine ever hold it, since herdr agent names are
 # unique across the whole herdr session; the repo root's name gives every
 # checkout a default of its own, and still collides — correctly — with a second
-# orchestrator in the same one. $FLEET_BOSS_HANDLE overrides.
-default_boss() {
-  if [ -n "${FLEET_BOSS_HANDLE:-}" ]; then
-    printf '%s' "$FLEET_BOSS_HANDLE"; return 0
+# orchestrator in the same one. $FLEET_FOREMAN_HANDLE overrides.
+default_foreman() {
+  if [ -n "${FLEET_FOREMAN_HANDLE:-}" ]; then
+    printf '%s' "$FLEET_FOREMAN_HANDLE"; return 0
   fi
   local top
   top=$(git rev-parse --show-toplevel 2>/dev/null) || true
-  if [ -n "$top" ]; then slugify "$(basename "$top")"; else printf 'boss'; fi
+  if [ -n "$top" ]; then slugify "$(basename "$top")"; else printf 'foreman'; fi
 }
 
-cmd_boss() {
+cmd_foreman() {
   require_herdr
   local steal=0 name=""
   while [ $# -gt 0 ]; do
     case $1 in
       --steal) steal=1; shift ;;
-      -*) die "usage: fleet boss [name] [--steal]" ;;
+      -*) die "usage: fleet foreman [name] [--steal]" ;;
       *) name=$1; shift ;;
     esac
   done
@@ -428,7 +429,7 @@ cmd_boss() {
   # handle keeps it.
   if [ -z "$name" ]; then
     if [ -n "$current" ]; then printf '%s\n' "$current"; return 0; fi
-    name=$(default_boss)
+    name=$(default_foreman)
   fi
   if [ "$current" = "$name" ]; then
     printf '%s\n' "$name"; return 0
@@ -442,14 +443,14 @@ cmd_boss() {
   local holder; holder=$(agent_field "$name" pane_id)
   if [ -n "$holder" ]; then
     [ "$steal" = 1 ] || die "handle '$name' is held by pane $holder
-  use another handle:  fleet boss <name>
-  or take it over:     fleet boss $name --steal   (moves $holder aside)"
+  use another handle:  fleet foreman <name>
+  or take it over:     fleet foreman $name --steal   (moves $holder aside)"
     local moved
     moved=$(free_handle "$name") \
       || die "cannot free '$name': every variant of it is already in use"
     h agent rename "$holder" "$moved" >/dev/null
     note "fleet: moved the previous '$name' (pane $holder) to '$moved'"
-    rebind_boss "$name" "$moved"
+    rebind_foreman "$name" "$moved"
   fi
   h agent rename "$HERDR_PANE_ID" "$name" >/dev/null
   # A pane can already be named without ever having been an orchestrator —
@@ -457,19 +458,19 @@ cmd_boss() {
   # is a normal path, not an error. What is not acceptable is leaving workers
   # pointing at a handle nobody answers to any more: the live agent name is the
   # source of truth, so their records follow it.
-  [ -z "$current" ] || rebind_boss "$current" "$name"
+  [ -z "$current" ] || rebind_foreman "$current" "$name"
   printf '%s\n' "$name"
 }
 
 # Repoint every worker that reports to $1 at $2. Deliberately unscoped by repo:
 # a handle is unique across the machine, so every record naming it means the
 # same agent, wherever its worktree lives.
-rebind_boss() {
+rebind_foreman() {
   local from=$1 to=$2 handle n=0
   [ -n "$from" ] && [ "$from" != "$to" ] || return 0
   for handle in $(known_workers); do
-    [ "$(meta_get "$handle" BOSS)" = "$from" ] || continue
-    meta_update "$handle" "BOSS=$to"
+    [ "$(meta_get "$handle" FOREMAN)" = "$from" ] || continue
+    meta_update "$handle" "FOREMAN=$to"
     n=$((n + 1))
   done
   [ "$n" = 0 ] || note "fleet: repointed $n worker(s) from '$from' to '$to'"
@@ -478,7 +479,7 @@ rebind_boss() {
 cmd_whoami() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
   printf '%s\n' "$me"
 }
 
@@ -513,7 +514,7 @@ cmd_doctor() {
   if [ -n "${HERDR_PANE_ID:-}" ]; then
     printf '%-6s %s\n' 'ok' 'HERDR_PANE_ID is set'
   else
-    printf '%-6s %s\n' 'warn' 'HERDR_PANE_ID is unset (fleet report/reply/boss need a pane; run: fleet boss)'
+    printf '%-6s %s\n' 'warn' 'HERDR_PANE_ID is unset (fleet report/reply/foreman need a pane; run: fleet foreman)'
   fi
 
   # 5. Only if checks 1-4 all passed: self_handle non-empty
@@ -522,7 +523,7 @@ cmd_doctor() {
     if [ -n "$me" ]; then
       printf '%-6s %s\n' 'ok' "agent handle: $me"
     else
-      printf '%-6s %s\n' 'warn' 'this pane has no agent handle (run: fleet boss)'
+      printf '%-6s %s\n' 'warn' 'this pane has no agent handle (run: fleet foreman)'
     fi
   fi
 
@@ -556,11 +557,11 @@ cmd_doctor() {
 
 # Resolve who to report to. A worker learns this from its own meta file, which
 # `fleet spawn` wrote before the worker existed.
-boss_handle() {
+foreman_handle() {
   local me; me=$(self_handle)
   local b=""
-  [ -n "$me" ] && b=$(meta_get "$me" BOSS)
-  printf '%s' "${b:-$(default_boss)}"
+  [ -n "$me" ] && b=$(meta_get "$me" FOREMAN)
+  printf '%s' "${b:-$(default_foreman)}"
 }
 
 # ── Skills ───────────────────────────────────────────────────────────────────
@@ -584,7 +585,7 @@ valid_skill_name() {
   case "$name" in *[!a-z0-9-]*|*-) return 1 ;; esac
 }
 
-# Worker model tiers are labels that `plugins/fleet` commands may print. The
+# Worker model tiers are labels that the agent plugin's commands may print. The
 # mapping onto omp's own `--model` selectors lives only here — the plugin must
 # not name `@task`, `@default`, or any other omp-specific selector.
 valid_agent_tier() {
@@ -651,14 +652,14 @@ skill_instruction() {
 # sessions with no orchestration instructions of their own, so the contract has
 # to travel with the work.
 protocol_block() {
-  local handle=$1 boss=$2 branch=$3 dir=$4
+  local handle=$1 foreman=$2 branch=$3 dir=$4
   cat <<EOF
 
 ---
 ## Fleet protocol
 
 You are fleet worker \`$handle\`, working in \`$dir\` on branch \`$branch\`.
-Your orchestrator is the agent \`$boss\`.
+Your orchestrator is the agent \`$foreman\`.
 
 - Stay inside this worktree. Do not touch other checkouts of this repo.
 - Commit your work on this branch when it is done. Do not push and do not open
@@ -836,12 +837,12 @@ cmd_spawn() {
     task="$(skill_instruction "$skill")"$'\n\n'"$task"
   fi
 
-  # The spawner is the boss, by definition. boss_handle() would be wrong here:
-  # it reads the caller's own BOSS record, and only workers have one, so an
+  # The spawner is the foreman, by definition. foreman_handle() would be wrong here:
+  # it reads the caller's own FOREMAN record, and only workers have one, so an
   # orchestrator that claimed a custom handle silently stamped the default
-  # `boss` into every worker and their replies went to whoever held it.
-  local boss; boss=$(self_handle)
-  [ -n "$boss" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
+  # `foreman` into every worker and their replies went to whoever held it.
+  local foreman; foreman=$(self_handle)
+  [ -n "$foreman" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
 
   note "fleet: creating $branch at $wtpath (from $base)"
   local created ws tab pane
@@ -862,12 +863,12 @@ cmd_spawn() {
   # argv plan and the MODEL value recorded beside TIER.
   local agent_args resolved_model=$model arg
   agent_args=$(worker_agent_args "$tier" "$model")
-  # When the boss passed --tier, record the mapped selector so `meta_get MODEL`
+  # When the foreman passed --tier, record the mapped selector so `meta_get MODEL`
   # answers the same question for both flags.
   if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
     resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
   fi
-  meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
+  meta_set "$handle" "FOREMAN=$foreman" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
     "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "SKILL=$skill" \
     "TIER=$tier" "MODEL=$resolved_model"
   : >"$(report_file "$handle")"
@@ -891,7 +892,7 @@ EOF
   printf '%s\n' "$handle"
 
   if [ "$dispatch" = 1 ] && [ -n "$task" ]; then
-    dispatch_to "$handle" "$task$(protocol_block "$handle" "$boss" "$branch" "$wtpath")"
+    dispatch_to "$handle" "$task$(protocol_block "$handle" "$foreman" "$branch" "$wtpath")"
   fi
 }
 
@@ -1193,7 +1194,7 @@ dispatch_to() {
 with_protocol() {
   local handle=$1 text=$2
   printf '%s%s' "$text" \
-    "$(protocol_block "$handle" "$(meta_get "$handle" BOSS)" \
+    "$(protocol_block "$handle" "$(meta_get "$handle" FOREMAN)" \
        "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)")"
 }
 
@@ -1295,7 +1296,7 @@ cmd_ask() {
 cmd_broadcast() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
   local text; text=$(read_message "broadcast <text...>" "$@")
   local scope; scope=$(scoped_key "fleet broadcast" "run it from inside a repo")
   # One `agent list` for the whole wave, not one per worker — the same
@@ -1316,13 +1317,13 @@ cmd_broadcast() {
 }
 
 # Whether $1 is currently recognized as an orchestrator: either the handle a
-# boss would claim by default, or some worker's own record names it as BOSS —
-# which covers a renamed/--steal'd boss, since rebind_boss keeps that in sync.
-is_boss_handle() {
+# foreman would claim by default, or some worker's own record names it as FOREMAN —
+# which covers a renamed/--steal'd foreman, since rebind_foreman keeps that in sync.
+is_foreman_handle() {
   local handle=$1 w
-  [ "$handle" = "$(default_boss)" ] && return 0
+  [ "$handle" = "$(default_foreman)" ] && return 0
   for w in $(known_workers); do
-    [ "$(meta_get "$w" BOSS)" = "$handle" ] && return 0
+    [ "$(meta_get "$w" FOREMAN)" = "$handle" ] && return 0
   done
   return 1
 }
@@ -1334,7 +1335,7 @@ cmd_dm() {
   local handle=${1:?usage: fleet dm <handle> <text...>}; shift
   valid_handle "$handle" || die "invalid handle '$handle'"
   agent_exists "$handle" || die "no live agent named '$handle'"
-  if [ ! -f "$(meta_file "$handle")" ] && ! is_boss_handle "$handle"; then
+  if [ ! -f "$(meta_file "$handle")" ] && ! is_foreman_handle "$handle"; then
     die "'$handle' is live but not a fleet member (see: fleet ls)"
   fi
   local text; text=$(read_message "dm <handle> <text...>" "$@")
@@ -1621,7 +1622,7 @@ cmd_reply() {
   [ -n "$me" ] || die "this pane is not a named fleet worker"
   [ -f "$(meta_file "$me")" ] \
     || die "'$me' is not a registered fleet worker; 'fleet reply' is a worker command"
-  local boss; boss=$(boss_handle)
+  local foreman; foreman=$(foreman_handle)
   local text; text=$(read_message "reply <text...>" "$@")
 
   # Filed first, delivered second. herdr's prompt only reaches an orchestrator
@@ -1639,13 +1640,13 @@ cmd_reply() {
   fi
   counter_bump "$(question_seq_file "$me")"
 
-  if agent_exists "$boss"; then
-    h agent prompt "$boss" "[fleet:$me] $text" >/dev/null
-    printf 'asked %s (question filed for its next fleet join)\n' "$boss"
+  if agent_exists "$foreman"; then
+    h agent prompt "$foreman" "[fleet:$me] $text" >/dev/null
+    printf 'asked %s (question filed for its next fleet join)\n' "$foreman"
   else
     # No longer fatal: the question is on disk, so an orchestrator that comes
     # back — or a different one — still collects it.
-    note "fleet: orchestrator '$boss' is not live; the question is filed and will surface on the next 'fleet join'"
+    note "fleet: orchestrator '$foreman' is not live; the question is filed and will surface on the next 'fleet join'"
   fi
 }
 
@@ -1810,7 +1811,7 @@ usage() {
 fleet — dispatch peer coding agents into herdr worktree workspaces
 
 Orchestrator
-  fleet boss [name] [--steal]    claim the orchestrator handle for this pane
+  fleet foreman [name] [--steal]    claim the orchestrator handle for this pane
   fleet spawn <branch> [opts]    create a worktree, start an agent, dispatch
   fleet send [--raw] <h> <text>  dispatch work, return immediately
   fleet ask <h> <text>           dispatch and block until the report is in
@@ -1850,7 +1851,7 @@ main() {
   [ $# -gt 0 ] || usage
   local cmd=$1; shift
   case "$cmd" in
-    boss)    cmd_boss "$@" ;;
+    foreman)    cmd_foreman "$@" ;;
     whoami)  cmd_whoami "$@" ;;
     spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;

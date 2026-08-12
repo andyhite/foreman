@@ -12,11 +12,11 @@ they define what stays with you and what goes to a worker. Read
 
 Then claim your handle. Nothing can be dispatched before this:
 
-Call `fleet_boss({})`.
+Call `fleet_foreman({})`.
 
 It defaults to the repo root's name, so it only collides if another pane is
 already orchestrating this same checkout — claim a distinct one with
-`fleet_boss({ name: "<name>" })` rather than stealing it.
+`fleet_foreman({ name: "<name>" })` rather than stealing it.
 
 ## Your job
 

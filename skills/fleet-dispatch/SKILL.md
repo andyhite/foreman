@@ -81,7 +81,7 @@ skill's own procedure.
 
 **`tier` picks the worker's model band.** Each `/fleet:*` command names the
 tier that fits its skill — `standard` for dispatch-heavy work, `deep` when the
-worker itself has to hold judgement. `model` is the escape hatch when a boss
+worker itself has to hold judgement. `model` is the escape hatch when a foreman
 needs an omp model selector the tier table does not cover.
 
 `disable-model-invocation: true` lands mostly on the other side of this split
@@ -125,7 +125,7 @@ spawns `review/412-webhook-retry`, the same `<n>-<slug>` (or `<slug>`) shape
 with only the prefix swapped. The worker's handle is derived from the
 branch, so keep branches distinguishable in their first 32 characters.
 
-Claim your own handle with `fleet_boss({})` before the first spawn — a worker
+Claim your own handle with `fleet_foreman({})` before the first spawn — a worker
 stamped with the wrong orchestrator sends its questions to the wrong pane.
 
 Then, once every independent slice is out, keep working. Reports and

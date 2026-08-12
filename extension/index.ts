@@ -196,7 +196,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       }
 
       if (result.code !== 0) {
-        // Most commonly "not in a git repo" if the boss's cwd changed out
+        // Most commonly "not in a git repo" if the foreman's cwd changed out
         // from under it. Five in a row means polling itself is broken, not
         // that nothing happened — stop rather than repeat the same die()
         // text as a steer message forever.
@@ -232,10 +232,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   // ---------------------------------------------------------------------
 
   pi.registerTool({
-    name: "fleet_boss",
-    label: "Fleet Boss",
+    name: "fleet_foreman",
+    label: "Fleet Foreman",
     description:
-      "Claim (or query) this pane's boss handle. Workers address their questions and reports to whichever handle this pane holds at spawn time, so claim it before spawning anything.",
+      "Claim (or query) this pane's foreman handle. Workers address their questions and reports to whichever handle this pane holds at spawn time, so claim it before spawning anything.",
     parameters: z.object({
       name: z.string().optional().describe("Handle to claim; defaults to the repo root's name"),
       steal: z
@@ -246,7 +246,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
       ensureJoinPoller(ctx);
-      const args = ["boss"];
+      const args = ["foreman"];
       if (params.name) args.push(params.name);
       if (params.steal) args.push("--steal");
       const stdout = await runFleet(args, ctx, signal);
@@ -545,7 +545,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     name: "fleet_reply",
     label: "Fleet Reply",
     description:
-      "File a question to the boss and interrupt its pane (worker-side). Use when blocked on a decision only the orchestrator can make.",
+      "File a question to the foreman and interrupt its pane (worker-side). Use when blocked on a decision only the orchestrator can make.",
     parameters: z.object({
       text: z.string(),
     }),

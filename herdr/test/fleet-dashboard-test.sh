@@ -203,7 +203,7 @@ is 'even for an agent that is gone' "$(dash_glyph gone 1)" '?'
 # prefix match creeps in.
 
 printf '\nstatus lookup\n'
-DASH_STATUSES=$(printf 'boss\tidle\nfeat-x\tworking\nfeat-x-2\tblocked\n')
+DASH_STATUSES=$(printf 'foreman\tidle\nfeat-x\tworking\nfeat-x-2\tblocked\n')
 is 'finds a status'                 "$(dash_status_of feat-x)"   'working'
 is 'does not stop at a prefix'      "$(dash_status_of feat-x-2)" 'blocked'
 is 'an unregistered agent is gone'  "$(dash_status_of nobody)"   'gone'

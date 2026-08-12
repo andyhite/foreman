@@ -172,9 +172,9 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     case "$1 $2" in
       'agent list')
         if [ -f "$started_file" ]; then
-          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"},{"name":"feat-x","pane_id":"p1","agent_status":"working","interactive_ready":true,"workspace_id":"w1"}]}}'
+          printf '{"result":{"agents":[{"name":"foreman","pane_id":"p0"},{"name":"feat-x","pane_id":"p1","agent_status":"working","interactive_ready":true,"workspace_id":"w1"}]}}'
         else
-          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"}]}}'
+          printf '{"result":{"agents":[{"name":"foreman","pane_id":"p0"}]}}'
         fi ;;
       'plugin list') printf '' ;;
       'worktree create')
@@ -242,11 +242,11 @@ fi
 # silently tell a worker to run something that no longer exists.
 
 printf '\nplugin prose\n'
-plugin_dir=$(cd "$(dirname "$0")/../../plugins/fleet" 2>/dev/null && pwd)
+plugin_dir=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
 if [ -n "$plugin_dir" ]; then
   offenders=""
   for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
-           "$plugin_dir"/README.md "$plugin_dir/../../README.md"; do
+           "$plugin_dir"/README.md; do
     [ -f "$f" ] || continue
     if [ -n "$(sed -n -E '/fleet[[:space:]]+skill/p' "$f")" ]; then
       offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
@@ -333,25 +333,25 @@ fi
 
 printf '\nmeta\n'
 export FLEET_STATE="$sandbox/meta"
-meta_set m1 "BOSS=my boss" "BRANCH=feat/x'y\"z" "DIR=/tmp/a b" "WORKSPACE=w8" \
+meta_set m1 "FOREMAN=my foreman" "BRANCH=feat/x'y\"z" "DIR=/tmp/a b" "WORKSPACE=w8" \
   "REPO=/r" "REPO_KEY=/r/.git"
-is 'a value with a space round-trips'  "$(meta_get m1 BOSS)"   'my boss'
+is 'a value with a space round-trips'  "$(meta_get m1 FOREMAN)"   'my foreman'
 is 'quotes and slashes round-trip'     "$(meta_get m1 BRANCH)" "feat/x'y\"z"
 
-meta_update m1 "BOSS=other"
-is 'meta_update rewrites its key'      "$(meta_get m1 BOSS)"   'other'
+meta_update m1 "FOREMAN=other"
+is 'meta_update rewrites its key'      "$(meta_get m1 FOREMAN)"   'other'
 is 'and preserves its siblings'        "$(meta_get m1 BRANCH)" "feat/x'y\"z"
 is 'and preserves the ones after it'   "$(meta_get m1 DIR)"    '/tmp/a b'
 
 is 'an absent key reads empty'         "$(meta_get m1 NOPE)"   ''
-is 'an absent worker reads empty'      "$(meta_get nosuch BOSS)" ''
+is 'an absent worker reads empty'      "$(meta_get nosuch FOREMAN)" ''
 
 # meta_get used to expand ${!key} *after* sourcing without unsetting first, so
 # a key the file did not carry fell through to the environment. A stale meta
 # file plus an exported REPO_KEY silently mis-scoped every repo-scoped command.
 export REPO_KEY=leaked-from-the-environment
 is 'an absent key does not leak the environment' "$(meta_get m1 XREPO_KEY)" ''
-meta_set m2 "BOSS=b"
+meta_set m2 "FOREMAN=b"
 is 'a missing REPO_KEY ignores the exported value' "$(meta_get m2 REPO_KEY)" ''
 unset REPO_KEY
 
@@ -643,7 +643,7 @@ unset -f require_herdr
 printf '\njoin --once\n'
 export FLEET_STATE="$sandbox/state-join-once"
 mkdir -p "$(meta_dir w1)"
-meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
 printf 'settled ok' >"$(report_file w1)"
 cp "$(dispatch_file w1)" "$(report_token_file w1)"
@@ -669,7 +669,7 @@ unset -f herdr
 # test (and, for real, block the poller) for a full `JOIN_POLL_MS`.
 export FLEET_STATE="$sandbox/state-join-once-working"
 mkdir -p "$(meta_dir w2)"
-meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+meta_set w2 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
 counter_bump "$(dispatch_file w2)"
 sleep_ms() { bad 'join --once must not call sleep_ms'; }
 herdr() {
@@ -708,7 +708,7 @@ unset -f require_herdr scoped_key
 printf '\njoin settle-confirm race\n'
 export FLEET_STATE="$sandbox/state-join-settle-race"
 mkdir -p "$(meta_dir w1)"
-meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
 require_herdr() { :; }
 scoped_key() { printf 'k'; }
@@ -744,7 +744,7 @@ unset -f herdr
 # stuck — once the SAME unfresh idle sighting repeats.
 export FLEET_STATE="$sandbox/state-join-settle-noreport"
 mkdir -p "$(meta_dir w2)"
-meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+meta_set w2 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
 counter_bump "$(dispatch_file w2)"
 herdr() {
   case "$*" in
@@ -768,9 +768,9 @@ unset -f herdr require_herdr scoped_key
 printf '\nreply appends an uncollected question\n'
 export FLEET_STATE="$sandbox/state-reply-append"
 mkdir -p "$FLEET_STATE/w1"
-meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
+meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/x"
 self_handle() { printf 'w1'; }
-boss_handle() { printf 'me'; }
+foreman_handle() { printf 'me'; }
 agent_exists() { return 1; }
 require_herdr() { :; }
 
@@ -783,7 +783,7 @@ assert     'question.md contains first question' [ -n "$(grep -F 'first question
 assert     'question.md contains second question' [ -n "$(grep -F 'second question' "$qf")" ]
 assert     'question.md contains separator' [ -n "$(grep -F -- '---' "$qf")" ]
 is         'question.seq reads 2' "$(counter_read "$FLEET_STATE/w1/question.seq")" '2'
-unset -f self_handle boss_handle agent_exists require_herdr
+unset -f self_handle foreman_handle agent_exists require_herdr
 
 # ── fleet version ───────────────────────────────────────────────────────────────
 
@@ -795,7 +795,7 @@ is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.5.0'
 printf '\nls shows a pending question\n'
 export FLEET_STATE="$sandbox/state-ls-q"
 mkdir -p "$FLEET_STATE/w2"
-meta_set w2 "BOSS=boss" "BRANCH=feat/q" "DIR=/tmp/q" "REPO_KEY=k"
+meta_set w2 "FOREMAN=foreman" "BRANCH=feat/q" "DIR=/tmp/q" "REPO_KEY=k"
 : >"$FLEET_STATE/w2/question.md"
 counter_bump "$(cat "$FLEET_STATE/w2/question.seq" 2>/dev/null || echo "$FLEET_STATE/w2/question.seq")"
 
@@ -845,12 +845,12 @@ unset -f herdr self_handle require_herdr scoped_key
 # ── dm ────────────────────────────────────────────────────────────────────────
 #
 # Raw steering to one fleet member. Same untracked-dispatch contract as
-# broadcast; the target gate (registered worker or the boss handle) is the one
+# broadcast; the target gate (registered worker or the foreman handle) is the one
 # thing that differs from `fleet send --raw`, which only checks liveness.
 
 printf '\ndm\n'
 export FLEET_STATE="$sandbox/state-dm"
-mkdir -p "$(meta_dir w1)"; meta_set w1 "BOSS=me"
+mkdir -p "$(meta_dir w1)"; meta_set w1 "FOREMAN=me"
 self_handle() { printf 'me'; }
 require_herdr() { :; }
 agent_exists() { case "$1" in w1|intruder) return 0 ;; *) return 1 ;; esac; }
@@ -862,7 +862,7 @@ is 'dm carries the [fleet dm from <sender>] prefix' "$sent_text" '[fleet dm from
 
 out=$( (cmd_dm intruder 'hi') 2>&1 )
 rc=$?
-assert 'dm rejects an unregistered, non-boss target' [ "$rc" != 0 ]
+assert 'dm rejects an unregistered, non-foreman target' [ "$rc" != 0 ]
 assert 'and points at fleet ls' [ "${out#*fleet ls}" != "$out" ]
 
 before=$(counter_read "$(dispatch_file w1)")

@@ -1,6 +1,6 @@
 # Fleet (herdr plugin)
 
-Fleet is one of two plugins published by the Foreman marketplace (`andyhite/foreman`): this herdr plugin supplies the `fleet` CLI, the mechanism that spawns and manages workers; the companion agent plugin at [`../plugins/fleet/`](../plugins/fleet/) supplies the `/fleet:*` orchestrator commands that drive it. omp's own `task` subagents share one process, context, and current directory; a fleet worker is a separate coding-agent process (`fleet spawn --kind`, default `omp`) in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
+Fleet is one of two plugins in this repo (`andyhite/foreman`): this herdr plugin supplies the `fleet` CLI, the mechanism that spawns and manages workers; the companion agent plugin at [the repo root](../) supplies the `/fleet:*` orchestrator commands that drive it. omp's own `task` subagents share one process, context, and current directory; a fleet worker is a separate coding-agent process (`fleet spawn --kind`, default `omp`) in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 
 | Command | Description |
 | --- | --- |
-| `fleet boss [name] [--steal]` | Claim the orchestrator handle for this pane. |
+| `fleet foreman [name] [--steal]` | Claim the orchestrator handle for this pane. |
 | `fleet spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--kind`, `--skill`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
 | `fleet send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
 | `fleet ask [--timeout <seconds>] <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. For ask the flag comes first. |
@@ -201,7 +201,7 @@ record with `fleet reap <handle> [--forget]`.
 | `FLEET_EDITOR` | `nvim` | Editor command run beside the agent in the `full` layout. |
 | `FLEET_GIT_UI` | `lazygit` | Git UI command run beside the agent in the `full` layout. |
 | `FLEET_LAYOUT_START_TIMEOUT_MS` | `15000` | Maximum milliseconds to verify that a layout's requested TUI became foreground before retrying. |
-| `FLEET_BOSS_HANDLE` | slugified repository-root name (or `boss` outside a repository) | Overrides the default orchestrator handle claimed by `fleet boss`. |
+| `FLEET_FOREMAN_HANDLE` | slugified repository-root name (or `foreman` outside a repository) | Overrides the default orchestrator handle claimed by `fleet foreman`. |
 | `FLEET_IGNORE_WORKSPACE_MANAGER` | unset | Set to `1` to skip the workspace-manager coexistence gate. |
 | `FLEET_DASHBOARD_POLL_MS` | `2000` | How long the dashboard waits for a keystroke before redrawing; also its whole polling cost, one `agent list` per tick. |
 | `FLEET_DASHBOARD_TAIL_LINES` | `200` | Lines of a worker's terminal the dashboard's `t` key pulls. |
@@ -246,4 +246,4 @@ herdr/test/fleet-dashboard-test.sh   # the dashboard
 
 For the agent-facing orchestration commands — the `/fleet:*` slash commands that
 dispatch work to these workers — see the companion agent plugin at
-[`../plugins/fleet/`](../plugins/fleet/). It is harness-portable (omp, Claude Code, Codex; Cursor untested).
+[the repo root](../). It is harness-portable (omp, Claude Code, Codex; Cursor untested).
