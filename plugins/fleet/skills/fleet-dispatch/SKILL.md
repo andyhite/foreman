@@ -119,10 +119,8 @@ temp file and passes it through, so you never manage `/tmp/fleet-*.md` files
 by hand.
 
 Branch names follow the repo's convention if it has one. Otherwise:
-`feat/` for new behaviour, `bug/` for defects, `spike/` for prototypes and
-research, `review/` for a review pass — reviewing `feat/412-webhook-retry`
-spawns `review/412-webhook-retry`, the same `<n>-<slug>` (or `<slug>`) shape
-with only the prefix swapped. The worker's handle is derived from the
+`feat/` for new behaviour, `fix/` for defects, `spike/` for prototypes and
+research, `review/` for a review pass. The worker's handle is derived from the
 branch, so keep branches distinguishable in their first 32 characters.
 
 Claim your own handle with `fleet_boss({})` before the first spawn — a worker

@@ -60,7 +60,7 @@ Compose the brief as text:
 Then, passing the brief as `task`:
 
 ```
-fleet_spawn({ branch: "bug/<slug>", tier: "deep", skill: "diagnosing-bugs", task: "<the brief above>" })
+fleet_spawn({ branch: "fix/<slug>", tier: "deep", skill: "diagnosing-bugs", task: "<the brief above>" })
 ```
 
 ## Delegation

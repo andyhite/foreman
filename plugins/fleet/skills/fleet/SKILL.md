@@ -92,7 +92,7 @@ Long tasks read better from a file, and a brief worth dispatching is almost
 always long:
 
 ```bash
-fleet spawn bug/301-null-guard --tier deep --skill diagnosing-bugs --task-file /tmp/task-301.md
+fleet spawn fix/301-null-guard --tier deep --skill diagnosing-bugs --task-file /tmp/task-301.md
 ```
 
 `--tier standard|deep` selects a worker model band; `--model <selector>` is

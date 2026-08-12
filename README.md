@@ -51,7 +51,7 @@ graph LR
   U[User] <--> B["Orchestrator<br/>grill / to-spec / to-tickets"]
   B -->|"/fleet:implement"| W1["worker (omp)<br/>feat/a"]
   B -->|"/fleet:implement"| W2["worker (omp)<br/>feat/b"]
-  B -->|"/fleet:diagnosing-bugs"| W3["worker (omp)<br/>bug/c"]
+  B -->|"/fleet:diagnosing-bugs"| W3["worker (omp)<br/>fix/c"]
   W1 -->|report| B
   W2 -->|"reply: which retry policy?"| B
   W3 -->|report| B

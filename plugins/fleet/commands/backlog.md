@@ -104,7 +104,7 @@ What falls out still needs saying. Report it once, in one block:
 | The ticket is | Worker reads | Branch |
 |---|---|---|
 | a change to build against a spec | `skill://implement` | `feat/<n>-<slug>` |
-| something broken or slow, with a symptom | `skill://diagnosing-bugs` | `bug/<n>-<slug>` |
+| something broken or slow, with a symptom | `skill://diagnosing-bugs` | `fix/<n>-<slug>` |
 | a question whose deliverable is a committed write-up | `skill://research` | `spike/<n>-<slug>` |
 | a design question needing something runnable | `skill://prototype` | `spike/<n>-<slug>` |
 | a review of a branch that already exists | `skill://code-review` | `review/<n>-<slug>` |
@@ -236,7 +236,7 @@ sit until the next one lands:
 
 ```
 fleet_spawn({ branch: "feat/412-webhook-retry", base: "origin/main", tier: "deep", skill: "implement", task: "orchestrate this ticket: <the brief above>" })
-fleet_spawn({ branch: "bug/418-duplicate-send", base: "origin/main", tier: "deep", skill: "diagnosing-bugs", task: "orchestrate this ticket: <the brief above>" })
+fleet_spawn({ branch: "fix/418-duplicate-send", base: "origin/main", tier: "deep", skill: "diagnosing-bugs", task: "orchestrate this ticket: <the brief above>" })
 fleet_join({})
 ```
 
@@ -291,8 +291,8 @@ acceptance criteria too: a reviewer is a fresh agent that may have no tracker
 access, so a bare issue number is not a spec.
 
 ```
-fleet_spawn({ branch: "review/412-webhook-retry", base: "feat/412-webhook-retry", tier: "standard", skill: "code-review", task: "<the review brief>" })
-fleet_spawn({ branch: "review/418-duplicate-send", base: "bug/418-duplicate-send", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_spawn({ branch: "review/412", base: "feat/412-webhook-retry", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_spawn({ branch: "review/418", base: "fix/418-duplicate-send", tier: "standard", skill: "code-review", task: "<the review brief>" })
 fleet_join({})
 ```
 
