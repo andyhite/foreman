@@ -1,6 +1,5 @@
 ---
 description: Dispatch a bug or performance regression to a fleet worker on its own branch
-disable-model-invocation: true
 ---
 
 Dispatch the diagnosis below to a fleet worker. Read

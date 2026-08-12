@@ -1,6 +1,5 @@
 ---
 description: Dispatch a two-axis review of an existing branch to a fleet worker on its own branch
-disable-model-invocation: true
 ---
 
 Dispatch the review below to a fleet worker. Read `skill://fleet-dispatch`

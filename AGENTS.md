@@ -4,8 +4,11 @@ Foreman is a repo with two Fleet plugins. `herdr/` is a herdr plugin shipping
 the `fleet` CLI — the mechanism that creates worktrees, spawns peer coding
 agents, and carries reports and questions between them. The repo root is an
 omp-native agent plugin (`package.json`, `.omp-plugin/plugin.json`,
-`commands/`, `skills/`, `extension/`) whose commands and skills teach an
-orchestrator to drive that CLI.
+`command-prompts/`, `skills/`, `extension/`). `extension/index.ts` reads
+`command-prompts/*.md` at load and registers each as a `fleet:<name>` slash
+command — not left to omp's own file-based command discovery, which does not
+namespace commands from a link/git-installed plugin the way it does for a
+marketplace-installed one.
 
 ## Verify
 

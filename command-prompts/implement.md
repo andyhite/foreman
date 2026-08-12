@@ -1,6 +1,5 @@
 ---
 description: Dispatch implementation work to a fleet worker on its own branch
-disable-model-invocation: true
 ---
 
 Dispatch the implementation below to a fleet worker. Read

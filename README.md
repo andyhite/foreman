@@ -8,10 +8,10 @@ branches:
   git worktree, start a separate coding agent in it, dispatch work, collect the
   report.
 - **the repo root** — an omp-native agent plugin (`package.json`,
-  `.omp-plugin/plugin.json`, `commands/`, `skills/`, `extension/`) providing
-  the orchestrator's slash commands and custom tools, each of which dispatches
-  the matching [mattpocock/skills](https://github.com/mattpocock/skills) skill
-  to a worker.
+  `.omp-plugin/plugin.json`, `command-prompts/`, `skills/`, `extension/`)
+  providing the orchestrator's slash commands and custom tools, each of which
+  dispatches the matching [mattpocock/skills](https://github.com/mattpocock/skills)
+  skill to a worker.
 
 Both plugins are named `fleet`; the repo is named `foreman` on GitHub for
 where they live, not for any marketplace semantics — there isn't one.
@@ -146,24 +146,19 @@ create it.
 
 ## Invocation control
 
-omp loads `commands/` and `skills/` through the same machinery, so both are
-invocable from both sides unless the frontmatter says otherwise. The two
-halves want opposite defaults:
+`skills/*/SKILL.md` are auto-discovered through omp's conventional plugin
+scanning; `user-invocable: false` keeps `fleet` and `fleet-dispatch` out of
+the bare `/fleet` slot — that namespace is noise once `fleet:<name>` commands
+exist — while staying reachable to a model, and to any session through
+`skill://fleet`, which reads the file directly and ignores the flag.
 
-| File | Frontmatter | User | Model |
-|---|---|---|---|
-| `commands/*.md` | `disable-model-invocation: true` | yes | no |
-| `skills/*/SKILL.md` | `user-invocable: false` | no | yes |
-
-A dispatch command creates a branch, a worktree, and a live agent process —
-a side effect a user asks for, never one a model should decide on its own, so
-every command opts out of model invocation.
-
-The two skills are the opposite: contract documents, meant to be read.
-`fleet` would otherwise bind bare `/fleet` beside the `fleet:` command
-namespace, which is noise, so they opt out of user invocation and stay
-reachable to a model — and to any session through `skill://fleet`, which
-reads the file directly and ignores both fields.
+The seven orchestrator commands work differently: `extension/index.ts` reads
+`command-prompts/*.md` at load and registers each directly as `fleet:<name>`
+— see [Install](#install) for why. A dispatch command creates a branch, a
+worktree, and a live agent process: a side effect a user asks for, never one
+a model decides on its own. Registering it directly, rather than through any
+auto-discovery path, is what guarantees that — there is no frontmatter flag
+to set on that side, only the skills need one.
 
 ## Skills
 

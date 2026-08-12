@@ -1,6 +1,5 @@
 ---
 description: Dispatch a research question to a fleet worker on its own branch
-disable-model-invocation: true
 ---
 
 Dispatch the research below to a fleet worker. Read `skill://fleet-dispatch`

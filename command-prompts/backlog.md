@@ -1,6 +1,5 @@
 ---
 description: Drive the repo's backlog to merged — read the dependency graph, dispatch every ready ticket to the matching fleet worker, send every branch that comes back to a review worker, merge, recompute, repeat
-disable-model-invocation: true
 ---
 
 Drive the backlog to merged. The tickets are the objective, you dispatch every

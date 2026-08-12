@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { readFileSync, readdirSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -45,6 +46,46 @@ function isMissingBinaryError(err: unknown): boolean {
   if (code === "ENOENT") return true;
   const message = String((err as { message?: unknown } | undefined)?.message ?? err ?? "");
   return /ENOENT|command not found|not found on \$?PATH/i.test(message);
+}
+
+interface CommandPrompt {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/**
+ * Reads `command-prompts/*.md` and returns each as a registerable command.
+ * These are deliberately NOT named `commands/` — that directory name is one
+ * of the conventions omp's `omp-plugins` capability provider auto-scans for
+ * npm/link-installed plugins, and that provider (unlike the `claude-plugins`
+ * one marketplace installs use) does not prefix discovered commands with the
+ * plugin name. A `commands/foreman.md` would surface as bare `/foreman`,
+ * invisibly unscoped and one collision away from any other installed
+ * plugin's same-named command. Loading them here and registering under
+ * `fleet:<name>` keeps the namespace under every install mechanism.
+ */
+function loadCommandPrompts(): CommandPrompt[] {
+  const dir = path.join(import.meta.dir, "..", "command-prompts");
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
+  } catch {
+    return [];
+  }
+  return files.map((file) => {
+    const raw = readFileSync(path.join(dir, file), "utf8");
+    const name = file.slice(0, -3);
+    const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (!match) return { name, description: name, body: raw.trim() };
+    const [, frontmatter, rest] = match;
+    const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
+    return {
+      name,
+      description: descMatch ? descMatch[1].trim() : name,
+      body: rest.replace(/^\n+/, ""),
+    };
+  });
 }
 
 export default function fleetExtension(pi: ExtensionAPI) {
@@ -555,4 +596,19 @@ export default function fleetExtension(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });
+
+  // ---------------------------------------------------------------------
+  // Orchestrator commands — /fleet:<name>. See loadCommandPrompts() above
+  // for why these are registered here instead of left to commands/*.md
+  // auto-discovery.
+  // ---------------------------------------------------------------------
+
+  for (const prompt of loadCommandPrompts()) {
+    pi.registerCommand(`fleet:${prompt.name}`, {
+      description: prompt.description,
+      handler: async (args: string) => {
+        await pi.sendUserMessage(prompt.body.replace("$ARGUMENTS", args ?? ""));
+      },
+    });
+  }
 }

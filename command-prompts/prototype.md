@@ -1,6 +1,5 @@
 ---
 description: Dispatch a design question to a fleet worker on a throwaway branch
-disable-model-invocation: true
 ---
 
 Dispatch the prototype below to a fleet worker. Read `skill://fleet-dispatch`

@@ -245,7 +245,7 @@ printf '\nplugin prose\n'
 plugin_dir=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
 if [ -n "$plugin_dir" ]; then
   offenders=""
-  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
+  for f in "$plugin_dir"/command-prompts/*.md "$plugin_dir"/skills/*/SKILL.md \
            "$plugin_dir"/README.md; do
     [ -f "$f" ] || continue
     if [ -n "$(sed -n -E '/fleet[[:space:]]+skill/p' "$f")" ]; then
@@ -260,7 +260,7 @@ if [ -n "$plugin_dir" ]; then
   # (a copy-paste from one of these three, say) would silently change a
   # worker's behavior with no review signal.
   offenders=""
-  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md; do
+  for f in "$plugin_dir"/command-prompts/*.md "$plugin_dir"/skills/*/SKILL.md; do
     [ -f "$f" ] || continue
     if [ -n "$(sed -n -E '/(^|[^[:alnum:]_-])orchestrate([^[:alnum:]_-]|$)/p' "$f")" ]; then
       offenders="$offenders $(basename "$f")"
@@ -274,7 +274,7 @@ if [ -n "$plugin_dir" ]; then
   # the brief with no procedure attached.
   missing=""
   for c in implement diagnosing-bugs research prototype code-review; do
-    f="$plugin_dir/commands/$c.md"
+    f="$plugin_dir/command-prompts/$c.md"
     [ -f "$f" ] || continue
     [ -n "$(sed -n "/skill: \"$c\"/p" "$f")" ] || missing="$missing $c"
   done
@@ -282,7 +282,7 @@ if [ -n "$plugin_dir" ]; then
 
   missing=""
   for c in implement diagnosing-bugs research prototype code-review; do
-    f="$plugin_dir/commands/$c.md"
+    f="$plugin_dir/command-prompts/$c.md"
     [ -f "$f" ] || continue
     [ -n "$(sed -n '/tier: "/p' "$f")" ] || missing="$missing $c"
   done
