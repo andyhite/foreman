@@ -1402,6 +1402,38 @@ mark_joined() {
   else : >"$(joined_token_file "$1")"; fi
 }
 
+pending_confirm_file() { printf '%s/pending_confirm' "$(meta_dir "$1")"; }
+
+# `idle`/`done` with no fresh report is ambiguous, not necessarily final: an
+# agent's status flips to idle the moment its turn ends, but that signal
+# comes from herdr's own process/pane tracking, independent of and with no
+# ordering guarantee against a *different* process's view of the report file
+# `fleet_report` just wrote in that same turn. A poller ticking every few
+# seconds right after dispatch (unlike a human who naturally calls `join`
+# well after spawn) is exactly what makes this race observable in practice:
+# it can catch "idle" a beat before the report is visible, and — because
+# `mark_joined` fires unconditionally once a status settles — that report is
+# then lost forever, silently, since the bumped joined counter makes the
+# worker un-joinable again even after the real report lands moments later.
+#
+# Fix: require the SAME sighting (same dispatch generation) twice before
+# treating an unfresh idle/done as final. A worker that is genuinely done
+# with nothing to report is still idle with nothing to report on the next
+# tick, so this costs at most one `JOIN_POLL_MS` of latency; a worker mid-race
+# resolves on the very next check once its report becomes visible.
+settled_confirmed() {
+  local handle=$1 cf current
+  cf=$(pending_confirm_file "$handle")
+  current=$(counter_read "$(dispatch_file "$handle")")
+  if [ -n "$current" ] && [ "$(counter_read "$cf")" = "$current" ]; then
+    rm -f "$cf"
+    return 0
+  fi
+  mkdir -p "$(meta_dir "$handle")"
+  printf '%s' "$current" >"$cf"
+  return 1
+}
+
 # Registered workers whose most recent dispatch has not been collected yet,
 # plus any worker holding an unanswered question. Deliberately `known`, not
 # `live`: a worker can die after dispatch and before join, and silently
@@ -1522,9 +1554,17 @@ cmd_join() {
 
       case "$status" in
         '') print_result "$handle" gone; mark_joined "$handle" ;;
-        idle|done|blocked)
+        blocked)
           print_result "$handle" "$status"
           mark_joined "$handle"
+          ;;
+        idle|done)
+          if report_is_fresh "$handle" || settled_confirmed "$handle"; then
+            print_result "$handle" "$status"
+            mark_joined "$handle"
+          else
+            remaining="$remaining $handle"
+          fi
           ;;
         *) remaining="$remaining $handle" ;;
       esac

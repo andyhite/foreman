@@ -645,6 +645,8 @@ export FLEET_STATE="$sandbox/state-join-once"
 mkdir -p "$(meta_dir w1)"
 meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
+printf 'settled ok' >"$(report_file w1)"
+cp "$(dispatch_file w1)" "$(report_token_file w1)"
 require_herdr() { :; }
 scoped_key() { printf 'k'; }
 herdr() {
@@ -692,6 +694,74 @@ rc3=$?
 is 'join --once with nothing joinable exits 0' "$rc3" '0'
 is 'join --once with nothing joinable prints nothing' "$out3" ''
 unset -f require_herdr scoped_key
+
+# ── join settle-confirm race ─────────────────────────────────────────────────
+#
+# Bug caught live: a poller ticking every few seconds right after spawn can
+# observe agent_status flip to idle a beat before a *different* process sees
+# the report `fleet_report` just wrote in that same turn — herdr's status
+# tracking and the filesystem view have no ordering guarantee between them.
+# `mark_joined` used to fire unconditionally on the first idle/done sighting,
+# so that race silently lost a real report forever: the joined counter was
+# already bumped past it by the time the report became visible.
+
+printf '\njoin settle-confirm race\n'
+export FLEET_STATE="$sandbox/state-join-settle-race"
+mkdir -p "$(meta_dir w1)"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+counter_bump "$(dispatch_file w1)"
+require_herdr() { :; }
+scoped_key() { printf 'k'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w1","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+# Tick 1: idle, but no report visible yet — must defer, not finalize.
+out1=$(cmd_join --once 2>&1)
+is     'settle race: first unfresh idle tick exits 0' "$?" '0'
+is     'settle race: first unfresh idle tick prints nothing' "$out1" ''
+is     'settle race: first unfresh idle tick leaves worker unjoined' \
+  "$(counter_read "$(joined_token_file w1)")" ''
+
+# Tick 2, same dispatch generation, report now written (the race resolving
+# itself): report_is_fresh short-circuits the debounce — must finalize
+# immediately rather than waiting for a third tick.
+printf 'the real report' >"$(report_file w1)"
+cp "$(dispatch_file w1)" "$(report_token_file w1)"
+out2=$(cmd_join --once 2>&1)
+is     'settle race: second tick with a fresh report exits 0' "$?" '0'
+assert 'settle race: second tick delivers the real report' \
+  [ "${out2#*the real report}" != "$out2" ]
+is     'settle race: second tick marks the worker joined' \
+  "$(counter_read "$(joined_token_file w1)")" "$(counter_read "$(dispatch_file w1)")"
+unset -f herdr
+
+# A worker that is genuinely done with nothing to report (no `fleet_report`
+# call at all) must still settle — just one tick later, never permanently
+# stuck — once the SAME unfresh idle sighting repeats.
+export FLEET_STATE="$sandbox/state-join-settle-noreport"
+mkdir -p "$(meta_dir w2)"
+meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+counter_bump "$(dispatch_file w2)"
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w2","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out3=$(cmd_join --once 2>&1)
+is 'settle race: no-report worker first tick leaves it unjoined' \
+  "$(counter_read "$(joined_token_file w2)")" ''
+out4=$(cmd_join --once 2>&1)
+is     'settle race: no-report worker second identical tick exits 0' "$?" '0'
+assert 'settle race: no-report worker eventually reports no report written' \
+  [ "${out4#*no report written}" != "$out4" ]
+is     'settle race: no-report worker second identical tick marks joined' \
+  "$(counter_read "$(joined_token_file w2)")" "$(counter_read "$(dispatch_file w2)")"
+unset -f herdr require_herdr scoped_key
 
 # ── reply appends an uncollected question ────────────────────────────────────────
 
