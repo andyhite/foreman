@@ -34,19 +34,13 @@ jobs:
       - name: Check version consistency
         run: |
           herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)
-          
+          plugin_json_version=$(jq -r '.version' plugins/fleet/.omp-plugin/plugin.json)
+          marketplace_version=$(jq -r '.plugins[0].version' .omp-plugin/marketplace.json)
+          package_json_version=$(jq -r '.version' plugins/fleet/package.json)
+
           # Collect all versions
-          versions=("$herdr_version")
-          
-          # Check plugin.json files
-          for plugin_json in plugins/fleet/.*-plugin/plugin.json; do
-            versions+=("$(jq -r '.version' "$plugin_json")")
-          done
-          
-          # Check marketplace.json files
-          versions+=("$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)")
-          versions+=("$(jq -r '.plugins[0].version' .omp-plugin/marketplace.json)")
-          
+          versions=("$herdr_version" "$plugin_json_version" "$marketplace_version" "$package_json_version")
+
           # Check all versions are identical
           first="${versions[0]}"
           all_same=true
@@ -56,14 +50,12 @@ jobs:
               break
             fi
           done
-          
+
           if [ "$all_same" = false ]; then
             echo "Version mismatch:"
             echo "herdr/herdr-plugin.toml: $herdr_version"
-            for plugin_json in plugins/fleet/.*-plugin/plugin.json; do
-              echo "$plugin_json: $(jq -r '.version' "$plugin_json")"
-            done
-            echo ".claude-plugin/marketplace.json: $(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)"
-            echo ".omp-plugin/marketplace.json: $(jq -r '.plugins[0].version' .omp-plugin/marketplace.json)"
+            echo "plugins/fleet/.omp-plugin/plugin.json: $plugin_json_version"
+            echo ".omp-plugin/marketplace.json: $marketplace_version"
+            echo "plugins/fleet/package.json: $package_json_version"
             exit 1
           fi

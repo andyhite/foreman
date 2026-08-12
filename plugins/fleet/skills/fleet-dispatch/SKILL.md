@@ -13,7 +13,7 @@ stranger could build it*. A fleet worker is exactly that stranger: a blank
 agent process with no memory of this conversation, no access to your context,
 and no way to guess. Everything it needs travels in one block of text.
 
-This skill is the contract for writing that text. Run `fleet skill fleet` for
+This skill is the contract for writing that text. Read `skill://fleet` for
 the CLI contract underneath it.
 
 ## The split
@@ -24,11 +24,11 @@ worker.
 
 | Stays with you (the orchestrator) | Goes to a worker |
 |---|---|
-| `fleet skill grill-me`, `fleet skill grill-with-docs` — interviewing the user | `fleet skill implement` — build the spec or tickets |
-| `fleet skill to-spec`, `fleet skill to-tickets` — turning the conversation into work | `fleet skill diagnosing-bugs` — reproduce, fix, regression-test |
-| `fleet skill triage`, `fleet skill wayfinder` — shaping the backlog | `fleet skill research` — investigate and write up |
-| `fleet skill domain-modeling`, `fleet skill codebase-design` — deciding the shape | `fleet skill prototype` — throwaway answer to a design question |
-| Reviewing branches, answering `[fleet:*]` questions, merging | `fleet skill code-review` — two-axis review of a branch |
+| `skill://grill-me`, `skill://grill-with-docs` — interviewing the user | `skill://implement` — build the spec or tickets |
+| `skill://to-spec`, `skill://to-tickets` — turning the conversation into work | `skill://diagnosing-bugs` — reproduce, fix, regression-test |
+| `skill://triage`, `skill://wayfinder` — shaping the backlog | `skill://research` — investigate and write up |
+| `skill://domain-modeling`, `skill://codebase-design` — deciding the shape | `skill://prototype` — throwaway answer to a design question |
+| Reviewing branches, answering `[fleet:*]` questions, merging | `skill://code-review` — two-axis review of a branch |
 
 If you catch yourself editing source files, you have stopped orchestrating.
 Dispatch it.
@@ -47,7 +47,7 @@ able to state, without hedging:
 - every decision already made, so the worker does not re-litigate it
 
 If any of those is fuzzy, that is a question for the user, not for the worker.
-Run `fleet skill grilling` to interview them until it is sharp. One clarifying
+Read `skill://grilling` to interview them until it is sharp. One clarifying
 round now is cheaper than a worker that builds the wrong thing for an hour.
 
 The exception is a decision the worker is *better placed* to make because it
@@ -57,7 +57,7 @@ and tell the worker to `fleet reply` if it needs you to choose.
 ## Anatomy of a brief
 
 Three sections. Nothing else. The skill invocation does not belong in the file:
-`fleet spawn --skill <name>` prepends it deterministically.
+`fleet_spawn`'s `skill` field prepends it deterministically.
 
 ```markdown
 ## <what this is>
@@ -70,19 +70,19 @@ Three sections. Nothing else. The skill invocation does not belong in the file:
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
-**`--skill` is what puts the procedure in front of the worker.** Naming the
+**`skill` is what puts the procedure in front of the worker.** Naming the
 skill explicitly is what guarantees the worker works from *that* skill's own
 procedure, rather than trusting a blank agent to auto-select the right one
-out of a list of forty. Fleet prepends an instruction to run
-`fleet skill <name>`, which works in every harness and prints the skill body
-with its base directory. Without `--skill` you get a generic agent doing
-generic work; with it the worker follows the named skill's own procedure.
+out of a list of forty. Fleet prepends the instruction "Before doing any
+other work, read `skill://<name>` and follow it." — omp's own
+skill-activation path, since workers are always omp now. Without `skill` you
+get a generic agent doing generic work; with it the worker follows the named
+skill's own procedure.
 
-**`--tier` picks the worker's model band.** Each `/fleet:*` command prints the
+**`tier` picks the worker's model band.** Each `/fleet:*` command names the
 tier that fits its skill — `standard` for dispatch-heavy work, `deep` when the
-worker itself has to hold judgement. The CLI maps the label onto the selected
-harness; do not put harness-specific model names in a brief. `--model` is the
-escape hatch when a boss needs a selector the tier table does not cover.
+worker itself has to hold judgement. `model` is the escape hatch when a boss
+needs an omp model selector the tier table does not cover.
 
 `disable-model-invocation: true` lands mostly on the other side of this split
 than you would expect. Every one of your own interview skills sets it —
@@ -90,47 +90,55 @@ than you would expect. Every one of your own interview skills sets it —
 execution skills only `implement` does. So it is mostly *your* menu that is
 missing entries, not the worker's: naming a skill and reading it, rather than
 expecting to find it in a list, is the same discipline you are asking of the
-worker, applied to yourself. `fleet skill <name>` reads the file directly and
+worker, applied to yourself. `skill://<name>` reads the skill directly and
 ignores the field either way.
 
-**Do not include:** where to commit, whether to push, how to report back, or a
-reminder to stay in the worktree. `fleet` appends its own protocol block
-covering all of that. Repeating it wastes context and invites contradictions.
+**Do not include:** where to commit, whether to push, how to report back, a
+reminder to stay in the worktree, that other workers exist, or a nudge to
+delegate independent work. `fleet` appends its own protocol block covering
+all of that — including that `fleet ls`/`fleet_ls` lists the other workers
+and `fleet dm`/`fleet_dm` reaches one directly over a declared shared seam
+(never for status updates), and that substantial independent slices of the
+worker's own task should go to its own subagents instead of running
+serially. Repeating any of it wastes context and invites contradictions.
 
 **Do not include** a summary of this conversation either. Include the
 conclusions, not the deliberation.
 
 ## Dispatching
 
-Briefs are multi-line, so pass them as a file rather than fighting shell
-quoting. Write it, spawn, and move on to the next slice:
+Compose each brief as text, name the execution skill explicitly, and move on
+to the next slice:
 
-```bash
-# 1. write the brief to /tmp/fleet-<handle>.md
-# 2. spawn with the execution skill named explicitly
-fleet spawn feat/412-webhook-retry --tier deep --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
 ```
+fleet_spawn({ branch: "feat/412-webhook-retry", tier: "deep", skill: "implement", task: "<the brief above>" })
+```
+
+`fleet_spawn`'s `task` field is the brief itself — the tool writes it to a
+temp file and passes it through, so you never manage `/tmp/fleet-*.md` files
+by hand.
 
 Branch names follow the repo's convention if it has one. Otherwise:
 `feat/` for new behaviour, `fix/` for defects, `spike/` for prototypes and
 research, `review/` for a review pass. The worker's handle is derived from the
 branch, so keep branches distinguishable in their first 32 characters.
 
-Claim your own handle with `fleet boss` before the first spawn — a worker
+Claim your own handle with `fleet_boss({})` before the first spawn — a worker
 stamped with the wrong orchestrator sends its questions to the wrong pane.
 
 Then, once every independent slice is out:
 
-```bash
-fleet join
+```
+fleet_join({})
 ```
 
-Answer anything tagged `[fleet:<handle>]` with `fleet send --raw <handle>
-<answer>` — `--raw` sends the answer alone; the default re-appends fleet's
-protocol block, which fits a fresh brief and nothing else. Raw answers are
-steering rather than new tracked dispatches, so they do not make the eventual
-report for the worker's original task look stale. Re-join until everyone has
-reported, then review the branches and tell the user what landed where.
+Answer anything tagged `[fleet:<handle>]` with
+`fleet_send({ handle, text: <answer>, raw: true })` — `raw: true` sends the
+answer alone; the default re-appends fleet's protocol block, which fits a
+fresh brief and nothing else. Raw answers are steering rather than new
+tracked dispatches, so they do not make the eventual report for the worker's
+original task look stale. Re-join until everyone has reported, then review
+the branches and tell the user what landed where.
 
 ## Sizing a slice
 

@@ -3,7 +3,7 @@ description: Dispatch a design question to a fleet worker on a throwaway branch
 disable-model-invocation: true
 ---
 
-Dispatch the prototype below to a fleet worker. Run `fleet skill fleet-dispatch`
+Dispatch the prototype below to a fleet worker. Read `skill://fleet-dispatch`
 and follow the brief contract it prints.
 
 Design question to answer:
@@ -35,11 +35,16 @@ this well — the prototype is captured as a primary source and main stays clean
 
 ## Dispatch
 
-Write the brief to `/tmp/fleet-<handle>.md`:
+Workers are always omp now, so the brief's body opens with the lowercase word
+`orchestrate` as its first word — plain prose, not inside backticks. That word
+triggers omp's magic-keyword contract: it scopes the full task, delegates
+substantial independent work in parallel, verifies each phase, and continues
+until the request is complete, from the worker's very first turn. Compose the
+brief as text:
 
 ```markdown
 ## Question
-<the design question>
+orchestrate this prototype: <the design question>
 
 ## Which branch
 <"logic — single shareable HTML file" or "UI — variations on one route">, because <why>
@@ -54,10 +59,10 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <a runnable artifact at <path>, plus the verdict on the question>
 ```
 
-Then:
+Then, passing the brief as `task`:
 
-```bash
-fleet spawn spike/<slug> --tier deep --skill prototype --task-file /tmp/fleet-<handle>.md
+```
+fleet_spawn({ branch: "spike/<slug>", tier: "deep", skill: "prototype", task: "<the brief above>" })
 ```
 
 ## Delegation

@@ -363,9 +363,8 @@ dash_header() {
 dash_columns() {
   DASH_W_HANDLE=20
   DASH_W_STATUS=8
-  DASH_W_KIND=7
   DASH_W_FLAGS=4
-  local rest=$((DASH_COLS - 3 - DASH_W_HANDLE - DASH_W_STATUS - DASH_W_KIND - DASH_W_FLAGS - 5))
+  local rest=$((DASH_COLS - 3 - DASH_W_HANDLE - DASH_W_STATUS - DASH_W_FLAGS - 5))
   [ "$rest" -ge 18 ] || rest=18
   DASH_W_BRANCH=$((rest * 2 / 5))
   [ "$DASH_W_BRANCH" -ge 8 ] || DASH_W_BRANCH=8
@@ -386,10 +385,9 @@ dash_flags() {
 }
 
 dash_row() {
-  local handle=$1 selected=$2 status kind branch dir question=0 glyph line color
+  local handle=$1 selected=$2 status branch dir question=0 glyph line color
   status=$(dash_status_of "$handle")
   [ -n "$status" ] || status=gone
-  kind=$(meta_get "$handle" KIND); [ -n "$kind" ] || kind=omp
   branch=$(meta_get "$handle" BRANCH)
   dir=$(dash_tilde "$(meta_get "$handle" DIR)")
   if question_pending "$handle"; then question=1; fi
@@ -399,7 +397,6 @@ dash_row() {
 
   line=" $glyph $(dash_cell "$handle" "$DASH_W_HANDLE")"
   line="$line $(dash_cell "$status" "$DASH_W_STATUS")"
-  line="$line $(dash_cell "$kind" "$DASH_W_KIND")"
   line="$line $(dash_cell "$(dash_flags "$handle")" "$DASH_W_FLAGS")"
   line="$line $(dash_cell "$branch" "$DASH_W_BRANCH")"
   line="$line $(dash_fit "$dir" "$DASH_W_DIR")"
@@ -473,8 +470,8 @@ dash_draw() {
 
   DASH_FRAME=$'\033[H'
   dash_header
-  dash_line "${C_DIM}   $(dash_fit "$(printf '%-*s %-*s %-*s %-*s %-*s %s' \
-    "$DASH_W_HANDLE" HANDLE "$DASH_W_STATUS" STATUS "$DASH_W_KIND" KIND \
+  dash_line "${C_DIM}   $(dash_fit "$(printf '%-*s %-*s %-*s %-*s %s' \
+    "$DASH_W_HANDLE" HANDLE "$DASH_W_STATUS" STATUS \
     "$DASH_W_FLAGS" DRJ "$DASH_W_BRANCH" BRANCH DIR)" $((DASH_COLS - 3)))${C_RESET}"
 
   # Scroll the window, not the selection: keep the cursor inside the visible

@@ -3,8 +3,8 @@ description: Dispatch implementation work to a fleet worker on its own branch
 disable-model-invocation: true
 ---
 
-Dispatch the implementation below to a fleet worker. Run
-`fleet skill fleet-dispatch` and follow the brief contract it prints.
+Dispatch the implementation below to a fleet worker. Read
+`skill://fleet-dispatch` and follow the brief contract it prints.
 
 Work to implement:
 
@@ -18,8 +18,8 @@ alone, so settle them here:
 
 - **The spec or tickets.** A ticket reference is enough *only* if the worker can
   read it — a tracker ID it can fetch, or a spec file in the repo. Otherwise
-  inline the whole thing. If neither exists yet, stop and run
-  `fleet skill to-spec` or `fleet skill to-tickets` first.
+  inline the whole thing. If neither exists yet, stop and read
+  `skill://to-spec` or `skill://to-tickets` first.
 - **The seams to test at.** The `tdd` skill refuses to write a test at an
   unconfirmed seam, so a worker without them will either stall on a `fleet
   reply` or guess. Name the public interfaces under test.
@@ -28,16 +28,21 @@ alone, so settle them here:
   re-litigates.
 - **Non-goals.** The adjacent thing it must not touch.
 
-Ask the user for anything missing before spawning. Run `fleet skill grilling`
+Ask the user for anything missing before spawning. Read `skill://grilling`
 if there is more than a question or two.
 
 ## Dispatch
 
-Write the brief to `/tmp/fleet-<handle>.md`:
+Workers are always omp now, so the brief's body opens with the lowercase word
+`orchestrate` as its first word — plain prose, not inside backticks. That word
+triggers omp's magic-keyword contract: it scopes the full task, delegates
+substantial independent work in parallel, verifies each phase, and continues
+until the request is complete, from the worker's very first turn. Compose the
+brief as text:
 
 ```markdown
 ## Spec
-<the tickets or spec, inline or a reference the worker can read>
+orchestrate this implementation: <the tickets or spec, inline or a reference the worker can read>
 
 ## Seams to test at
 <the public interfaces the `tdd` skill should work against>
@@ -52,10 +57,10 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <checkable criteria>
 ```
 
-Then:
+Then, passing the brief as `task`:
 
-```bash
-fleet spawn feat/<slug> --tier deep --skill implement --task-file /tmp/fleet-<handle>.md
+```
+fleet_spawn({ branch: "feat/<slug>", tier: "deep", skill: "implement", task: "<the brief above>" })
 ```
 
 ## Delegation
@@ -70,4 +75,4 @@ Do not fan the tight red-green loop out to subagents. Many small questions over
 material the worker already has warm cost more than keeping them local.
 
 One branch per independently shippable piece. If the work splits into several,
-write and spawn all of them before running `fleet join`.
+compose and spawn all of them before calling `fleet_join`.

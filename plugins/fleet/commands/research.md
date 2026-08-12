@@ -3,7 +3,7 @@ description: Dispatch a research question to a fleet worker on its own branch
 disable-model-invocation: true
 ---
 
-Dispatch the research below to a fleet worker. Run `fleet skill fleet-dispatch`
+Dispatch the research below to a fleet worker. Read `skill://fleet-dispatch`
 and follow the brief contract it prints.
 
 Question to research:
@@ -30,7 +30,7 @@ resist over-specifying the answer. Specify the question.
 
 ## Dispatch
 
-Write the brief to `/tmp/fleet-<handle>.md`:
+Compose the brief as text:
 
 ```markdown
 ## Question
@@ -46,10 +46,10 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <a cited Markdown file at <path>, answering the question>
 ```
 
-Then:
+Then, passing the brief as `task`:
 
-```bash
-fleet spawn spike/<slug> --tier standard --skill research --task-file /tmp/fleet-<handle>.md
+```
+fleet_spawn({ branch: "spike/<slug>", tier: "standard", skill: "research", task: "<the brief above>" })
 ```
 
 ## Delegation
@@ -65,4 +65,4 @@ stays with the worker. Many tiny questions over material already in its context
 cost more than they save — leave those local.
 
 Research parallelizes better than anything else here — independent questions are
-independent workers. Spawn all of them, then `fleet join` once.
+independent workers. Spawn all of them, then call `fleet_join({})` once.

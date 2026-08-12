@@ -19,7 +19,7 @@ You are now this session's **fleet orchestrator** — adopt that role for the re
 of the conversation, exactly as `/fleet:boss` defines it. You do not need to
 have run it; this command is standalone.
 
-Run `fleet skill fleet-dispatch` if you have not already and follow the
+Read `skill://fleet-dispatch` if you have not already and follow the
 instructions it prints. This command does not replace its requirements gate.
 It batches it: one pass over the frontier, one round of questions, one fan-out.
 
@@ -39,21 +39,18 @@ plainly that the frontier will not advance until they do.
 Both are hard stops.
 
 1. **A handle.** Claim it now, before anything else — a worker stamped with the
-   wrong orchestrator sends its questions to another pane:
-
-   ```bash
-   fleet boss
-   ```
+   wrong orchestrator sends its questions to another pane. Call `fleet_boss({})`.
 
    It defaults to the repo root's name. On a pane that already holds a handle a
-   bare `fleet boss` is a query, not a claim: it prints the existing one and
+   bare `fleet_boss({})` is a query, not a claim: it prints the existing one and
    changes nothing. If it fails, another pane is orchestrating this checkout —
-   claim a distinct name with `fleet boss <name>` rather than stealing it.
+   claim a distinct name with `fleet_boss({ name: "<name>" })` rather than
+   stealing it.
 2. **`docs/agents/issue-tracker.md`.** It is the only thing that knows how to
    list issues, read dependencies, comment, and close in this repo. If it is
-   missing, the repo was never set up: stop and tell the user to run
-   `fleet skill setup-matt-pocock-skills`. Do not substitute a `gh` command you
-   invented — this tracker may not be GitHub.
+   missing, the repo was never set up: stop and tell the user this repo needs
+   `skill://setup-matt-pocock-skills` run first. Do not substitute a `gh`
+   command you invented — this tracker may not be GitHub.
 
 If `docs/agents/triage-labels.md` exists, read it — it maps the canonical
 role names below to the strings this repo actually uses. Setup writes that
@@ -79,7 +76,7 @@ Then reduce the ready set to what is dispatchable now:
   it goes to a worker.
 - **Drop anything already claimed.** An assignee means the ticket is
   claimed — by a human, or by another orchestrator's worker — either way it
-  is not yours. Run `fleet ls` too — a ticket whose worker is alive from an
+  is not yours. Call `fleet_ls({})` too — a ticket whose worker is alive from an
   earlier run must not be dispatched twice.
 - **Drop epics and parents.** Their status derives from their children. Work the
   children.
@@ -97,7 +94,7 @@ What falls out still needs saying. Report it once, in one block:
 
 | Role | What you do with it |
 |---|---|
-| `needs-triage` | Offer to run `fleet skill triage` here. It is interview work; it stays with you. |
+| `needs-triage` | Offer to read `skill://triage` here. It is interview work; it stays with you. |
 | `needs-info` | Blocked on a person. Name the ticket and who owes the answer. |
 | `ready-for-human` | Never dispatch. Count it. |
 | `wontfix` | Ignore. |
@@ -106,11 +103,11 @@ What falls out still needs saying. Report it once, in one block:
 
 | The ticket is | Worker reads | Branch |
 |---|---|---|
-| a change to build against a spec | `fleet skill implement` | `feat/<n>-<slug>` |
-| something broken or slow, with a symptom | `fleet skill diagnosing-bugs` | `fix/<n>-<slug>` |
-| a question whose deliverable is a committed write-up | `fleet skill research` | `spike/<n>-<slug>` |
-| a design question needing something runnable | `fleet skill prototype` | `spike/<n>-<slug>` |
-| a review of a branch that already exists | `fleet skill code-review` | `review/<n>-<slug>` |
+| a change to build against a spec | `skill://implement` | `feat/<n>-<slug>` |
+| something broken or slow, with a symptom | `skill://diagnosing-bugs` | `fix/<n>-<slug>` |
+| a question whose deliverable is a committed write-up | `skill://research` | `spike/<n>-<slug>` |
+| a design question needing something runnable | `skill://prototype` | `spike/<n>-<slug>` |
+| a review of a branch that already exists | `skill://code-review` | `review/<n>-<slug>` |
 
 Follow the repo's branch convention where it has one; the above is the fallback.
 
@@ -178,18 +175,28 @@ Two things decide who is in the wave:
   settled, so they are not competing for the same slots.
 - **File overlap.** Two workers editing the same files produce conflicting
   branches and nothing resolves that for you. Hold the second back and say why.
+- **A wave-wide notice.** If a decision changes after workers are already
+  dispatched — a contract shifts, a choke-point ticket lands differently than
+  planned — `fleet_broadcast({ text })` reaches every live worker in this repo
+  in one call, instead of repeating a `fleet_send` per handle.
 
 ## 5. Dispatch
 
-Write every brief to `/tmp/fleet-<handle>.md` before spawning anything. Use the shape
-printed by `fleet skill fleet-dispatch`: the answers from step 3, then scope and
-acceptance. `fleet spawn --skill <name>` prepends the portable skill instruction,
-so the brief itself starts with its concrete content:
+Compose every brief as text before spawning anything. Use the shape described
+by `skill://fleet-dispatch`: the answers from step 3, then scope and
+acceptance. `fleet_spawn`'s `skill` field prepends the skill activation
+instruction, so the brief itself starts with its concrete content:
+
+Workers are always omp now, so open the brief's body with the lowercase word
+`orchestrate` as its first word — plain prose, not inside backticks. That word
+triggers omp's magic-keyword contract: it scopes the full task, delegates
+substantial independent work in parallel, verifies each phase, and continues
+until the request is complete, from the worker's very first turn.
 
 ```markdown
 
 ## <Spec | Symptom + Reproduction | Question | Design question | Fixed point>
-<the answers from step 3, in full>
+orchestrate this ticket: <the answers from step 3, in full>
 
 ## Scope
 <files and modules in play; then the explicit non-goals>
@@ -219,40 +226,45 @@ consume.
 Claim each ticket at the moment its worker spawns — not earlier in the
 batch, and not with an invented command. The tracker file documents its own
 claim mechanism (a GitHub tracker claims with `gh issue edit <n>
---add-assignee @me`); use that one, immediately before the matching `fleet
-spawn` below. If the spawn fails, release the claim right away so the ticket
+--add-assignee @me`); use that one, immediately before the matching
+`fleet_spawn` call below. If the spawn fails, release the claim right away so the ticket
 is dispatchable again instead of sitting stuck looking taken.
 
 Then spawn the whole wave and block once:
 
-```bash
-fleet spawn feat/412-webhook-retry --base origin/main --tier deep --skill implement --task-file /tmp/fleet-feat-412-webhook-retry.md
-fleet spawn fix/418-duplicate-send --base origin/main --tier deep --skill diagnosing-bugs --task-file /tmp/fleet-fix-418-duplicate-send.md
-fleet join
+```
+fleet_spawn({ branch: "feat/412-webhook-retry", base: "origin/main", tier: "deep", skill: "implement", task: "orchestrate this ticket: <the brief above>" })
+fleet_spawn({ branch: "fix/418-duplicate-send", base: "origin/main", tier: "deep", skill: "diagnosing-bugs", task: "orchestrate this ticket: <the brief above>" })
+fleet_join({})
 ```
 
-Never a chain of `fleet ask` — that serializes the thing you came here to
+Never a chain of `fleet_ask` — that serializes the thing you came here to
 parallelize.
 
-Reviewers are the exception to `--base`, and step 6 spawns one for every branch
+Reviewers are the exception to `base`, and step 6 spawns one for every branch
 that comes back: the `code-review` skill diffs in its own checkout, so a
 reviewer branches off the tip under review rather than off the merge target.
 
 ## 6. Collect the wave, then review it
 
-`fleet join` still waits for the whole wave, but not silently and not
+`fleet_join` still waits for the whole wave, but not silently and not
 uninterruptibly: it prints each worker's result the moment that worker
 settles rather than holding all of them until the last one finishes, and it
 returns immediately — before the rest of the wave has settled — the instant
 any worker files a question with `fleet reply`. That preemption is what
 actually gets a blocked worker in front of you; omp steering alone does not,
 because a queued prompt is not read until the running tool call returns.
-Answer with `fleet send --raw <handle> <answer>` — `--raw` sends the answer
-alone, where the default would re-append fleet's protocol block onto a
-one-line reply — then `fleet join` again; re-joining is safe and skips
-workers already marked joined. It is still a wave, not a rolling queue: you
-cannot backfill a finished worker's slot while its siblings are still
-running, and you should not try.
+Answer with `fleet_send({ handle, text: <answer>, raw: true })` — `raw: true`
+sends the answer alone, where the default would re-append fleet's protocol
+block onto a one-line reply — then call `fleet_join({})` again; re-joining is
+safe and skips workers already marked joined. It is still a wave, not a
+rolling queue: you cannot backfill a finished worker's slot while its
+siblings are still running, and you should not try.
+
+If `fleet_join` instead reports a worker `blocked` on an approval or question
+UI rather than a `fleet reply`, read its pane first — `fleet_read({ handle })`
+— then send the keys that clear it — `fleet_keys({ handle, keys: [...] })` —
+before joining it again.
 
 When the wave settles, every branch that carries code goes straight back out —
 to a `code-review` worker, before you read a line of the diff. Reviewing them
@@ -266,21 +278,21 @@ Two kinds of branch skip it. `research` and `prototype` deliver a write-up or a
 throwaway spike rather than code to merge — read those yourself. Trivia you did
 inline never had a branch.
 
-One reviewer per branch, all spawned before any `fleet join`. Two different
-refs are in play and swapping them wastes a worker: `--base` is the **tip under
+One reviewer per branch, all spawned before any `fleet_join`. Two different
+refs are in play and swapping them wastes a worker: `base` is the **tip under
 review**, so the reviewer's checkout contains the work, while the fixed point it
-diffs against — the `--base` you dispatched the *worker* from, typically
-`origin/main` — is a line in the task file, not a flag. Inline the acceptance
-criteria too: a reviewer is a fresh agent that may have no tracker access, so a
-bare issue number is not a spec.
+diffs against — the `base` you dispatched the *worker* from, typically
+`origin/main` — is a line in the brief text, not a field. Inline the
+acceptance criteria too: a reviewer is a fresh agent that may have no tracker
+access, so a bare issue number is not a spec.
 
-```bash
-fleet spawn review/412 --base feat/412-webhook-retry --tier standard --skill code-review --task-file /tmp/fleet-review-412.md
-fleet spawn review/418 --base fix/418-duplicate-send --tier standard --skill code-review --task-file /tmp/fleet-review-418.md
-fleet join
+```
+fleet_spawn({ branch: "review/412", base: "feat/412-webhook-retry", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_spawn({ branch: "review/418", base: "fix/418-duplicate-send", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_join({})
 ```
 
-Each report is committed in its reviewer's worktree — `fleet ls` prints the
+Each report is committed in its reviewer's worktree — `fleet_ls` prints the
 directory. Those `review/*` branches are scratch: read them, never merge them.
 
 An `implement` worker closes by running the `code-review` skill on its own
@@ -288,7 +300,7 @@ branch. That is the author reviewing the author; it does not replace this step.
 Read it if the worker linked it, but the independent reviewer is the one whose
 finding blocks a merge.
 
-Leave each code worker alive until its review clears. `fleet reap` deletes the
+Leave each code worker alive until its review clears. `fleet_reap` deletes the
 worktree, and a change request needs the worker that wrote the branch, in the
 worktree it wrote it in.
 
@@ -305,27 +317,27 @@ Take each ticket in turn:
    logical change per commit and conventional subjects wants a rebase merge, and
    a squash would collapse exactly what it is keeping. Delete the branch.
 3. **Confirm the ticket closed,** update any derived parent or epic status,
-   mark its todo done, and `fleet reap` **both handles** — the worker and its
-   reviewer. `reap` refuses a dirty worktree — that refusal is protecting
-   uncommitted work, so read the diff before reaching for `--force`. If the
-   worktree is already gone, removed by hand outside fleet,
-   `reap --forget <handle>` drops fleet's record without touching a worktree
-   that isn't there; without it that handle sticks in `fleet ls` as `gone`
-   forever. The mirror case is a handle whose state exists but whose agent
-   died: `fleet spawn <branch> --replace` removes the recorded workspace and
-   respawns under the same handle, rather than refusing because the record is
-   still there.
+   mark its todo done, and call `fleet_reap({ handles: [<worker>, <reviewer>] })`
+   for **both handles**. `fleet_reap` refuses a dirty worktree — that refusal
+   is protecting uncommitted work, so read the diff before reaching for
+   `force: true`. If the worktree is already gone, removed by hand outside
+   fleet, `fleet_reap({ handles: [<handle>], forget: true })` drops fleet's
+   record without touching a worktree that isn't there; without it that
+   handle sticks in `fleet_ls` as `gone` forever. The mirror case is a handle
+   whose state exists but whose agent died: `fleet_spawn({ branch: <branch>,
+   replace: true })` removes the recorded workspace and respawns under the
+   same handle, rather than refusing because the record is still there.
 
 Then recompute the frontier from step 1 and dispatch the next wave. Merge the
 whole settled wave before recomputing — one merge typically unblocks one or two
 tickets, and computing the frontier halfway through leaves them out of it.
 
 **A blocking finding goes back to its worker.** Comment the change request on
-the PR, `fleet send` the worker to address it, move the ticket back. Do not fix
+the PR, `fleet_send` the worker to address it, move the ticket back. Do not fix
 it yourself — you would be reviewing your own patch on the next pass. When the
 fix lands, check it against the specific findings yourself; a targeted fix does
 not earn a second full review. Re-dispatch a reviewer only when the worker
-reworked the approach instead of patching it, re-spawning it with `--replace`
+reworked the approach instead of patching it, re-spawning it with `replace: true`
 so it rebuilds off the new tip under the same handle.
 
 **Escalate instead of merging** when CI is red and the worker says it is

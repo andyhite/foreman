@@ -3,7 +3,7 @@ description: Dispatch a two-axis review of an existing branch to a fleet worker 
 disable-model-invocation: true
 ---
 
-Dispatch the review below to a fleet worker. Run `fleet skill fleet-dispatch`
+Dispatch the review below to a fleet worker. Read `skill://fleet-dispatch`
 and follow the brief contract it prints.
 
 Branch to review:
@@ -15,11 +15,11 @@ $ARGUMENTS
 The `code-review` skill diffs `HEAD` against a fixed point *in its own checkout*.
 So a reviewer is spawned **from the branch under review**, not alongside it:
 
-```bash
-fleet spawn review/<slug> --base <branch-under-review> --tier standard --skill code-review --task-file <brief>
+```
+fleet_spawn({ branch: "review/<slug>", base: "<branch-under-review>", tier: "standard", skill: "code-review", task: "<brief>" })
 ```
 
-`--base` branches the reviewer's worktree off the tip being reviewed, so its
+`base` branches the reviewer's worktree off the tip being reviewed, so its
 `HEAD` already contains the work and `git diff <fixed-point>...HEAD` is exactly
 the change set. The reviewer commits its report to `review/<slug>`, leaving the
 branch under review untouched.
@@ -41,7 +41,7 @@ fail here, not inside two parallel sub-agents in another process.
 
 ## Dispatch
 
-Write the brief to `/tmp/fleet-<handle>.md`:
+Compose the brief as text:
 
 ```markdown
 ## Fixed point
@@ -57,10 +57,10 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <both axes reported to <path> in this worktree, and committed>
 ```
 
-Then spawn from the branch under review:
+Then spawn from the branch under review, passing the brief as `task`:
 
-```bash
-fleet spawn review/<slug> --base <branch-under-review> --tier standard --skill code-review --task-file /tmp/fleet-<handle>.md
+```
+fleet_spawn({ branch: "review/<slug>", base: "<branch-under-review>", tier: "standard", skill: "code-review", task: "<the brief above>" })
 ```
 
 ## Delegation
@@ -75,4 +75,4 @@ the reading stays inside the two subagents. Do not ask the worker to re-read
 the whole diff itself after they return.
 
 Reviewing several worker branches is a clean fan-out — one reviewer per branch,
-all spawned before any `fleet join`.
+all spawned before any `fleet_join`.

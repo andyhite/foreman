@@ -19,7 +19,14 @@ That independence is also the cost. Harness-local channels such as omp's `hub`,
 both directions goes through herdr's agent surface, which `fleet` wraps.
 
 This skill is the CLI contract. For *what to put in a worker's brief* — the
-orchestrator's actual job — run `fleet skill fleet-dispatch`.
+orchestrator's actual job — read `skill://fleet-dispatch`.
+
+Every `fleet_*` custom tool (`fleet_boss`, `fleet_spawn`, `fleet_send`, …) is
+the CLI subcommand of the same name, one parameter for one flag. The CLI is
+the contract; the tools are the interface — call the tool when one is
+registered, and fall back to the shell form shown in this doc only where no
+tool is loaded (a worker's own commands, or a shell without the extension
+installed). Both hit the identical command underneath.
 
 ## Requirements
 
@@ -64,12 +71,12 @@ the fleet of whoever it displaces.
 
 ## Dispatching
 
-One worker per branch. `spawn` creates the worktree, starts the selected agent
-harness in the workspace's own pane under a handle derived from the branch,
-builds the selected layout, and submits the task:
+One worker per branch. `spawn` creates the worktree, starts an omp agent in
+the workspace's own pane under a handle derived from the branch, builds the
+selected layout, and submits the task:
 
 ```bash
-fleet spawn feat/412-webhook-retry --kind claude --tier deep --skill implement \
+fleet spawn feat/412-webhook-retry --tier deep --skill implement \
   --task "Add exponential backoff to the webhook dispatcher. Tests in
 tests/webhooks/. Do not change the public dispatch() signature."
 ```
@@ -77,8 +84,9 @@ tests/webhooks/. Do not change the public dispatch() signature."
 Write the task the way you would write a local subagent assignment: target
 files, concrete change, acceptance criteria. The worker has no memory of this
 conversation — every requirement must be in the text. `--skill` prepends the
-portable instruction that loads its procedure; `fleet` appends the protocol
-block (report, reply, commit, stay-in-worktree), so repeat neither one.
+instruction to read `skill://<name>`, which loads that skill's procedure in
+the worker's own omp session; `fleet` appends the protocol block (report,
+reply, commit, stay-in-worktree), so repeat neither one.
 
 Long tasks read better from a file, and a brief worth dispatching is almost
 always long:
@@ -87,15 +95,12 @@ always long:
 fleet spawn fix/301-null-guard --tier deep --skill diagnosing-bugs --task-file /tmp/task-301.md
 ```
 
-`--kind` chooses any harness supported by `herdr agent start` and defaults to
-`$FLEET_AGENT_KIND`, then `omp`. The orchestrator and worker kinds are
-independent: an omp session can dispatch Claude or Codex workers. `--tier
-standard|deep` selects a worker model band (mapped per kind inside the CLI);
-`--model <selector>` is the escape hatch that passes a harness selector
-straight through. The two are mutually exclusive. `$FLEET_AGENT_TIER` sets a
-default when neither flag is passed. `--base` overrides the branch point
-(default: `origin/HEAD`). `--no-dispatch` creates the worktree and starts its
-agent without assigning work.
+`--tier standard|deep` selects a worker model band; `--model <selector>` is
+the escape hatch that passes an omp model selector straight through. The two
+are mutually exclusive. `$FLEET_AGENT_TIER` sets a default when neither flag
+is passed. `--base` overrides the branch point (default: `origin/HEAD`).
+`--no-dispatch` creates the worktree and starts its agent without assigning
+work.
 
 `--layout agent` (the default) is the worker shape: one `agent` tab, one pane
 named for the selected harness. `--layout full` is for a worktree a human will
@@ -198,13 +203,33 @@ question UI in the pane, not a `fleet reply`. Read the pane with `fleet read`
 and answer it with `fleet send --raw` — a keystroke into an approval prompt
 must not carry a protocol block behind it.
 
+## Peer messaging
+
+Three more commands send raw, untracked text — like `fleet send --raw`, none
+of them bump a worker's dispatch counter or touch its report freshness:
+
+```bash
+fleet broadcast "Contract changed: retries now live in core/retry.ts."
+fleet dm feat-412-webhook-retry "Are you touching core/retry.ts? I need it untouched for fix-418."
+fleet keys feat-412-webhook-retry down down enter
+```
+
+`broadcast` reaches every live worker in this repo in one call — a wave-wide
+notice cheaper than repeating `fleet send --raw` per handle. `dm` is peer to
+peer: any member — orchestrator or worker — can message any other by handle,
+for coordinating over a shared seam rather than for status updates. `keys`
+passes terminal keys straight through to `herdr agent send-keys`, for
+unblocking a worker parked on an approval or question UI that a line of text
+can't dismiss — read the pane with `fleet read <handle>` first to see what it
+is waiting on.
+
 ## Finishing
 
 Workers commit to their own branch and stop. They do not push and do not open
 PRs unless the task said to. Review the branches yourself, then:
 
 ```bash
-fleet ls                     # handles, states, kinds, branches, paths
+fleet ls                     # handles, states, branches, paths
 fleet reap <handle>          # remove one worktree
 fleet reap --all             # remove this repo's worktrees
 fleet reap <handle> --forget # drop the record, leave the worktree

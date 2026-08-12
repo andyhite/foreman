@@ -3,8 +3,8 @@ description: Dispatch a bug or performance regression to a fleet worker on its o
 disable-model-invocation: true
 ---
 
-Dispatch the diagnosis below to a fleet worker. Run
-`fleet skill fleet-dispatch` and follow the brief contract it prints.
+Dispatch the diagnosis below to a fleet worker. Read
+`skill://fleet-dispatch` and follow the brief contract it prints.
 
 Bug to diagnose:
 
@@ -35,7 +35,7 @@ reproduction needs credentials, tell it which env vars carry them and to write
 
 ## Dispatch
 
-Write the brief to `/tmp/fleet-<handle>.md`:
+Compose the brief as text:
 
 ```markdown
 ## Symptom
@@ -57,10 +57,10 @@ Write the brief to `/tmp/fleet-<handle>.md`:
 <the regression test that now exists and passes, and the symptom is gone>
 ```
 
-Then:
+Then, passing the brief as `task`:
 
-```bash
-fleet spawn fix/<slug> --tier deep --skill diagnosing-bugs --task-file /tmp/fleet-<handle>.md
+```
+fleet_spawn({ branch: "fix/<slug>", tier: "deep", skill: "diagnosing-bugs", task: "<the brief above>" })
 ```
 
 ## Delegation

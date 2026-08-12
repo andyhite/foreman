@@ -77,46 +77,13 @@ assert_not 'rejects absolute paths'     valid_handle '/etc'
 assert_not 'rejects an embedded slash'  valid_handle 'a/b'
 assert_not 'rejects 33 characters'      valid_handle 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
-# ── portable skills and agent kinds ──────────────────────────────────────────
+# ── skills and worker args ──────────────────────────────────────────────────
 
 printf '\nskills\n'
-skill_root="$sandbox/skills"
-fallback_root="$sandbox/fallback-skills"
-mkdir -p "$skill_root/implement" "$fallback_root/implement"
-cat >"$skill_root/implement/SKILL.md" <<'EOF'
----
-name: implement
-description: Build an agreed change.
----
-
-# Implement
-
-Do the work.
-EOF
-printf 'wrong root\n' >"$fallback_root/implement/SKILL.md"
-export FLEET_SKILL_PATH="$skill_root:$fallback_root"
-
-is 'resolves the first configured skill root' "$(resolve_skill implement)" \
-  "$skill_root/implement/SKILL.md"
-# The base directory is normalized by cmd_skill, and $TMPDIR on macOS is itself a
-# symlink, so the expectation has to be normalized the same way.
-skill_base=$(cd -P "$skill_root/implement" && pwd)
-expected=$(printf '## Skill: implement\n\nBase directory: `%s`\nFollow the instructions below. Resolve relative paths from the base directory.\n\n\n# Implement\n\nDo the work.' \
-  "$skill_base")
-is 'prints a portable prompt without YAML frontmatter' "$(cmd_skill implement)" "$expected"
-is 'renders one universal worker instruction' "$(skill_instruction implement)" \
-  'Before doing any other work, run `fleet skill implement` and follow the instructions it prints.'
-assert 'resolves fleet-dispatch from its bundled plugin tree' \
-  [ -f "$(resolve_skill fleet-dispatch)" ]
+is 'renders the omp-native skill instruction' "$(skill_instruction implement)" \
+  'Before doing any other work, read `skill://implement` and follow it.'
 assert_not 'skill names reject traversal' valid_skill_name '../implement'
 assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
-
-printf '\nagent kinds\n'
-assert 'accepts a herdr agent kind' valid_agent_kind 'claude'
-assert 'accepts a compound agent kind' valid_agent_kind 'cursor-agent'
-assert_not 'rejects an agent-kind option injection' valid_agent_kind '--kind'
-assert_not 'rejects an agent-kind path' valid_agent_kind '../omp'
-assert_not 'rejects an uppercase agent kind' valid_agent_kind 'Claude'
 
 printf '\nagent tiers and models\n'
 assert 'accepts standard' valid_agent_tier 'standard'
@@ -127,18 +94,17 @@ assert 'accepts a role selector' valid_agent_model '@task'
 assert 'accepts a provider/model selector' valid_agent_model 'anthropic/claude-sonnet-5'
 assert_not 'rejects a model option injection' valid_agent_model '--model'
 assert_not 'rejects a model with spaces' valid_agent_model 'claude sonnet'
-is 'omp standard maps to @task' "$(worker_agent_args omp standard '')" $'--model\n@task'
-is 'omp deep maps to @default' "$(worker_agent_args omp deep '')" $'--model\n@default'
-is 'claude standard maps to sonnet' "$(worker_agent_args claude standard '')" $'--model\nsonnet'
-is 'explicit --model wins the plan' "$(worker_agent_args omp '' '@smol')" $'--model\n@smol'
-is 'no tier and no model yields nothing' "$(worker_agent_args omp '' '')" ''
+is 'standard maps to @task' "$(worker_agent_args standard '')" $'--model\n@task'
+is 'deep maps to @default' "$(worker_agent_args deep '')" $'--model\n@default'
+is 'explicit --model wins the plan' "$(worker_agent_args '' '@smol')" $'--model\n@smol'
+is 'no tier and no model yields nothing' "$(worker_agent_args '' '')" ''
 
 herdr_args="$sandbox/herdr-args"
 herdr() { printf '%s\n' "$*" >"$herdr_args"; }
-start_worker_agent worker ws pane claude
-is 'threads the selected kind into herdr agent start' "$(cat "$herdr_args")" \
-  'agent start worker --kind claude --pane pane --timeout 120000'
-start_worker_agent worker ws pane omp --model '@task'
+start_worker_agent worker ws pane
+is 'always starts an omp agent' "$(cat "$herdr_args")" \
+  'agent start worker --kind omp --pane pane --timeout 120000'
+start_worker_agent worker ws pane --model '@task'
 is 'threads model args after --' "$(cat "$herdr_args")" \
   'agent start worker --kind omp --pane pane --timeout 120000 -- --model @task'
 unset -f herdr
@@ -223,32 +189,28 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # rather than abort the whole run.
   ( cd "$spawn_repo" \
     && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
-       cmd_spawn feat/x --kind claude --tier deep --skill implement \
+       cmd_spawn feat/x --tier deep --skill implement \
          --task 'Add exponential backoff to the dispatcher.' ) >/dev/null 2>&1
 
   assert 'a --skill spawn dispatches a prompt' [ -s "$prompt_file" ]
   prompt=$(cat "$prompt_file" 2>/dev/null || true)
   is 'the worker is told to load the skill first' "$(printf '%s' "$prompt" | sed -n 1p)" \
-    'Before doing any other work, run `fleet skill implement` and follow the instructions it prints.'
+    'Before doing any other work, read `skill://implement` and follow it.'
   assert 'the brief follows the instruction' \
     [ "${prompt#*Add exponential backoff to the dispatcher.}" != "$prompt" ]
   assert 'fleets own protocol block is still appended' \
     [ "${prompt#*fleet report}" != "$prompt" ]
-  assert_not 'no skill:// URI reaches the worker' \
-    [ "${prompt#*skill://}" != "$prompt" ]
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
-  assert 'the requested kind reached agent start' \
-    [ "${started_cmd#*--kind claude}" != "$started_cmd" ]
-  is 'the kind is recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x KIND)" 'claude'
+  assert 'every worker starts as omp' \
+    [ "${started_cmd#*--kind omp}" != "$started_cmd" ]
   is 'the skill is recorded for later inspection' \
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILL)" 'implement'
   is 'the tier is recorded for later inspection' \
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x TIER)" 'deep'
   is 'the mapped model is recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x MODEL)" 'opus'
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x MODEL)" '@default'
   assert 'the mapped model reached agent start' \
-    [ "${started_cmd#*--model opus}" != "$started_cmd" ]
+    [ "${started_cmd#*--model @default}" != "$started_cmd" ]
 
   # `$FLEET_AGENT_TIER` must yield to an explicit `--model`, and the env-derived
   # tier must not be recorded beside it. Without that, exporting the documented
@@ -257,7 +219,7 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   ( cd "$spawn_repo" \
     && FLEET_STATE="$sandbox/spawn-state" FLEET_AGENT_TIER=deep \
        HERDR_ENV=1 HERDR_PANE_ID=p0 \
-       cmd_spawn feat/y --kind claude --model sonnet --skill implement \
+       cmd_spawn feat/y --model sonnet --skill implement \
          --task 'Prove --model wins over FLEET_AGENT_TIER.' ) >/dev/null 2>&1
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
   is 'env-tier + --model records no tier' \
@@ -272,38 +234,40 @@ else
   printf '  skip  dispatched prompt cases (needs git and jq)\n'
 fi
 
-# ── portable plugin prose ────────────────────────────────────────────────────
+# ── plugin prose ─────────────────────────────────────────────────────────────
 #
-# `skill://` is an omp-only URI. A worker on any other harness cannot resolve
-# one, and the failure is silent — it just does generic work. This caught a real
-# regression: a rebase reintroduced four of them in hunks git never flagged,
-# because the merge conflicted elsewhere in the same files.
+# The old `fleet spawn --skill` printer is gone; workers now read
+# `skill://<name>` directly, which only omp can resolve. A stray reference to
+# that removed printer left in the plugin prose after the cutover would
+# silently tell a worker to run something that no longer exists.
 
-printf '\nportable plugin prose\n'
+printf '\nplugin prose\n'
 plugin_dir=$(cd "$(dirname "$0")/../../plugins/fleet" 2>/dev/null && pwd)
 if [ -n "$plugin_dir" ]; then
   offenders=""
   for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
            "$plugin_dir"/README.md "$plugin_dir/../../README.md"; do
     [ -f "$f" ] || continue
-    if [ -n "$(sed -n '/skill:\/\//p' "$f")" ]; then
+    if [ -n "$(sed -n -E '/fleet[[:space:]]+skill/p' "$f")" ]; then
       offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
     fi
   done
-  is 'no skill:// URI survives in the plugin prose' "${offenders# }" ''
+  is 'no removed fleet-skill reference survives in the plugin prose' "${offenders# }" ''
 
+  # `orchestrate` arms omp's magic-keyword orchestration contract on the
+  # worker's very first turn. It belongs only in the three commands whose
+  # dispatched work is genuinely multi-phase; leaking it into a fifth file
+  # (a copy-paste from one of these three, say) would silently change a
+  # worker's behavior with no review signal.
   offenders=""
-  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md \
-           "$plugin_dir"/README.md "$plugin_dir/../../README.md"; do
+  for f in "$plugin_dir"/commands/*.md "$plugin_dir"/skills/*/SKILL.md; do
     [ -f "$f" ] || continue
-    # Harness-specific model selectors and omp-only verbs belong in
-    # herdr/bin/fleet, not in the portable plugin. A bare `orchestrate` in a
-    # brief would also silently arm omp's orchestration contract.
-    if [ -n "$(sed -n -E '/(^|[^[:alnum:]_-])(orchestrate|@smol|@task|@slow|@default|--smol)([^[:alnum:]_-]|$)/p' "$f")" ]; then
-      offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
+    if [ -n "$(sed -n -E '/(^|[^[:alnum:]_-])orchestrate([^[:alnum:]_-]|$)/p' "$f")" ]; then
+      offenders="$offenders $(basename "$f")"
     fi
   done
-  is 'no harness-specific model vocab survives in the plugin prose' "${offenders# }" ''
+  is 'orchestrate appears only in the commands that dispatch multi-phase work' \
+    "${offenders# }" 'backlog.md implement.md prototype.md'
 
 
   # Each dispatch command must name the skill it dispatches, or the worker gets
@@ -312,17 +276,17 @@ if [ -n "$plugin_dir" ]; then
   for c in implement diagnosing-bugs research prototype code-review; do
     f="$plugin_dir/commands/$c.md"
     [ -f "$f" ] || continue
-    [ -n "$(sed -n "/--skill $c/p" "$f")" ] || missing="$missing $c"
+    [ -n "$(sed -n "/skill: \"$c\"/p" "$f")" ] || missing="$missing $c"
   done
-  is 'every dispatch command passes its own --skill' "${missing# }" ''
+  is 'every dispatch command passes its own skill:' "${missing# }" ''
 
   missing=""
   for c in implement diagnosing-bugs research prototype code-review; do
     f="$plugin_dir/commands/$c.md"
     [ -f "$f" ] || continue
-    [ -n "$(sed -n '/--tier /p' "$f")" ] || missing="$missing $c"
+    [ -n "$(sed -n '/tier: "/p' "$f")" ] || missing="$missing $c"
   done
-  is 'every dispatch command names a --tier' "${missing# }" ''
+  is 'every dispatch command names a tier:' "${missing# }" ''
 else
   printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
 fi
@@ -655,11 +619,6 @@ out=$( (FLEET_AGENT_TIER=deep cmd_spawn br --model opus --task x) 2>&1 )
 assert_not 'env FLEET_AGENT_TIER does not block --model' \
   [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
 
-out=$( (cmd_spawn br --kind codex --tier deep --task x) 2>&1 )
-rc=$?
-assert     'spawn dies when kind has no --tier mapping' [ "$rc" != 0 ]
-assert     'output contains no --tier mapping' [ "${out#*no --tier mapping}" != "$out" ]
-assert_not 'herdr was not called for unmapped kind+tier' [ "${out#*herdr was called}" != "$out" ]
 unset -f herdr
 
 # ── join --timeout validation ───────────────────────────────────────────────────
@@ -699,14 +658,14 @@ unset -f self_handle boss_handle agent_exists require_herdr
 # ── fleet version ───────────────────────────────────────────────────────────────
 
 printf '\nfleet version\n'
-is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.4.0'
+is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.5.0'
 
 # ── ls shows a pending question ──────────────────────────────────────────────────
 
 printf '\nls shows a pending question\n'
 export FLEET_STATE="$sandbox/state-ls-q"
 mkdir -p "$FLEET_STATE/w2"
-meta_set w2 "BOSS=boss" "BRANCH=feat/q" "DIR=/tmp/q" "KIND=omp" "REPO_KEY=k"
+meta_set w2 "BOSS=boss" "BRANCH=feat/q" "DIR=/tmp/q" "REPO_KEY=k"
 : >"$FLEET_STATE/w2/question.md"
 counter_bump "$(cat "$FLEET_STATE/w2/question.seq" 2>/dev/null || echo "$FLEET_STATE/w2/question.seq")"
 
@@ -719,10 +678,95 @@ assert 'ls header contains Q column' [ "${ls_out#* Q }" != "$ls_out" ]
 assert 'ls row shows ? for pending question' [ "${ls_out#*w2*\?}" != "$ls_out" ]
 unset -f agent_field require_herdr scoped_key
 
-# ── widen the skill:// sweep ────────────────────────────────────────────────────
+# ── broadcast ─────────────────────────────────────────────────────────────────
+#
+# Raw steering to every live worker in the repo. It must never bump the
+# dispatch counter dispatch_to guards — a broadcast is not a tracked task, and
+# bumping it would make a worker's eventual `fleet report` for its real task
+# look like it answers the broadcast instead.
 
-# Modify existing sweep test to add repo root README.md
-# The sweep test was around lines 241-264, so update the for loop to include repo root README
+printf '\nbroadcast\n'
+export FLEET_STATE="$sandbox/state-broadcast"
+for w in w1 w2 me; do mkdir -p "$(meta_dir "$w")"; meta_set "$w" "REPO_KEY=repo1"; done
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w1","agent_status":"idle"},{"name":"me","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+self_handle() { printf 'me'; }
+require_herdr() { :; }
+scoped_key() { printf 'repo1'; }
+
+before=$(counter_read "$(dispatch_file w1)")
+out=$(cmd_broadcast 'checkpoint' 2>&1)
+after=$(counter_read "$(dispatch_file w1)")
+is 'broadcast leaves the dispatch counter untouched' "$after" "$before"
+assert 'broadcast sends to the live worker' [ "${out#*sent: w1}" != "$out" ]
+assert_not 'broadcast skips its own sender handle' [ "${out#*sent: me}" != "$out" ]
+assert 'broadcast skips the dead worker' [ "${out#*skipped*w2}" != "$out" ]
+
+out2=$( (FLEET_STATE="$sandbox/state-broadcast-empty" cmd_broadcast 'hi') 2>&1 )
+rc2=$?
+assert 'broadcast fails with no live workers in scope' [ "$rc2" != 0 ]
+assert 'and explains why' [ "${out2#*no live workers in this repo}" != "$out2" ]
+unset -f herdr self_handle require_herdr scoped_key
+
+# ── dm ────────────────────────────────────────────────────────────────────────
+#
+# Raw steering to one fleet member. Same untracked-dispatch contract as
+# broadcast; the target gate (registered worker or the boss handle) is the one
+# thing that differs from `fleet send --raw`, which only checks liveness.
+
+printf '\ndm\n'
+export FLEET_STATE="$sandbox/state-dm"
+mkdir -p "$(meta_dir w1)"; meta_set w1 "BOSS=me"
+self_handle() { printf 'me'; }
+require_herdr() { :; }
+agent_exists() { case "$1" in w1|intruder) return 0 ;; *) return 1 ;; esac; }
+sent_text=""
+prompt_raw() { sent_text="$2"; }
+
+cmd_dm w1 'ping' >/dev/null 2>&1
+is 'dm carries the [fleet dm from <sender>] prefix' "$sent_text" '[fleet dm from me] ping'
+
+out=$( (cmd_dm intruder 'hi') 2>&1 )
+rc=$?
+assert 'dm rejects an unregistered, non-boss target' [ "$rc" != 0 ]
+assert 'and points at fleet ls' [ "${out#*fleet ls}" != "$out" ]
+
+before=$(counter_read "$(dispatch_file w1)")
+cmd_dm w1 'ping again' >/dev/null 2>&1
+after=$(counter_read "$(dispatch_file w1)")
+is 'dm leaves the dispatch counter untouched' "$after" "$before"
+unset -f self_handle require_herdr agent_exists prompt_raw
+
+# ── keys ──────────────────────────────────────────────────────────────────────
+#
+# Unblocking an approval UI needs real terminal keys, not text `agent prompt`
+# can deliver. fleet does not validate key names — herdr does — so the argv
+# must reach `herdr agent send-keys` unmodified.
+
+printf '\nkeys\n'
+export FLEET_STATE="$sandbox/state-keys"
+require_herdr() { :; }
+agent_exists() { case "$1" in feat-x) return 0 ;; *) return 1 ;; esac; }
+herdr_args="$sandbox/herdr-keys-args"
+herdr() { printf '%s\n' "$*" >"$herdr_args"; }
+
+cmd_keys feat-x down down enter
+is 'keys threads argv into herdr agent send-keys verbatim' "$(cat "$herdr_args")" \
+  'agent send-keys feat-x down down enter'
+
+out=$( (cmd_keys feat-x) 2>&1 )
+rc=$?
+assert 'keys requires at least one key' [ "$rc" != 0 ]
+assert 'and explains usage' [ "${out#*usage: fleet keys}" != "$out" ]
+
+out=$( (cmd_keys unknown-handle down) 2>&1 )
+rc=$?
+assert 'keys rejects a non-live handle' [ "$rc" != 0 ]
+unset -f require_herdr agent_exists herdr
 
 printf '\n'
 if [ "$failures" = 0 ]; then

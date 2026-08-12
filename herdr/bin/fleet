@@ -46,8 +46,6 @@ DISPATCH_SETTLE_MS="${FLEET_DISPATCH_SETTLE_MS:-15000}"
 # are a preference, not a mechanism.
 FLEET_EDITOR="${FLEET_EDITOR:-nvim}"
 FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
-# Harness started for new workers unless `fleet spawn --kind` overrides it.
-FLEET_AGENT_KIND="${FLEET_AGENT_KIND:-omp}"
 # Model tier applied when `fleet spawn` names neither `--tier` nor `--model`.
 # Empty keeps today's behaviour: the harness's own default model. Commands in
 # plugins/fleet print an explicit `--tier`, so this is only a boss-side default.
@@ -567,14 +565,13 @@ boss_handle() {
 
 # ── Skills ───────────────────────────────────────────────────────────────────
 #
-# One portable path to a named skill, for every harness. Each one names and
-# invokes skills differently — `skill://x`, `/x`, `$x` — and a per-harness table
-# of those forms fails silently when an entry is wrong: the worker simply does
-# generic work. `fleet skill <name>` sidesteps the whole question by printing
-# the skill instead of invoking it, which every harness can do through bash.
+# Workers are always omp, and `skill://<name>` is omp's own first-class skill
+# activation path — its system prompt instructs reading it directly. Fleet's
+# only remaining job is validating the name before it goes into a dispatched
+# prompt.
 
-# A skill name becomes part of a path below. Agent Skills names are lowercase,
-# at most 64 characters, and use hyphens as separators.
+# A skill name becomes part of a `skill://` URI below. Agent Skills names are
+# lowercase, at most 64 characters, and use hyphens as separators.
 #
 # LC_ALL=C is load-bearing for the same reason it is in valid_handle(): a glob
 # range is collation-ordered, and most locales interleave case, so under the
@@ -587,19 +584,9 @@ valid_skill_name() {
   case "$name" in *[!a-z0-9-]*|*-) return 1 ;; esac
 }
 
-# A harness kind is passed to `herdr agent start --kind`. Keep command-line
-# input to one shell-safe token; herdr remains the authority on supported kinds.
-valid_agent_kind() {
-  local LC_ALL=C
-  local kind=$1
-  [ -n "$kind" ] && [ ${#kind} -le 32 ] || return 1
-  case "$kind" in [a-z]*) ;; *) return 1 ;; esac
-  case "$kind" in *[!a-z0-9_-]*) return 1 ;; esac
-}
-
-# Worker model tiers are harness-neutral labels that `plugins/fleet` commands
-# may print. The mapping onto a harness's `--model` flag lives only here — the
-# plugin must not name `@task`, `sonnet`, or any other harness-specific selector.
+# Worker model tiers are labels that `plugins/fleet` commands may print. The
+# mapping onto omp's own `--model` selectors lives only here — the plugin must
+# not name `@task`, `@default`, or any other omp-specific selector.
 valid_agent_tier() {
   case "$1" in standard|deep) return 0 ;; *) return 1 ;; esac
 }
@@ -617,35 +604,23 @@ valid_agent_model() {
 
 # Print the argv that follows `herdr agent start … --`, one token per line.
 # `--model` wins by construction (callers treat the two flags as mutually
-# exclusive); `--tier` is mapped per kind. Kinds without a mapping must pass
-# `--model` rather than guess at a selector that silently no-ops.
+# exclusive); `--tier` maps onto omp's own model selectors.
 worker_agent_args() {
-  local kind=$1 tier=$2 model=$3
+  local tier=$1 model=$2
   if [ -n "$model" ]; then
     printf '%s\n' --model "$model"
     return 0
   fi
   [ -n "$tier" ] || return 0
-  case "$kind" in
-    omp)
-      case "$tier" in
-        standard) printf '%s\n' --model '@task' ;;
-        deep)     printf '%s\n' --model '@default' ;;
-      esac ;;
-    claude)
-      case "$tier" in
-        standard) printf '%s\n' --model 'sonnet' ;;
-        deep)     printf '%s\n' --model 'opus' ;;
-      esac ;;
-    *)
-      die "no --tier mapping for kind '$kind'
-  pass --model <selector> instead, or use --kind omp|claude" ;;
+  case "$tier" in
+    standard) printf '%s\n' --model '@task' ;;
+    deep)     printf '%s\n' --model '@default' ;;
   esac
 }
 
-# Resolve through the PATH symlink herdr installs, so fleet's own skills remain
-# reachable from the same repository/cache checkout without copying them into
-# every harness's user skill directory.
+# Resolve through the PATH symlink herdr installs, so fleet_version and
+# cmd_dashboard can find files that live beside this script regardless of the
+# caller's cwd.
 fleet_script_dir() {
   local path=${BASH_SOURCE[0]} dir target
   while [ -L "$path" ]; do
@@ -664,87 +639,10 @@ fleet_version() {
 
 cmd_version() { printf 'fleet %s\n' "$(fleet_version)"; }
 
-# Ordered from explicit override, to fleet's bundled skills, to project scope,
-# then user scope. Every supported harness uses the Agent Skills
-# `<root>/<name>/SKILL.md` layout even though their discovery roots differ.
-# Empty and missing roots are harmless.
-skill_roots() {
-  local root old_ifs top="" script_dir
-  old_ifs=$IFS
-  IFS=:
-  for root in ${FLEET_SKILL_PATH:-}; do
-    [ -n "$root" ] && printf '%s\n' "$root"
-  done
-  IFS=$old_ifs
-
-  script_dir=$(fleet_script_dir)
-  printf '%s\n' "$script_dir/../../plugins/fleet/skills"
-
-  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
-  if [ -n "$top" ]; then
-    printf '%s\n' \
-      "$top/.agents/skills" "$top/.agent/skills" "$top/.claude/skills" \
-      "$top/.omp/skills" "$top/.codex/skills" "$top/.cursor/skills" \
-      "$top/.gemini/skills" "$top/.opencode/skills" "$top/.opencode/skill" \
-      "$top/.pi/skills"
-  fi
-
-  printf '%s\n' \
-    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" \
-    "$HOME/.agents/skills" "$HOME/.agent/skills" "$HOME/.omp/agent/skills" \
-    "$HOME/.codex/skills" "$HOME/.cursor/skills" "$HOME/.gemini/skills" \
-    "$HOME/.config/opencode/skills" "$HOME/.config/opencode/skill" \
-    "$HOME/.config/amp/skills" "$HOME/.pi/agent/skills"
-}
-
-resolve_skill() {
-  local name=$1 root
-  valid_skill_name "$name" || return 1
-  while IFS= read -r root; do
-    [ -f "$root/$name/SKILL.md" ] || continue
-    printf '%s' "$root/$name/SKILL.md"
-    return 0
-  done < <(skill_roots)
-  return 1
-}
-
-strip_skill_frontmatter() {
-  local file=$1 first="" line="" closed=0
-  {
-    IFS= read -r first || return 0
-    if [ "$first" != "---" ]; then
-      printf '%s\n' "$first"
-      cat
-      return 0
-    fi
-    while IFS= read -r line; do
-      if [ "$line" = "---" ]; then closed=1; break; fi
-    done
-    [ "$closed" = 1 ] || die "skill at $file has unclosed YAML frontmatter"
-    cat
-  } <"$file"
-}
-
-cmd_skill() {
-  local name=${1:-}
-  [ $# = 1 ] && valid_skill_name "$name" \
-    || die "usage: fleet skill <name>"
-  local file
-  file=$(resolve_skill "$name") \
-    || die "skill '$name' was not found (set FLEET_SKILL_PATH to add roots)"
-  # Normalized, because the bundled root is reached through `../..` from the
-  # script's own directory. An agent is told to resolve the skill's relative
-  # asset paths against this, so it has to read as a real location.
-  local base; base=$(cd -P "$(dirname "$file")" && pwd)
-  printf '## Skill: %s\n\nBase directory: `%s`\n' "$name" "$base"
-  printf 'Follow the instructions below. Resolve relative paths from the base directory.\n\n'
-  strip_skill_frontmatter "$base/SKILL.md"
-}
-
 skill_instruction() {
   local name=$1
   valid_skill_name "$name" || die "invalid skill name '$name'"
-  printf 'Before doing any other work, run `fleet skill %s` and follow the instructions it prints.' "$name"
+  printf 'Before doing any other work, read `skill://%s` and follow it.' "$name"
 }
 
 # ── Spawning ─────────────────────────────────────────────────────────────────
@@ -765,12 +663,18 @@ Your orchestrator is the agent \`$boss\`.
 - Stay inside this worktree. Do not touch other checkouts of this repo.
 - Commit your work on this branch when it is done. Do not push and do not open
   a PR unless the task above says to.
-- When finished, write your report last:
-  \`fleet report -f <file>\` or \`fleet report "<summary>"\`.
-  The orchestrator reads that file; terminal output does not reach it.
-- If you are blocked or need a decision, run \`fleet reply "<question>"\`. It
-  files the question and interrupts the orchestrator, so a \`fleet join\` it is
-  sitting in returns immediately. Use it for questions, not progress updates.
+- When finished, write your report last: the \`fleet_report\` tool, or
+  \`fleet report -f <file>\` / \`fleet report "<summary>"\` from a shell. The
+  orchestrator reads that file; terminal output does not reach it.
+- If you are blocked or need a decision, use the \`fleet_reply\` tool, or
+  \`fleet reply "<question>"\`. It files the question and interrupts the
+  orchestrator, so a \`fleet join\` it is sitting in returns immediately. Use it
+  for questions, not progress updates.
+- Peers: \`fleet ls\` lists the other workers; \`fleet dm <handle> "<text>"\`
+  messages one directly. Use it to coordinate on a shared seam, not for status
+  updates.
+- Delegate substantial independent slices of your task to your own subagents
+  instead of working serially.
 EOF
 }
 
@@ -782,10 +686,9 @@ usage: fleet spawn <branch> [options]
   --repo <path>       repo to branch from (default: current repo)
   --path <path>       worktree location (default: sibling <repo>-<slug>)
   --handle <name>     agent handle (default: derived from the branch)
-  --kind <kind>       agent harness (default: $FLEET_AGENT_KIND or omp)
   --tier <tier>       worker model tier: standard | deep
-                      (default: $FLEET_AGENT_TIER, or the harness default)
-  --model <selector>  pass --model <selector> to the harness (escape hatch;
+                      (default: $FLEET_AGENT_TIER, or omp's own default)
+  --model <selector>  pass --model <selector> to omp (escape hatch;
                       mutually exclusive with --tier)
   --skill <name>      load this skill before the dispatched task
   --layout <shape>    agent (default) | full — see below
@@ -796,10 +699,8 @@ usage: fleet spawn <branch> [options]
                       gone: removes the recorded workspace, then respawns
 
 tiers:
-  standard  mid-high model for orchestration that mostly delegates
-            (omp: @task, claude: sonnet)
-  deep      high model for judgement-heavy orchestration
-            (omp: @default, claude: opus)
+  standard  mid-high model for orchestration that mostly delegates (@task)
+  deep      high model for judgement-heavy orchestration (@default)
 
 layouts:
   agent   one pane, running the selected agent. All a worker needs.
@@ -813,7 +714,7 @@ EOF
 cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
-  local layout=agent replace=0 kind=$FLEET_AGENT_KIND skill=""
+  local layout=agent replace=0 skill=""
   local tier=$FLEET_AGENT_TIER model="" tier_explicit=0
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
@@ -825,7 +726,6 @@ cmd_spawn() {
       --path) wtpath=${2:?}; shift 2 ;;
       --handle) handle=${2:?}; shift 2 ;;
       --layout) layout=${2:?}; shift 2 ;;
-      --kind) kind=${2:?}; shift 2 ;;
       --tier) tier=${2:?}; tier_explicit=1; shift 2 ;;
       --model) model=${2:?}; shift 2 ;;
       --skill) skill=${2:?}; shift 2 ;;
@@ -849,8 +749,6 @@ cmd_spawn() {
     agent|full) ;;
     *) die "unknown layout '$layout' (expected: agent, full)" ;;
   esac
-  valid_agent_kind "$kind" \
-    || die "agent kind '$kind' is not a safe herdr kind"
   [ -z "$skill" ] || valid_skill_name "$skill" \
     || die "invalid skill name '$skill'"
   # Only an *explicit* `--tier` conflicts with `--model`. `$FLEET_AGENT_TIER` is
@@ -865,12 +763,10 @@ cmd_spawn() {
     || die "unknown tier '$tier' (expected: standard, deep)"
   [ -z "$model" ] || valid_agent_model "$model" \
     || die "model selector '$model' is not a safe --model value"
-  # Kind↔tier mapping lives in worker_agent_args and dies for unmapped kinds.
-  # Check it here — before the worktree/workspace/pane exist — so a boss that
-  # pastes a command's `--tier` with `--kind codex` fails clean instead of
-  # leaving state that needs `fleet reap`. Only runs when --tier is set;
-  # --model is a raw passthrough and needs no kind mapping.
-  [ -z "$tier" ] || worker_agent_args "$kind" "$tier" "" >/dev/null
+  # Validated before anything is created, like the handle validity check
+  # below: a bad --tier should die here, not after the worktree, agent, and
+  # meta record already exist and need `fleet reap` to clean up.
+  [ -z "$tier" ] || worker_agent_args "$tier" "" >/dev/null
 
   repo=${repo:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
   [ -n "$repo" ] || die "not in a git repo and --repo was not given"
@@ -947,7 +843,7 @@ cmd_spawn() {
   local boss; boss=$(self_handle)
   [ -n "$boss" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
 
-  note "fleet: creating $branch at $wtpath with $kind (from $base)"
+  note "fleet: creating $branch at $wtpath (from $base)"
   local created ws tab pane
   created=$(h worktree create --cwd "$repo" --branch "$branch" --base "$base" \
     --path "$wtpath" --no-focus)
@@ -965,14 +861,14 @@ cmd_spawn() {
   # Tier→model mapping was already validated above; this call only builds the
   # argv plan and the MODEL value recorded beside TIER.
   local agent_args resolved_model=$model arg
-  agent_args=$(worker_agent_args "$kind" "$tier" "$model")
+  agent_args=$(worker_agent_args "$tier" "$model")
   # When the boss passed --tier, record the mapped selector so `meta_get MODEL`
   # answers the same question for both flags.
   if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
     resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
   fi
   meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
-    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "KIND=$kind" "SKILL=$skill" \
+    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "SKILL=$skill" \
     "TIER=$tier" "MODEL=$resolved_model"
   : >"$(report_file "$handle")"
   : >"$(report_token_file "$handle")"
@@ -987,10 +883,10 @@ cmd_spawn() {
   done <<EOF
 $agent_args
 EOF
-  start_worker_agent "$handle" "$ws" "$pane" "$kind" "$@"
+  start_worker_agent "$handle" "$ws" "$pane" "$@"
   # After the agent, deliberately. The agent is the deliverable; the rest of
   # the layout is scenery, and a worker that works beats a tidy dead workspace.
-  apply_layout "$layout" "$ws" "$tab" "$pane" "$wtpath" "$kind"
+  apply_layout "$layout" "$ws" "$tab" "$pane" "$wtpath"
 
   printf '%s\n' "$handle"
 
@@ -1013,8 +909,8 @@ EOF
 # workspace-manager is rejected before worktree creation, so this function
 # never participates in a layout race with it.
 start_worker_agent() {
-  local handle=$1 ws=$2 pane=$3 kind=$4
-  shift 4
+  local handle=$1 ws=$2 pane=$3
+  shift 3
   # Remaining arguments are forwarded after `--` to the harness (typically
   # `--model <selector>`). Empty means the harness's own default — today's
   # behaviour, and what a spawn without `--tier`/`--model` still does.
@@ -1035,12 +931,12 @@ start_worker_agent() {
     [ "$left" -gt 0 ] || break
     [ "$left" -le 300000 ] || left=300000
     if [ "$has_agent_args" = 1 ]; then
-      if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
+      if err=$(herdr agent start "$handle" --kind omp --pane "$pane" \
                  --timeout "$left" -- "$@" 2>&1); then
         return 0
       fi
     else
-      if err=$(herdr agent start "$handle" --kind "$kind" --pane "$pane" \
+      if err=$(herdr agent start "$handle" --kind omp --pane "$pane" \
                  --timeout "$left" 2>&1); then
         return 0
       fi
@@ -1086,22 +982,22 @@ workspace_ready_agent() {
 # does in the background, and it must not yank the view out from under whoever
 # is reading something else.
 apply_layout() {
-  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5 kind=$6
+  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
   # Best-effort, in a subshell. The agent is the deliverable and the rest of
   # the layout is scenery: a pane split that fails, a TUI still starting, a
   # shell that has not finished sourcing its rc files — none of that is worth
   # failing a spawn over. Aborting here would skip the dispatch and never even
   # print the handle of the worker that is already up and running.
-  if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" "$kind" ); then
+  if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" ); then
     note "fleet: the '$layout' layout did not finish; the agent pane is up regardless"
   fi
   return 0
 }
 
 build_layout() {
-  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5 kind=$6
+  local layout=$1 ws=$2 tab=$3 root=$4 dir=$5
   h tab rename "$tab" agent >/dev/null
-  h pane rename "$root" "$kind" >/dev/null
+  h pane rename "$root" omp >/dev/null
   [ "$layout" = full ] || return 0
 
   local editor shell review created
@@ -1389,6 +1285,74 @@ cmd_ask() {
   if [ -n "$timeout" ]; then cmd_join --timeout "$timeout" "$handle"; else cmd_join "$handle"; fi
 }
 
+# ── Peer messaging ───────────────────────────────────────────────────────────
+#
+# broadcast, dm, and keys are steering, not dispatch: they must never touch
+# the dispatch counter dispatch_to guards above. A reply to the current turn
+# must not be mistaken for a new tracked task, and a keystroke into a working
+# agent has no report to be fresh against.
+
+cmd_broadcast() {
+  require_herdr
+  local me; me=$(self_handle)
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet boss' first"
+  local text; text=$(read_message "broadcast <text...>" "$@")
+  local scope; scope=$(scoped_key "fleet broadcast" "run it from inside a repo")
+  # One `agent list` for the whole wave, not one per worker — the same
+  # round-trip rationale as cmd_join's per-tick snapshot.
+  local agents handle sent=0
+  agents=$(h agent list)
+  for handle in $(known_workers "$scope"); do
+    [ "$handle" != "$me" ] || continue
+    if [ -n "$(snapshot_status "$agents" "$handle")" ]; then
+      prompt_raw "$handle" "[fleet broadcast from $me] $text"
+      printf 'sent: %s\n' "$handle"
+      sent=$((sent + 1))
+    else
+      printf 'skipped (not live): %s\n' "$handle"
+    fi
+  done
+  [ "$sent" -gt 0 ] || die "no live workers in this repo"
+}
+
+# Whether $1 is currently recognized as an orchestrator: either the handle a
+# boss would claim by default, or some worker's own record names it as BOSS —
+# which covers a renamed/--steal'd boss, since rebind_boss keeps that in sync.
+is_boss_handle() {
+  local handle=$1 w
+  [ "$handle" = "$(default_boss)" ] && return 0
+  for w in $(known_workers); do
+    [ "$(meta_get "$w" BOSS)" = "$handle" ] && return 0
+  done
+  return 1
+}
+
+cmd_dm() {
+  require_herdr
+  local me; me=$(self_handle)
+  [ -n "$me" ] || die "this pane has no herdr agent name; join the fleet first"
+  local handle=${1:?usage: fleet dm <handle> <text...>}; shift
+  valid_handle "$handle" || die "invalid handle '$handle'"
+  agent_exists "$handle" || die "no live agent named '$handle'"
+  if [ ! -f "$(meta_file "$handle")" ] && ! is_boss_handle "$handle"; then
+    die "'$handle' is live but not a fleet member (see: fleet ls)"
+  fi
+  local text; text=$(read_message "dm <handle> <text...>" "$@")
+  prompt_raw "$handle" "[fleet dm from $me] $text"
+}
+
+cmd_keys() {
+  require_herdr
+  local handle=${1:?usage: fleet keys <handle> <key>...}; shift
+  valid_handle "$handle" || die "invalid handle '$handle'"
+  agent_exists "$handle" || die "no live agent named '$handle'"
+  [ $# -gt 0 ] || die "usage: fleet keys <handle> <key>..."
+  # herdr stays the authority on key names (same philosophy as the removed
+  # kind validation): a bad key is herdr's error to report, not fleet's to
+  # pre-judge.
+  h agent send-keys "$handle" "$@" >/dev/null
+}
+
 # Everything join prints for one worker.
 print_result() {
   local handle=$1 status=$2 rf; rf=$(report_file "$handle")
@@ -1672,19 +1636,15 @@ cmd_ls() {
   if [ "${1:-}" != "--all-repos" ]; then
     scope=$(scoped_key "fleet ls" "run it from inside a repo, or pass --all-repos")
   fi
-  local handle status kind q
-  printf '%-20s %-9s %-2s %-8s %-28s %s\n' HANDLE STATUS Q KIND BRANCH DIR
+  local handle status q
+  printf '%-20s %-9s %-2s %-28s %s\n' HANDLE STATUS Q BRANCH DIR
   for handle in $(known_workers "$scope"); do
     status=$(agent_field "$handle" agent_status)
     [ -n "$status" ] || status=gone
-    # Every worker recorded before --kind existed was started as omp, so that is
-    # the honest fallback rather than an unknown marker.
-    kind=$(meta_get "$handle" KIND)
-    [ -n "$kind" ] || kind=omp
     # A filed question is invisible outside fleet join.
     q=-
     if question_pending "$handle"; then q='?'; fi
-    printf '%-20s %-9s %-2s %-8s %-28s %s\n' "$handle" "$status" "$q" "$kind" \
+    printf '%-20s %-9s %-2s %-28s %s\n' "$handle" "$status" "$q" \
       "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)"
   done
 }
@@ -1799,11 +1759,13 @@ Orchestrator
   fleet ask <h> <text>           dispatch and block until the report is in
   fleet join [handle...]         collect this repo's workers, print reports
                                  [--timeout <seconds>] bounds either wait
-  fleet ls [--all-repos]         list workers, their kinds, and their states
+  fleet ls [--all-repos]         list workers and their states
   fleet dashboard [--all-repos]  inspect and operate the fleet interactively
   fleet read <handle> [-n N]     read a worker's terminal directly
   fleet reap <handle>...|--all   remove worktrees and forget workers
                                  [--all-repos] [--force] [--forget]
+  fleet broadcast <text>         raw steering to every live worker in this repo
+  fleet keys <handle> <key>...   send terminal keys (e.g. unblock an approval)
 
 Worker
   fleet report [-f file|text]    write the report the orchestrator collects
@@ -1813,11 +1775,13 @@ Worker
 Both
   fleet doctor                   check prerequisites
   fleet version                  print the fleet version
-  fleet skill <name>             print a named skill for any agent harness
+  fleet dm <handle> <text>       raw steering to any fleet member
 
 --raw sends text alone; without it fleet appends its protocol block, which is
 right for a task and wrong for a one-line answer.
 --forget drops fleet's record and leaves the worktree alone.
+fleet broadcast and fleet dm are always raw, untracked steering: like --raw,
+no protocol block and no dispatch counter bump.
 
 `fleet spawn --help` lists spawn options.
 EOF
@@ -1829,7 +1793,6 @@ main() {
   local cmd=$1; shift
   case "$cmd" in
     boss)    cmd_boss "$@" ;;
-    skill)   cmd_skill "$@" ;;
     whoami)  cmd_whoami "$@" ;;
     spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;
@@ -1841,6 +1804,9 @@ main() {
     ls|list) cmd_ls "$@" ;;
     dashboard|dash) cmd_dashboard "$@" ;;
     reap)    cmd_reap "$@" ;;
+    broadcast) cmd_broadcast "$@" ;;
+    dm)      cmd_dm "$@" ;;
+    keys)    cmd_keys "$@" ;;
     doctor)  cmd_doctor "$@" ;;
     version|--version|-V) cmd_version ;;
     -h|--help|help) usage ;;

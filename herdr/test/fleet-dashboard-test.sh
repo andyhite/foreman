@@ -308,7 +308,7 @@ assert_not 'acknowledging clears the pending question' question_pending "$d"
 printf '\nrow rendering\n'
 r=renderworker
 meta_set "$r" BRANCH=feat/a-branch-name-of-some-considerable-length \
-  DIR="$HOME/Code/somewhere/deep/and/long/renderworker" KIND=codex
+  DIR="$HOME/Code/somewhere/deep/and/long/renderworker"
 DASH_STATUSES=$(printf '%s\tworking\n' "$r")
 
 for cols in 40 80 193; do
@@ -373,7 +373,7 @@ DASH_TTY=$dash_tty_real
 
 # Column budgets have to survive the narrowest frame the clamp allows.
 DASH_COLS=40; dash_columns
-total=$((3 + DASH_W_HANDLE + DASH_W_STATUS + DASH_W_KIND + DASH_W_FLAGS + DASH_W_BRANCH + DASH_W_DIR + 5))
+total=$((3 + DASH_W_HANDLE + DASH_W_STATUS + DASH_W_FLAGS + DASH_W_BRANCH + DASH_W_DIR + 5))
 assert 'the branch column is positive at 40 columns' [ "$DASH_W_BRANCH" -gt 0 ]
 assert 'the dir column is positive at 40 columns'    [ "$DASH_W_DIR" -gt 0 ]
 assert 'and the row is truncated to the frame rather than the budget' \
@@ -420,8 +420,8 @@ frame_lines() {
   printf '%s' "$DASH_FRAME" | sed -n '$=' | tr -d '\n'
 }
 
-meta_set alpha BRANCH=feat/a DIR=/tmp/a KIND=omp
-meta_set beta  BRANCH=feat/b DIR=/tmp/b KIND=omp
+meta_set alpha BRANCH=feat/a DIR=/tmp/a
+meta_set beta  BRANCH=feat/b DIR=/tmp/b
 
 DASH_HANDLES=$(printf 'alpha\nbeta\n'); DASH_COUNT=2; DASH_STATUSES=""
 is 'a 30-row terminal draws 30 rows'  "$(frame_lines 30)" '30'
