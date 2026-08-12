@@ -291,8 +291,8 @@ acceptance criteria too: a reviewer is a fresh agent that may have no tracker
 access, so a bare issue number is not a spec.
 
 ```
-fleet_spawn({ branch: "review/412", base: "feat/412-webhook-retry", tier: "standard", skill: "code-review", task: "<the review brief>" })
-fleet_spawn({ branch: "review/418", base: "fix/418-duplicate-send", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_spawn({ branch: "review/412-webhook-retry", base: "feat/412-webhook-retry", tier: "standard", skill: "code-review", task: "<the review brief>" })
+fleet_spawn({ branch: "review/418-duplicate-send", base: "fix/418-duplicate-send", tier: "standard", skill: "code-review", task: "<the review brief>" })
 fleet_join({})
 ```
 
