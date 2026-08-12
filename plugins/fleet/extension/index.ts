@@ -213,7 +213,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       if (!text) return;
       await pi.sendMessage(
         {
-          customType: "fleet:update",
+          customType: "Fleet Update",
           content: text,
           display: true,
           attribution: "user",
