@@ -85,8 +85,10 @@ Once per project, before the first `/foreman:boss`:
 
 Creates `.foreman/config.yml` if it doesn't exist yet, then digs through the
 repo — its documented conventions and whatever skills it can find, both its
-own and this session's — to propose a starting `roles:` mapping. Safe to
-re-run; it never overwrites a mapping already there.
+own and this session's — to propose a starting `roles:` mapping, and matches
+role names against any `modelRoles:` already configured, globally or for
+this project, to pin one where the alias already exists. Safe to re-run;
+it never overwrites a mapping already there.
 
 ```
 /foreman:boss Ship the webhook retry work in #412 and #413
@@ -112,12 +114,15 @@ foreman spawn <branch> --tier <standard|deep> \
 ```
 
 `--role` is optional and appears at most once. It resolves through `roles:` in
-foreman's config (`foreman roles` shows the mapping) to one skill instruction.
-Use it for a named convention, such as `review`, whose mapped skill may change
-without rewriting every dispatch. `--skill <name>` is repeatable; each named
-skill prepends `Before doing any other work, read skill://<name> and follow
-it.` to the worker prompt, in flag order. When both are present, the
-role-mapped instruction comes first, then every literal skill instruction.
+foreman's config (`foreman roles` shows the mapping) to one skill instruction,
+and may also default `--tier`/`--model` when the role's config value carries
+a model token (`review: code-review @review`) — an explicit `--tier`/`--model`
+at the call site still wins. Use it for a named convention, such as `review`,
+whose mapped skill or model may change without rewriting every dispatch.
+`--skill <name>` is repeatable; each named skill prepends `Before doing any
+other work, read skill://<name> and follow it.` to the worker prompt, in flag
+order. When both are present, the role-mapped instruction comes first, then
+every literal skill instruction.
 Leave both absent and the worker gets the brief alone. Foreman then appends its
 protocol block telling the worker how to commit, file its report, stay in its
 worktree, and interrupt the boss with a question. Briefs repeat none

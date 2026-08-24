@@ -88,21 +88,26 @@ Write the task the way you would write a local subagent assignment: target
 files, concrete change, acceptance criteria. The worker has no memory of this
 conversation — every requirement must be in the text. `--role <name>` is
 optional and accepted once: it looks up a named convention in `roles:` in
-foreman's config and prepends that role's mapped skill instruction. Use it where
-a role such as `review` should survive a skill rename without changing every
-dispatch. `--skill <name>` is repeatable; each occurrence prepends that
-skill's instruction. When both are present, the role-mapped skill comes first,
-then literal skills in the order passed. Leave both absent and the worker gets
-the task text alone.
+foreman's config and prepends that role's mapped skill instruction. Use it
+where a role such as `review` should survive a skill rename without
+changing every dispatch. `--skill <name>` is repeatable; each occurrence
+prepends that skill's instruction. When both are present, the role-mapped
+skill comes first, then literal skills in the order passed. Leave both
+absent and the worker gets the task text alone. A role can also pin a
+model — `review: code-review @review` — so `--role review` alone applies
+that model without a separate `--tier`/`--model`; an explicit
+`--tier`/`--model` at the call site still wins.
 
-`foreman roles` prints the current mapping and where its config was found. A
+`foreman roles` prints the current mapping, where its config was found, and
+each mapped skill's own frontmatter description as a "what is this role
+for" hint — read from the skill itself, not a second copy in the config. A
 missing role dies naming the config path it looked for. The config is
 project-local: `.foreman/config.yml` at the repo root (or `$FOREMAN_CONFIG`
 as an override). `foreman init` scaffolds it if it does not exist yet:
 
 ```yaml
 roles:
-  review: code-review
+  review: code-review @review
   implement: my-house-implement-skill
 ```
 

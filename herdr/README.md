@@ -45,26 +45,48 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman reply <text>` | From a worker, file a question and interrupt the boss. |
 | `foreman whoami` | Print this pane's handle. |
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
-| `foreman roles` | List the role → skill mappings read from foreman's project-local config. |
+| `foreman roles` | List the role → skill mappings read from foreman's project-local config, plus each mapped skill's own frontmatter description as a hint. |
 | `foreman init` | Scaffold `.foreman/config.yml` at the repo root, commented and empty. Refuses to overwrite an existing file. |
 | `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, and the current repo's worker count. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. |
 
 ### Role config
 
 `roles:` in `.foreman/config.yml` at the repo root maps a `--role` name to one
-skill instruction, so a named house convention (`review`, `implement`) survives
-a skill rename without touching every dispatch site. The file is project-local
-by design — one repo's convention should not leak into every other checkout on
+skill, so a named house convention (`review`, `implement`) survives a skill
+rename without touching every dispatch site. The file is project-local by
+design — one repo's convention should not leak into every other checkout on
 the machine — and travels with the checkout the same way any other committed
 config does, including into a worker's own worktree. `foreman init` creates it;
-`foreman roles` shows what it currently resolves to. `$FOREMAN_CONFIG` is an
-escape hatch that overrides the repo-local lookup outright, for testing or a
-config that intentionally lives elsewhere.
+`foreman roles` shows what it currently resolves to, plus each mapped
+skill's own frontmatter `description:` — read straight from the skill,
+wherever it actually lives (project or global), so there is no second copy
+of that text to keep in sync — as a hint for what the role is actually for.
+`$FOREMAN_CONFIG` is an escape hatch that overrides the repo-local lookup
+outright, for testing or a config that intentionally lives elsewhere.
+
+A role maps to a skill in one of two ways:
+
+- `name: skill` (default) — load the skill as reference material before the
+  task, same as `--skill`. Right for content meant to be read and applied by
+  judgment: `code-review`, `tdd`, `domain-modeling`.
+- `name: command:skill` — invoke the skill instead, the way omp's own
+  `/skill:<name>` does: the dispatched task becomes that command's argument
+  text rather than a task decorated with reference material. Right for a
+  skill marked `disable-model-invocation: true` — it expects to be invoked
+  with an argument, not kept passively in mind (`triage`, `to-spec`, an
+  `implement` protocol).
+
+Append a second, space-separated token to pin the role to a model, exactly
+like `--model` for one `foreman spawn` — a plain selector or an omp
+`@modelRole` alias (see omp's own model-role docs). It survives a model
+rename the same way the skill mapping survives a skill rename, and it is
+only a default: an explicit `--tier`/`--model` at the call site still wins.
 
 ```yaml
 roles:
-  review: code-review
+  review: code-review @review
   implement: my-house-implement-skill
+  triage: command:triage
 ```
 
 ### Collecting

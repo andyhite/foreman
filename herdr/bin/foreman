@@ -663,7 +663,21 @@ cmd_roles() {
     return 0
   fi
   printf 'roles (%s):\n' "$config"
-  printf '%s\n' "$entries" | awk -F'\t' '{ printf "  %-20s -> %s\n", $1, $2 }'
+  local name value spec model skill tag desc
+  while IFS=$'\t' read -r name value; do
+    spec=$(role_value_spec "$value")
+    model=$(role_value_model "$value")
+    skill=$(role_value_skill "$spec")
+    tag=""
+    [ "$(role_value_type "$spec")" = command ] && tag=" (command)"
+    [ -n "$model" ] && tag="$tag [$model]"
+    printf '  %-20s -> %s%s\n' "$name" "$skill" "$tag"
+    if desc=$(skill_description "$skill"); then
+      printf '      %s\n' "$desc"
+    fi
+  done <<EOF
+$entries
+EOF
 }
 
 # Scaffolds the project-local config `foreman roles`/`--role` read from.
@@ -684,12 +698,23 @@ cmd_init() {
 # foreman project config — see `foreman roles` and skill://foreman-dispatch
 #
 # roles: maps a --role name (foreman spawn --role <name>, foreman_spawn
-# { role }) to one skill to load before the worker's task. Uncomment and
-# edit to name this project's own conventions:
+# { role }) to one skill, plus an optional model. Plain `name: skill` loads
+# that skill as reference material before the worker's task, same as
+# --skill. Prefix the value with `command:` to invoke the skill instead, the
+# way omp's own /skill:<name> does — the worker's task becomes that
+# command's argument text. Use `command:` for a skill marked
+# disable-model-invocation: true (a slash command, not passive content);
+# plain form for everything else. Append a second, space-separated token to
+# pin the role to a model or omp modelRole selector (e.g. `@review`, see
+# omp://models.md) — the same thing --tier/--model do for one spawn, kept
+# with the role so it survives a model rename. An explicit --tier/--model
+# at the call site still wins. Uncomment and edit to name this project's
+# own conventions:
 #
 # roles:
-#   review: code-review
+#   review: code-review @review
 #   implement: my-house-implement-skill
+#   triage: command:triage
 EOF
   printf 'foreman: created %s\n' "$target"
 }
@@ -698,6 +723,19 @@ skill_instruction() {
   local name=$1
   valid_skill_name "$name" || die "invalid skill name '$name'"
   printf 'Before doing any other work, read `skill://%s` and follow it.' "$name"
+}
+
+# `command:` roles are not reference material to read passively — they are
+# `disable-model-invocation` skills (triage, to-spec, an implement protocol)
+# that expect to be invoked like omp's own `/skill:<name>` slash command, with
+# the dispatched task as that command's argument text. Emitting the same
+# `/skill:<name>` token `h agent prompt` sends triggers the identical parser
+# omp uses for a human typing it: see omp://skills.md, "Skills vs slash
+# commands". Only the leading token differs from `skill_instruction` above.
+command_instruction() {
+  local name=$1
+  valid_skill_name "$name" || die "invalid skill name '$name'"
+  printf '/skill:%s' "$name"
 }
 
 # ── Role → skill mapping ─────────────────────────────────────────────────────
@@ -764,6 +802,108 @@ role_skill() {
     return 0
   done <<EOF
 $(role_entries "$config")
+EOF
+  return 1
+}
+
+# A role's raw config value is a skill name by default, but a `command:`
+# prefix marks it as an invocable command instead (see command_instruction
+# above) — the distinction omp://skills.md draws between passive reference
+# content and a user-invoked entry point. Kept as two small case statements,
+# not one function with an out-param: bash 3.2 has no clean way to return two
+# strings, and both call sites only ever need one half.
+role_value_type() {
+  case "$1" in
+    command:*) printf 'command' ;;
+    *) printf 'skill' ;;
+  esac
+}
+
+role_value_skill() {
+  case "$1" in
+    command:*) printf '%s' "${1#command:}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# A role's config value is "<spec>[ <model>]": the skill spec (parsed by
+# role_value_type/role_value_skill above) as the first whitespace-delimited
+# token, an optional model or omp modelRole selector (see omp://models.md,
+# "Role aliases like @smol expand through settings.modelRoles") as the
+# second — the same idea as `--role` for skills, applied to `--tier`/`--model`:
+# a house convention ("review runs on the good model") survives a model
+# rename without touching every dispatch site. `read` (not glob stripping)
+# splits it: the second variable in a multi-var read absorbs the remainder
+# with surrounding whitespace trimmed, which handles stray extra spaces a
+# glob-based split would not.
+role_value_spec() {
+  local spec
+  read -r spec _ <<EOF
+$1
+EOF
+  printf '%s' "$spec"
+}
+
+role_value_model() {
+  local spec model
+  read -r spec model <<EOF
+$1
+EOF
+  printf '%s' "$model"
+}
+
+# Best-effort "what is this role for" hint for `cmd_roles`: the mapped
+# skill's own frontmatter `description:`, from wherever the skill actually
+# lives. `roles:` only ever stores a name, not a reason — `/foreman:init`
+# picks a role name because a skill's description justified it, but that
+# reasoning was never persisted anywhere `foreman roles` could show later.
+# Reading the description back out of the skill itself avoids a second,
+# driftable copy of the same text in `.foreman/config.yml`.
+skill_frontmatter_description() {
+  local file=$1 desc
+  [ -f "$file" ] || return 1
+  desc=$(awk '
+    NR == 1 && $0 !~ /^---[[:space:]]*$/ { exit }
+    NR == 1 { next }
+    /^---[[:space:]]*$/ { exit }
+    /^description:[[:space:]]*/ {
+      sub(/^description:[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")
+      print
+      exit
+    }
+  ' "$file")
+  case "$desc" in
+    \"*\") desc=${desc#\"}; desc=${desc%\"} ;;
+    \'*\') desc=${desc#\'}; desc=${desc%\'} ;;
+  esac
+  [ -n "$desc" ] || return 1
+  printf '%s' "$desc"
+}
+
+# Checked in the same project-then-global, native/claude/agents order
+# `/foreman:init` globs (see skill://foreman-boss, "Role config", and
+# omp://skills.md) — not every provider omp itself supports, just the ones a
+# hand-authored skill is actually likely to live under. First file found
+# wins; a role naming a skill this lookup cannot find (loaded through a
+# provider it does not know about, or not installed in this checkout at
+# all) is a silent miss, not a failure — `cmd_roles` still lists the mapping.
+skill_description() {
+  local name=$1 root candidate
+  root=$(project_root) || root=""
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    skill_frontmatter_description "$candidate" && return 0
+  done <<EOF
+${root:+$root/skills/$name/SKILL.md}
+${root:+$root/.omp/skills/$name/SKILL.md}
+${root:+$root/.claude/skills/$name/SKILL.md}
+${root:+$root/.agent/skills/$name/SKILL.md}
+${root:+$root/.agents/skills/$name/SKILL.md}
+$HOME/.omp/agent/skills/$name/SKILL.md
+$HOME/.claude/skills/$name/SKILL.md
+$HOME/.agent/skills/$name/SKILL.md
+$HOME/.agents/skills/$name/SKILL.md
 EOF
   return 1
 }
@@ -840,9 +980,9 @@ EOF
 cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
-  local layout=agent replace=0 role="" role_seen=0 skills_count=0
+  local layout=agent replace=0 role="" role_seen=0 skills_count=0 command_skill=""
   local -a skills=()
-  local tier=$FOREMAN_AGENT_TIER model="" tier_explicit=0
+  local tier=$FOREMAN_AGENT_TIER model="" tier_explicit=0 role_model=""
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
   case "$branch" in -*) usage_spawn ;; esac
@@ -888,16 +1028,35 @@ cmd_spawn() {
   [ -z "$role" ] || valid_skill_name "$role" \
     || die "invalid role name '$role'"
   if [ -n "$role" ]; then
-    skill=$(role_skill "$role") || die "role '$role' has no mapping in foreman's config
+    local role_value role_spec
+    role_value=$(role_skill "$role") || die "role '$role' has no mapping in foreman's config
   add it under roles: in $(foreman_config 2>/dev/null || printf '.foreman/config.yml at the repo root — run: foreman init')"
+    role_spec=$(role_value_spec "$role_value")
+    role_model=$(role_value_model "$role_value")
+    skill=$(role_value_skill "$role_spec")
     valid_skill_name "$skill" \
       || die "role '$role' maps to invalid skill name '$skill'"
-    if [ "$skills_count" -gt 0 ]; then
-      skills=("$skill" "${skills[@]}")
+    [ -z "$role_model" ] || valid_agent_model "$role_model" \
+      || die "role '$role' maps to invalid model selector '$role_model'"
+    # A command role is invoked, not read as reference material — it does not
+    # join the plain skills[] instruction list (see command_instruction).
+    if [ "$(role_value_type "$role_spec")" = command ]; then
+      command_skill=$skill
     else
-      skills[0]=$skill
+      if [ "$skills_count" -gt 0 ]; then
+        skills=("$skill" "${skills[@]}")
+      else
+        skills[0]=$skill
+      fi
+      skills_count=$((skills_count + 1))
     fi
-    skills_count=$((skills_count + 1))
+    # A role's model is a default, exactly like $FOREMAN_AGENT_TIER — an
+    # explicit --tier/--model at the call site is a more specific signal and
+    # must still win. Only fills in when neither flag was given.
+    if [ -n "$role_model" ] && [ "$tier_explicit" = 0 ] && [ -z "$model" ]; then
+      model=$role_model
+      tier=""
+    fi
   fi
   # Only an *explicit* `--tier` conflicts with `--model`. `$FOREMAN_AGENT_TIER` is
   # a default, and an explicit `--model` must override it — otherwise exporting
@@ -976,7 +1135,7 @@ cmd_spawn() {
     if [ "$taskfile" = "-" ]; then task=$(cat); else task=$(cat "$taskfile"); fi
   fi
 
-  if [ "$skills_count" -gt 0 ]; then
+  if [ "$skills_count" -gt 0 ] || [ -n "$command_skill" ]; then
     local skill_flag='--skill'; [ -z "$role" ] || skill_flag='--role or --skill'
     [ "$dispatch" = 1 ] \
       || die "$skill_flag cannot be combined with --no-dispatch"
@@ -986,6 +1145,12 @@ cmd_spawn() {
     for skill in "${skills[@]}"; do
       instructions=${instructions:+$instructions$'\n\n'}"$(skill_instruction "$skill")"
     done
+    # The command token goes last, directly ahead of the task text, so it
+    # reads as "/skill:<name> <task>" — the leading-form shape omp's own
+    # /skill:<name> parser recognizes even with earlier prose in the message.
+    if [ -n "$command_skill" ]; then
+      instructions=${instructions:+$instructions$'\n\n'}"$(command_instruction "$command_skill")"
+    fi
     task="$instructions"$'\n\n'"$task"
   fi
 
@@ -1020,7 +1185,11 @@ cmd_spawn() {
   if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
     resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
   fi
-  if [ "$skills_count" -gt 0 ]; then
+  if [ "$skills_count" -gt 0 ] && [ -n "$command_skill" ]; then
+    skills_csv="$command_skill,$(IFS=,; printf '%s' "${skills[*]}")"
+  elif [ -n "$command_skill" ]; then
+    skills_csv=$command_skill
+  elif [ "$skills_count" -gt 0 ]; then
     skills_csv=$(IFS=,; printf '%s' "${skills[*]}")
   else
     skills_csv=""

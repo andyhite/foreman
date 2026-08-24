@@ -359,7 +359,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
         .string()
         .optional()
         .describe(
-          "One role name resolved to a skill through foreman's own config (see: foreman roles). Its skill precedes skills in the worker prompt.",
+          "One role name resolved through foreman's own config (see: foreman roles). Its skill precedes skills in the worker prompt; the role may also default tier/model unless tier or model is set here.",
         ),
       tier: z
         .enum(["standard", "deep"])
@@ -658,7 +658,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_roles",
     label: "Foreman Roles",
     description:
-      "List the role names foreman_spawn's role parameter accepts and the skill each resolves to.",
+      "List the role names foreman_spawn's role parameter accepts, the skill each resolves to, any model each defaults to, and that skill's own description as a hint for what the role is for.",
     parameters: z.object({}),
     async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();

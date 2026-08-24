@@ -84,6 +84,32 @@ is 'renders the omp-native skill instruction' "$(skill_instruction implement)" \
   'Before doing any other work, read `skill://implement` and follow it.'
 assert_not 'skill names reject traversal' valid_skill_name '../implement'
 assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
+is 'renders the /skill: command invocation token' "$(command_instruction triage)" \
+  '/skill:triage'
+
+# `command:` prefixes a role's config value; a plain value stays type "skill"
+# for back-compat with every config committed before this distinction existed.
+is 'a plain value is type skill' "$(role_value_type code-review)" 'skill'
+is 'a command: value is type command' "$(role_value_type command:triage)" 'command'
+is 'a plain value is its own skill name' "$(role_value_skill code-review)" 'code-review'
+is 'a command: value strips the prefix' "$(role_value_skill command:triage)" 'triage'
+
+# An optional second, space-separated token pins a role to a model or omp
+# modelRole selector, the same idea as --model for one spawn kept with the
+# role's skill mapping. role_value_spec/role_value_model split it; the type/
+# skill helpers above run on the spec half, never the raw two-token value.
+is 'a value with no model has an empty model half' \
+  "$(role_value_model code-review)" ''
+is 'a value with no model keeps the whole thing as its spec' \
+  "$(role_value_spec code-review)" 'code-review'
+is 'a value with a model splits off the spec' \
+  "$(role_value_spec 'code-review @review')" 'code-review'
+is 'a value with a model splits off the model' \
+  "$(role_value_model 'code-review @review')" '@review'
+is 'a command: spec with a model still splits its spec half' \
+  "$(role_value_spec 'command:triage @task')" 'command:triage'
+is 'a command: spec with a model still splits its model half' \
+  "$(role_value_model 'command:triage @task')" '@task'
 
 # ── role config ──────────────────────────────────────────────────────────────
 #
@@ -91,6 +117,12 @@ assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
 # every dispatch site. Regression coverage for the parser (decoys, comments,
 # malformed lines) and the lookup (found, missing key, missing config).
 
+# HOME is sandboxed for this whole section: skill_description searches
+# ~/.agents/skills et al, and this suite must pass identically whether or
+# not the machine running it happens to have skills named "code-review" or
+# "triage" installed globally.
+role_home_orig=$HOME
+HOME="$sandbox/role-home"
 printf '\nrole config\n'
 role_cfg="$sandbox/foreman-roles.yml"
 cat >"$role_cfg" <<'YAML'
@@ -98,21 +130,131 @@ not-a-role: decoy
 roles:
   review: code-review
   implement: my-house-implement  # trailing comment
+  triage: command:triage
   broken
 YAML
 role_ent=$(role_entries "$role_cfg")
-is 'reads two well-formed roles, not the decoy or the keyless line' \
-  "$(printf '%s\n' "$role_ent" | wc -l | tr -d ' ')" '2'
+is 'reads three well-formed roles, not the decoy or the keyless line' \
+  "$(printf '%s\n' "$role_ent" | wc -l | tr -d ' ')" '3'
 assert 'reads the review mapping' [ "${role_ent#*review	code-review}" != "$role_ent" ]
 assert 'strips a trailing comment' [ "${role_ent#*# trailing}" = "$role_ent" ]
 assert 'ignores the top-level decoy key' [ "${role_ent#*not-a-role}" = "$role_ent" ]
+assert 'reads a command: role value verbatim, prefix and all' \
+  [ "${role_ent#*triage	command:triage}" != "$role_ent" ]
 
 foreman_config() { printf '%s' "$role_cfg"; }
 is 'role_skill resolves a configured role' "$(role_skill review)" 'code-review'
+is 'role_skill resolves a command role with its prefix intact' \
+  "$(role_skill triage)" 'command:triage'
+is 'role_value_type reads a plain role as skill' \
+  "$(role_value_type "$(role_skill review)")" 'skill'
+is 'role_value_type reads a command role as command' \
+  "$(role_value_type "$(role_skill triage)")" 'command'
+is 'role_value_skill strips the command role prefix' \
+  "$(role_value_skill "$(role_skill triage)")" 'triage'
 assert_not 'role_skill fails an unconfigured role' role_skill missing
 foreman_config() { return 1; }
 assert_not 'role_skill fails with no config at all' role_skill review
+foreman_config() { printf '%s' "$role_cfg"; }
+is 'cmd_roles tags a command role in its listing' \
+  "$(cmd_roles | sed -n '/triage/p')" '  triage               -> triage (command)'
+is 'cmd_roles leaves a plain role untagged' \
+  "$(cmd_roles | sed -n '/^  review/p')" '  review               -> code-review'
+
+# The model token is a separate display concern from the command: tag above;
+# a fresh one-entry config keeps it from disturbing the exact-string
+# assertions on $role_cfg's untouched rows.
+role_cfg_model="$sandbox/foreman-roles-model.yml"
+cat >"$role_cfg_model" <<'YAML'
+roles:
+  review: code-review @review
+YAML
+foreman_config() { printf '%s' "$role_cfg_model"; }
+is 'cmd_roles shows a role model in brackets' \
+  "$(cmd_roles | sed -n '/^  review/p')" '  review               -> code-review [@review]'
+foreman_config() { printf '%s' "$role_cfg"; }
 unset -f foreman_config
+HOME=$role_home_orig
+
+# ── skill description lookup ────────────────────────────────────────────────
+#
+# `roles:` only ever stores a name; `cmd_roles` reads the mapped skill's own
+# frontmatter `description:` back out to answer "what is this role for"
+# without a second, driftable copy of that text in the config. Coverage: the
+# frontmatter parser itself, project-before-global precedence, and the
+# integrated `cmd_roles` listing.
+
+printf '\nskill description lookup\n'
+desc_home="$sandbox/desc-home"
+mkdir -p "$sandbox/desc-project/skills/demo" \
+  "$sandbox/desc-project/skills/noquote" \
+  "$sandbox/desc-project/skills/empty" \
+  "$desc_home/.agents/skills/global-demo"
+
+cat >"$sandbox/desc-project/skills/demo/SKILL.md" <<'MD'
+---
+name: demo
+description: "Quoted project demo skill."
+---
+Body.
+MD
+cat >"$sandbox/desc-project/skills/noquote/SKILL.md" <<'MD'
+---
+name: noquote
+description: Unquoted description.
+---
+Body.
+MD
+cat >"$sandbox/desc-project/skills/empty/SKILL.md" <<'MD'
+---
+name: empty
+---
+Body, no description field at all.
+MD
+cat >"$desc_home/.agents/skills/global-demo/SKILL.md" <<'MD'
+---
+name: global-demo
+description: Global-only demo skill.
+---
+Body.
+MD
+
+is 'reads a quoted frontmatter description' \
+  "$(skill_frontmatter_description "$sandbox/desc-project/skills/demo/SKILL.md")" \
+  'Quoted project demo skill.'
+is 'reads an unquoted frontmatter description' \
+  "$(skill_frontmatter_description "$sandbox/desc-project/skills/noquote/SKILL.md")" \
+  'Unquoted description.'
+assert_not 'no description field is a miss, not empty output' \
+  skill_frontmatter_description "$sandbox/desc-project/skills/empty/SKILL.md"
+assert_not 'a missing file is a miss' \
+  skill_frontmatter_description "$sandbox/desc-project/skills/missing/SKILL.md"
+
+project_root() { printf '%s' "$sandbox/desc-project"; }
+HOME=$desc_home
+is 'skill_description finds a project-local skill' \
+  "$(skill_description demo)" 'Quoted project demo skill.'
+is 'skill_description falls back to a global skill' \
+  "$(skill_description global-demo)" 'Global-only demo skill.'
+assert_not 'skill_description misses a skill nowhere on disk' \
+  skill_description nowhere
+
+desc_role_cfg="$sandbox/foreman-roles-desc.yml"
+cat >"$desc_role_cfg" <<'YAML'
+roles:
+  mine: demo
+  elsewhere: global-demo
+  ghost: nowhere
+YAML
+foreman_config() { printf '%s' "$desc_role_cfg"; }
+is 'cmd_roles shows a project skill description under its mapping' \
+  "$(cmd_roles | sed -n '/^      Quoted/p')" '      Quoted project demo skill.'
+is 'cmd_roles shows a global skill description under its mapping' \
+  "$(cmd_roles | sed -n '/^      Global-only/p')" '      Global-only demo skill.'
+is 'cmd_roles adds no description line for a skill found nowhere' \
+  "$(cmd_roles | wc -l | tr -d ' ')" '6'
+unset -f foreman_config project_root
+HOME=$role_home_orig
 
 # ── project-local config resolution ─────────────────────────────────────────
 #
@@ -159,6 +301,10 @@ mkdir -p "$init_repo"
 assert 'init creates .foreman/config.yml' [ -f "$init_repo/.foreman/config.yml" ]
 assert 'the scaffold documents roles:' \
   bash -c 'grep -q "^# roles:" "$0"' "$init_repo/.foreman/config.yml"
+assert 'the scaffold documents the command: prefix' \
+  bash -c 'grep -q "command:" "$0"' "$init_repo/.foreman/config.yml"
+assert 'the scaffold documents an optional model token' \
+  bash -c 'grep -q "@review" "$0"' "$init_repo/.foreman/config.yml"
 
 printf 'roles:\n  custom: my-skill\n' >"$init_repo/.foreman/config.yml"
 ( cd "$init_repo" && unset FOREMAN_CONFIG && "$FOREMAN_BIN" init >/dev/null )
@@ -331,6 +477,70 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-z SKILLS)" 'code-review,implement,research'
   is 'the role itself is also recorded' \
     "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-z ROLE)" 'review'
+
+  # A command role wraps the task as a /skill:<name> invocation instead of a
+  # "read the skill" instruction, and its skill still lands in SKILLS meta
+  # for introspection even though it never joins the instruction list.
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  role_skill() { [ "$1" = triage ] && { printf 'command:triage'; return 0; }; return 1; }
+  ( cd "$spawn_repo" \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/triage --role triage --skill implement \
+         --task 'Decide what to do about the flaky test.' ) >/dev/null 2>&1
+  prompt=$(cat "$prompt_file" 2>/dev/null || true)
+  expected_instructions=$'Before doing any other work, read `skill://implement` and follow it.\n\n/skill:triage'
+  is 'a command role invokes /skill:<name> after any literal --skill instructions' \
+    "${prompt%%$'\n\n'Decide what to do about the flaky test.*}" "$expected_instructions"
+  is 'the command role skill is still recorded for introspection' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-triage SKILLS)" 'triage,implement'
+  unset -f role_skill
+
+  # A role's model token is a default like $FOREMAN_AGENT_TIER, not a flag:
+  # it must fill in TIER/MODEL when neither --tier nor --model was given, the
+  # same way FOREMAN_AGENT_TIER does.
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  role_skill() { [ "$1" = review ] && { printf 'code-review @review'; return 0; }; return 1; }
+  ( cd "$spawn_repo" \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/role-model --role review \
+         --task 'Prove a role model applies with no explicit --tier/--model.' ) >/dev/null 2>&1
+  is 'a role model is recorded with no tier' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-role-model TIER)" ''
+  is 'a role model is recorded as the model' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-role-model MODEL)" '@review'
+  started_cmd=$(cat "$start_args" 2>/dev/null || true)
+  assert 'the role model reached agent start' \
+    [ "${started_cmd#*--model @review}" != "$started_cmd" ]
+
+  # An explicit --tier/--model at the call site is a more specific signal
+  # than a role default and must still win.
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  ( cd "$spawn_repo" \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/role-model-override --role review --model opus \
+         --task 'Prove an explicit --model wins over a role model.' ) >/dev/null 2>&1
+  is 'an explicit --model overrides the role model' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-role-model-override MODEL)" 'opus'
+
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  ( cd "$spawn_repo" \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/role-model-tier --role review --tier deep \
+         --task 'Prove an explicit --tier wins over a role model.' ) >/dev/null 2>&1
+  is 'an explicit --tier overrides the role model' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-role-model-tier TIER)" 'deep'
+  is 'an explicit --tier leaves no role model behind' \
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-role-model-tier MODEL)" '@default'
+  unset -f role_skill
+
+  # A role model must not defeat the original --tier/--model conflict check
+  # when both flags really are given explicitly alongside a role.
+  role_skill() { [ "$1" = review ] && { printf 'code-review @review'; return 0; }; return 1; }
+  out=$( (cd "$spawn_repo" && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+      cmd_spawn feat/role-model-conflict --role review --tier deep --model opus --task x) 2>&1 )
+  assert 'an explicit --tier and --model with a role model still conflict' \
+    [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
+  unset -f role_skill
 
   ( cd "$spawn_repo" && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
       cmd_spawn feat/two-roles --role review --role review --task x ) >"$sandbox/foreman-two-roles" 2>&1
