@@ -1,9 +1,9 @@
 ---
-description: Dispatch one piece of work to a fleet worker on its own branch
+description: Dispatch one piece of work to a foreman worker on its own branch
 ---
 
-Dispatch the work below to a fleet worker. Read `skill://fleet-dispatch` and
-follow the brief contract it prints, then `skill://fleet-orchestrate` for the
+Dispatch the work below to a foreman worker. Read `skill://foreman-dispatch` and
+follow the brief contract it prints, then `skill://foreman-boss` for the
 CLI mechanics underneath it if you have not already.
 
 Work to dispatch:
@@ -19,7 +19,7 @@ whatever the worker cannot recover on its own:
 - **What "done" looks like.** Checkable, not a vibe.
 - **Scope.** The files or modules in play, then the explicit non-goals.
 - **The process, if there is one.** A configured house convention goes in
-  `role`; it resolves once through fleet's config, and there may be only one.
+  `role`; it resolves once through foreman's config, and there may be only one.
   Every literal procedure goes in `skills`; it may list any number of skill
   names. When both apply, use both: the role-mapped skill precedes literal
   skills in the prompt. Leave both unset for a plain task brief; the worker
@@ -29,11 +29,11 @@ whatever the worker cannot recover on its own:
 
 ## Dispatch
 
-Compose the brief using the shape `skill://fleet-dispatch` describes — what
+Compose the brief using the shape `skill://foreman-dispatch` describes — what
 this is, scope, done when — then spawn:
 
 ```
-fleet_spawn({
+foreman_spawn({
   branch: "<branch>",
   tier: "<standard|deep>",
   role: "<optional role name>",
@@ -43,5 +43,5 @@ fleet_spawn({
 ```
 
 Once it is out, keep working. Reports and questions arrive on their own,
-tagged `[fleet:<handle>]`, as the worker settles — no blocking wait required.
-Call `fleet_join({})` only when there is genuinely nothing else to do.
+tagged `[foreman:<handle>]`, as the worker settles — no blocking wait required.
+Call `foreman_join({})` only when there is genuinely nothing else to do.

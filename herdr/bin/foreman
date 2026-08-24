@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet — dispatch peer coding agents into herdr worktree workspaces.
+# foreman — dispatch peer coding agents into herdr worktree workspaces.
 #
 # The problem this solves: local subagents (`task` in omp) live inside one
 # harness process, so they share its context window, cwd, and lifetime. Work
@@ -11,55 +11,55 @@
 # address. This is that sequence, done once, correctly.
 #
 # The other half is addressing. Harness-local direct channels do not cross
-# process boundaries, so every message between orchestrator and worker rides
+# process boundaries, so every message between boss and worker rides
 # herdr's agent surface instead. `herdr agent prompt <name>` writes into a live
 # agent's input, which
-# means the channel is symmetric: a worker answers its orchestrator with the
-# same command the orchestrator used to reach it. What each side needs to know
-# about the other lives under $FLEET_STATE, keyed by herdr agent name, so
+# means the channel is symmetric: a worker answers its boss with the
+# same command the boss used to reach it. What each side needs to know
+# about the other lives under $FOREMAN_STATE, keyed by herdr agent name, so
 # nothing is written into the repo and no environment has to be injected.
 #
-# Vocabulary: the ORCHESTRATOR (default handle: the repo root's name) is
-# `fleet foreman`. A WORKER is an agent `fleet spawn` created. A HANDLE is a herdr
+# Vocabulary: the BOSS (default handle: the repo root's name) is
+# `foreman boss`. A WORKER is an agent `foreman spawn` created. A HANDLE is a herdr
 # agent name — `[a-z][a-z0-9_-]{0,31}` — and is the only identifier used here;
 # workspace and pane IDs stay inside this script.
 
 set -euo pipefail
 
-FLEET_STATE="${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fleet}"
+FOREMAN_STATE="${FOREMAN_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/foreman}"
 
 # Bound on getting a named, input-ready agent into a fresh worktree. `agent
 # start` blocks until herdr has detected the selected harness, so this covers
 # the agent's own boot; herdr caps its --timeout at 300000 and the value is
 # clamped to that.
-SPAWN_TIMEOUT_MS="${FLEET_SPAWN_TIMEOUT_MS:-120000}"
-# Bound on a single `fleet ask`/`fleet join`. Long by default: the whole point
+SPAWN_TIMEOUT_MS="${FOREMAN_SPAWN_TIMEOUT_MS:-120000}"
+# Bound on a single `foreman ask`/`foreman join`. Long by default: the whole point
 # of a worker is that it does something substantial.
-WAIT_TIMEOUT_MS="${FLEET_WAIT_TIMEOUT_MS:-3600000}"
-# A prompt that never lands is worse than a failed one: `fleet join` then waits
+WAIT_TIMEOUT_MS="${FOREMAN_WAIT_TIMEOUT_MS:-3600000}"
+# A prompt that never lands is worse than a failed one: `foreman join` then waits
 # on an agent that is idle for the wrong reason. herdr only fails a stalled
 # prompt under `agent prompt --wait`, and that waits for a *settled* state
 # rather than a started one, so the check has to live here — on the state the
 # agent actually reached after submission.
-DISPATCH_SETTLE_MS="${FLEET_DISPATCH_SETTLE_MS:-15000}"
+DISPATCH_SETTLE_MS="${FOREMAN_DISPATCH_SETTLE_MS:-15000}"
 # Commands the `full` layout runs beside the agent. Overridable because they
 # are a preference, not a mechanism.
-FLEET_EDITOR="${FLEET_EDITOR:-nvim}"
-FLEET_GIT_UI="${FLEET_GIT_UI:-lazygit}"
-# Model tier applied when `fleet spawn` names neither `--tier` nor `--model`.
+FOREMAN_EDITOR="${FOREMAN_EDITOR:-nvim}"
+FOREMAN_GIT_UI="${FOREMAN_GIT_UI:-lazygit}"
+# Model tier applied when `foreman spawn` names neither `--tier` nor `--model`.
 # Empty keeps today's behaviour: the harness's own default model. The agent
-# plugin's commands print an explicit `--tier`, so this is only a foreman-side
+# plugin's commands print an explicit `--tier`, so this is only a boss-side
 # default.
-FLEET_AGENT_TIER="${FLEET_AGENT_TIER:-}"
+FOREMAN_AGENT_TIER="${FOREMAN_AGENT_TIER:-}"
 # A new shell may still be loading zsh/mise/direnv when a layout command is
 # sent. Verify that the requested TUI actually became foreground and retry.
-LAYOUT_START_TIMEOUT_MS="${FLEET_LAYOUT_START_TIMEOUT_MS:-15000}"
-# How often `fleet join` re-reads every worker it is watching. One `agent list`
+LAYOUT_START_TIMEOUT_MS="${FOREMAN_LAYOUT_START_TIMEOUT_MS:-15000}"
+# How often `foreman join` re-reads every worker it is watching. One `agent list`
 # covers the whole wave per tick, so this is cheap; it only bounds how quickly
 # a settled worker or a filed question is noticed.
-JOIN_POLL_MS="${FLEET_JOIN_POLL_MS:-2000}"
+JOIN_POLL_MS="${FOREMAN_JOIN_POLL_MS:-2000}"
 
-die() { printf 'fleet: %s\n' "$*" >&2; exit 1; }
+die() { printf 'foreman: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"; }
@@ -110,7 +110,7 @@ remaining_ms() {
 }
 
 # Keeps the millisecond units of the constants above from leaking into every
-# call site. `sleep` takes a decimal on both platforms fleet supports.
+# call site. `sleep` takes a decimal on both platforms foreman supports.
 sleep_ms() { sleep "$(( $1 / 1000 )).$(printf '%03d' "$(( $1 % 1000 ))")"; }
 
 # ── Handles ──────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ slugify() {
   printf '%.32s' "$s" | sed -E -e 's/-+$//'
 }
 
-# This pane's own agent handle. Every fleet command a worker runs resolves its
+# This pane's own agent handle. Every foreman command a worker runs resolves its
 # identity this way, which is why no env var has to be injected at spawn.
 self_handle() {
   [ -n "${HERDR_PANE_ID:-}" ] || die "HERDR_PANE_ID is unset; not in a herdr pane"
@@ -174,7 +174,7 @@ valid_handle() {
 
 # An unused variant of $1, for displacing whoever currently holds it. Clearing
 # the holder's name instead would leave a live agent that nothing can address —
-# not `fleet send`, not `fleet read`, not even its own `fleet whoami` — so a
+# not `foreman send`, not `foreman read`, not even its own `foreman whoami` — so a
 # displaced agent is always moved to a name, never anonymized.
 free_handle() {
   local base=$1 n=1 candidate
@@ -188,9 +188,9 @@ free_handle() {
   return 1
 }
 
-# Repo identity for scoping. $FLEET_STATE is machine-global, so without this a
-# bare `fleet join` in one repo blocks on another repo's workers and
-# `fleet reap --all` deletes their worktrees. The git *common* dir is the key
+# Repo identity for scoping. $FOREMAN_STATE is machine-global, so without this a
+# bare `foreman join` in one repo blocks on another repo's workers and
+# `foreman reap --all` deletes their worktrees. The git *common* dir is the key
 # rather than the toplevel, so a worktree groups with the repo it came from.
 repo_key() {
   local dir=${1:-.} top common
@@ -202,14 +202,14 @@ repo_key() {
 }
 
 # Whether the enabled workspace-manager plugin declares this repo, or the
-# worktree fleet is about to create inside it. This is the deterministic
+# worktree foreman is about to create inside it. This is the deterministic
 # coexistence gate: a covered repo belongs to the plugin for as long as it is
-# enabled; every other repo belongs to fleet. Letting both race and inferring
+# enabled; every other repo belongs to foreman. Letting both race and inferring
 # ownership from who started the agent first has an inverse race where the
 # loser can still apply its layout afterwards.
 #
-# $FLEET_IGNORE_WORKSPACE_MANAGER=1 turns the gate off. Refusing outright left
-# a covered repo unusable by fleet without editing a *different* plugin's
+# $FOREMAN_IGNORE_WORKSPACE_MANAGER=1 turns the gate off. Refusing outright left
+# a covered repo unusable by foreman without editing a *different* plugin's
 # global config — a heavy price for a race the operator may know does not
 # apply, since a layout with no `agent:` pane never contends for one.
 WSM_PLUGIN_ID=herdr-plugin-workspace-manager
@@ -223,7 +223,7 @@ workspace_manager_enabled() {
 
 # The plugin's own config lookup, in its own order: $HERDR_WSM_CONFIG wins
 # outright, then the herdr-managed config dir, then its legacy path under
-# ~/.herdr. Checking only the middle one — which is what fleet used to do —
+# ~/.herdr. Checking only the middle one — which is what foreman used to do —
 # reports "not covered" for a repo the plugin is in fact managing.
 workspace_manager_config() {
   local dir f
@@ -268,7 +268,7 @@ workspace_manager_entries() {
 workspace_manager_covers() {
   local repo=$1 wtpath=$2 config repo_id kind value candidate
 
-  if [ "${FLEET_IGNORE_WORKSPACE_MANAGER:-}" = 1 ]; then return 1; fi
+  if [ "${FOREMAN_IGNORE_WORKSPACE_MANAGER:-}" = 1 ]; then return 1; fi
   workspace_manager_enabled || return 1
   config=$(workspace_manager_config) || return 1
   repo_id=$(repo_key "$repo")
@@ -293,7 +293,7 @@ workspace_manager_covers() {
         ;;
       path)
         # The plugin prefix-matches a worktree's *checkout* path, so the thing
-        # to compare is the path fleet is about to create — not the repo it
+        # to compare is the path foreman is about to create — not the repo it
         # branches from. It does not exist yet, so this is a string prefix
         # rather than a resolved one.
         value=${value%/}
@@ -308,18 +308,18 @@ EOF
 
 # ── State ────────────────────────────────────────────────────────────────────
 #
-# One directory per worker under $FLEET_STATE. `meta` is sourced, so values are
+# One directory per worker under $FOREMAN_STATE. `meta` is sourced, so values are
 # written through printf %q. `report.md` is the worker's deliverable: herdr can
 # only scrape a pane's scrollback, and omp runs on the alternate screen where
 # scrollback does not survive, so a file is the only reliable transport for a
 # report of any length.
 
-meta_dir() { printf '%s/%s' "$FLEET_STATE" "$1"; }
+meta_dir() { printf '%s/%s' "$FOREMAN_STATE" "$1"; }
 meta_file() { printf '%s/meta' "$(meta_dir "$1")"; }
 report_file() { printf '%s/report.md' "$(meta_dir "$1")"; }
 # Holds a counter bumped immediately before every dispatch, so a report can be
 # matched against the dispatch it answers. That is what keeps a follow-up
-# `fleet send` from having to truncate the report the worker already filed just
+# `foreman send` from having to truncate the report the worker already filed just
 # to avoid re-reading it.
 #
 # A counter rather than a timestamp: `test -nt` compares whole seconds under
@@ -327,19 +327,19 @@ report_file() { printf '%s/report.md' "$(meta_dir "$1")"; }
 # as its dispatch read as stale — which made a fast task look like a dispatch
 # that never landed.
 dispatch_file() { printf '%s/dispatched' "$(meta_dir "$1")"; }
-# The dispatch counter the current report answers, stamped by `fleet report`.
+# The dispatch counter the current report answers, stamped by `foreman report`.
 report_token_file() { printf '%s/report.token' "$(meta_dir "$1")"; }
-# The question a worker filed with `fleet reply`, and the counter pair that
-# says whether the orchestrator has seen it. `fleet join` polls these: a queued
-# `agent prompt` does not reach an orchestrator that is inside a blocking tool
+# The question a worker filed with `foreman reply`, and the counter pair that
+# says whether the boss has seen it. `foreman join` polls these: a queued
+# `agent prompt` does not reach a boss that is inside a blocking tool
 # call, so herdr's own interrupt cannot preempt a join. Watching a file can.
 question_file() { printf '%s/question.md' "$(meta_dir "$1")"; }
 question_seq_file() { printf '%s/question.seq' "$(meta_dir "$1")"; }
 question_seen_file() { printf '%s/question.seen' "$(meta_dir "$1")"; }
-# The dispatch counter `fleet join` last reported a settled result for. A bare
+# The dispatch counter `foreman join` last reported a settled result for. A bare
 # `join` skips a worker whose settle has already been collected, so re-joining
 # terminates instead of returning instantly, forever, on a worker that ended
-# its turn without ever running `fleet report`.
+# its turn without ever running `foreman report`.
 joined_token_file() { printf '%s/joined' "$(meta_dir "$1")"; }
 
 # Counters are compared as strings, never coerced to a number: "never
@@ -397,29 +397,29 @@ meta_get() {
     . "$f"; printf '%s' "${!2:-}" )
 }
 
-# ── Orchestrator identity ────────────────────────────────────────────────────
+# ── Boss identity ────────────────────────────────────────────────────
 
-# The handle `fleet foreman` claims when none is named. A constant default would
+# The handle `foreman boss` claims when none is named. A constant default would
 # let exactly one repo on the machine ever hold it, since herdr agent names are
 # unique across the whole herdr session; the repo root's name gives every
 # checkout a default of its own, and still collides — correctly — with a second
-# orchestrator in the same one. $FLEET_FOREMAN_HANDLE overrides.
-default_foreman() {
-  if [ -n "${FLEET_FOREMAN_HANDLE:-}" ]; then
-    printf '%s' "$FLEET_FOREMAN_HANDLE"; return 0
+# boss in the same one. $FOREMAN_BOSS_HANDLE overrides.
+default_boss() {
+  if [ -n "${FOREMAN_BOSS_HANDLE:-}" ]; then
+    printf '%s' "$FOREMAN_BOSS_HANDLE"; return 0
   fi
   local top
   top=$(git rev-parse --show-toplevel 2>/dev/null) || true
-  if [ -n "$top" ]; then slugify "$(basename "$top")"; else printf 'foreman'; fi
+  if [ -n "$top" ]; then slugify "$(basename "$top")"; else printf 'boss'; fi
 }
 
-cmd_foreman() {
+cmd_boss() {
   require_herdr
   local steal=0 name=""
   while [ $# -gt 0 ]; do
     case $1 in
       --steal) steal=1; shift ;;
-      -*) die "usage: fleet foreman [name] [--steal]" ;;
+      -*) die "usage: foreman boss [name] [--steal]" ;;
       *) name=$1; shift ;;
     esac
   done
@@ -429,7 +429,7 @@ cmd_foreman() {
   # handle keeps it.
   if [ -z "$name" ]; then
     if [ -n "$current" ]; then printf '%s\n' "$current"; return 0; fi
-    name=$(default_foreman)
+    name=$(default_boss)
   fi
   if [ "$current" = "$name" ]; then
     printf '%s\n' "$name"; return 0
@@ -438,48 +438,48 @@ cmd_foreman() {
 
   # A name is unique among live agents and follows the pane occupant, so a
   # handle held elsewhere is a live collision, not a stale record. Two repos
-  # each wanting a fleet is the ordinary case, so say how to get out of it
+  # each wanting a foreman is the ordinary case, so say how to get out of it
   # instead of just refusing.
   local holder; holder=$(agent_field "$name" pane_id)
   if [ -n "$holder" ]; then
     [ "$steal" = 1 ] || die "handle '$name' is held by pane $holder
-  use another handle:  fleet foreman <name>
-  or take it over:     fleet foreman $name --steal   (moves $holder aside)"
+  use another handle:  foreman boss <name>
+  or take it over:     foreman boss $name --steal   (moves $holder aside)"
     local moved
     moved=$(free_handle "$name") \
       || die "cannot free '$name': every variant of it is already in use"
     h agent rename "$holder" "$moved" >/dev/null
-    note "fleet: moved the previous '$name' (pane $holder) to '$moved'"
-    rebind_foreman "$name" "$moved"
+    note "foreman: moved the previous '$name' (pane $holder) to '$moved'"
+    rebind_boss "$name" "$moved"
   fi
   h agent rename "$HERDR_PANE_ID" "$name" >/dev/null
-  # A pane can already be named without ever having been an orchestrator —
+  # A pane can already be named without ever having been a boss —
   # workspace-manager's layout starts agents as `omp-<workspace>` — so renaming
   # is a normal path, not an error. What is not acceptable is leaving workers
   # pointing at a handle nobody answers to any more: the live agent name is the
   # source of truth, so their records follow it.
-  [ -z "$current" ] || rebind_foreman "$current" "$name"
+  [ -z "$current" ] || rebind_boss "$current" "$name"
   printf '%s\n' "$name"
 }
 
 # Repoint every worker that reports to $1 at $2. Deliberately unscoped by repo:
 # a handle is unique across the machine, so every record naming it means the
 # same agent, wherever its worktree lives.
-rebind_foreman() {
+rebind_boss() {
   local from=$1 to=$2 handle n=0
   [ -n "$from" ] && [ "$from" != "$to" ] || return 0
   for handle in $(known_workers); do
-    [ "$(meta_get "$handle" FOREMAN)" = "$from" ] || continue
-    meta_update "$handle" "FOREMAN=$to"
+    [ "$(meta_get "$handle" BOSS)" = "$from" ] || continue
+    meta_update "$handle" "BOSS=$to"
     n=$((n + 1))
   done
-  [ "$n" = 0 ] || note "fleet: repointed $n worker(s) from '$from' to '$to'"
+  [ "$n" = 0 ] || note "foreman: repointed $n worker(s) from '$from' to '$to'"
 }
 
 cmd_whoami() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'foreman boss' first"
   printf '%s\n' "$me"
 }
 
@@ -514,7 +514,7 @@ cmd_doctor() {
   if [ -n "${HERDR_PANE_ID:-}" ]; then
     printf '%-6s %s\n' 'ok' 'HERDR_PANE_ID is set'
   else
-    printf '%-6s %s\n' 'warn' 'HERDR_PANE_ID is unset (fleet report/reply/foreman need a pane; run: fleet foreman)'
+    printf '%-6s %s\n' 'warn' 'HERDR_PANE_ID is unset (foreman report/reply/boss need a pane; run: foreman boss)'
   fi
 
   # 5. Only if checks 1-4 all passed: self_handle non-empty
@@ -523,24 +523,24 @@ cmd_doctor() {
     if [ -n "$me" ]; then
       printf '%-6s %s\n' 'ok' "agent handle: $me"
     else
-      printf '%-6s %s\n' 'warn' 'this pane has no agent handle (run: fleet foreman)'
+      printf '%-6s %s\n' 'warn' 'this pane has no agent handle (run: foreman boss)'
     fi
   fi
 
-  # 6. $FLEET_STATE writable
+  # 6. $FOREMAN_STATE writable
   local probe_file
-  if mkdir -p "$FLEET_STATE" 2>/dev/null && probe_file=$(mktemp "$FLEET_STATE/.probe.XXXXXX" 2>/dev/null) && rm -f "$probe_file" 2>/dev/null; then
-    printf '%-6s %s\n' 'ok' "$FLEET_STATE is writable"
+  if mkdir -p "$FOREMAN_STATE" 2>/dev/null && probe_file=$(mktemp "$FOREMAN_STATE/.probe.XXXXXX" 2>/dev/null) && rm -f "$probe_file" 2>/dev/null; then
+    printf '%-6s %s\n' 'ok' "$FOREMAN_STATE is writable"
   else
-    printf '%-6s %s\n' 'fail' "$FLEET_STATE is not writable"
+    printf '%-6s %s\n' 'fail' "$FOREMAN_STATE is not writable"
     failed=1
   fi
 
-  # 7. command -v fleet resolves
-  if command -v fleet >/dev/null 2>&1; then
-    printf '%-6s %s\n' 'ok' "fleet at $(command -v fleet)"
+  # 7. command -v foreman resolves
+  if command -v foreman >/dev/null 2>&1; then
+    printf '%-6s %s\n' 'ok' "foreman at $(command -v foreman)"
   else
-    printf '%-6s %s\n' 'warn' 'fleet not on PATH (run fleet-link or add ~/.local/bin to PATH)'
+    printf '%-6s %s\n' 'warn' 'foreman not on PATH (run foreman-link or add ~/.local/bin to PATH)'
   fi
 
   # 8. Inside a git repo (repo_key non-empty)
@@ -553,29 +553,29 @@ cmd_doctor() {
   fi
 
   # 9. --role config, if any (optional: --role/--skill work without one)
-  local rc; rc=$(fleet_config 2>/dev/null) || true
+  local rc; rc=$(foreman_config 2>/dev/null) || true
   if [ -n "$rc" ]; then
     printf '%-6s %s\n' 'ok' "role config at $rc"
   else
-    printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — see: fleet roles)'
+    printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — see: foreman roles)'
   fi
 
   [ "$failed" = 0 ]
 }
 
 # Resolve who to report to. A worker learns this from its own meta file, which
-# `fleet spawn` wrote before the worker existed.
-foreman_handle() {
+# `foreman spawn` wrote before the worker existed.
+boss_handle() {
   local me; me=$(self_handle)
   local b=""
-  [ -n "$me" ] && b=$(meta_get "$me" FOREMAN)
-  printf '%s' "${b:-$(default_foreman)}"
+  [ -n "$me" ] && b=$(meta_get "$me" BOSS)
+  printf '%s' "${b:-$(default_boss)}"
 }
 
 # ── Skills ───────────────────────────────────────────────────────────────────
 #
 # Workers are always omp, and `skill://<name>` is omp's own first-class skill
-# activation path — its system prompt instructs reading it directly. Fleet's
+# activation path — its system prompt instructs reading it directly. Foreman's
 # only remaining job is validating the name before it goes into a dispatched
 # prompt.
 
@@ -627,10 +627,10 @@ worker_agent_args() {
   esac
 }
 
-# Resolve through the PATH symlink herdr installs, so fleet_version and
+# Resolve through the PATH symlink herdr installs, so foreman_version and
 # cmd_dashboard can find files that live beside this script regardless of the
 # caller's cwd.
-fleet_script_dir() {
+foreman_script_dir() {
   local path=${BASH_SOURCE[0]} dir target
   while [ -L "$path" ]; do
     dir=$(cd -P "$(dirname "$path")" && pwd)
@@ -640,22 +640,22 @@ fleet_script_dir() {
   cd -P "$(dirname "$path")" && pwd
 }
 
-fleet_version() {
-  local toml; toml="$(fleet_script_dir)/../herdr-plugin.toml"
+foreman_version() {
+  local toml; toml="$(foreman_script_dir)/../herdr-plugin.toml"
   [ -f "$toml" ] || { printf 'unknown'; return 0; }
   awk '/^[[:space:]]*\[/ { exit } /^[[:space:]]*version[[:space:]]*=/ { gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit }' "$toml"
 }
 
-cmd_version() { printf 'fleet %s\n' "$(fleet_version)"; }
+cmd_version() { printf 'foreman %s\n' "$(foreman_version)"; }
 
-# Introspection for --role: where fleet's config was found (if at all) and
+# Introspection for --role: where foreman's config was found (if at all) and
 # what it maps. Exists because a missing or misspelled role only surfaces at
 # spawn time otherwise, and the error there cannot show the whole mapping.
 cmd_roles() {
   local config
-  if ! config=$(fleet_config); then
-    printf 'no fleet config found (checked $FLEET_CONFIG, herdr plugin config-dir %s, and ~/.herdr/plugins/%s/config.yml)\n' \
-      "$FLEET_PLUGIN_ID" "$FLEET_PLUGIN_ID"
+  if ! config=$(foreman_config); then
+    printf 'no foreman config found (checked $FOREMAN_CONFIG, herdr plugin config-dir %s, and ~/.herdr/plugins/%s/config.yml)\n' \
+      "$FOREMAN_PLUGIN_ID" "$FOREMAN_PLUGIN_ID"
     return 0
   fi
   local entries; entries=$(role_entries "$config")
@@ -675,30 +675,30 @@ skill_instruction() {
 
 # ── Role → skill mapping ─────────────────────────────────────────────────────
 #
-# fleet has no opinion on how a worker does its job (see skill://fleet-dispatch)
+# foreman has no opinion on how a worker does its job (see skill://foreman-dispatch)
 # — but once a house convention has a name ("review", "implement"), spelling
 # out its exact skill at every dispatch site invites drift the moment that
-# skill is renamed. `--role` is that convention, resolved through fleet's own
+# skill is renamed. `--role` is that convention, resolved through foreman's own
 # config rather than baked into the CLI, so repointing "review" at a different
 # skill touches one line in one file instead of every dispatch site.
 
-FLEET_PLUGIN_ID=andyhite.fleet
+FOREMAN_PLUGIN_ID=andyhite.foreman
 
-# Mirrors workspace_manager_config(): $FLEET_CONFIG wins outright, then the
+# Mirrors workspace_manager_config(): $FOREMAN_CONFIG wins outright, then the
 # herdr-managed config dir, then the legacy path under ~/.herdr.
-fleet_config() {
+foreman_config() {
   local dir f
-  if [ -n "${FLEET_CONFIG:-}" ]; then
-    [ -f "$FLEET_CONFIG" ] || return 1
-    printf '%s' "$FLEET_CONFIG"; return 0
+  if [ -n "${FOREMAN_CONFIG:-}" ]; then
+    [ -f "$FOREMAN_CONFIG" ] || return 1
+    printf '%s' "$FOREMAN_CONFIG"; return 0
   fi
-  dir=$(herdr plugin config-dir "$FLEET_PLUGIN_ID" 2>/dev/null || true)
+  dir=$(herdr plugin config-dir "$FOREMAN_PLUGIN_ID" 2>/dev/null || true)
   if [ -n "$dir" ]; then
     for f in "$dir/config.yml" "$dir/config.yaml"; do
       [ -f "$f" ] && { printf '%s' "$f"; return 0; }
     done
   fi
-  f="$HOME/.herdr/plugins/$FLEET_PLUGIN_ID/config.yml"
+  f="$HOME/.herdr/plugins/$FOREMAN_PLUGIN_ID/config.yml"
   [ -f "$f" ] && { printf '%s' "$f"; return 0; }
   return 1
 }
@@ -727,7 +727,7 @@ role_entries() {
 
 role_skill() {
   local role=$1 config key value
-  config=$(fleet_config) || return 1
+  config=$(foreman_config) || return 1
   while IFS=$'\t' read -r key value; do
     [ "$key" = "$role" ] || continue
     printf '%s' "$value"
@@ -744,26 +744,26 @@ EOF
 # sessions with no orchestration instructions of their own, so the contract has
 # to travel with the work.
 protocol_block() {
-  local handle=$1 foreman=$2 branch=$3 dir=$4
+  local handle=$1 boss=$2 branch=$3 dir=$4
   cat <<EOF
 
 ---
-## Fleet protocol
+## Foreman protocol
 
-You are fleet worker \`$handle\`, working in \`$dir\` on branch \`$branch\`.
-Your orchestrator is the agent \`$foreman\`.
+You are foreman worker \`$handle\`, working in \`$dir\` on branch \`$branch\`.
+Your boss is the agent \`$boss\`.
 
 - Stay inside this worktree. Do not touch other checkouts of this repo.
 - Commit your work on this branch when it is done. Do not push and do not open
   a PR unless the task above says to.
-- When finished, write your report last: the \`fleet_report\` tool, or
-  \`fleet report -f <file>\` / \`fleet report "<summary>"\` from a shell. The
-  orchestrator reads that file; terminal output does not reach it.
-- If you are blocked or need a decision, use the \`fleet_reply\` tool, or
-  \`fleet reply "<question>"\`. It files the question and interrupts the
-  orchestrator, so a \`fleet join\` it is sitting in returns immediately. Use it
+- When finished, write your report last: the \`foreman_report\` tool, or
+  \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell. The
+  boss reads that file; terminal output does not reach it.
+- If you are blocked or need a decision, use the \`foreman_reply\` tool, or
+  \`foreman reply "<question>"\`. It files the question and interrupts the
+  boss, so a \`foreman join\` it is sitting in returns immediately. Use it
   for questions, not progress updates.
-- Peers: \`fleet ls\` lists the other workers; \`fleet dm <handle> "<text>"\`
+- Peers: \`foreman ls\` lists the other workers; \`foreman dm <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
   updates.
 - Delegate substantial independent slices of your task to your own subagents
@@ -773,19 +773,19 @@ EOF
 
 usage_spawn() {
   cat >&2 <<'EOF'
-usage: fleet spawn <branch> [options]
+usage: foreman spawn <branch> [options]
 
   --base <ref>        branch point (default: the repo's origin HEAD)
   --repo <path>       repo to branch from (default: current repo)
   --path <path>       worktree location (default: sibling <repo>-<slug>)
   --handle <name>     agent handle (default: derived from the branch)
   --tier <tier>       worker model tier: standard | deep
-                      (default: $FLEET_AGENT_TIER, or omp's own default)
+                      (default: $FOREMAN_AGENT_TIER, or omp's own default)
   --model <selector>  pass --model <selector> to omp (escape hatch;
                       mutually exclusive with --tier)
   --skill <name>      load this skill before the dispatched task; repeat for
                       each procedure the worker must follow
-  --role <name>       load the skill fleet's config maps this role to; only
+  --role <name>       load the skill foreman's config maps this role to; only
                       one role per spawn
   --layout <shape>    agent (default) | full — see below
   --task <text>       task to dispatch once the agent is ready
@@ -801,8 +801,8 @@ tiers:
 layouts:
   agent   one pane, running the selected agent. All a worker needs.
   full    the agent with an editor beside it, plus shell and review tabs, for a
-          worktree you intend to sit in yourself. $FLEET_EDITOR (nvim) and
-          $FLEET_GIT_UI (lazygit) choose the commands.
+          worktree you intend to sit in yourself. $FOREMAN_EDITOR (nvim) and
+          $FOREMAN_GIT_UI (lazygit) choose the commands.
 EOF
   exit 2
 }
@@ -812,7 +812,7 @@ cmd_spawn() {
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
   local layout=agent replace=0 role="" role_seen=0 skills_count=0
   local -a skills=()
-  local tier=$FLEET_AGENT_TIER model="" tier_explicit=0
+  local tier=$FOREMAN_AGENT_TIER model="" tier_explicit=0
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
   case "$branch" in -*) usage_spawn ;; esac
@@ -858,8 +858,8 @@ cmd_spawn() {
   [ -z "$role" ] || valid_skill_name "$role" \
     || die "invalid role name '$role'"
   if [ -n "$role" ]; then
-    skill=$(role_skill "$role") || die "role '$role' has no mapping in fleet's config
-  add it under roles: in $(fleet_config 2>/dev/null || printf '<config dir>/config.yml — see: herdr plugin config-dir %s' "$FLEET_PLUGIN_ID")"
+    skill=$(role_skill "$role") || die "role '$role' has no mapping in foreman's config
+  add it under roles: in $(foreman_config 2>/dev/null || printf '<config dir>/config.yml — see: herdr plugin config-dir %s' "$FOREMAN_PLUGIN_ID")"
     valid_skill_name "$skill" \
       || die "role '$role' maps to invalid skill name '$skill'"
     if [ "$skills_count" -gt 0 ]; then
@@ -869,7 +869,7 @@ cmd_spawn() {
     fi
     skills_count=$((skills_count + 1))
   fi
-  # Only an *explicit* `--tier` conflicts with `--model`. `$FLEET_AGENT_TIER` is
+  # Only an *explicit* `--tier` conflicts with `--model`. `$FOREMAN_AGENT_TIER` is
   # a default, and an explicit `--model` must override it — otherwise exporting
   # the documented env default makes the escape hatch unusable.
   if [ "$tier_explicit" = 1 ] && [ -n "$model" ]; then
@@ -883,7 +883,7 @@ cmd_spawn() {
     || die "model selector '$model' is not a safe --model value"
   # Validated before anything is created, like the handle validity check
   # below: a bad --tier should die here, not after the worktree, agent, and
-  # meta record already exist and need `fleet reap` to clean up.
+  # meta record already exist and need `foreman reap` to clean up.
   [ -z "$tier" ] || worker_agent_args "$tier" "" >/dev/null
 
   repo=${repo:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
@@ -917,27 +917,27 @@ cmd_spawn() {
   # configured by checkout path as well as by repo.
   if workspace_manager_covers "$repo" "$wtpath"; then
     die "workspace-manager is enabled and configured for $repo
-  fleet will not race it or depend on it. Remove the entry from
+  foreman will not race it or depend on it. Remove the entry from
   $(workspace_manager_config)
   or disable the plugin — or, if you know its layout starts no agent here,
-  re-run with FLEET_IGNORE_WORKSPACE_MANAGER=1"
+  re-run with FOREMAN_IGNORE_WORKSPACE_MANAGER=1"
   fi
 
   # A record with no live agent is a worker that died, not a free handle.
   # Overwriting it — which an `agent_exists` check alone allows — repoints
   # BRANCH/DIR/WORKSPACE at the new worktree and strands the old one where no
-  # fleet command can find it. Branches collapse onto the same handle easily
+  # foreman command can find it. Branches collapse onto the same handle easily
   # (`feat/x`, `feat_x` and `feat-x` all slugify to `feat-x`), so this is
   # reachable by accident rather than only by reuse.
   if [ -d "$(meta_dir "$handle")" ]; then
     if [ "$replace" != 1 ]; then
-      die "handle '$handle' still has a fleet record for branch '$(meta_get "$handle" BRANCH)'
+      die "handle '$handle' still has a foreman record for branch '$(meta_get "$handle" BRANCH)'
   its worktree: $(meta_get "$handle" DIR)
-  reuse it:     fleet spawn $branch --replace
-  or clear it:  fleet reap $handle            (removes the worktree)
-                fleet reap $handle --forget   (leaves the worktree alone)"
+  reuse it:     foreman spawn $branch --replace
+  or clear it:  foreman reap $handle            (removes the worktree)
+                foreman reap $handle --forget   (leaves the worktree alone)"
     fi
-    note "fleet: replacing the dead worker '$handle' ($(meta_get "$handle" BRANCH))"
+    note "foreman: replacing the dead worker '$handle' ($(meta_get "$handle" BRANCH))"
     reap_one "$handle" 0 0 1 \
       || die "could not clear the old '$handle'; reap it yourself, then retry"
   fi
@@ -959,14 +959,14 @@ cmd_spawn() {
     task="$instructions"$'\n\n'"$task"
   fi
 
-  # The spawner is the foreman, by definition. foreman_handle() would be wrong here:
-  # it reads the caller's own FOREMAN record, and only workers have one, so an
-  # orchestrator that claimed a custom handle silently stamped the default
-  # `foreman` into every worker and their replies went to whoever held it.
-  local foreman; foreman=$(self_handle)
-  [ -n "$foreman" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
+  # The spawner is the boss, by definition. boss_handle() would be wrong here:
+  # it reads the caller's own BOSS record, and only workers have one, so an
+  # boss that claimed a custom handle silently stamped the default
+  # `boss` into every worker and their replies went to whoever held it.
+  local boss; boss=$(self_handle)
+  [ -n "$boss" ] || die "this pane has no herdr agent name; run 'foreman boss' first"
 
-  note "fleet: creating $branch at $wtpath (from $base)"
+  note "foreman: creating $branch at $wtpath (from $base)"
   local created ws tab pane
   created=$(h worktree create --cwd "$repo" --branch "$branch" --base "$base" \
     --path "$wtpath" --no-focus)
@@ -979,13 +979,13 @@ cmd_spawn() {
 
   # Recorded before the agent exists. Every value here is already known, and a
   # spawn that dies further down — no agent could be started, herdr refused a
-  # rename — must still leave something `fleet ls` shows and `fleet reap` can
-  # remove. Otherwise the failure orphans a worktree no fleet command can see.
+  # rename — must still leave something `foreman ls` shows and `foreman reap` can
+  # remove. Otherwise the failure orphans a worktree no foreman command can see.
   # Tier→model mapping was already validated above; this call only builds the
   # argv plan and the MODEL value recorded beside TIER.
   local agent_args resolved_model=$model arg skills_csv
   agent_args=$(worker_agent_args "$tier" "$model")
-  # When the foreman passed --tier, record the mapped selector so `meta_get MODEL`
+  # When the boss passed --tier, record the mapped selector so `meta_get MODEL`
   # answers the same question for both flags.
   if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
     resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
@@ -995,7 +995,7 @@ cmd_spawn() {
   else
     skills_csv=""
   fi
-  meta_set "$handle" "FOREMAN=$foreman" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
+  meta_set "$handle" "BOSS=$boss" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
     "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "SKILLS=$skills_csv" "ROLE=$role" \
     "TIER=$tier" "MODEL=$resolved_model"
   : >"$(report_file "$handle")"
@@ -1019,7 +1019,7 @@ EOF
   printf '%s\n' "$handle"
 
   if [ "$dispatch" = 1 ] && [ -n "$task" ]; then
-    dispatch_to "$handle" "$task$(protocol_block "$handle" "$foreman" "$branch" "$wtpath")"
+    dispatch_to "$handle" "$task$(protocol_block "$handle" "$boss" "$branch" "$wtpath")"
   fi
 }
 
@@ -1029,7 +1029,7 @@ EOF
 # to discover: `agent start` launches the selected harness there, takes the name
 # up front, and returns only once herdr has detected it and considers it ready
 # for input. That one call replaces a poll for `interactive_ready` followed by
-# a rename, and it means fleet no longer needs a layout plugin to start an agent.
+# a rename, and it means foreman no longer needs a layout plugin to start an agent.
 #
 # `agent start` is a loop because it requires the pane to be *at its interactive
 # shell prompt*, and a brand-new worktree pane is not — zsh, mise and direnv
@@ -1075,19 +1075,19 @@ start_worker_agent() {
     found=$(workspace_ready_agent "$ws")
     if [ -n "$found" ]; then
       if [ "$(agent_field "$handle" pane_id)" = "$found" ]; then
-        note "fleet: the started agent became ready in $found"
+        note "foreman: the started agent became ready in $found"
         return 0
       fi
       die "workspace $ws already contains an unexpected agent in $found
-  fleet will not adopt or rename it
-  clean up the worktree with: fleet reap $handle --force"
+  foreman will not adopt or rename it
+  clean up the worktree with: foreman reap $handle --force"
     fi
     sleep 0.5
   done
 
   die "could not get an agent into workspace $ws within $((SPAWN_TIMEOUT_MS / 1000))s
   agent start said: $err
-  clean up the worktree with: fleet reap $handle --force"
+  clean up the worktree with: foreman reap $handle --force"
 }
 
 # The pane id of an input-ready agent in workspace $1, if there is one.
@@ -1099,14 +1099,14 @@ workspace_ready_agent() {
 }
 
 # Arrange the worktree's workspace from herdr's own primitives, so that
-# removing a layout plugin costs a fleet worktree nothing.
+# removing a layout plugin costs a foreman worktree nothing.
 #
 # `agent` is the default and is the whole job for a worker: the single pane
 # `worktree create` returned, running the selected harness. `full` is for a
 # worktree you intend to sit in yourself — editor beside the agent, a shell,
 # and a git UI — and is the shape worth pairing with `--no-dispatch`.
 #
-# Panes and tabs are created unfocused: spawning is something an orchestrator
+# Panes and tabs are created unfocused: spawning is something a boss
 # does in the background, and it must not yank the view out from under whoever
 # is reading something else.
 apply_layout() {
@@ -1117,7 +1117,7 @@ apply_layout() {
   # failing a spawn over. Aborting here would skip the dispatch and never even
   # print the handle of the worker that is already up and running.
   if ! ( build_layout "$layout" "$ws" "$tab" "$root" "$dir" ); then
-    note "fleet: the '$layout' layout did not finish; the agent pane is up regardless"
+    note "foreman: the '$layout' layout did not finish; the agent pane is up regardless"
   fi
   return 0
 }
@@ -1133,7 +1133,7 @@ build_layout() {
     --no-focus | jq -r '.result.pane.pane_id // empty')
   [ -n "$editor" ] || die "pane split returned no pane id"
   h pane rename "$editor" editor >/dev/null
-  run_pane_command "$editor" "$FLEET_EDITOR"
+  run_pane_command "$editor" "$FOREMAN_EDITOR"
 
   created=$(h tab create --workspace "$ws" --cwd "$dir" --label shell --no-focus)
   shell=$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')
@@ -1144,7 +1144,7 @@ build_layout() {
   review=$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')
   [ -n "$review" ] || die "tab create returned no review pane id"
   h pane rename "$review" review >/dev/null
-  run_pane_command "$review" "$FLEET_GIT_UI"
+  run_pane_command "$review" "$FOREMAN_GIT_UI"
 }
 
 # Start a persistent TUI only after the new pane proves its shell can accept
@@ -1163,7 +1163,7 @@ run_pane_command() {
   executable=$(basename "$executable")
   wait_shell_ready "$pane"
   if ! pane_has_command "$pane" "$executable"; then
-    note "fleet: '$executable' is unavailable in $pane; leaving it as a shell"
+    note "foreman: '$executable' is unavailable in $pane; leaving it as a shell"
     return 0
   fi
   h pane run "$pane" "$command" >/dev/null
@@ -1179,16 +1179,16 @@ run_pane_command() {
 pane_has_command() {
   local pane=$1 executable=$2 id=${1//[:]/_} quoted result line
   printf -v quoted '%q' "$executable"
-  local available="__fleet_command_available_${id}__"
-  local missing="__fleet_command_missing_${id}__"
+  local available="__foreman_command_available_${id}__"
+  local missing="__foreman_command_missing_${id}__"
   # The full marker is not present in this input line: `%s` is filled only
   # during execution. wait-output therefore cannot mistake terminal echo for
   # the command's result.
   h pane run "$pane" \
-    "if command -v $quoted >/dev/null 2>&1; then state=available; else state=missing; fi; printf '__fleet_command_%s_${id}__\\n' \"\$state\"" \
+    "if command -v $quoted >/dev/null 2>&1; then state=available; else state=missing; fi; printf '__foreman_command_%s_${id}__\\n' \"\$state\"" \
     >/dev/null
   result=$(herdr pane wait-output "$pane" \
-    --regex "__fleet_command_(available|missing)_${id}__" \
+    --regex "__foreman_command_(available|missing)_${id}__" \
     --source recent-unwrapped --lines 20 --timeout "$LAYOUT_START_TIMEOUT_MS" 2>&1) \
     || die "pane $pane did not answer the command-availability check: $result"
   line=$(printf '%s' "$result" | jq -r '.result.matched_line // empty')
@@ -1198,12 +1198,12 @@ pane_has_command() {
 
 wait_shell_ready() {
   local pane=$1 id=${1//[:]/_}
-  local marker="__fleet_shell_ready_${id}__"
+  local marker="__foreman_shell_ready_${id}__"
   local dl; dl=$(deadline_ms "$LAYOUT_START_TIMEOUT_MS")
   while ! expired "$dl"; do
     # The full marker is assembled by printf, so terminal echo cannot satisfy
     # the wait. Repetition is harmless; marker output is the acknowledgement.
-    h pane run "$pane" "printf '__fleet_shell_%s_${id}__\\n' ready" >/dev/null
+    h pane run "$pane" "printf '__foreman_shell_%s_${id}__\\n' ready" >/dev/null
     if herdr pane wait-output "$pane" --match "$marker" \
          --source recent-unwrapped --lines 20 --timeout 1000 >/dev/null 2>&1; then
       return 0
@@ -1241,16 +1241,16 @@ report_is_fresh() {
 # Submit, then confirm the agent actually picked it up. herdr only fails a
 # stalled prompt under `agent prompt --wait`, and that waits for a *settled*
 # state — the opposite of what is wanted here. "Accepted" is not "started":
-# without this loop a following `fleet join` can match the agent's
+# without this loop a following `foreman join` can match the agent's
 # pre-dispatch idle state and return instantly.
 #
 # The evidence is `state_change_seq`, not the status alone. A status of
 # `working` read straight after submission may be the turn that was already
 # running. Failing closed is the point — a dispatch that reports success on a
 # prompt that never ran is worse than one that dies, and the worktree and meta
-# already exist by then, so `fleet read` and `fleet reap` still work on it.
+# already exist by then, so `foreman read` and `foreman reap` still work on it.
 #
-# The one exception is a worker's *first* dispatch, which is `fleet spawn`'s
+# The one exception is a worker's *first* dispatch, which is `foreman spawn`'s
 # own call. See the working|blocked branch below.
 dispatch_to() {
   local handle=$1 text=$2
@@ -1266,16 +1266,16 @@ dispatch_to() {
     working|blocked)
       if [ -n "$prior" ]; then
         # There is no herdr turn id to stamp into a report. If dispatch 2 is
-        # queued while dispatch 1 is running, dispatch 1's eventual `fleet
+        # queued while dispatch 1 is running, dispatch 1's eventual `foreman
         # report` reads the now-current counter and labels itself as dispatch
         # 2. Refusing is the only way to preserve report identity. Raw steering
         # is deliberately untracked, so answers and approval input remain
         # allowed.
         die "$handle is $before_status and cannot accept a new tracked task yet
-  steer its current turn:  fleet send --raw $handle \"<answer>\"
-  or collect it first:     fleet join $handle"
+  steer its current turn:  foreman send --raw $handle \"<answer>\"
+  or collect it first:     foreman join $handle"
       fi
-      # A first dispatch is the `fleet spawn` path, and a freshly started omp
+      # A first dispatch is the `foreman spawn` path, and a freshly started omp
       # can legitimately be initializing or sitting on a first-run trust
       # prompt. Refusing here would fail a spawn *after* its worktree, agent
       # and layout exist, which is worse than the stale-label risk this guard
@@ -1285,7 +1285,7 @@ dispatch_to() {
       mkdir -p "$(meta_dir "$handle")"
       counter_bump "$(dispatch_file "$handle")"
       h agent prompt "$handle" "$text" >/dev/null
-      note "fleet: $handle was $before_status at its first dispatch; submitted without confirming pickup (check it with: fleet read $handle)"
+      note "foreman: $handle was $before_status at its first dispatch; submitted without confirming pickup (check it with: foreman read $handle)"
       return 0
       ;;
   esac
@@ -1315,13 +1315,13 @@ dispatch_to() {
     sleep 0.5
   done
   die "$handle did not pick up the prompt within $((DISPATCH_SETTLE_MS / 1000))s (status: ${status:-gone})
-  inspect it with: fleet read $handle"
+  inspect it with: foreman read $handle"
 }
 
 with_protocol() {
   local handle=$1 text=$2
   printf '%s%s' "$text" \
-    "$(protocol_block "$handle" "$(meta_get "$handle" FOREMAN)" \
+    "$(protocol_block "$handle" "$(meta_get "$handle" BOSS)" \
        "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)")"
 }
 
@@ -1332,7 +1332,7 @@ read_message() {
   local text="$*"
   if [ -z "$text" ]; then
     if [ -t 0 ]; then
-      die "usage: fleet $what   (or pipe the text on stdin)"
+      die "usage: foreman $what   (or pipe the text on stdin)"
     fi
     text=$(cat)
   fi
@@ -1349,7 +1349,7 @@ prompt_raw() {
   status=$(agent_field "$handle" agent_status)
   h agent prompt "$handle" "$text" >/dev/null
   [ "$status" != working ] \
-    || note "fleet: $handle was already working; the raw message is queued behind its current turn"
+    || note "foreman: $handle was already working; the raw message is queued behind its current turn"
 }
 
 cmd_send() {
@@ -1362,13 +1362,13 @@ cmd_send() {
       *) break ;;
     esac
   done
-  local handle=${1:?usage: fleet send [--raw] <handle> <text...>}; shift
+  local handle=${1:?usage: foreman send [--raw] <handle> <text...>}; shift
   case "${1:-}" in --raw) raw=1; shift ;; esac
   agent_exists "$handle" || die "no live agent named '$handle'"
   local text; text=$(read_message "send [--raw] <handle> <text...>" "$@")
   if [ "$raw" != 1 ] && [ ! -f "$(meta_file "$handle")" ]; then
-    die "'$handle' is live but not a registered fleet worker; a tracked task would send it a broken protocol block and mint a phantom record
-  steer it instead: fleet send --raw $handle \"<text>\""
+    die "'$handle' is live but not a registered foreman worker; a tracked task would send it a broken protocol block and mint a phantom record
+  steer it instead: foreman send --raw $handle \"<text>\""
   fi
   if [ "$raw" = 1 ]; then
     # No protocol block. A one-line answer does not want the contract
@@ -1386,16 +1386,16 @@ cmd_ask() {
   require_herdr
   local timeout=""
   if [ "${1:-}" = --timeout ]; then
-    timeout=${2:?usage: fleet ask [--timeout <seconds>] <handle> <text...>}
+    timeout=${2:?usage: foreman ask [--timeout <seconds>] <handle> <text...>}
     shift 2
   fi
   # Rejected in both positions cmd_send would honor it — before the handle and
   # immediately after it. A raw send has no pickup confirmation, so the join
   # that follows would match the agent's pre-dispatch idle state and return a
   # stale report: the exact race dispatch_to's settle check exists to prevent.
-  local raw_refused="fleet ask dispatches a tracked task and waits for its report; --raw steering files no report to wait for
-  send it instead:  fleet send --raw <handle> \"<text>\"
-  then if needed:   fleet join <handle>"
+  local raw_refused="foreman ask dispatches a tracked task and waits for its report; --raw steering files no report to wait for
+  send it instead:  foreman send --raw <handle> \"<text>\"
+  then if needed:   foreman join <handle>"
   local a handle="" after_handle=0
   for a in "$@"; do
     if [ "$after_handle" = 1 ]; then
@@ -1408,7 +1408,7 @@ cmd_ask() {
       *) handle=$a; after_handle=1 ;;
     esac
   done
-  [ -n "$handle" ] || die "usage: fleet ask [--timeout <seconds>] <handle> <text...>"
+  [ -n "$handle" ] || die "usage: foreman ask [--timeout <seconds>] <handle> <text...>"
   cmd_send "$@"
   if [ -n "$timeout" ]; then cmd_join --timeout "$timeout" "$handle"; else cmd_join "$handle"; fi
 }
@@ -1423,9 +1423,9 @@ cmd_ask() {
 cmd_broadcast() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; run 'fleet foreman' first"
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'foreman boss' first"
   local text; text=$(read_message "broadcast <text...>" "$@")
-  local scope; scope=$(scoped_key "fleet broadcast" "run it from inside a repo")
+  local scope; scope=$(scoped_key "foreman broadcast" "run it from inside a repo")
   # One `agent list` for the whole wave, not one per worker — the same
   # round-trip rationale as cmd_join's per-tick snapshot.
   local agents handle sent=0
@@ -1433,7 +1433,7 @@ cmd_broadcast() {
   for handle in $(known_workers "$scope"); do
     [ "$handle" != "$me" ] || continue
     if [ -n "$(snapshot_status "$agents" "$handle")" ]; then
-      prompt_raw "$handle" "[fleet broadcast from $me] $text"
+      prompt_raw "$handle" "[foreman broadcast from $me] $text"
       printf 'sent: %s\n' "$handle"
       sent=$((sent + 1))
     else
@@ -1443,14 +1443,14 @@ cmd_broadcast() {
   [ "$sent" -gt 0 ] || die "no live workers in this repo"
 }
 
-# Whether $1 is currently recognized as an orchestrator: either the handle a
-# foreman would claim by default, or some worker's own record names it as FOREMAN —
-# which covers a renamed/--steal'd foreman, since rebind_foreman keeps that in sync.
-is_foreman_handle() {
+# Whether $1 is currently recognized as a boss: either the handle a
+# boss would claim by default, or some worker's own record names it as BOSS —
+# which covers a renamed/--steal'd boss, since rebind_boss keeps that in sync.
+is_boss_handle() {
   local handle=$1 w
-  [ "$handle" = "$(default_foreman)" ] && return 0
+  [ "$handle" = "$(default_boss)" ] && return 0
   for w in $(known_workers); do
-    [ "$(meta_get "$w" FOREMAN)" = "$handle" ] && return 0
+    [ "$(meta_get "$w" BOSS)" = "$handle" ] && return 0
   done
   return 1
 }
@@ -1458,25 +1458,25 @@ is_foreman_handle() {
 cmd_dm() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; join the fleet first"
-  local handle=${1:?usage: fleet dm <handle> <text...>}; shift
+  [ -n "$me" ] || die "this pane has no herdr agent name; join the foreman first"
+  local handle=${1:?usage: foreman dm <handle> <text...>}; shift
   valid_handle "$handle" || die "invalid handle '$handle'"
   agent_exists "$handle" || die "no live agent named '$handle'"
-  if [ ! -f "$(meta_file "$handle")" ] && ! is_foreman_handle "$handle"; then
-    die "'$handle' is live but not a fleet member (see: fleet ls)"
+  if [ ! -f "$(meta_file "$handle")" ] && ! is_boss_handle "$handle"; then
+    die "'$handle' is live but not a foreman member (see: foreman ls)"
   fi
   local text; text=$(read_message "dm <handle> <text...>" "$@")
-  prompt_raw "$handle" "[fleet dm from $me] $text"
+  prompt_raw "$handle" "[foreman dm from $me] $text"
 }
 
 cmd_keys() {
   require_herdr
-  local handle=${1:?usage: fleet keys <handle> <key>...}; shift
+  local handle=${1:?usage: foreman keys <handle> <key>...}; shift
   valid_handle "$handle" || die "invalid handle '$handle'"
   agent_exists "$handle" || die "no live agent named '$handle'"
-  [ $# -gt 0 ] || die "usage: fleet keys <handle> <key>..."
+  [ $# -gt 0 ] || die "usage: foreman keys <handle> <key>..."
   # herdr stays the authority on key names (same philosophy as the removed
-  # kind validation): a bad key is herdr's error to report, not fleet's to
+  # kind validation): a bad key is herdr's error to report, not foreman's to
   # pre-judge.
   h agent send-keys "$handle" "$@" >/dev/null
 }
@@ -1495,18 +1495,18 @@ print_result() {
     printf '(blocked, nothing reported since the last dispatch — last output below)\n'
     herdr agent read "$handle" --source recent-unwrapped --lines 40 2>/dev/null \
       || printf '(could not read the pane; the agent may have just exited)\n'
-    printf '\nunblock it:       fleet send --raw %s "<answer or keystroke>"\nthen collect it:  fleet join %s\n' "$handle" "$handle"
+    printf '\nunblock it:       foreman send --raw %s "<answer or keystroke>"\nthen collect it:  foreman join %s\n' "$handle" "$handle"
   elif [ -s "$rf" ]; then
-    # Stale, but kept: a follow-up `fleet send` must not destroy the report a
+    # Stale, but kept: a follow-up `foreman send` must not destroy the report a
     # worker already filed, so staleness is dated rather than deleted.
     printf '(nothing reported since the last dispatch; previous report follows)\n'
     cat "$rf"
   else
-    printf '(no report written; check with: fleet read %s)\n' "$handle"
+    printf '(no report written; check with: foreman read %s)\n' "$handle"
   fi
 }
 
-# A worker's `fleet reply` bumps question.seq; join records what it has shown
+# A worker's `foreman reply` bumps question.seq; join records what it has shown
 # in question.seen. An unseen question means the worker is waiting on a person,
 # and nothing else in the wave matters until that is answered.
 question_pending() {
@@ -1518,7 +1518,7 @@ print_question() {
   local handle=$1 qf sf; qf=$(question_file "$handle"); sf=$(question_seq_file "$handle")
   printf '\n=== %s — QUESTION — branch %s\n' "$handle" "$(meta_get "$handle" BRANCH)"
   if [ -s "$qf" ]; then cat "$qf"; fi
-  printf '\nanswer it with: fleet send --raw %s "<answer>"\nthen re-run:    fleet join\n' "$handle"
+  printf '\nanswer it with: foreman send --raw %s "<answer>"\nthen re-run:    foreman join\n' "$handle"
   if [ -f "$sf" ]; then cp "$sf" "$(question_seen_file "$handle")"
   else : >"$(question_seen_file "$handle")"; fi
 }
@@ -1536,7 +1536,7 @@ pending_confirm_file() { printf '%s/pending_confirm' "$(meta_dir "$1")"; }
 # agent's status flips to idle the moment its turn ends, but that signal
 # comes from herdr's own process/pane tracking, independent of and with no
 # ordering guarantee against a *different* process's view of the report file
-# `fleet_report` just wrote in that same turn. A poller ticking every few
+# `foreman_report` just wrote in that same turn. A poller ticking every few
 # seconds right after dispatch (unlike a human who naturally calls `join`
 # well after spawn) is exactly what makes this race observable in practice:
 # it can catch "idle" a beat before the report is visible, and — because
@@ -1593,11 +1593,11 @@ snapshot_status() {
 #  - Order independence. Waiting handle by handle hid a worker that finished
 #    first behind one that finishes last. Polling the whole set prints each
 #    result the moment it lands.
-#  - Termination. Nothing makes a worker call `fleet report`; an omp that ends
+#  - Termination. Nothing makes a worker call `foreman report`; an omp that ends
 #    its turn is simply idle, which settles instantly — so the documented
 #    "join again until everyone reports" spun. A settle is now recorded
 #    against the dispatch counter it answers, and a bare `join` skips workers
-#    already collected at their current counter. A `fleet send` bumps that
+#    already collected at their current counter. A `foreman send` bumps that
 #    counter and makes the worker joinable again, which is precisely when
 #    re-joining means something.
 #
@@ -1606,12 +1606,12 @@ snapshot_status() {
 #
 # `--once` runs exactly that inner tick — no deadline, no `sleep_ms` — and
 # returns whatever settled (possibly nothing). It exists so something outside
-# this process can poll cheaply on its own schedule: the omp fleet extension
+# this process can poll cheaply on its own schedule: the omp foreman extension
 # runs it from a session-owned timer to deliver worker reports as a
-# non-interrupting aside instead of the orchestrator blocking a tool call for
-# up to `WAIT_TIMEOUT_MS`. A blocked orchestrator can't be reached by an
+# non-interrupting aside instead of the boss blocking a tool call for
+# up to `WAIT_TIMEOUT_MS`. A blocked boss can't be reached by an
 # outside interrupt (see the note above `question_file`), but a timer ticking
-# inside the *same* process the orchestrator's tool call would otherwise be
+# inside the *same* process the boss's tool call would otherwise be
 # stuck in has no such wall to hit — there is no blocking call to preempt.
 cmd_join() {
   require_herdr
@@ -1624,7 +1624,7 @@ cmd_join() {
     case $1 in
       --timeout)
         case "${2-}" in
-          ''|*[!0-9]*) die "usage: fleet join [--timeout <seconds>] [--once] [handle...]" ;;
+          ''|*[!0-9]*) die "usage: foreman join [--timeout <seconds>] [--once] [handle...]" ;;
         esac
         timeout_ms=$(($2 * 1000))
         shift 2
@@ -1634,7 +1634,7 @@ cmd_join() {
         shift
         ;;
       --*)
-        die "usage: fleet join [--timeout <seconds>] [--once] [handle...]"
+        die "usage: foreman join [--timeout <seconds>] [--once] [handle...]"
         ;;
       *)
         handles="$handles $1"
@@ -1649,17 +1649,17 @@ cmd_join() {
   if [ -n "$handles" ]; then
     for handle in $handles; do
       valid_handle "$handle" || die "invalid handle '$handle'"
-      [ -d "$(meta_dir "$handle")" ] || die "no fleet record for '$handle' (see: fleet ls)"
+      [ -d "$(meta_dir "$handle")" ] || die "no foreman record for '$handle' (see: foreman ls)"
     done
   fi
 
   if [ -z "$handles" ]; then
-    scope=$(scoped_key "fleet join" "run it from inside a repo, or name the handles to join")
+    scope=$(scoped_key "foreman join" "run it from inside a repo, or name the handles to join")
     handles=$(joinable_workers "$scope")
     if [ -z "${handles// /}" ]; then
       # A poller calling `--once` every few seconds hits this constantly while
       # a wave is quiet; noting it every tick would drown real output.
-      [ "$once" = 1 ] || note "fleet: nothing to join — every worker in this repo has been collected since its last dispatch (see: fleet ls)"
+      [ "$once" = 1 ] || note "foreman: nothing to join — every worker in this repo has been collected since its last dispatch (see: foreman ls)"
       return 0
     fi
   fi
@@ -1675,7 +1675,7 @@ cmd_join() {
     for handle in $pending; do
       if question_pending "$handle"; then
         print_question "$handle"
-        [ "$once" = 1 ] || note "fleet: '$handle' is waiting on you; join returned early"
+        [ "$once" = 1 ] || note "foreman: '$handle' is waiting on you; join returned early"
         return 0
       fi
       status=$(snapshot_status "$agents" "$handle")
@@ -1701,7 +1701,7 @@ cmd_join() {
     [ -n "${pending// /}" ] || return 0
     if [ "$once" = 1 ]; then return 0; fi
     if expired "$dl"; then
-      note "fleet: gave up after $((timeout_ms / 1000))s; still working:$pending"
+      note "foreman: gave up after $((timeout_ms / 1000))s; still working:$pending"
       return 1
     fi
     sleep_ms "$JOIN_POLL_MS"
@@ -1710,7 +1710,7 @@ cmd_join() {
 
 cmd_read() {
   require_herdr
-  local handle=${1:?usage: fleet read <handle> [-n lines]}; shift
+  local handle=${1:?usage: foreman read <handle> [-n lines]}; shift
   local lines=120
   [ "${1:-}" = "-n" ] && { lines=${2:?}; shift 2; }
   h agent read "$handle" --source recent-unwrapped --lines "$lines"
@@ -1721,22 +1721,22 @@ cmd_read() {
 cmd_report() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane is not a named fleet worker"
-  # A registered worker always has a meta file, written by `fleet spawn` before
-  # its agent existed. Without this check `fleet report` in an orchestrator's
-  # own pane silently creates a state directory named after the orchestrator,
-  # which then shows up as a phantom worker in `fleet ls --all-repos`.
+  [ -n "$me" ] || die "this pane is not a named foreman worker"
+  # A registered worker always has a meta file, written by `foreman spawn` before
+  # its agent existed. Without this check `foreman report` in a boss's
+  # own pane silently creates a state directory named after the boss,
+  # which then shows up as a phantom worker in `foreman ls --all-repos`.
   [ -f "$(meta_file "$me")" ] \
-    || die "'$me' is not a registered fleet worker; 'fleet report' is a worker command"
+    || die "'$me' is not a registered foreman worker; 'foreman report' is a worker command"
   local rf; rf=$(report_file "$me")
   if [ "${1:-}" = "-f" ]; then
-    cp "${2:?usage: fleet report -f <file>}" "$rf"
+    cp "${2:?usage: foreman report -f <file>}" "$rf"
   elif [ $# -gt 0 ]; then
     printf '%s\n' "$*" >"$rf"
   else
     cat >"$rf"
   fi
-  # Stamp the report with the dispatch it answers, so the orchestrator can tell
+  # Stamp the report with the dispatch it answers, so the boss can tell
   # a fresh report from the one this worker filed before its last instruction.
   local df tf; df=$(dispatch_file "$me"); tf=$(report_token_file "$me")
   if [ -f "$df" ]; then cp "$df" "$tf"; else : >"$tf"; fi
@@ -1746,16 +1746,16 @@ cmd_report() {
 cmd_reply() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane is not a named fleet worker"
+  [ -n "$me" ] || die "this pane is not a named foreman worker"
   [ -f "$(meta_file "$me")" ] \
-    || die "'$me' is not a registered fleet worker; 'fleet reply' is a worker command"
-  local foreman; foreman=$(foreman_handle)
+    || die "'$me' is not a registered foreman worker; 'foreman reply' is a worker command"
+  local boss; boss=$(boss_handle)
   local text; text=$(read_message "reply <text...>" "$@")
 
-  # Filed first, delivered second. herdr's prompt only reaches an orchestrator
-  # that is between tool calls; one sitting inside `fleet join` does not read
+  # Filed first, delivered second. herdr's prompt only reaches a boss
+  # that is between tool calls; one sitting inside `foreman join` does not read
   # its input until that call returns, which for a default join is an hour
-  # away. The file is what `fleet join` polls, and it is what makes a blocked
+  # away. The file is what `foreman join` polls, and it is what makes a blocked
   # worker actually preempt the wave.
   # A second question filed before the first is collected must not destroy
   # the first.
@@ -1767,13 +1767,13 @@ cmd_reply() {
   fi
   counter_bump "$(question_seq_file "$me")"
 
-  if agent_exists "$foreman"; then
-    h agent prompt "$foreman" "[fleet:$me] $text" >/dev/null
-    printf 'asked %s (question filed for its next fleet join)\n' "$foreman"
+  if agent_exists "$boss"; then
+    h agent prompt "$boss" "[foreman:$me] $text" >/dev/null
+    printf 'asked %s (question filed for its next foreman join)\n' "$boss"
   else
-    # No longer fatal: the question is on disk, so an orchestrator that comes
+    # No longer fatal: the question is on disk, so a boss that comes
     # back — or a different one — still collects it.
-    note "fleet: orchestrator '$foreman' is not live; the question is filed and will surface on the next 'fleet join'"
+    note "foreman: boss '$boss' is not live; the question is filed and will surface on the next 'foreman join'"
   fi
 }
 
@@ -1787,7 +1787,7 @@ cmd_reply() {
 # caller's assignment.
 known_workers() {
   local scope=${1-} d handle
-  for d in "$FLEET_STATE"/*/; do
+  for d in "$FOREMAN_STATE"/*/; do
     [ -d "$d" ] || continue
     handle=$(basename "$d")
     [ -z "$scope" ] || [ "$(meta_get "$handle" REPO_KEY)" = "$scope" ] || continue
@@ -1819,14 +1819,14 @@ cmd_ls() {
   require_herdr
   local scope=""
   if [ "${1:-}" != "--all-repos" ]; then
-    scope=$(scoped_key "fleet ls" "run it from inside a repo, or pass --all-repos")
+    scope=$(scoped_key "foreman ls" "run it from inside a repo, or pass --all-repos")
   fi
   local handle status q
   printf '%-20s %-9s %-2s %-28s %s\n' HANDLE STATUS Q BRANCH DIR
   for handle in $(known_workers "$scope"); do
     status=$(agent_field "$handle" agent_status)
     [ -n "$status" ] || status=gone
-    # A filed question is invisible outside fleet join.
+    # A filed question is invisible outside foreman join.
     q=-
     if question_pending "$handle"; then q='?'; fi
     printf '%-20s %-9s %-2s %-28s %s\n' "$handle" "$status" "$q" \
@@ -1839,7 +1839,7 @@ cmd_reap() {
   local force=0 all=0 all_repos=0 forget=0 handles="" scope
   # Not named `usage`: that is a function here, and shadowing it with a string
   # reads like a call site that would silently do nothing.
-  local use="usage: fleet reap <handle>... | --all [--all-repos] [--force] [--forget]"
+  local use="usage: foreman reap <handle>... | --all [--all-repos] [--force] [--forget]"
   while [ $# -gt 0 ]; do
     case $1 in
       --force) force=1; shift ;;
@@ -1851,19 +1851,19 @@ cmd_reap() {
     esac
   done
   # Resolved once the whole line is parsed, not as each flag is seen: scoping
-  # `--all` on sight made `fleet reap --all --all-repos` fail outside a repo by
+  # `--all` on sight made `foreman reap --all --all-repos` fail outside a repo by
   # telling the user to pass the flag they had already passed.
   if [ "$all_repos" = 1 ]; then
     handles="$handles $(known_workers)"
   elif [ "$all" = 1 ]; then
-    scope=$(scoped_key "fleet reap --all" "pass --all-repos, or name the handles to reap")
+    scope=$(scoped_key "foreman reap --all" "pass --all-repos, or name the handles to reap")
     handles="$handles $(known_workers "$scope")"
   fi
   [ -n "${handles// /}" ] || die "$use"
 
   local handle
   # Validated up front, before anything is removed: the `rm -rf` below joins a
-  # handle onto $FLEET_STATE, so one that is not a handle — `../..`, an
+  # handle onto $FOREMAN_STATE, so one that is not a handle — `../..`, an
   # absolute path — would delete outside it. Every other caller derives its
   # handles from state or validates them at spawn; these came off the command
   # line. Checking the whole list first also keeps a bad third argument from
@@ -1887,7 +1887,7 @@ cmd_reap() {
 # degrades to "skip the restore" rather than aborting the whole reap. The
 # trailing `|| true` is load-bearing under this file's `set -e -o pipefail`:
 # without it, `restore_ws=$(focused_workspace_id)` at the call site would
-# abort the entire `fleet reap` on exactly the failure this is meant to
+# abort the entire `foreman reap` on exactly the failure this is meant to
 # tolerate.
 focused_workspace_id() {
   herdr workspace list 2>/dev/null \
@@ -1898,25 +1898,25 @@ focused_workspace_id() {
 # Remove one worker: its workspace, then its record. Returns non-zero when the
 # workspace could not be removed, and in that case the record is deliberately
 # left behind — forgetting a worker whose worktree is still on disk is exactly
-# how a worktree becomes invisible to every fleet command.
+# how a worktree becomes invisible to every foreman command.
 #
 # `--forget` is the inverse, and the missing half of teardown: a worktree
 # already removed by hand leaves a record `worktree remove` can never satisfy,
-# so before this the worker sat in `fleet ls` as `gone` permanently.
+# so before this the worker sat in `foreman ls` as `gone` permanently.
 reap_one() {
   local handle=$1 force=$2 forget=$3 missing_ok=${4:-0} ws out code
   ws=$(meta_get "$handle" WORKSPACE)
   if [ "$forget" = 1 ]; then
-    note "fleet: forgot $handle ($(meta_get "$handle" BRANCH)); its worktree at $(meta_get "$handle" DIR) is untouched"
+    note "foreman: forgot $handle ($(meta_get "$handle" BRANCH)); its worktree at $(meta_get "$handle" DIR) is untouched"
   elif [ -n "$ws" ]; then
     local -a args
     args=(worktree remove --workspace "$ws")
     [ "$force" = 1 ] && args+=(--force)
     # `worktree remove` focuses the removed worktree's parent workspace as an
     # unconditional herdr-level side effect (the parent is whichever workspace
-    # `fleet spawn` ran from) — unlike `worktree create`, it has no --no-focus
-    # flag to suppress that. `fleet_reap` runs from a background aside inside
-    # the foreman's own pane, so without this the operator gets yanked away
+    # `foreman spawn` ran from) — unlike `worktree create`, it has no --no-focus
+    # flag to suppress that. `foreman_reap` runs from a background aside inside
+    # the boss's own pane, so without this the operator gets yanked away
     # from whatever repo they were actually looking at every time a worker is
     # reaped. Capturing and restoring focus around the one call that moves it
     # undoes the side effect without herdr needing to add a flag it doesn't
@@ -1925,7 +1925,7 @@ reap_one() {
     # A worker with uncommitted work makes herdr refuse; that refusal is the
     # safety net, so it is reported and skipped rather than forced silently.
     if out=$(herdr "${args[@]}" 2>&1); then
-      note "fleet: removed $handle ($(meta_get "$handle" BRANCH))"
+      note "foreman: removed $handle ($(meta_get "$handle" BRANCH))"
       # `|| true`: if the operator was looking straight at the worktree that
       # was just removed, refocusing its now-gone id fails — harmlessly,
       # since herdr already picked something reasonable on its own then.
@@ -1938,26 +1938,26 @@ reap_one() {
       # Ordinary `reap` still requires the explicit --forget, preserving the
       # rule that a failed removal never silently makes a worktree invisible.
       if [ "$missing_ok" = 1 ] && [ "$code" = workspace_not_found ]; then
-        note "fleet: the old workspace for $handle is already gone; clearing its stale record"
+        note "foreman: the old workspace for $handle is already gone; clearing its stale record"
       else
-        note "fleet: could not remove $handle's worktree ($(meta_get "$handle" DIR))
+        note "foreman: could not remove $handle's worktree ($(meta_get "$handle" DIR))
   herdr said:             ${out:-no error payload}
-  uncommitted changes?   fleet reap $handle --force
-  already gone by hand?  fleet reap $handle --forget"
+  uncommitted changes?   foreman reap $handle --force
+  already gone by hand?  foreman reap $handle --forget"
         return 1
       fi
     fi
   fi
-  rm -rf "${FLEET_STATE:?}/$handle"
+  rm -rf "${FOREMAN_STATE:?}/$handle"
 }
 
 # The dashboard is a separate program rather than a cmd_* in here: it is also
 # the plugin's popup pane entrypoint, which herdr launches directly, and it
 # sources this file for its state helpers. Exec'ing it keeps one copy on disk
-# and lets `fleet dashboard` and the palette action reach the same code.
+# and lets `foreman dashboard` and the palette action reach the same code.
 cmd_dashboard() {
-  local bin; bin="$(fleet_script_dir)/fleet-dashboard"
-  [ -x "$bin" ] || die "fleet-dashboard is missing from $(fleet_script_dir)"
+  local bin; bin="$(foreman_script_dir)/foreman-dashboard"
+  [ -x "$bin" ] || die "foreman-dashboard is missing from $(foreman_script_dir)"
   exec "$bin" "$@"
 }
 
@@ -1965,42 +1965,42 @@ cmd_dashboard() {
 
 usage() {
   cat >&2 <<'EOF'
-fleet — dispatch peer coding agents into herdr worktree workspaces
+foreman — dispatch peer coding agents into herdr worktree workspaces
 
-Orchestrator
-  fleet foreman [name] [--steal]    claim the orchestrator handle for this pane
-  fleet spawn <branch> [opts]    create a worktree, start an agent, dispatch
-  fleet send [--raw] <h> <text>  dispatch work, return immediately
-  fleet ask <h> <text>           dispatch and block until the report is in
-  fleet join [handle...]         collect this repo's workers, print reports
+Boss
+  foreman boss [name] [--steal]    claim the boss handle for this pane
+  foreman spawn <branch> [opts]    create a worktree, start an agent, dispatch
+  foreman send [--raw] <h> <text>  dispatch work, return immediately
+  foreman ask <h> <text>           dispatch and block until the report is in
+  foreman join [handle...]         collect this repo's workers, print reports
                                  [--timeout <seconds>] bounds either wait
                                  [--once] single non-blocking poll tick
-  fleet ls [--all-repos]         list workers and their states
-  fleet dashboard [--all-repos]  inspect and operate the fleet interactively
-  fleet read <handle> [-n N]     read a worker's terminal directly
-  fleet reap <handle>...|--all   remove worktrees and forget workers
+  foreman ls [--all-repos]         list workers and their states
+  foreman dashboard [--all-repos]  inspect and operate the foreman interactively
+  foreman read <handle> [-n N]     read a worker's terminal directly
+  foreman reap <handle>...|--all   remove worktrees and forget workers
                                  [--all-repos] [--force] [--forget]
-  fleet broadcast <text>         raw steering to every live worker in this repo
-  fleet keys <handle> <key>...   send terminal keys (e.g. unblock an approval)
+  foreman broadcast <text>         raw steering to every live worker in this repo
+  foreman keys <handle> <key>...   send terminal keys (e.g. unblock an approval)
 
 Worker
-  fleet report [-f file|text]    write the report the orchestrator collects
-  fleet reply <text>             file a question and interrupt the orchestrator
-  fleet whoami                   print this pane's handle
+  foreman report [-f file|text]    write the report the boss collects
+  foreman reply <text>             file a question and interrupt the boss
+  foreman whoami                   print this pane's handle
 
 Both
-  fleet doctor                   check prerequisites
-  fleet version                  print the fleet version
-  fleet roles                    list role -> skill mappings from fleet's config
-  fleet dm <handle> <text>       raw steering to any fleet member
+  foreman doctor                   check prerequisites
+  foreman version                  print the foreman version
+  foreman roles                    list role -> skill mappings from foreman's config
+  foreman dm <handle> <text>       raw steering to any foreman member
 
---raw sends text alone; without it fleet appends its protocol block, which is
+--raw sends text alone; without it foreman appends its protocol block, which is
 right for a task and wrong for a one-line answer.
---forget drops fleet's record and leaves the worktree alone.
-fleet broadcast and fleet dm are always raw, untracked steering: like --raw,
+--forget drops foreman's record and leaves the worktree alone.
+foreman broadcast and foreman dm are always raw, untracked steering: like --raw,
 no protocol block and no dispatch counter bump.
 
-`fleet spawn --help` lists spawn options.
+`foreman spawn --help` lists spawn options.
 EOF
   exit 2
 }
@@ -2009,7 +2009,7 @@ main() {
   [ $# -gt 0 ] || usage
   local cmd=$1; shift
   case "$cmd" in
-    foreman)    cmd_foreman "$@" ;;
+    boss)    cmd_boss "$@" ;;
     whoami)  cmd_whoami "$@" ;;
     spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;
@@ -2028,7 +2028,7 @@ main() {
     roles)   cmd_roles "$@" ;;
     version|--version|-V) cmd_version ;;
     -h|--help|help) usage ;;
-    *) die "unknown command '$cmd' (try: fleet --help)" ;;
+    *) die "unknown command '$cmd' (try: foreman --help)" ;;
   esac
 }
 

@@ -1,11 +1,11 @@
 # Foreman
 
-Foreman is a repo with two Fleet plugins. `herdr/` is a herdr plugin shipping
-the `fleet` CLI — the mechanism that creates worktrees, spawns peer coding
+Foreman is a repo with two Foreman plugins. `herdr/` is a herdr plugin shipping
+the `foreman` CLI — the mechanism that creates worktrees, spawns peer coding
 agents, and carries reports and questions between them. The repo root is an
 omp-native agent plugin (`package.json`, `.omp-plugin/plugin.json`,
 `command-prompts/`, `skills/`, `extension/`). `extension/index.ts` reads
-`command-prompts/*.md` at load and registers each as a `fleet:<name>` slash
+`command-prompts/*.md` at load and registers each as a `foreman:<name>` slash
 command — not left to omp's own file-based command discovery, which does not
 namespace commands from a link/git-installed plugin the way it does for a
 marketplace-installed one.
@@ -16,20 +16,20 @@ Run every suite under the oldest supported bash — several shipped bugs only
 reproduce there:
 
 ```sh
-/bin/bash herdr/test/fleet-test.sh        # macOS system bash 3.2
-/bin/bash herdr/test/fleet-link-test.sh
-/bin/bash herdr/test/fleet-dashboard-test.sh
+/bin/bash herdr/test/foreman-test.sh        # macOS system bash 3.2
+/bin/bash herdr/test/foreman-link-test.sh
+/bin/bash herdr/test/foreman-dashboard-test.sh
 ```
 
-shellcheck with `-s bash` for `herdr/bin/fleet`, `herdr/bin/fleet-dashboard`
-and the test files, `-s sh` for `fleet-link`, `fleet-ls`,
-`fleet-dashboard-open`, and `install.sh`. CI runs exactly this plus a
+shellcheck with `-s bash` for `herdr/bin/foreman`, `herdr/bin/foreman-dashboard`
+and the test files, `-s sh` for `foreman-link`, `foreman-ls`,
+`foreman-dashboard-open`, and `install.sh`. CI runs exactly this plus a
 version-consistency check.
 
 ## Shell constraints
 
-- `herdr/bin/fleet` and the tests are bash 3.2: no associative arrays, no
-  `${var,,}`, no `$EPOCHREALTIME`. `fleet-link`, `fleet-ls`, and `install.sh`
+- `herdr/bin/foreman` and the tests are bash 3.2: no associative arrays, no
+  `${var,,}`, no `$EPOCHREALTIME`. `foreman-link`, `foreman-ls`, and `install.sh`
   are POSIX sh — no bashisms at all.
 - Glob ranges in `case` patterns need `local LC_ALL=C` first: locales
   interleave case in collation order, so under macOS bash 3.2 `[a-z]` matches
@@ -46,17 +46,17 @@ version-consistency check.
 
 - Comments justify decisions: each one names the bug it prevents or the
   alternative it rejects, not what the line does. Match this in every edit.
-- Every test in `fleet-test.sh` is a bug that actually shipped. A new fix
+- Every test in `foreman-test.sh` is a bug that actually shipped. A new fix
   lands with the regression test that would have caught it.
 - Root-level command/skill prose is omp-native; skills are referenced as
-  `skill://<name>` everywhere — the sweep test in `fleet-test.sh` fails any
-  `fleet skill` reference left in that prose or the README.
+  `skill://<name>` everywhere — the sweep test in `foreman-test.sh` fails any
+  `foreman skill` reference left in that prose or the README.
 - One version string, three files: `herdr/herdr-plugin.toml`,
   `.omp-plugin/plugin.json`, and `package.json` must agree (CI enforces).
-  `fleet version` reads the toml at runtime.
-- Both plugins are named `fleet`; `foreman` is only the GitHub repo name, not
-  an install-time namespace — there is no marketplace here, so nothing keys an
+  `foreman version` reads the toml at runtime.
+- Both plugins share the name `foreman` with the GitHub repo — coincidence, not
+  an install-time namespace; there is no marketplace here, so nothing keys an
   install on it.
 - Handles (`[a-z][a-z0-9_-]{0,31}`) are the only worker identifiers; all state
-  lives under `$FLEET_STATE` keyed by handle, and nothing is written into the
+  lives under `$FOREMAN_STATE` keyed by handle, and nothing is written into the
   repo a worker operates on. Workspace and pane IDs stay inside the CLI.

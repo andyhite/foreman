@@ -10,12 +10,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run fleet test suite
-        run: /bin/bash herdr/test/fleet-test.sh
-      - name: Run fleet-link test suite
-        run: /bin/bash herdr/test/fleet-link-test.sh
-      - name: Run fleet dashboard test suite
-        run: /bin/bash herdr/test/fleet-dashboard-test.sh
+      - name: Run foreman test suite
+        run: /bin/bash herdr/test/foreman-test.sh
+      - name: Run foreman-link test suite
+        run: /bin/bash herdr/test/foreman-link-test.sh
+      - name: Run foreman dashboard test suite
+        run: /bin/bash herdr/test/foreman-dashboard-test.sh
 
   lint:
     runs-on: ubuntu-latest
@@ -23,14 +23,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check bash syntax and run tests with modern bash
         run: |
-          bash -n herdr/bin/fleet
-          bash -n herdr/bin/fleet-dashboard
-          bash herdr/test/fleet-test.sh
-          bash herdr/test/fleet-dashboard-test.sh
+          bash -n herdr/bin/foreman
+          bash -n herdr/bin/foreman-dashboard
+          bash herdr/test/foreman-test.sh
+          bash herdr/test/foreman-dashboard-test.sh
       - name: Lint bash scripts
-        run: shellcheck --severity=warning -s bash herdr/bin/fleet herdr/bin/fleet-dashboard herdr/test/fleet-test.sh herdr/test/fleet-link-test.sh herdr/test/fleet-dashboard-test.sh
+        run: shellcheck --severity=warning -s bash herdr/bin/foreman herdr/bin/foreman-dashboard herdr/test/foreman-test.sh herdr/test/foreman-link-test.sh herdr/test/foreman-dashboard-test.sh
       - name: Lint POSIX shell scripts
-        run: shellcheck --severity=warning -s sh herdr/bin/fleet-link herdr/bin/fleet-ls herdr/bin/fleet-dashboard-open herdr/install.sh
+        run: shellcheck --severity=warning -s sh herdr/bin/foreman-link herdr/bin/foreman-ls herdr/bin/foreman-dashboard-open herdr/install.sh
       - name: Check version consistency
         run: |
           herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)

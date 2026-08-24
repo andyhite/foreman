@@ -13,14 +13,14 @@ import * as path from "node:path";
  * so it is safe to keep for documentation/IDE purposes; everything this
  * file actually relies on for type-checking is declared below instead.
  */
-interface FleetExecResult {
+interface ForemanExecResult {
   code: number;
   stdout: string;
   stderr: string;
   killed?: boolean;
 }
 
-interface FleetToolCtx {
+interface ForemanToolCtx {
   cwd: string;
   // Managed timer handles — see `omp://extensions.md` "Background work". Used
   // by `ensureJoinPoller` below; isolated from the callback's own throws and
@@ -31,7 +31,7 @@ interface FleetToolCtx {
 }
 
 /** The slice of Bun's `Subprocess` this extension actually relies on. */
-interface FleetSubprocess {
+interface ForemanSubprocess {
   kill: () => void;
   exited: Promise<number>;
   stdout: ReadableStream<Uint8Array> | number | null;
@@ -60,10 +60,10 @@ interface CommandPrompt {
  * of the conventions omp's `omp-plugins` capability provider auto-scans for
  * npm/link-installed plugins, and that provider (unlike the `claude-plugins`
  * one marketplace installs use) does not prefix discovered commands with the
- * plugin name. A `commands/foreman.md` would surface as bare `/foreman`,
+ * plugin name. A `commands/boss.md` would surface as bare `/boss`,
  * invisibly unscoped and one collision away from any other installed
  * plugin's same-named command. Loading them here and registering under
- * `fleet:<name>` keeps the namespace under every install mechanism.
+ * `foreman:<name>` keeps the namespace under every install mechanism.
  */
 function loadCommandPrompts(): CommandPrompt[] {
   const dir = path.join(import.meta.dir, "..", "command-prompts");
@@ -88,32 +88,32 @@ function loadCommandPrompts(): CommandPrompt[] {
   });
 }
 
-export default function fleetExtension(pi: ExtensionAPI) {
-  // Sessions outside herdr have nothing to talk to: fleet's state, worktrees,
+export default function foremanExtension(pi: ExtensionAPI) {
+  // Sessions outside herdr have nothing to talk to: foreman's state, worktrees,
   // and worker panes are all herdr concepts. Register nothing there.
   if (!process.env.HERDR_ENV) return;
 
   const z = pi.zod;
-  const fleetBin = process.env.FLEET_BIN || "fleet";
+  const foremanBin = process.env.FOREMAN_BIN || "foreman";
 
   /**
-   * Runs `fleet <args>` to completion via `pi.exec` and returns stdout.
-   * Every tool except `fleet_join` uses this: a non-zero exit is always a
-   * real failure here, so it throws `stderr || stdout`. `fleet_join` (and
-   * `fleet_ask`, for progress) use `runFleetStreaming` below instead.
+   * Runs `foreman <args>` to completion via `pi.exec` and returns stdout.
+   * Every tool except `foreman_join` uses this: a non-zero exit is always a
+   * real failure here, so it throws `stderr || stdout`. `foreman_join` (and
+   * `foreman_ask`, for progress) use `runFleetStreaming` below instead.
    */
   async function runFleet(
     args: string[],
-    ctx: FleetToolCtx,
+    ctx: ForemanToolCtx,
     signal: AbortSignal | undefined,
   ): Promise<string> {
-    let result: FleetExecResult;
+    let result: ForemanExecResult;
     try {
-      result = (await pi.exec(fleetBin, args, { signal, cwd: ctx.cwd })) as FleetExecResult;
+      result = (await pi.exec(foremanBin, args, { signal, cwd: ctx.cwd })) as ForemanExecResult;
     } catch (err) {
       if (isMissingBinaryError(err)) {
         throw new Error(
-          "fleet CLI not found on PATH — is the herdr fleet plugin installed?",
+          "foreman CLI not found on PATH — is the herdr foreman plugin installed?",
         );
       }
       throw err;
@@ -125,28 +125,28 @@ export default function fleetExtension(pi: ExtensionAPI) {
   }
 
   /**
-   * Runs `fleet <args>` with `Bun.spawn` so stdout can be forwarded through
-   * `onUpdate` as it arrives — `fleet join`/`fleet ask` print each worker's
+   * Runs `foreman <args>` with `Bun.spawn` so stdout can be forwarded through
+   * `onUpdate` as it arrives — `foreman join`/`foreman ask` print each worker's
    * report the moment it settles rather than all at once at the end. Kills
    * the child on abort. Callers decide how to interpret `exitCode`.
    */
   async function runFleetStreaming(
     args: string[],
-    ctx: FleetToolCtx,
+    ctx: ForemanToolCtx,
     signal: AbortSignal | undefined,
     onUpdate: ToolUpdate | undefined,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    let child: FleetSubprocess;
+    let child: ForemanSubprocess;
     try {
-      child = Bun.spawn([fleetBin, ...args], {
+      child = Bun.spawn([foremanBin, ...args], {
         cwd: ctx.cwd,
         stdout: "pipe",
         stderr: "pipe",
-      }) as unknown as FleetSubprocess;
+      }) as unknown as ForemanSubprocess;
     } catch (err) {
       if (isMissingBinaryError(err)) {
         throw new Error(
-          "fleet CLI not found on PATH — is the herdr fleet plugin installed?",
+          "foreman CLI not found on PATH — is the herdr foreman plugin installed?",
         );
       }
       throw err;
@@ -199,32 +199,32 @@ export default function fleetExtension(pi: ExtensionAPI) {
 
   // ---------------------------------------------------------------------
   // Background join poller — delivers worker settlement/questions as a
-  // non-interrupting aside instead of the orchestrator blocking a tool call.
+  // non-interrupting aside instead of the boss blocking a tool call.
   // ---------------------------------------------------------------------
 
   let joinPollTimer: unknown = null;
   let joinPollFailures = 0;
-  const joinPollMs = Number(process.env.FLEET_ASIDE_POLL_MS) || 5000;
+  const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 5000;
 
   /**
    * Starts (once per session) a `ctx.setInterval` tick that runs
-   * `fleet join --once` — a single, non-blocking poll pass, never the
-   * deadline/`sleep_ms` loop `fleet join` uses on its own. Any output (a
+   * `foreman join --once` — a single, non-blocking poll pass, never the
+   * deadline/`sleep_ms` loop `foreman join` uses on its own. Any output (a
    * settled worker's report, or a filed question) is delivered as a
-   * `followUp` custom message: queued behind whatever the orchestrator is
+   * `followUp` custom message: queued behind whatever the boss is
    * doing rather than interrupting it — the same non-interrupting-aside
    * shape `hub`'s own IRC delivery uses for a running recipient — and it
-   * starts a turn on its own if the orchestrator is idle. This is what lets
-   * the orchestrator keep working after `fleet_spawn` instead of blocking a
-   * `fleet_join` tool call for up to an hour. Idempotent, so every
-   * orchestrator-side tool can call it unconditionally.
+   * starts a turn on its own if the boss is idle. This is what lets
+   * the boss keep working after `foreman_spawn` instead of blocking a
+   * `foreman_join` tool call for up to an hour. Idempotent, so every
+   * boss-side tool can call it unconditionally.
    */
-  function ensureJoinPoller(ctx: FleetToolCtx) {
+  function ensureJoinPoller(ctx: ForemanToolCtx) {
     if (joinPollTimer) return;
     joinPollTimer = ctx.setInterval(async () => {
-      let result: FleetExecResult;
+      let result: ForemanExecResult;
       try {
-        result = (await pi.exec(fleetBin, ["join", "--once"], { cwd: ctx.cwd })) as FleetExecResult;
+        result = (await pi.exec(foremanBin, ["join", "--once"], { cwd: ctx.cwd })) as ForemanExecResult;
       } catch (err) {
         // A transient herdr hiccup shouldn't kill the poller, but a missing
         // binary never recovers on its own — stop instead of erroring on
@@ -237,7 +237,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       }
 
       if (result.code !== 0) {
-        // Most commonly "not in a git repo" if the foreman's cwd changed out
+        // Most commonly "not in a git repo" if the boss's cwd changed out
         // from under it. Five in a row means polling itself is broken, not
         // that nothing happened — stop rather than repeat the same die()
         // text as a steer message forever.
@@ -254,7 +254,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       if (!text) return;
       await pi.sendMessage(
         {
-          customType: "Fleet Update",
+          customType: "Foreman Update",
           content: text,
           display: true,
           attribution: "user",
@@ -269,14 +269,14 @@ export default function fleetExtension(pi: ExtensionAPI) {
   }
 
   // ---------------------------------------------------------------------
-  // Orchestrator-side tools
+  // Boss-side tools
   // ---------------------------------------------------------------------
 
   pi.registerTool({
-    name: "fleet_foreman",
-    label: "Fleet Foreman",
+    name: "foreman_boss",
+    label: "Foreman Boss",
     description:
-      "Claim (or query) this pane's foreman handle. Workers address their questions and reports to whichever handle this pane holds at spawn time, so claim it before spawning anything.",
+      "Claim (or query) this pane's boss handle. Workers address their questions and reports to whichever handle this pane holds at spawn time, so claim it before spawning anything.",
     parameters: z.object({
       name: z.string().optional().describe("Handle to claim; defaults to the repo root's name"),
       steal: z
@@ -287,7 +287,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
       ensureJoinPoller(ctx);
-      const args = ["foreman"];
+      const args = ["boss"];
       if (params.name) args.push(params.name);
       if (params.steal) args.push("--steal");
       const stdout = await runFleet(args, ctx, signal);
@@ -296,8 +296,8 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_spawn",
-    label: "Fleet Spawn",
+    name: "foreman_spawn",
+    label: "Foreman Spawn",
     description:
       "Create a worktree, start a worker agent in it, and dispatch a task. One worker per branch.",
     parameters: z.object({
@@ -318,7 +318,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
         .string()
         .optional()
         .describe(
-          "One role name resolved to a skill through fleet's own config (see: fleet roles). Its skill precedes skills in the worker prompt.",
+          "One role name resolved to a skill through foreman's own config (see: foreman roles). Its skill precedes skills in the worker prompt.",
         ),
       tier: z
         .enum(["standard", "deep"])
@@ -345,7 +345,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       if (params.task) {
         taskFile = path.join(
           os.tmpdir(),
-          `fleet-task-${Date.now()}-${Math.random().toString(36).slice(2)}.md`,
+          `foreman-task-${Date.now()}-${Math.random().toString(36).slice(2)}.md`,
         );
         await Bun.write(taskFile, params.task);
         args.push("--task-file", taskFile);
@@ -368,10 +368,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_send",
-    label: "Fleet Send",
+    name: "foreman_send",
+    label: "Foreman Send",
     description:
-      "Send a follow-up task to a worker, or (with raw: true) untracked raw steering text — the right way to answer a blocked worker or a fleet_reply question.",
+      "Send a follow-up task to a worker, or (with raw: true) untracked raw steering text — the right way to answer a blocked worker or a foreman_reply question.",
     parameters: z.object({
       handle: z.string(),
       text: z.string(),
@@ -395,10 +395,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_ask",
-    label: "Fleet Ask",
+    name: "foreman_ask",
+    label: "Foreman Ask",
     description:
-      "Dispatch a task to one worker and block until it settles. Use only for a genuine follow-up or a serial dependency; never to start a batch — use fleet_spawn + fleet_join for that.",
+      "Dispatch a task to one worker and block until it settles. Use only for a genuine follow-up or a serial dependency; never to start a batch — use foreman_spawn + foreman_join for that.",
     parameters: z.object({
       handle: z.string(),
       text: z.string(),
@@ -421,10 +421,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_join",
-    label: "Fleet Join",
+    name: "foreman_join",
+    label: "Foreman Join",
     description:
-      "Explicit blocking wait on the given worker handles (or every known worker in this repo if none given). Rarely needed: once fleet_spawn has run, worker reports and questions already arrive on their own as non-interrupting asides — use this only when there is truly nothing else to do and you want to sit until something lands.",
+      "Explicit blocking wait on the given worker handles (or every known worker in this repo if none given). Rarely needed: once foreman_spawn has run, worker reports and questions already arrive on their own as non-interrupting asides — use this only when there is truly nothing else to do and you want to sit until something lands.",
     parameters: z.object({
       handles: z
         .array(z.string())
@@ -452,9 +452,9 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_ls",
-    label: "Fleet List",
-    description: "List known fleet workers, their states, kinds, branches, and paths.",
+    name: "foreman_ls",
+    label: "Foreman List",
+    description: "List known foreman workers, their states, kinds, branches, and paths.",
     parameters: z.object({
       all_repos: z.boolean().optional().describe("List workers across every repo, not just this one"),
     }),
@@ -468,10 +468,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_read",
-    label: "Fleet Read",
+    name: "foreman_read",
+    label: "Foreman Read",
     description:
-      "Show the visible terminal of a worker pane. A debugging aid, not a durable way to collect a result — use fleet_join/fleet_ask for that.",
+      "Show the visible terminal of a worker pane. A debugging aid, not a durable way to collect a result — use foreman_join/foreman_ask for that.",
     parameters: z.object({
       handle: z.string(),
       lines: z.number().int().positive().optional().describe("Number of trailing lines to show"),
@@ -486,8 +486,8 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_reap",
-    label: "Fleet Reap",
+    name: "foreman_reap",
+    label: "Foreman Reap",
     description:
       "Remove worker worktrees and records. Refuses a worktree with uncommitted changes unless force is set.",
     parameters: z.object({
@@ -499,7 +499,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
       if (!params.all && (!params.handles || params.handles.length === 0)) {
-        throw new Error("fleet_reap requires either a non-empty handles array or all: true");
+        throw new Error("foreman_reap requires either a non-empty handles array or all: true");
       }
       const args = ["reap"];
       if (params.all) args.push("--all");
@@ -515,8 +515,8 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_broadcast",
-    label: "Fleet Broadcast",
+    name: "foreman_broadcast",
+    label: "Foreman Broadcast",
     description:
       "Send untracked raw steering text to every live worker in this repo. Use for wave-wide notices, not for a task.",
     parameters: z.object({
@@ -530,9 +530,9 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_dm",
-    label: "Fleet DM",
-    description: "Send untracked raw steering text directly to one other fleet member.",
+    name: "foreman_dm",
+    label: "Foreman DM",
+    description: "Send untracked raw steering text directly to one other foreman member.",
     parameters: z.object({
       handle: z.string(),
       text: z.string(),
@@ -545,10 +545,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_keys",
-    label: "Fleet Keys",
+    name: "foreman_keys",
+    label: "Foreman Keys",
     description:
-      "Send terminal keys into a worker's interactive UI — the way to unblock an approval prompt fleet_read shows as stuck.",
+      "Send terminal keys into a worker's interactive UI — the way to unblock an approval prompt foreman_read shows as stuck.",
     parameters: z.object({
       handle: z.string(),
       keys: z.array(z.string()).min(1).describe("Key names, passed through to herdr agent send-keys"),
@@ -570,8 +570,8 @@ export default function fleetExtension(pi: ExtensionAPI) {
   // ---------------------------------------------------------------------
 
   pi.registerTool({
-    name: "fleet_report",
-    label: "Fleet Report",
+    name: "foreman_report",
+    label: "Foreman Report",
     description:
       "File this worker's report to disk (worker-side). Overwritten only by this worker's own later report.",
     parameters: z.object({
@@ -583,7 +583,7 @@ export default function fleetExtension(pi: ExtensionAPI) {
       const hasText = typeof params.text === "string" && params.text.length > 0;
       const hasFile = typeof params.file === "string" && params.file.length > 0;
       if (hasText === hasFile) {
-        throw new Error("fleet_report requires exactly one of text or file");
+        throw new Error("foreman_report requires exactly one of text or file");
       }
       const args = hasFile ? ["report", "-f", params.file as string] : ["report", params.text as string];
       const stdout = await runFleet(args, ctx, signal);
@@ -592,10 +592,10 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "fleet_reply",
-    label: "Fleet Reply",
+    name: "foreman_reply",
+    label: "Foreman Reply",
     description:
-      "File a question to the foreman and interrupt its pane (worker-side). Use when blocked on a decision only the orchestrator can make.",
+      "File a question to the boss and interrupt its pane (worker-side). Use when blocked on a decision only the boss can make.",
     parameters: z.object({
       text: z.string(),
     }),
@@ -607,13 +607,13 @@ export default function fleetExtension(pi: ExtensionAPI) {
   });
 
   // ---------------------------------------------------------------------
-  // Orchestrator commands — /fleet:<name>. See loadCommandPrompts() above
+  // Boss commands — /foreman:<name>. See loadCommandPrompts() above
   // for why these are registered here instead of left to commands/*.md
   // auto-discovery.
   // ---------------------------------------------------------------------
 
   for (const prompt of loadCommandPrompts()) {
-    pi.registerCommand(`fleet:${prompt.name}`, {
+    pi.registerCommand(`foreman:${prompt.name}`, {
       description: prompt.description,
       handler: async (args: string) => {
         await pi.sendUserMessage(prompt.body.replace("$ARGUMENTS", args ?? ""));

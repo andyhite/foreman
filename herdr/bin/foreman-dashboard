@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# fleet dashboard — inspect and operate a fleet from one screen.
+# foreman dashboard — inspect and operate a foreman from one screen.
 #
-# `fleet ls` answers "who exists"; everything else about a wave — who is
+# `foreman ls` answers "who exists"; everything else about a wave — who is
 # blocked on a question, whose report is fresh, what a worker's terminal is
 # showing right now — costs a separate command and a handle you have to have
 # memorised. This is that state in one place, with the operations attached to
@@ -9,7 +9,7 @@
 #
 # It is declared as a herdr plugin pane with `placement = "popup"`, so the
 # ordinary way in is the command palette. It is also a normal program: run
-# `fleet dashboard` in any pane and it behaves identically.
+# `foreman dashboard` in any pane and it behaves identically.
 #
 # Two facts about a popup drive the I/O in here, both measured rather than
 # assumed:
@@ -20,10 +20,10 @@
 #     from `stty size </dev/tty`.
 #   - The process starts in the plugin root, not the workspace. The repo whose
 #     workers we are meant to show arrives in $HERDR_PLUGIN_CONTEXT_JSON, the
-#     same way `fleet-ls` gets it.
+#     same way `foreman-ls` gets it.
 #
-# Mechanism is not reimplemented here. Reads come from sourcing `fleet` for its
-# state helpers; every mutation shells out to the `fleet` subcommand that owns
+# Mechanism is not reimplemented here. Reads come from sourcing `foreman` for its
+# state helpers; every mutation shells out to the `foreman` subcommand that owns
 # it, so dispatch semantics have exactly one implementation.
 
 set -euo pipefail
@@ -39,25 +39,25 @@ dash_script_dir() {
 }
 
 DASH_DIR=$(dash_script_dir)
-FLEET_BIN="$DASH_DIR/fleet"
-[ -x "$FLEET_BIN" ] || {
-  printf 'fleet-dashboard: no executable fleet beside %s\n' "$DASH_DIR" >&2
+FOREMAN_BIN="$DASH_DIR/foreman"
+[ -x "$FOREMAN_BIN" ] || {
+  printf 'foreman-dashboard: no executable foreman beside %s\n' "$DASH_DIR" >&2
   exit 1
 }
 
-# Sourced, not executed: `fleet` guards its own entry point, so this brings in
+# Sourced, not executed: `foreman` guards its own entry point, so this brings in
 # meta_get, known_workers, report_is_fresh, question_pending and the rest
 # without running a command.
-# shellcheck source=./fleet
-. "$FLEET_BIN"
+# shellcheck source=./foreman
+. "$FOREMAN_BIN"
 
 # How long the dashboard waits for a keystroke before redrawing. This is what
 # keeps the list live while a wave runs, and it is also the whole polling cost:
 # one `agent list` per tick. Rounded up to tenths of a second because the wait
 # is enforced by the tty driver (`stty time`), which counts in them.
-DASH_POLL_MS="${FLEET_DASHBOARD_POLL_MS:-2000}"
+DASH_POLL_MS="${FOREMAN_DASHBOARD_POLL_MS:-2000}"
 # Lines of a worker's terminal that `t` pulls.
-DASH_TAIL_LINES="${FLEET_DASHBOARD_TAIL_LINES:-200}"
+DASH_TAIL_LINES="${FOREMAN_DASHBOARD_TAIL_LINES:-200}"
 
 # ── Terminal ─────────────────────────────────────────────────────────────────
 
@@ -311,7 +311,7 @@ dash_refresh() {
   fi
   if [ "$DASH_ALL_REPOS" = 0 ]; then
     scope=$(repo_key "$DASH_SCOPE_DIR")
-    # Having nothing to scope to is fatal for `fleet ls`, which would silently
+    # Having nothing to scope to is fatal for `foreman ls`, which would silently
     # widen to the whole machine. Here the widening is visible in the header,
     # so the dashboard shows everything and says which mode it is in.
     if [ -z "$scope" ]; then DASH_ALL_REPOS=2; fi
@@ -351,11 +351,11 @@ dash_scope_label() {
 dash_header() {
   local plural="s" visible right pad
   [ "$DASH_COUNT" != 1 ] || plural=""
-  visible=" fleet · $(dash_scope_label) · $DASH_COUNT worker$plural"
+  visible=" foreman · $(dash_scope_label) · $DASH_COUNT worker$plural"
   right="? help  q quit "
   pad=$((DASH_COLS - ${#visible} - ${#right}))
   [ "$pad" -ge 1 ] || pad=1
-  dash_line "${C_REV}${C_BOLD} fleet${C_RESET}${C_REV} · $(dash_scope_label) · $DASH_COUNT worker$plural$(printf '%*s' "$pad" '')${right}${C_RESET}"
+  dash_line "${C_REV}${C_BOLD} foreman${C_RESET}${C_REV} · $(dash_scope_label) · $DASH_COUNT worker$plural$(printf '%*s' "$pad" '')${right}${C_RESET}"
 }
 
 # Column widths are derived, not fixed: a popup is a percentage of the
@@ -373,7 +373,7 @@ dash_columns() {
 }
 
 # `<dispatches><report><join>` — where a worker sits in the send/report/collect
-# cycle, which is the part `fleet ls` cannot show at all.
+# cycle, which is the part `foreman ls` cannot show at all.
 dash_flags() {
   local handle=$1 dispatched joined out
   dispatched=$(counter_read "$(dispatch_file "$handle")")
@@ -604,13 +604,13 @@ dash_confirm() {
 
 # ── Operations ───────────────────────────────────────────────────────────────
 #
-# Every mutation is `fleet <subcommand>` run as a child process. Calling the
+# Every mutation is `foreman <subcommand>` run as a child process. Calling the
 # sourced cmd_* functions directly would be cheaper and wrong: they end in
 # `die` on any error, which from inside the loop takes the dashboard — and the
 # terminal it is holding in raw mode — down with them.
 
 dash_log_init() {
-  local dir="$FLEET_STATE/.dashboard"
+  local dir="$FOREMAN_STATE/.dashboard"
   mkdir -p "$dir" 2>/dev/null || true
   DASH_LOG="$dir/operations.log"
 }
@@ -636,7 +636,7 @@ dash_run() {
   return 1
 }
 
-# `fleet spawn` blocks for as long as a coding agent takes to boot, which in a
+# `foreman spawn` blocks for as long as a coding agent takes to boot, which in a
 # session-modal popup is a frozen screen for a minute or more. It runs detached
 # instead, and the worker appears in the list the moment herdr names it — which
 # is the dashboard's whole job.
@@ -678,7 +678,7 @@ dash_op_terminal() {
   [ -n "$handle" ] || return 0
   DASH_MESSAGE="reading $handle's terminal…"
   dash_draw
-  out=$("$FLEET_BIN" read "$handle" -n "$DASH_TAIL_LINES" 2>&1) || true
+  out=$("$FOREMAN_BIN" read "$handle" -n "$DASH_TAIL_LINES" 2>&1) || true
   DASH_MESSAGE=""
   dash_view "$handle — last $DASH_TAIL_LINES lines" "$out"
 }
@@ -692,13 +692,13 @@ dash_op_send() {
     return 0
   fi
   if [ "$raw" = 1 ]; then
-    dash_run "steer $handle" "$FLEET_BIN" send --raw "$handle" "$text" || true
+    dash_run "steer $handle" "$FOREMAN_BIN" send --raw "$handle" "$text" || true
   else
-    dash_run "dispatch to $handle" "$FLEET_BIN" send "$handle" "$text" || true
+    dash_run "dispatch to $handle" "$FOREMAN_BIN" send "$handle" "$text" || true
   fi
 }
 
-# Answering is a raw send plus the acknowledgement `fleet join` would have
+# Answering is a raw send plus the acknowledgement `foreman join` would have
 # written. Without the second half the question stays pending forever, and the
 # next join returns early on a question that has already been answered.
 dash_op_answer() {
@@ -712,14 +712,14 @@ dash_op_answer() {
     DASH_MESSAGE="cancelled"
     return 0
   fi
-  dash_run "answer $handle" "$FLEET_BIN" send --raw "$handle" "$text" || return 0
+  dash_run "answer $handle" "$FOREMAN_BIN" send --raw "$handle" "$text" || return 0
   seq=$(question_seq_file "$handle"); seen=$(question_seen_file "$handle")
   if [ -f "$seq" ]; then cp "$seq" "$seen"; else : >"$seen"; fi
 }
 
 dash_op_spawn() {
   local branch task root
-  # `fleet spawn --repo` wants the repository, and the scope directory may be
+  # `foreman spawn --repo` wants the repository, and the scope directory may be
   # any subdirectory of one.
   root=$(cd "$DASH_SCOPE_DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || root=""
   if [ -z "$root" ]; then
@@ -732,9 +732,9 @@ dash_op_spawn() {
   fi
   task=$(dash_prompt "task (empty to spawn without dispatching):") || task=""
   if [ -n "$task" ]; then
-    dash_run_detached "spawn $branch" "$FLEET_BIN" spawn "$branch" --repo "$root" --task "$task"
+    dash_run_detached "spawn $branch" "$FOREMAN_BIN" spawn "$branch" --repo "$root" --task "$task"
   else
-    dash_run_detached "spawn $branch" "$FLEET_BIN" spawn "$branch" --repo "$root" --no-dispatch
+    dash_run_detached "spawn $branch" "$FOREMAN_BIN" spawn "$branch" --repo "$root" --no-dispatch
   fi
 }
 
@@ -745,17 +745,17 @@ dash_op_reap() {
     if ! dash_confirm "reap $handle and DISCARD its uncommitted work?"; then
       DASH_MESSAGE="cancelled"; return 0
     fi
-    dash_run "reap $handle --force" "$FLEET_BIN" reap "$handle" --force || return 0
+    dash_run "reap $handle --force" "$FOREMAN_BIN" reap "$handle" --force || return 0
   else
     if ! dash_confirm "reap $handle and remove its worktree?"; then
       DASH_MESSAGE="cancelled"; return 0
     fi
-    dash_run "reap $handle" "$FLEET_BIN" reap "$handle" || return 0
+    dash_run "reap $handle" "$FOREMAN_BIN" reap "$handle" || return 0
   fi
   if [ "$DASH_SEL" -gt 0 ]; then DASH_SEL=$((DASH_SEL - 1)); fi
 }
 
-DASH_HELP='fleet dashboard
+DASH_HELP='foreman dashboard
 
   Navigation
     j / down        next worker
@@ -773,12 +773,12 @@ DASH_HELP='fleet dashboard
 
   Operate
     enter           focus the worker agent, and close the dashboard
-    s               dispatch a task           (fleet send)
-    S               steer the current turn    (fleet send --raw)
+    s               dispatch a task           (foreman send)
+    S               steer the current turn    (foreman send --raw)
     a               answer a pending question, and clear it
-    n               spawn a new worker        (fleet spawn, in the background)
-    x               reap the worker           (fleet reap)
-    X               reap and discard uncommitted work   (fleet reap --force)
+    n               spawn a new worker        (foreman spawn, in the background)
+    x               reap the worker           (foreman reap)
+    X               reap and discard uncommitted work   (foreman reap --force)
 
   Row flags: D R J
     D   the dispatch counter: how many tasks this worker has been given
@@ -861,9 +861,9 @@ dash_loop() {
 
 dash_usage() {
   cat >&2 <<'EOF'
-usage: fleet dashboard [--cwd <dir>] [--all-repos]
+usage: foreman dashboard [--cwd <dir>] [--all-repos]
 
-An interactive view of this repository's fleet, with the operations attached to
+An interactive view of this repository's foreman, with the operations attached to
 the worker they act on. Press ? inside it for the keymap.
 EOF
   exit 2
@@ -876,7 +876,7 @@ dash_main() {
       --cwd) explicit=${2:?--cwd needs a directory}; shift 2 ;;
       --all-repos) DASH_ALL_REPOS=1; shift ;;
       -h|--help) dash_usage ;;
-      *) note "fleet-dashboard: unknown option '$1'"; dash_usage ;;
+      *) note "foreman-dashboard: unknown option '$1'"; dash_usage ;;
     esac
   done
   require_herdr

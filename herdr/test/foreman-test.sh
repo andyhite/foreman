@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Regression tests for `fleet`.
+# Regression tests for `foreman`.
 #
 # No framework: the plugin is dependency-free shell and its tests should be
-# too, so this runs anywhere fleet itself does. Every case here is a bug that
+# too, so this runs anywhere foreman itself does. Every case here is a bug that
 # was actually shipped, not a hypothetical.
 #
-#   herdr/test/fleet-test.sh
+#   herdr/test/foreman-test.sh
 #
 # Run it under the oldest bash you support as well — several of these only
 # fail there:
 #
-#   /bin/bash herdr/test/fleet-test.sh    # macOS system bash 3.2
+#   /bin/bash herdr/test/foreman-test.sh    # macOS system bash 3.2
 
 # Several sections replace a sourced function with a stub, so the tests can
 # cover logic that would otherwise need a live herdr. shellcheck cannot see
@@ -21,8 +21,8 @@
 # rest of the suite run.
 set -uo pipefail
 
-FLEET=$(cd "$(dirname "$0")/.." && pwd)/bin/fleet
-[ -f "$FLEET" ] || { printf 'cannot find fleet at %s\n' "$FLEET" >&2; exit 1; }
+FOREMAN_BIN=$(cd "$(dirname "$0")/.." && pwd)/bin/foreman
+[ -f "$FOREMAN_BIN" ] || { printf 'cannot find foreman at %s\n' "$FOREMAN_BIN" >&2; exit 1; }
 
 failures=0
 ok()  { printf '  ok    %s\n' "$1"; }
@@ -35,9 +35,9 @@ sandbox=$(mktemp -d) || exit 1
 trap 'rm -rf "$sandbox"' EXIT
 
 # Functions under test, without running a command.
-# shellcheck source=../bin/fleet
-source "$FLEET"
-# fleet sets `-e` at its top, and sourcing applies that to this shell too — it
+# shellcheck source=../bin/foreman
+source "$FOREMAN_BIN"
+# foreman sets `-e` at its top, and sourcing applies that to this shell too — it
 # would abort the run on the first assertion that is *supposed* to fail.
 set +e
 
@@ -87,12 +87,12 @@ assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
 
 # ── role config ──────────────────────────────────────────────────────────────
 #
-# `--role` resolves through fleet's own config instead of naming a skill at
+# `--role` resolves through foreman's own config instead of naming a skill at
 # every dispatch site. Regression coverage for the parser (decoys, comments,
 # malformed lines) and the lookup (found, missing key, missing config).
 
 printf '\nrole config\n'
-role_cfg="$sandbox/fleet-roles.yml"
+role_cfg="$sandbox/foreman-roles.yml"
 cat >"$role_cfg" <<'YAML'
 not-a-role: decoy
 roles:
@@ -107,12 +107,12 @@ assert 'reads the review mapping' [ "${role_ent#*review	code-review}" != "$role_
 assert 'strips a trailing comment' [ "${role_ent#*# trailing}" = "$role_ent" ]
 assert 'ignores the top-level decoy key' [ "${role_ent#*not-a-role}" = "$role_ent" ]
 
-fleet_config() { printf '%s' "$role_cfg"; }
+foreman_config() { printf '%s' "$role_cfg"; }
 is 'role_skill resolves a configured role' "$(role_skill review)" 'code-review'
 assert_not 'role_skill fails an unconfigured role' role_skill missing
-fleet_config() { return 1; }
+foreman_config() { return 1; }
 assert_not 'role_skill fails with no config at all' role_skill review
-unset -f fleet_config
+unset -f foreman_config
 
 printf '\nagent tiers and models\n'
 assert 'accepts standard' valid_agent_tier 'standard'
@@ -146,7 +146,7 @@ unset -f herdr
 # which made a fast task look like a dispatch that never landed.
 
 printf '\nreport freshness\n'
-export FLEET_STATE="$sandbox/state"
+export FOREMAN_STATE="$sandbox/state"
 h=worker1
 mkdir -p "$(meta_dir "$h")"
 
@@ -156,7 +156,7 @@ bump() {  # what dispatch_to does to the counter
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s' "$((n + 1))" >"$df"
 }
-stamp() { cp "$(dispatch_file "$1")" "$(report_token_file "$1")"; }  # what `fleet report` does
+stamp() { cp "$(dispatch_file "$1")" "$(report_token_file "$1")"; }  # what `foreman report` does
 
 assert_not 'no report at all is not fresh' report_is_fresh "$h"
 
@@ -179,7 +179,7 @@ assert 'the answer to the second dispatch is fresh' report_is_fresh "$h"
 # ── dispatched prompt composition ────────────────────────────────────────────
 #
 # The contract a worker actually receives: the portable skill instruction first,
-# then the brief, then fleet's own protocol block. herdr is stubbed so the whole
+# then the brief, then foreman's own protocol block. herdr is stubbed so the whole
 # composition is asserted without creating a worktree or starting an agent.
 
 printf '\ndispatched prompt\n'
@@ -201,9 +201,9 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     case "$1 $2" in
       'agent list')
         if [ -f "$started_file" ]; then
-          printf '{"result":{"agents":[{"name":"foreman","pane_id":"p0"},{"name":"feat-x","pane_id":"p1","agent_status":"working","interactive_ready":true,"workspace_id":"w1"}]}}'
+          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"},{"name":"feat-x","pane_id":"p1","agent_status":"working","interactive_ready":true,"workspace_id":"w1"}]}}'
         else
-          printf '{"result":{"agents":[{"name":"foreman","pane_id":"p0"}]}}'
+          printf '{"result":{"agents":[{"name":"boss","pane_id":"p0"}]}}'
         fi ;;
       'plugin list') printf '' ;;
       'worktree create')
@@ -217,7 +217,7 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # A subshell, because `die` exits: a regression here must fail one assertion
   # rather than abort the whole run.
   ( cd "$spawn_repo" \
-    && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
        cmd_spawn feat/x --tier deep --skill implement \
          --task 'Add exponential backoff to the dispatcher.' ) >/dev/null 2>&1
 
@@ -227,34 +227,34 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     'Before doing any other work, read `skill://implement` and follow it.'
   assert 'the brief follows the instruction' \
     [ "${prompt#*Add exponential backoff to the dispatcher.}" != "$prompt" ]
-  assert 'fleets own protocol block is still appended' \
-    [ "${prompt#*fleet report}" != "$prompt" ]
+  assert "foreman's own protocol block is still appended" \
+    [ "${prompt#*foreman report}" != "$prompt" ]
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
   assert 'every worker starts as omp' \
     [ "${started_cmd#*--kind omp}" != "$started_cmd" ]
   is 'the skills are recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILLS)" 'implement'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-x SKILLS)" 'implement'
   is 'the tier is recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x TIER)" 'deep'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-x TIER)" 'deep'
   is 'the mapped model is recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x MODEL)" '@default'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-x MODEL)" '@default'
   assert 'the mapped model reached agent start' \
     [ "${started_cmd#*--model @default}" != "$started_cmd" ]
 
-  # `$FLEET_AGENT_TIER` must yield to an explicit `--model`, and the env-derived
+  # `$FOREMAN_AGENT_TIER` must yield to an explicit `--model`, and the env-derived
   # tier must not be recorded beside it. Without that, exporting the documented
   # default makes the escape hatch unusable.
   rm -f "$prompt_file" "$started_file" "$start_args"
   ( cd "$spawn_repo" \
-    && FLEET_STATE="$sandbox/spawn-state" FLEET_AGENT_TIER=deep \
+    && FOREMAN_STATE="$sandbox/spawn-state" FOREMAN_AGENT_TIER=deep \
        HERDR_ENV=1 HERDR_PANE_ID=p0 \
        cmd_spawn feat/y --model sonnet --skill implement \
-         --task 'Prove --model wins over FLEET_AGENT_TIER.' ) >/dev/null 2>&1
+         --task 'Prove --model wins over FOREMAN_AGENT_TIER.' ) >/dev/null 2>&1
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
   is 'env-tier + --model records no tier' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-y TIER)" ''
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-y TIER)" ''
   is 'env-tier + --model records the explicit model' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-y MODEL)" 'sonnet'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-y MODEL)" 'sonnet'
   assert 'the explicit --model reached agent start' \
     [ "${started_cmd#*--model sonnet}" != "$started_cmd" ]
 
@@ -264,7 +264,7 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -f "$prompt_file" "$started_file" "$start_args"
   role_skill() { [ "$1" = review ] && { printf 'code-review'; return 0; }; return 1; }
   ( cd "$spawn_repo" \
-    && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+    && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
        cmd_spawn feat/z --tier deep --role review --skill implement --skill research \
          --task 'Review the retry policy change.' ) >/dev/null 2>&1
   prompt=$(cat "$prompt_file" 2>/dev/null || true)
@@ -272,24 +272,24 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is 'a role and repeated --skill flags all load their procedures first' \
     "${prompt%%$'\n\n'Review the retry policy change.*}" "$expected_instructions"
   is 'all resolved and literal skills are recorded in prompt order' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-z SKILLS)" 'code-review,implement,research'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-z SKILLS)" 'code-review,implement,research'
   is 'the role itself is also recorded' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-z ROLE)" 'review'
+    "$(FOREMAN_STATE="$sandbox/spawn-state" meta_get feat-z ROLE)" 'review'
 
-  ( cd "$spawn_repo" && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
-      cmd_spawn feat/two-roles --role review --role review --task x ) >"$sandbox/fleet-two-roles" 2>&1
+  ( cd "$spawn_repo" && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+      cmd_spawn feat/two-roles --role review --role review --task x ) >"$sandbox/foreman-two-roles" 2>&1
   assert 'a second --role is a die' \
     [ "$?" != 0 ]
   assert 'and explains the single-role limit' \
-    grep -q 'only once' "$sandbox/fleet-two-roles"
+    grep -q 'only once' "$sandbox/foreman-two-roles"
 
-  ( cd "$spawn_repo" && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
-      cmd_spawn feat/unmapped --role ghost --task x ) >"$sandbox/fleet-role-unmapped" 2>&1
+  ( cd "$spawn_repo" && FOREMAN_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+      cmd_spawn feat/unmapped --role ghost --task x ) >"$sandbox/foreman-role-unmapped" 2>&1
   assert 'an unmapped --role is a die' \
     [ "$?" != 0 ]
   assert 'and names the role' \
-    grep -q "role 'ghost'" "$sandbox/fleet-role-unmapped"
-  rm -f "$sandbox/fleet-two-roles" "$sandbox/fleet-role-unmapped"
+    grep -q "role 'ghost'" "$sandbox/foreman-role-unmapped"
+  rm -f "$sandbox/foreman-two-roles" "$sandbox/foreman-role-unmapped"
   unset -f role_skill
 
   unset -f herdr
@@ -299,7 +299,7 @@ fi
 
 # ── plugin prose ─────────────────────────────────────────────────────────────
 #
-# The old `fleet spawn --skill` printer is gone; workers now read
+# The old `foreman spawn --skill` printer is gone; workers now read
 # `skill://<name>` directly, which only omp can resolve. A stray reference to
 # that removed printer left in the plugin prose after the cutover would
 # silently tell a worker to run something that no longer exists.
@@ -311,11 +311,11 @@ if [ -n "$plugin_dir" ]; then
   for f in "$plugin_dir"/command-prompts/*.md "$plugin_dir"/skills/*/SKILL.md \
            "$plugin_dir"/README.md; do
     [ -f "$f" ] || continue
-    if [ -n "$(sed -n -E '/fleet[[:space:]]+skill/p' "$f")" ]; then
+    if [ -n "$(sed -n -E '/foreman[[:space:]]+skill/p' "$f")" ]; then
       offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
     fi
   done
-  is 'no removed fleet-skill reference survives in the plugin prose' "${offenders# }" ''
+  is 'no removed foreman-skill reference survives in the plugin prose' "${offenders# }" ''
 
   # `orchestrate` arms omp's magic-keyword orchestration contract on a
   # worker's very first turn. This plugin dispatches generic briefs with no
@@ -336,7 +336,7 @@ fi
 
 # ── reap argument handling ───────────────────────────────────────────────────
 #
-# `cmd_reap` joins a handle onto $FLEET_STATE and `rm -rf`s it, and its handles
+# `cmd_reap` joins a handle onto $FOREMAN_STATE and `rm -rf`s it, and its handles
 # come straight off the command line. Needs a real herdr on PATH.
 
 printf '\nreap\n'
@@ -344,7 +344,7 @@ if [ "${HERDR_ENV:-}" = 1 ] && command -v herdr >/dev/null 2>&1 && command -v jq
   reap_state="$sandbox/reap"
   reap() (
     cd /tmp || exit 1
-    FLEET_STATE="$reap_state" HERDR_ENV=1 HERDR_PANE_ID=x "$FLEET" reap "$@" 2>&1
+    FOREMAN_STATE="$reap_state" HERDR_ENV=1 HERDR_PANE_ID=x "$FOREMAN_BIN" reap "$@" 2>&1
   )
   mk() { mkdir -p "$reap_state/$1"; : >"$reap_state/$1/meta"; }
 
@@ -375,26 +375,26 @@ fi
 # made it exist.
 
 printf '\nmeta\n'
-export FLEET_STATE="$sandbox/meta"
-meta_set m1 "FOREMAN=my foreman" "BRANCH=feat/x'y\"z" "DIR=/tmp/a b" "WORKSPACE=w8" \
+export FOREMAN_STATE="$sandbox/meta"
+meta_set m1 "BOSS=my boss" "BRANCH=feat/x'y\"z" "DIR=/tmp/a b" "WORKSPACE=w8" \
   "REPO=/r" "REPO_KEY=/r/.git"
-is 'a value with a space round-trips'  "$(meta_get m1 FOREMAN)"   'my foreman'
+is 'a value with a space round-trips'  "$(meta_get m1 BOSS)"   'my boss'
 is 'quotes and slashes round-trip'     "$(meta_get m1 BRANCH)" "feat/x'y\"z"
 
-meta_update m1 "FOREMAN=other"
-is 'meta_update rewrites its key'      "$(meta_get m1 FOREMAN)"   'other'
+meta_update m1 "BOSS=other"
+is 'meta_update rewrites its key'      "$(meta_get m1 BOSS)"   'other'
 is 'and preserves its siblings'        "$(meta_get m1 BRANCH)" "feat/x'y\"z"
 is 'and preserves the ones after it'   "$(meta_get m1 DIR)"    '/tmp/a b'
 
 is 'an absent key reads empty'         "$(meta_get m1 NOPE)"   ''
-is 'an absent worker reads empty'      "$(meta_get nosuch FOREMAN)" ''
+is 'an absent worker reads empty'      "$(meta_get nosuch BOSS)" ''
 
 # meta_get used to expand ${!key} *after* sourcing without unsetting first, so
 # a key the file did not carry fell through to the environment. A stale meta
 # file plus an exported REPO_KEY silently mis-scoped every repo-scoped command.
 export REPO_KEY=leaked-from-the-environment
 is 'an absent key does not leak the environment' "$(meta_get m1 XREPO_KEY)" ''
-meta_set m2 "FOREMAN=b"
+meta_set m2 "BOSS=b"
 is 'a missing REPO_KEY ignores the exported value' "$(meta_get m2 REPO_KEY)" ''
 unset REPO_KEY
 
@@ -443,7 +443,7 @@ is 'and so does feat-x'         "$(slugify feat-x)" "$(slugify feat/x)"
 # What makes a re-join terminate, and what makes a question preempt one.
 
 printf '\njoin bookkeeping\n'
-export FLEET_STATE="$sandbox/join"
+export FOREMAN_STATE="$sandbox/join"
 for w in alive quiet asker; do mkdir -p "$(meta_dir "$w")"; : >"$(meta_file "$w")"; done
 # live_workers asks herdr; the bookkeeping under test does not.
 agent_exists() { case "$1" in alive|quiet|asker) return 0 ;; *) return 1 ;; esac; }
@@ -459,7 +459,7 @@ mark_joined alive
 assert_not 'and stops being joinable once collected' \
   [ -n "$(joinable_workers | tr -d '[:space:]')" ]
 
-# The spin: a worker that ends its turn without ever running `fleet report` is
+# The spin: a worker that ends its turn without ever running `foreman report` is
 # simply idle, which settles instantly. Collecting it must be recorded even
 # though no report exists, or "join again until everyone reports" never ends.
 assert_not 'collected without a report is still collected' report_is_fresh alive
@@ -468,7 +468,7 @@ counter_bump "$(dispatch_file alive)"
 assert 'a new dispatch makes it joinable again' \
   [ "$(joinable_workers | tr -d '[:space:]')" = alive ]
 
-# `fleet spawn` makes a worker's first dispatch, and a freshly started omp can
+# `foreman spawn` makes a worker's first dispatch, and a freshly started omp can
 # still be initializing or sitting on a first-run trust prompt. Refusing there
 # would fail a spawn whose worktree, agent and layout already exist — and with
 # no prior dispatch there is no earlier report to mislabel, so it is submitted
@@ -483,7 +483,7 @@ assert 'and says pickup was not confirmed' [ "${out#*without confirming pickup}"
 is 'and records that dispatch' "$(counter_read "$(dispatch_file quiet)")" '1'
 
 # A second tracked task cannot be associated with its eventual report, though:
-# dispatch 1 would read dispatch 2's now-current counter when it reports. Fleet
+# dispatch 1 would read dispatch 2's now-current counter when it reports. Foreman
 # must refuse, without bumping that counter or prompting the agent. Raw answers
 # remain allowed below.
 out=$(
@@ -492,7 +492,7 @@ out=$(
     dispatch_to quiet 'a second tracked task' ) 2>&1
 )
 is 'a working worker refuses a REdispatch' "$?" '1'
-assert 'and explains the raw steering path' [ "${out#*fleet send --raw}" != "$out" ]
+assert 'and explains the raw steering path' [ "${out#*foreman send --raw}" != "$out" ]
 is 'and leaves the counter alone' "$(counter_read "$(dispatch_file quiet)")" '1'
 
 # Raw answers are steering: no protocol block, no new dispatch counter.
@@ -508,7 +508,7 @@ is 'a raw answer does not bump the dispatch counter' "$raw_after" "$raw_before"
 assert_not 'no question filed yet' question_pending asker
 printf 'which retry policy?\n' >"$(question_file asker)"
 counter_bump "$(question_seq_file asker)"
-assert 'fleet reply files a pending question' question_pending asker
+assert 'foreman reply files a pending question' question_pending asker
 joinable=$(joinable_workers | tr -d '[:space:]')
 assert 'a question makes an already-collected worker joinable again' \
   [ "${joinable#*asker}" != "$joinable" ]
@@ -519,7 +519,7 @@ unset -f agent_exists
 # ── workspace-manager coexistence ────────────────────────────────────────────
 #
 # The gate used to grep `- repo:` across the whole file and ignore `path:`
-# entirely, so a repo configured by checkout path read as uncovered and fleet
+# entirely, so a repo configured by checkout path read as uncovered and foreman
 # raced the plugin it exists to avoid racing.
 
 printf '\nworkspace-manager gate\n'
@@ -557,8 +557,8 @@ assert_not 'an unrelated worktree is not covered' \
 assert     'a bare repo name still matches by basename' \
   workspace_manager_covers /anywhere/quoted-name /tmp/quoted-name-feat-x
 # The override is the escape hatch for a repo the plugin covers but does not
-# actually contend for. Without it such a repo could not use fleet at all.
-FLEET_IGNORE_WORKSPACE_MANAGER=1 \
+# actually contend for. Without it such a repo could not use foreman at all.
+FOREMAN_IGNORE_WORKSPACE_MANAGER=1 \
   assert_not 'and the override really disables the check' \
     workspace_manager_covers /some/repo /srv/checkouts/web-app-feat-x
 unset -f workspace_manager_enabled workspace_manager_config
@@ -566,11 +566,11 @@ unset -f workspace_manager_enabled workspace_manager_config
 # ── reap --forget ────────────────────────────────────────────────────────────
 #
 # A worktree removed by hand leaves a record `worktree remove` can never
-# satisfy, so the worker used to sit in `fleet ls` as `gone` permanently with
+# satisfy, so the worker used to sit in `foreman ls` as `gone` permanently with
 # no way to clear it.
 
 printf '\nreap --forget\n'
-export FLEET_STATE="$sandbox/forget"
+export FOREMAN_STATE="$sandbox/forget"
 herdr() { return 1; }   # every `worktree remove` fails, as it would for a gone worktree
 meta_set stuck "BRANCH=feat/gone" "DIR=/tmp/gone" "WORKSPACE=w9"
 assert_not 'reap refuses when the workspace will not remove' reap_one stuck 0 0
@@ -582,13 +582,13 @@ unset -f herdr
 # ── join validates explicit handles ─────────────────────────────────────────────
 
 printf '\njoin validates explicit handles\n'
-export FLEET_STATE="$sandbox/state-join-validate"
+export FOREMAN_STATE="$sandbox/state-join-validate"
 require_herdr() { :; }
 
 out=$( (cmd_join 'no-such-worker') 2>&1 )
 rc=$?
 assert     'join fails for nonexistent worker' [ "$rc" != 0 ]
-assert     'output contains no fleet record for' [ "${out#*no fleet record for}" != "$out" ]
+assert     'output contains no foreman record for' [ "${out#*no foreman record for}" != "$out" ]
 assert_not 'output contains no === result' [ "${out#*===}" != "$out" ]
 
 out=$( (cmd_join '../evil') 2>&1 )
@@ -600,41 +600,41 @@ unset -f require_herdr
 # ── tracked send refuses unregistered agents ────────────────────────────────────
 
 printf '\ntracked send refuses unregistered agents\n'
-export FLEET_STATE="$sandbox/state-send-unregistered"
+export FOREMAN_STATE="$sandbox/state-send-unregistered"
 agent_exists() { return 0; }
 require_herdr() { :; }
 
 out=$( (cmd_send intruder 'hi') 2>&1 )
 rc=$?
 assert     'send fails for unregistered agent' [ "$rc" != 0 ]
-assert     'output contains not registered' [ "${out#*not a registered fleet worker}" != "$out" ]
-assert     'output suggests fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
-assert_not 'no state dir created for handle' [ -d "$FLEET_STATE/intruder" ]
+assert     'output contains not registered' [ "${out#*not a registered foreman worker}" != "$out" ]
+assert     'output suggests foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
+assert_not 'no state dir created for handle' [ -d "$FOREMAN_STATE/intruder" ]
 unset -f agent_exists require_herdr
 
 # ── ask rejects --raw ────────────────────────────────────────────────────────────
 
 printf '\nask rejects --raw\n'
-export FLEET_STATE="$sandbox/state-ask-raw"
+export FOREMAN_STATE="$sandbox/state-ask-raw"
 require_herdr() { :; }
 
 out=$( (cmd_ask --raw intruder 'hi') 2>&1 )
 rc=$?
 assert 'ask --raw dies' [ "$rc" != 0 ]
-assert 'output mentions fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
+assert 'output mentions foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
 
 # cmd_send also honors --raw in the position right after the handle, so ask
 # must refuse it there too — not just in the leading position.
 out=$( (cmd_ask intruder --raw 'hi') 2>&1 )
 rc=$?
 assert 'ask <handle> --raw dies too' [ "$rc" != 0 ]
-assert 'trailing form also points at fleet send --raw' [ "${out#*fleet send --raw}" != "$out" ]
+assert 'trailing form also points at foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
 unset -f require_herdr
 
 # ── spawn flag conflicts ─────────────────────────────────────────────────────────
 
 printf '\nspawn flag conflicts\n'
-export FLEET_STATE="$sandbox/state-spawn-flags"
+export FOREMAN_STATE="$sandbox/state-spawn-flags"
 require_herdr() { :; }
 herdr() { printf 'herdr was called\n' >&2; return 1; }
 
@@ -656,11 +656,11 @@ assert     'output contains tier/model mutually exclusive' \
   [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
 assert_not 'herdr was not called for tier/model' [ "${out#*herdr was called}" != "$out" ]
 
-# `$FLEET_AGENT_TIER` is a default, not a flag. An explicit `--model` must
+# `$FOREMAN_AGENT_TIER` is a default, not a flag. An explicit `--model` must
 # override it; otherwise exporting the documented env default makes the escape
 # hatch unusable. This used to die "--tier and --model are mutually exclusive".
-out=$( (FLEET_AGENT_TIER=deep cmd_spawn br --model opus --task x) 2>&1 )
-assert_not 'env FLEET_AGENT_TIER does not block --model' \
+out=$( (FOREMAN_AGENT_TIER=deep cmd_spawn br --model opus --task x) 2>&1 )
+assert_not 'env FOREMAN_AGENT_TIER does not block --model' \
   [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
 
 unset -f herdr
@@ -669,26 +669,26 @@ unset -f require_herdr
 # ── join --timeout validation ───────────────────────────────────────────────────
 
 printf '\njoin --timeout validation\n'
-export FLEET_STATE="$sandbox/state-join-timeout"
+export FOREMAN_STATE="$sandbox/state-join-timeout"
 require_herdr() { :; }
 
 out=$( (cmd_join --timeout abc h) 2>&1 )
 rc=$?
 assert 'join --timeout dies on non-numeric value' [ "$rc" != 0 ]
-assert 'output contains usage: fleet join' [ "${out#*usage: fleet join}" != "$out" ]
+assert 'output contains usage: foreman join' [ "${out#*usage: foreman join}" != "$out" ]
 unset -f require_herdr
 
 # ── join --once ──────────────────────────────────────────────────────────────
 #
-# The single-tick mode the omp fleet extension polls on a timer to deliver
-# worker reports as a non-interrupting aside, instead of the orchestrator
+# The single-tick mode the omp foreman extension polls on a timer to deliver
+# worker reports as a non-interrupting aside, instead of the boss
 # blocking a tool call. It must never enter the deadline/sleep loop — a
 # poller calling this every few seconds must never itself block.
 
 printf '\njoin --once\n'
-export FLEET_STATE="$sandbox/state-join-once"
+export FOREMAN_STATE="$sandbox/state-join-once"
 mkdir -p "$(meta_dir w1)"
-meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
 printf 'settled ok' >"$(report_file w1)"
 cp "$(dispatch_file w1)" "$(report_token_file w1)"
@@ -712,9 +712,9 @@ unset -f herdr
 # A still-working worker must return after exactly one tick, not fall through
 # to the normal deadline/`sleep_ms` loop — `sleep_ms` here would hang the
 # test (and, for real, block the poller) for a full `JOIN_POLL_MS`.
-export FLEET_STATE="$sandbox/state-join-once-working"
+export FOREMAN_STATE="$sandbox/state-join-once-working"
 mkdir -p "$(meta_dir w2)"
-meta_set w2 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
 counter_bump "$(dispatch_file w2)"
 sleep_ms() { bad 'join --once must not call sleep_ms'; }
 herdr() {
@@ -733,7 +733,7 @@ unset -f herdr sleep_ms
 
 # A poller ticks every few seconds; with nothing joinable it must stay silent
 # rather than repeat "nothing to join" on every tick.
-export FLEET_STATE="$sandbox/state-join-once-empty"
+export FOREMAN_STATE="$sandbox/state-join-once-empty"
 out3=$( (cmd_join --once) 2>&1 )
 rc3=$?
 is 'join --once with nothing joinable exits 0' "$rc3" '0'
@@ -744,16 +744,16 @@ unset -f require_herdr scoped_key
 #
 # Bug caught live: a poller ticking every few seconds right after spawn can
 # observe agent_status flip to idle a beat before a *different* process sees
-# the report `fleet_report` just wrote in that same turn — herdr's status
+# the report `foreman_report` just wrote in that same turn — herdr's status
 # tracking and the filesystem view have no ordering guarantee between them.
 # `mark_joined` used to fire unconditionally on the first idle/done sighting,
 # so that race silently lost a real report forever: the joined counter was
 # already bumped past it by the time the report became visible.
 
 printf '\njoin settle-confirm race\n'
-export FLEET_STATE="$sandbox/state-join-settle-race"
+export FOREMAN_STATE="$sandbox/state-join-settle-race"
 mkdir -p "$(meta_dir w1)"
-meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
 require_herdr() { :; }
 scoped_key() { printf 'k'; }
@@ -784,12 +784,12 @@ is     'settle race: second tick marks the worker joined' \
   "$(counter_read "$(joined_token_file w1)")" "$(counter_read "$(dispatch_file w1)")"
 unset -f herdr
 
-# A worker that is genuinely done with nothing to report (no `fleet_report`
+# A worker that is genuinely done with nothing to report (no `foreman_report`
 # call at all) must still settle — just one tick later, never permanently
 # stuck — once the SAME unfresh idle sighting repeats.
-export FLEET_STATE="$sandbox/state-join-settle-noreport"
+export FOREMAN_STATE="$sandbox/state-join-settle-noreport"
 mkdir -p "$(meta_dir w2)"
-meta_set w2 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
+meta_set w2 "BOSS=me" "BRANCH=b" "DIR=/tmp/w2" "REPO_KEY=k"
 counter_bump "$(dispatch_file w2)"
 herdr() {
   case "$*" in
@@ -811,38 +811,38 @@ unset -f herdr require_herdr scoped_key
 # ── reply appends an uncollected question ────────────────────────────────────────
 
 printf '\nreply appends an uncollected question\n'
-export FLEET_STATE="$sandbox/state-reply-append"
-mkdir -p "$FLEET_STATE/w1"
-meta_set w1 "FOREMAN=me" "BRANCH=b" "DIR=/tmp/x"
+export FOREMAN_STATE="$sandbox/state-reply-append"
+mkdir -p "$FOREMAN_STATE/w1"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
 self_handle() { printf 'w1'; }
-foreman_handle() { printf 'me'; }
+boss_handle() { printf 'me'; }
 agent_exists() { return 1; }
 require_herdr() { :; }
 
 cmd_reply 'first question' >/dev/null 2>&1
 cmd_reply 'second question' >/dev/null 2>&1
 
-qf="$FLEET_STATE/w1/question.md"
+qf="$FOREMAN_STATE/w1/question.md"
 assert     'question.md exists' [ -f "$qf" ]
 assert     'question.md contains first question' [ -n "$(grep -F 'first question' "$qf")" ]
 assert     'question.md contains second question' [ -n "$(grep -F 'second question' "$qf")" ]
 assert     'question.md contains separator' [ -n "$(grep -F -- '---' "$qf")" ]
-is         'question.seq reads 2' "$(counter_read "$FLEET_STATE/w1/question.seq")" '2'
-unset -f self_handle foreman_handle agent_exists require_herdr
+is         'question.seq reads 2' "$(counter_read "$FOREMAN_STATE/w1/question.seq")" '2'
+unset -f self_handle boss_handle agent_exists require_herdr
 
-# ── fleet version ───────────────────────────────────────────────────────────────
+# ── foreman version ───────────────────────────────────────────────────────────────
 
 printf '\nfleet version\n'
-is 'version comes from the plugin manifest' "$(cmd_version)" 'fleet 0.5.0'
+is 'version comes from the plugin manifest' "$(cmd_version)" 'foreman 0.5.0'
 
 # ── ls shows a pending question ──────────────────────────────────────────────────
 
 printf '\nls shows a pending question\n'
-export FLEET_STATE="$sandbox/state-ls-q"
-mkdir -p "$FLEET_STATE/w2"
-meta_set w2 "FOREMAN=foreman" "BRANCH=feat/q" "DIR=/tmp/q" "REPO_KEY=k"
-: >"$FLEET_STATE/w2/question.md"
-counter_bump "$(cat "$FLEET_STATE/w2/question.seq" 2>/dev/null || echo "$FLEET_STATE/w2/question.seq")"
+export FOREMAN_STATE="$sandbox/state-ls-q"
+mkdir -p "$FOREMAN_STATE/w2"
+meta_set w2 "BOSS=boss" "BRANCH=feat/q" "DIR=/tmp/q" "REPO_KEY=k"
+: >"$FOREMAN_STATE/w2/question.md"
+counter_bump "$(cat "$FOREMAN_STATE/w2/question.seq" 2>/dev/null || echo "$FOREMAN_STATE/w2/question.seq")"
 
 agent_field() { printf ''; }
 require_herdr() { :; }
@@ -857,11 +857,11 @@ unset -f agent_field require_herdr scoped_key
 #
 # Raw steering to every live worker in the repo. It must never bump the
 # dispatch counter dispatch_to guards — a broadcast is not a tracked task, and
-# bumping it would make a worker's eventual `fleet report` for its real task
+# bumping it would make a worker's eventual `foreman report` for its real task
 # look like it answers the broadcast instead.
 
 printf '\nbroadcast\n'
-export FLEET_STATE="$sandbox/state-broadcast"
+export FOREMAN_STATE="$sandbox/state-broadcast"
 for w in w1 w2 me; do mkdir -p "$(meta_dir "$w")"; meta_set "$w" "REPO_KEY=repo1"; done
 herdr() {
   case "$*" in
@@ -881,7 +881,7 @@ assert 'broadcast sends to the live worker' [ "${out#*sent: w1}" != "$out" ]
 assert_not 'broadcast skips its own sender handle' [ "${out#*sent: me}" != "$out" ]
 assert 'broadcast skips the dead worker' [ "${out#*skipped*w2}" != "$out" ]
 
-out2=$( (FLEET_STATE="$sandbox/state-broadcast-empty" cmd_broadcast 'hi') 2>&1 )
+out2=$( (FOREMAN_STATE="$sandbox/state-broadcast-empty" cmd_broadcast 'hi') 2>&1 )
 rc2=$?
 assert 'broadcast fails with no live workers in scope' [ "$rc2" != 0 ]
 assert 'and explains why' [ "${out2#*no live workers in this repo}" != "$out2" ]
@@ -889,13 +889,13 @@ unset -f herdr self_handle require_herdr scoped_key
 
 # ── dm ────────────────────────────────────────────────────────────────────────
 #
-# Raw steering to one fleet member. Same untracked-dispatch contract as
-# broadcast; the target gate (registered worker or the foreman handle) is the one
-# thing that differs from `fleet send --raw`, which only checks liveness.
+# Raw steering to one foreman member. Same untracked-dispatch contract as
+# broadcast; the target gate (registered worker or the boss handle) is the one
+# thing that differs from `foreman send --raw`, which only checks liveness.
 
 printf '\ndm\n'
-export FLEET_STATE="$sandbox/state-dm"
-mkdir -p "$(meta_dir w1)"; meta_set w1 "FOREMAN=me"
+export FOREMAN_STATE="$sandbox/state-dm"
+mkdir -p "$(meta_dir w1)"; meta_set w1 "BOSS=me"
 self_handle() { printf 'me'; }
 require_herdr() { :; }
 agent_exists() { case "$1" in w1|intruder) return 0 ;; *) return 1 ;; esac; }
@@ -903,12 +903,12 @@ sent_text=""
 prompt_raw() { sent_text="$2"; }
 
 cmd_dm w1 'ping' >/dev/null 2>&1
-is 'dm carries the [fleet dm from <sender>] prefix' "$sent_text" '[fleet dm from me] ping'
+is 'dm carries the [foreman dm from <sender>] prefix' "$sent_text" '[foreman dm from me] ping'
 
 out=$( (cmd_dm intruder 'hi') 2>&1 )
 rc=$?
-assert 'dm rejects an unregistered, non-foreman target' [ "$rc" != 0 ]
-assert 'and points at fleet ls' [ "${out#*fleet ls}" != "$out" ]
+assert 'dm rejects an unregistered, non-boss target' [ "$rc" != 0 ]
+assert 'and points at foreman ls' [ "${out#*foreman ls}" != "$out" ]
 
 before=$(counter_read "$(dispatch_file w1)")
 cmd_dm w1 'ping again' >/dev/null 2>&1
@@ -919,11 +919,11 @@ unset -f self_handle require_herdr agent_exists prompt_raw
 # ── keys ──────────────────────────────────────────────────────────────────────
 #
 # Unblocking an approval UI needs real terminal keys, not text `agent prompt`
-# can deliver. fleet does not validate key names — herdr does — so the argv
+# can deliver. foreman does not validate key names — herdr does — so the argv
 # must reach `herdr agent send-keys` unmodified.
 
 printf '\nkeys\n'
-export FLEET_STATE="$sandbox/state-keys"
+export FOREMAN_STATE="$sandbox/state-keys"
 require_herdr() { :; }
 agent_exists() { case "$1" in feat-x) return 0 ;; *) return 1 ;; esac; }
 herdr_args="$sandbox/herdr-keys-args"
@@ -936,7 +936,7 @@ is 'keys threads argv into herdr agent send-keys verbatim' "$(cat "$herdr_args")
 out=$( (cmd_keys feat-x) 2>&1 )
 rc=$?
 assert 'keys requires at least one key' [ "$rc" != 0 ]
-assert 'and explains usage' [ "${out#*usage: fleet keys}" != "$out" ]
+assert 'and explains usage' [ "${out#*usage: foreman keys}" != "$out" ]
 
 out=$( (cmd_keys unknown-handle down) 2>&1 )
 rc=$?

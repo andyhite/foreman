@@ -1,21 +1,21 @@
 ---
-name: fleet-dispatch
-description: How an orchestrator turns requirements into a fleet worker brief. Use when dispatching work to a peer agent, or when a /fleet:* command asks for the dispatch contract.
+name: foreman-dispatch
+description: How an boss turns requirements into a foreman worker brief. Use when dispatching work to a peer agent, or when a /foreman:* command asks for the dispatch contract.
 user-invocable: false
 ---
 
-# Fleet dispatch
+# Foreman dispatch
 
 You are the project manager, not the implementer.
 
 Your job is to *know what is wanted* and to *say it precisely enough that a
-stranger could build it*. A fleet worker is exactly that stranger: a blank
+stranger could build it*. A foreman worker is exactly that stranger: a blank
 agent process with no memory of this conversation, no access to your context,
 and no way to guess. Everything it needs travels in one block of text.
 
 This skill is the contract for writing that text. Read
-`skill://fleet-orchestrate` for the CLI contract underneath it, and
-`skill://fleet-worker` for what a worker itself can do once dispatched.
+`skill://foreman-boss` for the CLI contract underneath it, and
+`skill://foreman-worker` for what a worker itself can do once dispatched.
 
 ## The split
 
@@ -28,14 +28,14 @@ execution skills of its own. A dispatch may name one configured role, any
 number of literal skills, or neither. The role resolves to its configured
 skill and appears first in the prompt; literal skills follow in the order
 passed. Use a role for a convention reused across dispatches, and literal
-skills for procedures specific to this job — see `skill://fleet-orchestrate`.
+skills for procedures specific to this job — see `skill://foreman-boss`.
 
-If you catch yourself editing source files, you have stopped orchestrating.
+If you catch yourself editing source files, you have stopped bossing.
 Dispatch it.
 
 Concurrency is the whole point. Slices that do not depend on each other are
 spawned **before** anything is joined. A slice that fits in this checkout
-stays here or uses the orchestrator harness's own local subagent mechanism
+stays here or uses the boss harness's own local subagent mechanism
 (`task` in omp).
 
 ## The requirements gate
@@ -53,12 +53,12 @@ wrong thing for an hour.
 
 The exception is a decision the worker is *better placed* to make because it
 depends on what the code turns out to look like. Say so explicitly in the
-brief and tell the worker to `fleet reply` if it needs you to choose.
+brief and tell the worker to `foreman reply` if it needs you to choose.
 
 ## Anatomy of a brief
 
 Three sections. Nothing else. Role and skill invocations, if any, do not
-belong in the file: `fleet_spawn` prepends them deterministically.
+belong in the file: `foreman_spawn` prepends them deterministically.
 
 ```markdown
 ## <what this is>
@@ -72,22 +72,22 @@ belong in the file: `fleet_spawn` prepends them deterministically.
 ```
 
 **A role or skill puts a procedure in front of the worker.** A role selects
-one skill through fleet's config; every literal skill is included as named.
-Fleet prepends one `skill://<name>` instruction for each, so the worker reads
+one skill through foreman's config; every literal skill is included as named.
+Foreman prepends one `skill://<name>` instruction for each, so the worker reads
 every required procedure rather than auto-selecting from what happens to be
 installed. With neither, the worker works straight from the brief. Which mix
 fits is a decision made per dispatch, not something this plugin bakes in.
 
 **`tier` picks the worker's model band.** `standard` for dispatch-heavy work,
 `deep` when the worker itself has to hold judgement. `model` is the escape
-hatch when an orchestrator needs an omp model selector the tier names don't
+hatch when an boss needs an omp model selector the tier names don't
 cover.
 
 **Do not include:** where to commit, whether to push, how to report back, a
 reminder to stay in the worktree, that other workers exist, or a nudge to
-delegate independent work. `fleet` appends its own protocol block covering
-all of that — including that `fleet ls`/`fleet_ls` lists the other workers
-and `fleet dm`/`fleet_dm` reaches one directly over a declared shared seam
+delegate independent work. `foreman` appends its own protocol block covering
+all of that — including that `foreman ls`/`foreman_ls` lists the other workers
+and `foreman dm`/`foreman_dm` reaches one directly over a declared shared seam
 (never for status updates), and that substantial independent slices of the
 worker's own task should go to its own subagents instead of running
 serially. Repeating any of it wastes context and invites contradictions.
@@ -101,17 +101,17 @@ Compose each brief as text, name a configured role, literal skills, or both
 when the work calls for them, and move on to the next slice:
 
 ```
-fleet_spawn({ branch: "feat/412-webhook-retry", tier: "deep", role: "implement", skills: ["tdd", "code-review"], task: "<the brief above>" })
+foreman_spawn({ branch: "feat/412-webhook-retry", tier: "deep", role: "implement", skills: ["tdd", "code-review"], task: "<the brief above>" })
 ```
 
 Or, with no procedures, a plain task brief:
 
 ```
-fleet_spawn({ branch: "spike/dashboard-loading-state", tier: "standard", task: "<the brief above>" })
+foreman_spawn({ branch: "spike/dashboard-loading-state", tier: "standard", task: "<the brief above>" })
 ```
 
-`fleet_spawn`'s `task` field is the brief itself — the tool writes it to a
-temp file and passes it through, so you never manage `/tmp/fleet-*.md` files
+`foreman_spawn`'s `task` field is the brief itself — the tool writes it to a
+temp file and passes it through, so you never manage `/tmp/foreman-*.md` files
 by hand.
 
 Branch names follow the repo's convention if it has one. Otherwise:
@@ -120,17 +120,17 @@ exploratory work, `review/` for a review pass. The worker's handle is derived
 from the branch, so keep branches distinguishable in their first 32
 characters.
 
-Claim your own handle with `fleet_foreman({})` before the first spawn — a worker
-stamped with the wrong orchestrator sends its questions to the wrong pane.
+Claim your own handle with `foreman_boss({})` before the first spawn — a worker
+stamped with the wrong boss sends its questions to the wrong pane.
 
 Then, once every independent slice is out, keep working. Reports and
-questions arrive on their own, tagged `[fleet:<handle>]`, as each worker
+questions arrive on their own, tagged `[foreman:<handle>]`, as each worker
 settles — no blocking wait required. Answer any of them with
-`fleet_send({ handle, text: <answer>, raw: true })` — `raw: true` sends the
-answer alone; the default re-appends fleet's protocol block, which fits a
+`foreman_send({ handle, text: <answer>, raw: true })` — `raw: true` sends the
+answer alone; the default re-appends foreman's protocol block, which fits a
 fresh brief and nothing else. Raw answers are steering rather than new
 tracked dispatches, so they do not make the eventual report for the worker's
-original task look stale. Call `fleet_join({})` only if you have genuinely
+original task look stale. Call `foreman_join({})` only if you have genuinely
 nothing else to do and want to sit until the next one lands — it is a
 fallback, not the primary way results reach you. Once everyone has reported,
 review the branches and tell the user what landed where.

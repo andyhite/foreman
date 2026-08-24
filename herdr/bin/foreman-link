@@ -1,5 +1,5 @@
 #!/bin/sh
-# Put only this plugin's fleet on PATH: never replace an unrelated executable.
+# Put only this plugin's foreman on PATH: never replace an unrelated executable.
 
 quiet=false
 case "${1-}" in
@@ -8,7 +8,7 @@ case "${1-}" in
   '') ;;
   # A usage error, unlike the environment conditions below: exiting 0 here
   # would report a successful startup hook that never linked anything.
-  *) printf 'fleet-link: unknown option: %s\n' "$1" >&2; exit 2 ;;
+  *) printf 'foreman-link: unknown option: %s\n' "$1" >&2; exit 2 ;;
 esac
 
 resolve_path() {
@@ -54,7 +54,7 @@ plugin_id_of() {
 # + rename) on every write so a crash mid-write can't leave a truncated file
 # that then fails every future ownership check.
 receipt_file() {
-  printf '%s/link\n' "${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fleet}"
+  printf '%s/link\n' "${FOREMAN_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/foreman}"
 }
 
 # Echoes the destination last recorded for $1, if any; fails if there is none.
@@ -73,7 +73,7 @@ receipt_record() {
   destination=$2
   file=$(receipt_file)
   if ! mkdir -p "$(dirname "$file")" 2>/dev/null; then
-    printf 'fleet-link: warning: could not create %s to record link ownership\n' "$(dirname "$file")" >&2
+    printf 'foreman-link: warning: could not create %s to record link ownership\n' "$(dirname "$file")" >&2
     return 0
   fi
   tmp="$file.$$"
@@ -84,7 +84,7 @@ receipt_record() {
   fi
   printf '%s\t%s\n' "$target" "$destination" >>"$tmp" 2>/dev/null
   if ! mv "$tmp" "$file" 2>/dev/null; then
-    printf 'fleet-link: warning: could not record link ownership in %s\n' "$file" >&2
+    printf 'foreman-link: warning: could not record link ownership in %s\n' "$file" >&2
     rm -f "$tmp"
   fi
   return 0
@@ -93,8 +93,8 @@ receipt_record() {
 # Whether the symlink already at the target belongs to this plugin.
 #
 # Ownership is decided by plugin id, never by shape. An earlier version accepted
-# any path of the form <a herdr plugin>/bin/fleet, which would silently steal the
-# command of a different plugin that happens to ship its own `bin/fleet`.
+# any path of the form <a herdr plugin>/bin/foreman, which would silently steal the
+# command of a different plugin that happens to ship its own `bin/foreman`.
 #
 # A dangling link cannot be identified this way — there's no path left to read
 # a plugin id out of — so this function still refuses one. See
@@ -104,7 +104,7 @@ link_is_ours() {
   resolved_link=$1
   [ -n "$resolved_link" ] && [ -e "$resolved_link" ] || return 1
   [ -n "$self_id" ] || return 1
-  root=${resolved_link%/bin/fleet}
+  root=${resolved_link%/bin/foreman}
   [ "$root" != "$resolved_link" ] || return 1
   [ "$(plugin_id_of "$root/herdr-plugin.toml" 2>/dev/null)" = "$self_id" ]
 }
@@ -121,10 +121,10 @@ dangling_link_is_ours() {
 
 source=$(resolve_path "$0") || exit 1
 source_dir=$(dirname "$source")
-source=$source_dir/fleet
+source=$source_dir/foreman
 self_id=$(plugin_id_of "${source_dir%/bin}/herdr-plugin.toml" || true)
-target_dir=${FLEET_LINK_DIR:-"$HOME/.local/bin"}
-target=$target_dir/fleet
+target_dir=${FOREMAN_LINK_DIR:-"$HOME/.local/bin"}
+target=$target_dir/foreman
 # Replace the link in one rename: between an rm and a fresh ln -s the command
 # is off PATH, and a failed ln strands that gap until the next startup hook.
 repoint() {
@@ -148,7 +148,7 @@ elif [ -L "$target" ]; then
     receipt_record "$target" "$source"
     $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   elif [ -n "$resolved" ] && [ -e "$resolved" ]; then
-    printf 'fleet-link: warning: %s already points at %s; remove it or set FLEET_LINK_DIR\n' \
+    printf 'foreman-link: warning: %s already points at %s; remove it or set FOREMAN_LINK_DIR\n' \
       "$target" "$resolved" >&2
     exit 0
   elif dangling_link_is_ours "$target" "$literal"; then
@@ -156,16 +156,16 @@ elif [ -L "$target" ]; then
     receipt_record "$target" "$source"
     $quiet || printf 'repointed %s -> %s\n' "$target" "$source"
   else
-    printf 'fleet-link: warning: %s is a broken symlink to %s; fleet will not be on PATH until you remove it or set FLEET_LINK_DIR\n' \
+    printf 'foreman-link: warning: %s is a broken symlink to %s; foreman will not be on PATH until you remove it or set FOREMAN_LINK_DIR\n' \
       "$target" "$literal" >&2
     exit 0
   fi
 else
-  printf 'fleet-link: warning: %s already exists; remove it or set FLEET_LINK_DIR\n' "$target" >&2
+  printf 'foreman-link: warning: %s already exists; remove it or set FOREMAN_LINK_DIR\n' "$target" >&2
   exit 0
 fi
 
 case ":${PATH-}:" in
   *":$target_dir:"*) ;;
-  *) printf 'fleet-link: warning: %s is not on PATH; add it to your interactive shell PATH to use fleet there\n' "$target_dir" >&2 ;;
+  *) printf 'foreman-link: warning: %s is not on PATH; add it to your interactive shell PATH to use foreman there\n' "$target_dir" >&2 ;;
 esac

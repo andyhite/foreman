@@ -1,35 +1,35 @@
-id = "andyhite.fleet"
-name = "Fleet"
+id = "andyhite.foreman"
+name = "Foreman"
 version = "0.5.0"
 min_herdr_version = "0.8.0"
 description = "Dispatch peer coding agents into herdr worktree workspaces."
 platforms = ["linux", "macos"]
 
-# Installing the plugin puts fleet on PATH: agents invoke the CLI from ordinary
+# Installing the plugin puts foreman on PATH: agents invoke the CLI from ordinary
 # shells, and herdr has no mechanism for a plugin to export a binary.
 [[startup]]
-command = ["sh", "bin/fleet-link", "--quiet"]
+command = ["sh", "bin/foreman-link", "--quiet"]
 
 # Plugin actions take no arguments, so the two exposed here are the two that
-# need none. Both go through a wrapper rather than calling `bin/fleet` directly:
-# actions run with cwd set to the plugin root, and fleet scopes its inventory to
+# need none. Both go through a wrapper rather than calling `bin/foreman` directly:
+# actions run with cwd set to the plugin root, and foreman scopes its inventory to
 # the repo it runs in, so an unwrapped call would always report on this plugin's
 # own checkout.
 [[actions]]
 id = "ls"
-title = "List fleet workers"
+title = "List foreman workers"
 contexts = ["workspace"]
-command = ["./bin/fleet-ls"]
+command = ["./bin/foreman-ls"]
 
 # The dashboard is the interactive half of `ls`, and the one worth binding a key
 # to. It needs an action to reach it: the palette and `[[keys.command]]` both
 # address actions, never pane entrypoints.
 [[actions]]
 id = "dashboard"
-title = "Fleet dashboard"
-description = "Inspect and operate this workspace's fleet in a popup."
+title = "Foreman dashboard"
+description = "Inspect and operate this workspace's foreman in a popup."
 contexts = ["workspace"]
-command = ["./bin/fleet-dashboard-open"]
+command = ["./bin/foreman-dashboard-open"]
 
 # A popup rather than a split or a tab: the dashboard is something you open, act
 # in, and dismiss, and a popup leaves the tiled layout — including the agent
@@ -38,8 +38,8 @@ command = ["./bin/fleet-dashboard-open"]
 # the workspace it belongs to without being told.
 [[panes]]
 id = "dashboard"
-title = "Fleet"
+title = "Foreman"
 placement = "popup"
 width = "85%"
 height = "80%"
-command = ["bash", "bin/fleet-dashboard"]
+command = ["bash", "bin/foreman-dashboard"]

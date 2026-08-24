@@ -1,5 +1,5 @@
 #!/bin/sh
-# Open the fleet dashboard as a herdr popup.
+# Open the foreman dashboard as a herdr popup.
 #
 # The palette lists actions, not panes, so reaching a `[[panes]]` entrypoint
 # from the palette needs an action that opens it. A wrapper rather than a bare
@@ -7,7 +7,7 @@
 # $HERDR_BIN_PATH is the portable way to reach the running herdr, and nothing
 # expands it inside a manifest array.
 #
-# The popup does not need the workspace passed to it. Unlike `fleet-ls`, which
+# The popup does not need the workspace passed to it. Unlike `foreman-ls`, which
 # runs in the plugin root and has to be told where to look, a plugin pane
 # receives $HERDR_PLUGIN_CONTEXT_JSON of its own; the dashboard reads the
 # workspace cwd from there.
@@ -32,12 +32,12 @@
 set -eu
 
 herdr_bin=${HERDR_BIN_PATH:-herdr}
-plugin=${HERDR_PLUGIN_ID:-andyhite.fleet}
+plugin=${HERDR_PLUGIN_ID:-andyhite.foreman}
 # How long the child keeps trying for the slot. Seconds, because the deadline
 # is `date +%s` arithmetic — whole-second resolution means the real budget is
 # anywhere from one second less than this to exactly it, which is why the
 # default is not 1.
-budget=${FLEET_DASHBOARD_OPEN_TIMEOUT_S:-3}
+budget=${FOREMAN_DASHBOARD_OPEN_TIMEOUT_S:-3}
 
 # The action's own stderr goes to the plugin log, but the action is gone before
 # the child knows anything, so the child needs a log of its own. herdr provides
@@ -81,7 +81,7 @@ transient() {
   # (`ui.toast.delivery` defaults to `off`), so it is attempted rather than
   # relied on; the log is the half that is always written.
   printf '%s failed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$out" >>"$log"
-  "$herdr_bin" notification show 'Fleet dashboard' \
+  "$herdr_bin" notification show 'Foreman dashboard' \
     --body "Could not open: $(printf '%.200s' "$out")" \
     --position top-right >/dev/null 2>&1 || true
 ) >/dev/null 2>&1 &

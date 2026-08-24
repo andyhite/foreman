@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Regression tests for `fleet dashboard`.
+# Regression tests for `foreman dashboard`.
 #
-# Same shape as fleet-test.sh: no framework, no dependencies beyond what the
+# Same shape as foreman-test.sh: no framework, no dependencies beyond what the
 # dashboard itself needs. Everything here is a pure function or a function over
 # files on disk, so the whole suite runs without a terminal, a herdr session or
 # a worker.
 #
-#   herdr/test/fleet-dashboard-test.sh
-#   /bin/bash herdr/test/fleet-dashboard-test.sh    # macOS system bash 3.2
+#   herdr/test/foreman-dashboard-test.sh
+#   /bin/bash herdr/test/foreman-dashboard-test.sh    # macOS system bash 3.2
 #
 # The interactive layer — raw mode, escape-sequence decoding, the draw loop —
 # is deliberately not covered here; it needs a pty. What it dispatches to is,
@@ -24,8 +24,8 @@
 set -uo pipefail
 
 BIN=$(cd "$(dirname "$0")/.." && pwd)/bin
-DASHBOARD="$BIN/fleet-dashboard"
-[ -f "$DASHBOARD" ] || { printf 'cannot find fleet-dashboard at %s\n' "$DASHBOARD" >&2; exit 1; }
+DASHBOARD="$BIN/foreman-dashboard"
+[ -f "$DASHBOARD" ] || { printf 'cannot find foreman-dashboard at %s\n' "$DASHBOARD" >&2; exit 1; }
 
 failures=0
 ok()  { printf '  ok    %s\n' "$1"; }
@@ -39,11 +39,11 @@ sandbox=$(mktemp -d) || exit 1
 # Escape codes would have to be stripped out of every expectation below, and
 # the dashboard decides its palette once, at source time.
 export NO_COLOR=1
-export FLEET_STATE="$sandbox/state"
+export FOREMAN_STATE="$sandbox/state"
 
 # Functions under test, without taking over the terminal. This also sources
-# `fleet`, which the dashboard depends on for its state helpers.
-# shellcheck source=../bin/fleet-dashboard
+# `foreman`, which the dashboard depends on for its state helpers.
+# shellcheck source=../bin/foreman-dashboard
 source "$DASHBOARD"
 # Both files set `-e` at their top, and sourcing applies that here too — it
 # would abort the run on the first assertion that is *supposed* to fail.
@@ -57,7 +57,7 @@ trap 'dash_leave_screen; rm -rf "$sandbox"' EXIT
 # Which repository the dashboard reports on. A popup starts in the plugin root,
 # so getting this wrong does not fail loudly — it quietly shows this plugin's
 # own checkout instead of the workspace the user is looking at, which is the
-# bug `fleet-ls` already had to be fixed for.
+# bug `foreman-ls` already had to be fixed for.
 
 printf '\nscope\n'
 ctx='{"workspace_id":"w1","workspace_cwd":"'"$sandbox"'"}'
@@ -203,7 +203,7 @@ is 'even for an agent that is gone' "$(dash_glyph gone 1)" '?'
 # prefix match creeps in.
 
 printf '\nstatus lookup\n'
-DASH_STATUSES=$(printf 'foreman\tidle\nfeat-x\tworking\nfeat-x-2\tblocked\n')
+DASH_STATUSES=$(printf 'boss\tidle\nfeat-x\tworking\nfeat-x-2\tblocked\n')
 is 'finds a status'                 "$(dash_status_of feat-x)"   'working'
 is 'does not stop at a prefix'      "$(dash_status_of feat-x-2)" 'blocked'
 is 'an unregistered agent is gone'  "$(dash_status_of nobody)"   'gone'
@@ -225,7 +225,7 @@ is 'an empty list has no selection' "$(dash_handle_at 0)" ''
 # ── row flags ────────────────────────────────────────────────────────────────
 #
 # `<dispatches><report><join>`: the send/report/collect state, which is the
-# part `fleet ls` cannot show at all. Each character is written by a different
+# part `foreman ls` cannot show at all. Each character is written by a different
 # command, so the encoding is asserted against the files those commands write
 # rather than against a fixture.
 
@@ -234,8 +234,8 @@ h=flagworker
 mkdir -p "$(meta_dir "$h")"
 
 bump()  { counter_bump "$(dispatch_file "$1")"; }                        # dispatch_to
-stamp() { cp "$(dispatch_file "$1")" "$(report_token_file "$1")"; }      # fleet report
-join()  { cp "$(dispatch_file "$1")" "$(joined_token_file "$1")"; }      # fleet join
+stamp() { cp "$(dispatch_file "$1")" "$(report_token_file "$1")"; }      # foreman report
+join()  { cp "$(dispatch_file "$1")" "$(joined_token_file "$1")"; }      # foreman join
 
 is 'a worker that has never been dispatched to' "$(dash_flags "$h")" '0-.'
 
@@ -255,7 +255,7 @@ assert 'and does not destroy it' [ -s "$(report_file "$h")" ]
 # ── detail strip ─────────────────────────────────────────────────────────────
 #
 # What the selected worker is currently saying. The ordering is the whole
-# point: a question the orchestrator has not answered has to win over a report,
+# point: a question the boss has not answered has to win over a report,
 # or a blocked wave looks finished.
 
 printf '\ndetail strip\n'
@@ -296,7 +296,7 @@ is 'and the question itself follows' \
   'which branch should I use?'
 
 # What `a` does after the send: without this half the question stays pending
-# forever, and the next `fleet join` returns early on an answered question.
+# forever, and the next `foreman join` returns early on an answered question.
 cp "$(question_seq_file "$d")" "$(question_seen_file "$d")"
 assert_not 'acknowledging clears the pending question' question_pending "$d"
 
@@ -381,14 +381,14 @@ assert 'and the row is truncated to the frame rather than the budget' \
 
 # ── operation log ────────────────────────────────────────────────────────────
 #
-# The log lives under $FLEET_STATE, which is also the directory `known_workers`
+# The log lives under $FOREMAN_STATE, which is also the directory `known_workers`
 # globs for worker records. A visible name in there would list as a worker, on
-# every fleet command, in every repository.
+# every foreman command, in every repository.
 
 printf '\noperation log\n'
 dash_log_init
-is 'the log is kept inside the fleet state directory' \
-  "${DASH_LOG%/*}" "$FLEET_STATE/.dashboard"
+is 'the log is kept inside the foreman state directory' \
+  "${DASH_LOG%/*}" "$FOREMAN_STATE/.dashboard"
 dash_log_head 'a test operation'
 assert 'and writing to it works' [ -s "$DASH_LOG" ]
 
@@ -429,14 +429,14 @@ is 'a 54-row popup draws 54 rows'     "$(frame_lines 54)" '54'
 is 'the clamped minimum draws 10 rows' "$(frame_lines 4)" '10'
 
 DASH_HANDLES=""; DASH_COUNT=0
-is 'an empty fleet still fills the frame' "$(frame_lines 30)" '30'
+is 'an empty foreman still fills the frame' "$(frame_lines 30)" '30'
 
 # More workers than the band can hold: the window scrolls, the frame does not.
 many=""
 i=0
 while [ "$i" -lt 40 ]; do many="$many$(printf 'w%s\n' "$i")"$'\n'; i=$((i + 1)); done
 DASH_HANDLES=$many; DASH_COUNT=40
-is 'a fleet larger than the frame still draws one screenful' "$(frame_lines 30)" '30'
+is 'a foreman larger than the frame still draws one screenful' "$(frame_lines 30)" '30'
 DASH_SEL=39
 dash_draw
 is 'and the last worker is reachable' "$(dash_selected)" 'w39'
@@ -489,7 +489,7 @@ export OPEN_NOTIFY="$sandbox/open-notify"
 # one-second budget computed at x.99 expires before the first retry and the
 # suite fails on the boundary rather than on the behaviour — the same
 # whole-second trap the report-freshness protocol already exists to dodge.
-export FLEET_DASHBOARD_OPEN_TIMEOUT_S=2
+export FOREMAN_DASHBOARD_OPEN_TIMEOUT_S=2
 openlog="$HERDR_PLUGIN_STATE_DIR/dashboard-open.log"
 
 # The action returns before the work happens, so every assertion has to wait
@@ -498,7 +498,7 @@ run_open() {
   export OPEN_SCENARIO=$1
   mkdir -p "$HERDR_PLUGIN_STATE_DIR"
   : >"$OPEN_COUNTER"; : >"$OPEN_NOTIFY"; : >"$openlog"
-  "$BIN/fleet-dashboard-open" >/dev/null 2>&1
+  "$BIN/foreman-dashboard-open" >/dev/null 2>&1
   local waited=0
   while [ "$waited" -lt 100 ]; do
     [ -s "$openlog" ] && return 0
@@ -538,7 +538,7 @@ esac
 is 'on the first attempt' "$(cat "$OPEN_COUNTER")" '1'
 
 unset HERDR_BIN_PATH HERDR_PLUGIN_STATE_DIR OPEN_COUNTER OPEN_NOTIFY OPEN_SCENARIO
-unset FLEET_DASHBOARD_OPEN_TIMEOUT_S
+unset FOREMAN_DASHBOARD_OPEN_TIMEOUT_S
 
 # ── plugin wiring ────────────────────────────────────────────────────────────
 #
@@ -550,8 +550,8 @@ manifest=$(cd "$(dirname "$0")/.." && pwd)/herdr-plugin.toml
 assert 'the manifest declares a dashboard pane' \
   grep -q '^id = "dashboard"' "$manifest"
 assert 'as a popup' grep -q '^placement = "popup"' "$manifest"
-assert 'the dashboard the manifest launches is executable' [ -x "$BIN/fleet-dashboard" ]
-assert 'so is the action that opens it'                    [ -x "$BIN/fleet-dashboard-open" ]
+assert 'the dashboard the manifest launches is executable' [ -x "$BIN/foreman-dashboard" ]
+assert 'so is the action that opens it'                    [ -x "$BIN/foreman-dashboard-open" ]
 
 while IFS= read -r cmd; do
   [ -n "$cmd" ] || continue
@@ -560,17 +560,17 @@ done <<EOF
 $(sed -n 's|.*"[./]*\(bin/[a-z-]*\)".*|\1|p' "$manifest")
 EOF
 
-# `fleet dashboard` has to reach the dashboard's own argument parsing, which
+# `foreman dashboard` has to reach the dashboard's own argument parsing, which
 # happens before it needs herdr — so this runs without a session.
-out=$("$BIN/fleet" dashboard --help 2>&1); rc=$?
-is 'fleet dashboard --help exits like every other usage' "$rc" '2'
+out=$("$BIN/foreman" dashboard --help 2>&1); rc=$?
+is 'foreman dashboard --help exits like every other usage' "$rc" '2'
 case "$out" in
-  *'usage: fleet dashboard'*) ok 'and prints the dashboard usage' ;;
+  *'usage: foreman dashboard'*) ok 'and prints the dashboard usage' ;;
   *) bad "and prints the dashboard usage — got [$out]" ;;
 esac
-out=$("$BIN/fleet" dash --help 2>&1)
+out=$("$BIN/foreman" dash --help 2>&1)
 case "$out" in
-  *'usage: fleet dashboard'*) ok 'the dash alias reaches the same program' ;;
+  *'usage: foreman dashboard'*) ok 'the dash alias reaches the same program' ;;
   *) bad "the dash alias reaches the same program — got [$out]" ;;
 esac
 
