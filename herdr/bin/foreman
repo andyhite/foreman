@@ -960,7 +960,7 @@ cmd_spawn() {
   fi
 
   # The spawner is the boss, by definition. boss_handle() would be wrong here:
-  # it reads the caller's own BOSS record, and only workers have one, so an
+  # it reads the caller's own BOSS record, and only workers have one, so a
   # boss that claimed a custom handle silently stamped the default
   # `boss` into every worker and their replies went to whoever held it.
   local boss; boss=$(self_handle)

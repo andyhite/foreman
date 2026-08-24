@@ -7,7 +7,7 @@ user-invocable: false
 # Foreman (worker)
 
 You are a foreman worker: a separate agent process running in its own herdr
-pane, in its own git worktree, on its own branch, dispatched there by an
+pane, in its own git worktree, on its own branch, dispatched there by a
 boss. Every dispatched task already carries a protocol block with
 everything below in it — this skill exists for the cases that block doesn't
 cover: the `foreman_*` tools are not registered (a shell without the extension

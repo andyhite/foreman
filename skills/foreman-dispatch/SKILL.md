@@ -1,6 +1,6 @@
 ---
 name: foreman-dispatch
-description: How an boss turns requirements into a foreman worker brief. Use when dispatching work to a peer agent, or when a /foreman:* command asks for the dispatch contract.
+description: How a boss turns requirements into a foreman worker brief. Use when dispatching work to a peer agent, or when a /foreman:* command asks for the dispatch contract.
 user-invocable: false
 ---
 
@@ -80,7 +80,7 @@ fits is a decision made per dispatch, not something this plugin bakes in.
 
 **`tier` picks the worker's model band.** `standard` for dispatch-heavy work,
 `deep` when the worker itself has to hold judgement. `model` is the escape
-hatch when an boss needs an omp model selector the tier names don't
+hatch when a boss needs an omp model selector the tier names don't
 cover.
 
 **Do not include:** where to commit, whether to push, how to report back, a

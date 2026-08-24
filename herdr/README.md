@@ -1,6 +1,6 @@
 # Foreman (herdr plugin)
 
-Foreman is one of two plugins in this repo (`andyhite/foreman`): this herdr plugin supplies the `foreman` CLI, the mechanism that spawns and manages workers; the companion agent plugin at [the repo root](../) supplies the `/foreman:*` boss commands that drive it. omp's own `task` subagents share one process, context, and current directory; a foreman worker is a separate coding-agent process (`foreman spawn --kind`, default `omp`) in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
+Foreman is one of two plugins in this repo (`andyhite/foreman`): this herdr plugin supplies the `foreman` CLI, the mechanism that spawns and manages workers; the companion agent plugin at [the repo root](../) supplies the `/foreman:*` boss commands that drive it. omp's own `task` subagents share one process, context, and current directory; a foreman worker is a separate coding-agent process in its own herdr pane, git worktree, and branch. That worker remains reachable through herdr after the original dispatch, including an hour later.
 
 ## Requirements
 
@@ -30,18 +30,22 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | Command | Description |
 | --- | --- |
 | `foreman boss [name] [--steal]` | Claim the boss handle for this pane. |
-| `foreman spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--kind`, `--skill`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
+| `foreman spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--tier`, `--model`, `--skill`, `--role`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
 | `foreman send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
 | `foreman ask [--timeout <seconds>] <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. For ask the flag comes first. |
-| `foreman join [handle...] [--timeout <seconds>]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FOREMAN_WAIT_TIMEOUT_MS` for this call. |
+| `foreman join [handle...] [--timeout <seconds>] [--once]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FOREMAN_WAIT_TIMEOUT_MS` for this call. `--once` runs a single non-blocking poll pass instead of the blocking deadline loop. |
 | `foreman ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose filed question has not been collected by a join, `-` everyone else. |
 | `foreman dashboard [--all-repos]` | Interactive counterpart to `foreman ls`; also aliased `dash`. |
 | `foreman read <handle> [-n N]` | Read a worker's terminal. |
 | `foreman reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
+| `foreman broadcast <text>` | Untracked raw steering to every live worker in this repository; leaves the dispatch counter alone, so it never produces a report. |
+| `foreman dm <handle> <text>` | Untracked raw steering to any foreman member (boss or worker) by handle; same no-report contract as `broadcast`. |
+| `foreman keys <handle> <key>...` | Send terminal keys straight through to `herdr agent send-keys`; how you clear a worker stuck on an approval prompt. |
 | `foreman report [-f file\|text]` | From a worker, file its report. |
 | `foreman reply <text>` | From a worker, file a question and interrupt the boss. |
 | `foreman whoami` | Print this pane's handle. |
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
+| `foreman roles` | List the role → skill mappings read from foreman's config. |
 | `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, and the current repo's worker count. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. |
 
 ### Collecting
@@ -193,7 +197,7 @@ record with `foreman reap <handle> [--forget]`.
 | --- | --- | --- |
 | `FOREMAN_STATE` | `${XDG_STATE_HOME:-$HOME/.local/state}/foreman` | Directory holding foreman's machine-local worker metadata. |
 | `FOREMAN_SPAWN_TIMEOUT_MS` | `120000` | Maximum milliseconds to wait for a fresh worker's named, input-ready startup; herdr clamps it to 300000. |
-| `FOREMAN_AGENT_KIND` | `omp` | Harness started for new workers unless `foreman spawn --kind` overrides it. |
+| `FOREMAN_AGENT_TIER` | unset | Worker model tier (`standard`\|`deep`) for new workers unless `foreman spawn --tier` overrides it; empty means omp's own default. An explicit `--model` beats an env-derived tier. |
 | `FOREMAN_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `foreman ask` or `foreman join`. |
 | `FOREMAN_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
 | `FOREMAN_JOIN_POLL_MS` | `2000` | How often `foreman join` re-reads the workers it is watching. |
