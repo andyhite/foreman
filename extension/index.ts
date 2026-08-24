@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { readFileSync, readdirSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -73,18 +74,33 @@ function loadCommandPrompts(): CommandPrompt[] {
   } catch {
     return [];
   }
-  return files.map((file) => {
-    const raw = readFileSync(path.join(dir, file), "utf8");
+  // A bad file must not take down every command: this runs from the
+  // top-level `for` in the extension factory, so one throw here breaks the
+  // whole plugin. Reachable today: Emacs' lock file `.#boss.md` matches the
+  // `.md` filter above and is a broken symlink, so merely opening
+  // `command-prompts/boss.md` in Emacs crashes the plugin on next load.
+  return files.flatMap((file) => {
     const name = file.slice(0, -3);
-    const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-    if (!match) return { name, description: name, body: raw.trim() };
-    const [, frontmatter, rest] = match;
-    const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
-    return {
-      name,
-      description: descMatch ? descMatch[1].trim() : name,
-      body: rest.replace(/^\n+/, ""),
-    };
+    // A file whose derived name isn't a clean command-name segment (dotfile,
+    // space, `..`) would register as `foreman:<garbage>` instead of failing
+    // loudly — skip it rather than exposing a broken/unexpected command.
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return [];
+    try {
+      const raw = readFileSync(path.join(dir, file), "utf8");
+      const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+      if (!match) return [{ name, description: name, body: raw.trim() }];
+      const [, frontmatter, rest] = match;
+      const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
+      return [
+        {
+          name,
+          description: descMatch ? descMatch[1].trim() : name,
+          body: rest.replace(/^\n+/, ""),
+        },
+      ];
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -97,10 +113,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
   const foremanBin = process.env.FOREMAN_BIN || "foreman";
 
   /**
-   * Runs `foreman <args>` to completion via `pi.exec` and returns stdout.
-   * Every tool except `foreman_join` uses this: a non-zero exit is always a
-   * real failure here, so it throws `stderr || stdout`. `foreman_join` (and
-   * `foreman_ask`, for progress) use `runForemanStreaming` below instead.
+   * Runs `foreman <args>` to completion via `pi.exec` and returns both
+   * streams joined. Every tool except `foreman_join`/`foreman_ask` uses this:
+   * a non-zero exit is always a real failure here, so it throws with the
+   * subcommand and exit code. Those two stream instead, via
+   * `runForemanStreaming` below, so a settling report prints as it lands.
    */
   async function runForeman(
     args: string[],
@@ -119,9 +136,21 @@ export default function foremanExtension(pi: ExtensionAPI) {
       throw err;
     }
     if (result.code !== 0) {
-      throw new Error(result.stderr || result.stdout);
+      // Cancellation kills the child leaving stderr/stdout empty — throwing
+      // "" would surface as a blank, unactionable tool error instead of the
+      // abort the caller already knows about via `signal`.
+      if (result.killed || signal?.aborted) {
+        throw new Error(`foreman ${args[0]} cancelled`);
+      }
+      throw new Error(
+        `foreman ${args[0]} exited ${result.code}: ${result.stderr || result.stdout || "(no output)"}`,
+      );
     }
-    return result.stdout;
+    // note() (herdr/bin/foreman:63) routes every human-facing diagnostic —
+    // including the first-dispatch pickup warning foreman_spawn depends on —
+    // to stderr, and send/keys/dm/reap write nothing to stdout at all.
+    // Returning stdout alone silently discarded those on every success.
+    return [result.stdout, result.stderr].filter((s) => s.trim()).join("\n");
   }
 
   /**
@@ -181,20 +210,32 @@ export default function foremanExtension(pi: ExtensionAPI) {
       }
     };
 
-    await Promise.all([
-      pump(child.stdout, (chunk) => {
-        stdout += chunk;
-        onUpdate?.({ content: [{ type: "text", text: stdout }] });
-      }),
-      pump(child.stderr, (chunk) => {
-        stderr += chunk;
-      }),
-    ]);
+    try {
+      await Promise.all([
+        pump(child.stdout, (chunk) => {
+          stdout += chunk;
+          onUpdate?.({ content: [{ type: "text", text: stdout }] });
+        }),
+        pump(child.stderr, (chunk) => {
+          stderr += chunk;
+        }),
+      ]);
 
-    const exitCode = await child.exited;
-    if (signal) signal.removeEventListener("abort", onAbort);
-
-    return { stdout, stderr, exitCode };
+      const exitCode = await child.exited;
+      return { stdout, stderr, exitCode };
+    } finally {
+      // onUpdate can throw (e.g. host truncates an oversized turn). Without
+      // this, that throw skips both the listener removal below (leaking it
+      // for the rest of the session) and `await child.exited`, leaving the
+      // child running and an orphaned `foreman join` polling herdr for up
+      // to FOREMAN_WAIT_TIMEOUT_MS — an hour — with nothing to reap it.
+      if (signal) signal.removeEventListener("abort", onAbort);
+      try {
+        child.kill();
+      } catch {
+        // already exited
+      }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -359,11 +400,18 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (params.layout) args.push("--layout", params.layout);
       if (params.replace) args.push("--replace");
       if (params.no_dispatch) args.push("--no-dispatch");
-      const stdout = await runForeman(args, ctx, signal);
-      return {
-        content: [{ type: "text", text: stdout }],
-        details: { branch: params.branch, taskFile: taskFile ?? null },
-      };
+      // herdr/bin/foreman:946 only reads --task-file; it never owns or
+      // deletes it, so leaving this out leaked a full copy of every task
+      // brief into os.tmpdir() for the life of the machine.
+      try {
+        const stdout = await runForeman(args, ctx, signal);
+        return {
+          content: [{ type: "text", text: stdout }],
+          details: { branch: params.branch, taskFile: taskFile ?? null },
+        };
+      } finally {
+        if (taskFile) await unlink(taskFile).catch(() => {});
+      }
     },
   });
 
@@ -383,6 +431,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["send"];
       if (params.raw) args.push("--raw");
       args.push(params.handle, params.text);
@@ -402,16 +451,20 @@ export default function foremanExtension(pi: ExtensionAPI) {
     parameters: z.object({
       handle: z.string(),
       text: z.string(),
-      timeout_s: z.number().optional().describe("Override the wait timeout, in seconds"),
+      timeout_s: z.number().int().positive().optional().describe("Override the wait timeout, in seconds"),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["ask"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       args.push(params.handle, params.text);
       const { stdout, stderr, exitCode } = await runForemanStreaming(args, ctx, signal, onUpdate);
       if (exitCode !== 0) {
-        throw new Error(stderr || stdout);
+        // cmd_ask runs cmd_send BEFORE the join wait (herdr/bin/foreman:1412-1413),
+        // so a killed/silent child (empty stdout and stderr) would otherwise
+        // throw a blank error for work that already dispatched and is running.
+        throw new Error(stderr || stdout || `foreman ask exited ${exitCode}: (no output)`);
       }
       return {
         content: [{ type: "text", text: stdout }],
@@ -430,10 +483,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
         .array(z.string())
         .optional()
         .describe("Worker handles to join; omit to join every known worker in this repo"),
-      timeout_s: z.number().optional().describe("Override the wait timeout, in seconds"),
+      timeout_s: z.number().int().positive().optional().describe("Override the wait timeout, in seconds"),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["join"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       if (params.handles?.length) args.push(...params.handles);
@@ -444,8 +498,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (exitCode !== 0 && exitCode !== 1) {
         throw new Error(stderr || stdout);
       }
+      // stdout alone drops cmd_join's "gave up after Ns; still working: ..."
+      // stderr line whenever ANY worker settled (stdout is then non-empty),
+      // hiding a partial timeout as if every handle had joined cleanly.
       return {
-        content: [{ type: "text", text: stdout || stderr }],
+        content: [{ type: "text", text: [stdout, stderr].filter((s) => s.trim()).join("\n") }],
         details: { exitCode },
       };
     },
@@ -460,6 +517,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["ls"];
       if (params.all_repos) args.push("--all-repos");
       const stdout = await runForeman(args, ctx, signal);
@@ -478,6 +536,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const args = ["read", params.handle];
       if (params.lines != null) args.push("-n", String(params.lines));
       const stdout = await runForeman(args, ctx, signal);
@@ -498,6 +557,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       if (!params.all && (!params.handles || params.handles.length === 0)) {
         throw new Error("foreman_reap requires either a non-empty handles array or all: true");
       }
@@ -524,6 +584,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const stdout = await runForeman(["broadcast", params.text], ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
@@ -539,6 +600,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const stdout = await runForeman(["dm", params.handle, params.text], ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: { handle: params.handle } };
     },
@@ -555,11 +617,53 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
+      ensureJoinPoller(ctx);
       const stdout = await runForeman(["keys", params.handle, ...params.keys], ctx, signal);
       return {
         content: [{ type: "text", text: stdout }],
         details: { handle: params.handle, keys: params.keys },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "foreman_doctor",
+    label: "Foreman Doctor",
+    description:
+      "Diagnose why foreman isn't working — checks herdr, git, and worktree state. The designated \"why is nothing working\" tool; run this first when another tool fails unexpectedly.",
+    parameters: z.object({}),
+    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) return cancelled();
+      let result: ForemanExecResult;
+      try {
+        result = (await pi.exec(foremanBin, ["doctor"], { signal, cwd: ctx.cwd })) as ForemanExecResult;
+      } catch (err) {
+        if (isMissingBinaryError(err)) {
+          throw new Error(
+            "foreman CLI not found on PATH — is the herdr foreman plugin installed?",
+          );
+        }
+        throw err;
+      }
+      // doctor exits nonzero to report a failed check — that is the normal
+      // "here's what's wrong" result callers need to see, not a tool error.
+      return {
+        content: [{ type: "text", text: [result.stdout, result.stderr].filter((s) => s.trim()).join("\n") }],
+        details: { exitCode: result.code },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "foreman_roles",
+    label: "Foreman Roles",
+    description:
+      "List the role names foreman_spawn's role parameter accepts and the skill each resolves to.",
+    parameters: z.object({}),
+    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) return cancelled();
+      const stdout = await runForeman(["roles"], ctx, signal);
+      return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });
 
@@ -616,7 +720,12 @@ export default function foremanExtension(pi: ExtensionAPI) {
     pi.registerCommand(`foreman:${prompt.name}`, {
       description: prompt.description,
       handler: async (args: string) => {
-        await pi.sendUserMessage(prompt.body.replace("$ARGUMENTS", args ?? ""));
+        // String-pattern replace() treats $&, $`, $', $$ in the user's own
+        // arg text as replacement-pattern syntax, silently corrupting the
+        // brief, and only touches the first "$ARGUMENTS" occurrence. The
+        // function form disables pattern interpretation and replaceAll
+        // covers every occurrence.
+        await pi.sendUserMessage(prompt.body.replaceAll("$ARGUMENTS", () => args ?? ""));
       },
     });
   }
