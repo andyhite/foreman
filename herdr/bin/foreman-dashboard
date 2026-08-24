@@ -410,6 +410,27 @@ dash_row() {
   fi
 }
 
+# Strips control sequences from worker-supplied text before it reaches the
+# frame. dash_fit budgets by character count, not by screen column, so an
+# embedded escape both eats width it does not occupy and can be truncated
+# mid-sequence by that budget — a bare SGR bleeds colour through the rest of
+# the draw, and a stray `ESC[?1049l` pasted from colored build output exits
+# the alternate screen out from under the popup. CSI and OSC are each peeled
+# off by their own terminator before the two-byte ESC form and stray C0 bytes
+# are swept, so a truncated sequence cannot leave a dangling ESC behind for
+# the terminal to keep interpreting.
+dash_sanitize() {
+  local esc bel
+  esc=$(printf '\033')
+  bel=$(printf '\a')
+  sed -E \
+    -e "s/${esc}\][^${bel}]*${bel}//g" \
+    -e "s/${esc}\][^${esc}]*${esc}\\\\//g" \
+    -e "s/${esc}\[[ -?]*[@-~]//g" \
+    -e "s/${esc}.//g" \
+  | tr -d '\000-\010\013-\037\177'
+}
+
 # What the selected worker is currently saying: its unanswered question if it
 # has one, else the report for its latest dispatch, else why there is neither.
 dash_detail_lines() {
@@ -421,17 +442,17 @@ dash_detail_lines() {
   if question_pending "$handle"; then
     printf 'QUESTION from %s — a answers it\n' "$handle"
     f=$(question_file "$handle")
-    if [ -s "$f" ]; then sed -n "1,${budget}p" "$f"; fi
+    if [ -s "$f" ]; then sed -n "1,${budget}p" "$f" | dash_sanitize; fi
     return 0
   fi
   f=$(report_file "$handle")
   if report_is_fresh "$handle"; then
     printf 'report for dispatch %s — r opens all of it\n' \
       "$(counter_read "$(dispatch_file "$handle")")"
-    sed -n "1,${budget}p" "$f"
+    sed -n "1,${budget}p" "$f" | dash_sanitize
   elif [ -s "$f" ]; then
     printf 'no report for the current dispatch; the previous one begins:\n'
-    sed -n "1,$((budget > 1 ? budget - 1 : 1))p" "$f"
+    sed -n "1,$((budget > 1 ? budget - 1 : 1))p" "$f" | dash_sanitize
   else
     printf '%s has filed no report — t reads its terminal\n' "$handle"
   fi

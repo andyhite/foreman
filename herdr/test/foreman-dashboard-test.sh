@@ -300,6 +300,38 @@ is 'and the question itself follows' \
 cp "$(question_seq_file "$d")" "$(question_seen_file "$d")"
 assert_not 'acknowledging clears the pending question' question_pending "$d"
 
+# ── control-sequence sanitizing ─────────────────────────────────────────────
+#
+# A worker's report or question is agent output verbatim, and coding agents
+# routinely paste colored build/test output into both. dash_fit budgets by
+# character count, not by screen column, so an embedded escape sequence can be
+# truncated mid-sequence by that budget, leaving a dangling ESC for the
+# terminal to keep interpreting past the frame — and a bare `ESC[?1049l`
+# pasted from captured output would exit the alternate screen out from under
+# the popup.
+
+printf '\ncontrol-sequence sanitizing\n'
+esc=$(printf '\033'); bel=$(printf '\a')
+raw=$(printf '%s[31mred%s[0mplain\n%s]0;title%safter\n%s]0;title2%s\\after2\n%s[?1049ltail\n' \
+  "$esc" "$esc" "$esc" "$bel" "$esc" "$esc" "$esc")
+clean=$(printf '%s' "$raw" | dash_sanitize)
+is 'SGR color codes are stripped' "$(printf '%s\n' "$clean" | sed -n '1p')" 'redplain'
+is 'an OSC terminated by BEL is stripped' "$(printf '%s\n' "$clean" | sed -n '2p')" 'after'
+is 'an OSC terminated by ESC backslash is stripped' \
+  "$(printf '%s\n' "$clean" | sed -n '3p')" 'after2'
+is 'a bare mode-change CSI does not survive truncation' \
+  "$(printf '%s\n' "$clean" | sed -n '4p')" 'tail'
+assert_not 'no ESC byte remains anywhere in the output' \
+  [ "${clean#*"$esc"}" != "$clean" ]
+
+printf 'the %sfindings%s\n' "${esc}[31m" "${esc}[0m" >"$(report_file "$d")"
+counter_bump "$(dispatch_file "$d")"
+cp "$(dispatch_file "$d")" "$(report_token_file "$d")"
+sanitized=$(printf '%s\n' "$(dash_detail_lines "$d" 5)" | sed -n '2p')
+is 'dash_detail_lines routes a report through the sanitizer' "$sanitized" 'the findings'
+assert_not 'and its ESC byte does not reach the frame' \
+  [ "${sanitized#*"$esc"}" != "$sanitized" ]
+
 # ── row rendering ────────────────────────────────────────────────────────────
 #
 # A row that overruns the frame wraps, and one wrapped row pushes every line
