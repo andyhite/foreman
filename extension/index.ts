@@ -100,9 +100,9 @@ export default function foremanExtension(pi: ExtensionAPI) {
    * Runs `foreman <args>` to completion via `pi.exec` and returns stdout.
    * Every tool except `foreman_join` uses this: a non-zero exit is always a
    * real failure here, so it throws `stderr || stdout`. `foreman_join` (and
-   * `foreman_ask`, for progress) use `runFleetStreaming` below instead.
+   * `foreman_ask`, for progress) use `runForemanStreaming` below instead.
    */
-  async function runFleet(
+  async function runForeman(
     args: string[],
     ctx: ForemanToolCtx,
     signal: AbortSignal | undefined,
@@ -130,7 +130,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
    * report the moment it settles rather than all at once at the end. Kills
    * the child on abort. Callers decide how to interpret `exitCode`.
    */
-  async function runFleetStreaming(
+  async function runForemanStreaming(
     args: string[],
     ctx: ForemanToolCtx,
     signal: AbortSignal | undefined,
@@ -290,7 +290,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       const args = ["boss"];
       if (params.name) args.push(params.name);
       if (params.steal) args.push("--steal");
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: { name: params.name ?? null } };
     },
   });
@@ -359,7 +359,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (params.layout) args.push("--layout", params.layout);
       if (params.replace) args.push("--replace");
       if (params.no_dispatch) args.push("--no-dispatch");
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return {
         content: [{ type: "text", text: stdout }],
         details: { branch: params.branch, taskFile: taskFile ?? null },
@@ -386,7 +386,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       const args = ["send"];
       if (params.raw) args.push("--raw");
       args.push(params.handle, params.text);
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return {
         content: [{ type: "text", text: stdout }],
         details: { handle: params.handle, raw: !!params.raw },
@@ -409,7 +409,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       const args = ["ask"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       args.push(params.handle, params.text);
-      const { stdout, stderr, exitCode } = await runFleetStreaming(args, ctx, signal, onUpdate);
+      const { stdout, stderr, exitCode } = await runForemanStreaming(args, ctx, signal, onUpdate);
       if (exitCode !== 0) {
         throw new Error(stderr || stdout);
       }
@@ -437,7 +437,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       const args = ["join"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       if (params.handles?.length) args.push(...params.handles);
-      const { stdout, stderr, exitCode } = await runFleetStreaming(args, ctx, signal, onUpdate);
+      const { stdout, stderr, exitCode } = await runForemanStreaming(args, ctx, signal, onUpdate);
       // exit 0 = every named worker joined; exit 1 = the bounded wait timed
       // out with some still outstanding — both are informative results, not
       // tool failures. Anything else is a real error.
@@ -462,7 +462,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (signal?.aborted) return cancelled();
       const args = ["ls"];
       if (params.all_repos) args.push("--all-repos");
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });
@@ -480,7 +480,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (signal?.aborted) return cancelled();
       const args = ["read", params.handle];
       if (params.lines != null) args.push("-n", String(params.lines));
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: { handle: params.handle } };
     },
   });
@@ -506,7 +506,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       else args.push(...(params.handles ?? []));
       if (params.force) args.push("--force");
       if (params.forget) args.push("--forget");
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return {
         content: [{ type: "text", text: stdout }],
         details: { handles: params.handles ?? [], all: !!params.all },
@@ -524,7 +524,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      const stdout = await runFleet(["broadcast", params.text], ctx, signal);
+      const stdout = await runForeman(["broadcast", params.text], ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });
@@ -539,7 +539,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      const stdout = await runFleet(["dm", params.handle, params.text], ctx, signal);
+      const stdout = await runForeman(["dm", params.handle, params.text], ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: { handle: params.handle } };
     },
   });
@@ -555,7 +555,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      const stdout = await runFleet(["keys", params.handle, ...params.keys], ctx, signal);
+      const stdout = await runForeman(["keys", params.handle, ...params.keys], ctx, signal);
       return {
         content: [{ type: "text", text: stdout }],
         details: { handle: params.handle, keys: params.keys },
@@ -586,7 +586,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
         throw new Error("foreman_report requires exactly one of text or file");
       }
       const args = hasFile ? ["report", "-f", params.file as string] : ["report", params.text as string];
-      const stdout = await runFleet(args, ctx, signal);
+      const stdout = await runForeman(args, ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });
@@ -601,7 +601,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      const stdout = await runFleet(["reply", params.text], ctx, signal);
+      const stdout = await runForeman(["reply", params.text], ctx, signal);
       return { content: [{ type: "text", text: stdout }], details: {} };
     },
   });

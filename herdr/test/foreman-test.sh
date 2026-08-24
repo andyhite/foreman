@@ -832,7 +832,7 @@ unset -f self_handle boss_handle agent_exists require_herdr
 
 # ── foreman version ───────────────────────────────────────────────────────────────
 
-printf '\nfleet version\n'
+printf '\nforeman version\n'
 is 'version comes from the plugin manifest' "$(cmd_version)" 'foreman 0.5.0'
 
 # ── ls shows a pending question ──────────────────────────────────────────────────

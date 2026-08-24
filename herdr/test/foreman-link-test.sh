@@ -167,7 +167,7 @@ is     'resolves to the plugin checkout' "$(readlink "$linkdir/foreman")" "$s/ck
 
 # ── foreman-ls: parse guard against malformed JSON ───────────────────────────────
 
-printf '\nfleet-ls: parse guard against malformed JSON\n'
+printf '\nforeman-ls: parse guard against malformed JSON\n'
 s="$sandbox/s10"; mkdir -p "$s"
 FOREMAN_LS=$(cd "$(dirname "$FOREMAN_LINK")/.." && pwd)/bin/foreman-ls
 [ -f "$FOREMAN_LS" ] || { printf 'cannot find foreman-ls at %s\n' "$FOREMAN_LS" >&2; exit 1; }
