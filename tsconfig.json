@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    // Type-check only — this repo has no build step; omp's Bun runtime
+    // loads extension/index.ts directly. noEmit keeps CI from producing
+    // artifacts nobody consumes.
+    "noEmit": true,
+    "strict": true,
+    // No @oh-my-pi/pi-coding-agent or @types/bun package exists here (the
+    // extension is a zero-dependency plugin, see extension/index.ts:6-15) —
+    // skipLibCheck and an empty "types" keep the gate from requiring any
+    // ambient package to be installed.
+    "skipLibCheck": true,
+    "types": [],
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["extension/**/*.ts"]
+}

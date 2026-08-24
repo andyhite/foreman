@@ -31,26 +31,16 @@ jobs:
         run: shellcheck --severity=warning -s bash herdr/bin/foreman herdr/bin/foreman-dashboard herdr/test/foreman-test.sh herdr/test/foreman-link-test.sh herdr/test/foreman-dashboard-test.sh
       - name: Lint POSIX shell scripts
         run: shellcheck --severity=warning -s sh herdr/bin/foreman-link herdr/bin/foreman-ls herdr/bin/foreman-dashboard-open herdr/install.sh
+      - uses: oven-sh/setup-bun@v2
+      - name: Type-check the extension
+        run: bunx tsc --noEmit
       - name: Check version consistency
         run: |
           herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)
           plugin_json_version=$(jq -r '.version' .omp-plugin/plugin.json)
           package_json_version=$(jq -r '.version' package.json)
 
-          # Collect all versions
-          versions=("$herdr_version" "$plugin_json_version" "$package_json_version")
-
-          # Check all versions are identical
-          first="${versions[0]}"
-          all_same=true
-          for v in "${versions[@]}"; do
-            if [ "$v" != "$first" ]; then
-              all_same=false
-              break
-            fi
-          done
-
-          if [ "$all_same" = false ]; then
+          if [ "$herdr_version" != "$plugin_json_version" ] || [ "$herdr_version" != "$package_json_version" ]; then
             echo "Version mismatch:"
             echo "herdr/herdr-plugin.toml: $herdr_version"
             echo ".omp-plugin/plugin.json: $plugin_json_version"
