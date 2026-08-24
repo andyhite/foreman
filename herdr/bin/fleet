@@ -552,6 +552,14 @@ cmd_doctor() {
     printf '%-6s %s\n' 'warn' 'not in a git repo (repo-scoped commands need a repo)'
   fi
 
+  # 9. --role config, if any (optional: --role/--skill work without one)
+  local rc; rc=$(fleet_config 2>/dev/null) || true
+  if [ -n "$rc" ]; then
+    printf '%-6s %s\n' 'ok' "role config at $rc"
+  else
+    printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — see: fleet roles)'
+  fi
+
   [ "$failed" = 0 ]
 }
 
@@ -640,10 +648,94 @@ fleet_version() {
 
 cmd_version() { printf 'fleet %s\n' "$(fleet_version)"; }
 
+# Introspection for --role: where fleet's config was found (if at all) and
+# what it maps. Exists because a missing or misspelled role only surfaces at
+# spawn time otherwise, and the error there cannot show the whole mapping.
+cmd_roles() {
+  local config
+  if ! config=$(fleet_config); then
+    printf 'no fleet config found (checked $FLEET_CONFIG, herdr plugin config-dir %s, and ~/.herdr/plugins/%s/config.yml)\n' \
+      "$FLEET_PLUGIN_ID" "$FLEET_PLUGIN_ID"
+    return 0
+  fi
+  local entries; entries=$(role_entries "$config")
+  if [ -z "$entries" ]; then
+    printf 'config at %s has no roles: entries\n' "$config"
+    return 0
+  fi
+  printf 'roles (%s):\n' "$config"
+  printf '%s\n' "$entries" | awk -F'\t' '{ printf "  %-20s -> %s\n", $1, $2 }'
+}
+
 skill_instruction() {
   local name=$1
   valid_skill_name "$name" || die "invalid skill name '$name'"
   printf 'Before doing any other work, read `skill://%s` and follow it.' "$name"
+}
+
+# ── Role → skill mapping ─────────────────────────────────────────────────────
+#
+# fleet has no opinion on how a worker does its job (see skill://fleet-dispatch)
+# — but once a house convention has a name ("review", "implement"), spelling
+# out its exact skill at every dispatch site invites drift the moment that
+# skill is renamed. `--role` is that convention, resolved through fleet's own
+# config rather than baked into the CLI, so repointing "review" at a different
+# skill touches one line in one file instead of every dispatch site.
+
+FLEET_PLUGIN_ID=andyhite.fleet
+
+# Mirrors workspace_manager_config(): $FLEET_CONFIG wins outright, then the
+# herdr-managed config dir, then the legacy path under ~/.herdr.
+fleet_config() {
+  local dir f
+  if [ -n "${FLEET_CONFIG:-}" ]; then
+    [ -f "$FLEET_CONFIG" ] || return 1
+    printf '%s' "$FLEET_CONFIG"; return 0
+  fi
+  dir=$(herdr plugin config-dir "$FLEET_PLUGIN_ID" 2>/dev/null || true)
+  if [ -n "$dir" ]; then
+    for f in "$dir/config.yml" "$dir/config.yaml"; do
+      [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+  fi
+  f="$HOME/.herdr/plugins/$FLEET_PLUGIN_ID/config.yml"
+  [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  return 1
+}
+
+# `roles:` is a flat map, unlike workspace-manager's list of objects, so the
+# parser only has to arm on the `roles:` key and emit each indented
+# `name: value` line under it as `name<TAB>value`.
+role_entries() {
+  awk '
+    function emit(line) {
+      sub(/[[:space:]]+#.*$/, "", line)
+      key = line
+      sub(/^[[:space:]]+/, "", key)
+      sub(/:.*/, "", key)
+      val = line
+      sub(/^[^:]*:[[:space:]]*/, "", val)
+      sub(/[[:space:]]+$/, "", val)
+      gsub(/^["'"'"']|["'"'"']$/, "", val)
+      if (key != "" && val != "") print key "\t" val
+    }
+    /^[^[:space:]#]/ { inroles = ($0 ~ /^roles[[:space:]]*:/); next }
+    !inroles { next }
+    /^[[:space:]]+[^[:space:]#]+[[:space:]]*:/ { emit($0) }
+  ' "$1"
+}
+
+role_skill() {
+  local role=$1 config key value
+  config=$(fleet_config) || return 1
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "$role" ] || continue
+    printf '%s' "$value"
+    return 0
+  done <<EOF
+$(role_entries "$config")
+EOF
+  return 1
 }
 
 # ── Spawning ─────────────────────────────────────────────────────────────────
@@ -691,7 +783,10 @@ usage: fleet spawn <branch> [options]
                       (default: $FLEET_AGENT_TIER, or omp's own default)
   --model <selector>  pass --model <selector> to omp (escape hatch;
                       mutually exclusive with --tier)
-  --skill <name>      load this skill before the dispatched task
+  --skill <name>      load this skill before the dispatched task; repeat for
+                      each procedure the worker must follow
+  --role <name>       load the skill fleet's config maps this role to; only
+                      one role per spawn
   --layout <shape>    agent (default) | full — see below
   --task <text>       task to dispatch once the agent is ready
   --task-file <path>  read the task from a file ('-' for stdin)
@@ -715,7 +810,8 @@ EOF
 cmd_spawn() {
   require_herdr
   local branch="" base="" repo="" wtpath="" handle="" task="" taskfile="" dispatch=1
-  local layout=agent replace=0 skill=""
+  local layout=agent replace=0 role="" role_seen=0 skills_count=0
+  local -a skills=()
   local tier=$FLEET_AGENT_TIER model="" tier_explicit=0
   [ $# -gt 0 ] || usage_spawn
   branch=$1; shift
@@ -729,7 +825,10 @@ cmd_spawn() {
       --layout) layout=${2:?}; shift 2 ;;
       --tier) tier=${2:?}; tier_explicit=1; shift 2 ;;
       --model) model=${2:?}; shift 2 ;;
-      --skill) skill=${2:?}; shift 2 ;;
+      --skill) skills[skills_count]=${2:?}; skills_count=$((skills_count + 1)); shift 2 ;;
+      --role)
+        [ "$role_seen" = 0 ] || die "--role may be specified only once"
+        role=${2:?}; role_seen=1; shift 2 ;;
       --task) task=${2:?}; shift 2 ;;
       --task-file) taskfile=${2:?}; shift 2 ;;
       --no-dispatch) dispatch=0; shift ;;
@@ -750,8 +849,26 @@ cmd_spawn() {
     agent|full) ;;
     *) die "unknown layout '$layout' (expected: agent, full)" ;;
   esac
-  [ -z "$skill" ] || valid_skill_name "$skill" \
-    || die "invalid skill name '$skill'"
+  local skill
+  if [ "$skills_count" -gt 0 ]; then
+    for skill in "${skills[@]}"; do
+      valid_skill_name "$skill" || die "invalid skill name '$skill'"
+    done
+  fi
+  [ -z "$role" ] || valid_skill_name "$role" \
+    || die "invalid role name '$role'"
+  if [ -n "$role" ]; then
+    skill=$(role_skill "$role") || die "role '$role' has no mapping in fleet's config
+  add it under roles: in $(fleet_config 2>/dev/null || printf '<config dir>/config.yml — see: herdr plugin config-dir %s' "$FLEET_PLUGIN_ID")"
+    valid_skill_name "$skill" \
+      || die "role '$role' maps to invalid skill name '$skill'"
+    if [ "$skills_count" -gt 0 ]; then
+      skills=("$skill" "${skills[@]}")
+    else
+      skills[0]=$skill
+    fi
+    skills_count=$((skills_count + 1))
+  fi
   # Only an *explicit* `--tier` conflicts with `--model`. `$FLEET_AGENT_TIER` is
   # a default, and an explicit `--model` must override it — otherwise exporting
   # the documented env default makes the escape hatch unusable.
@@ -829,12 +946,17 @@ cmd_spawn() {
     if [ "$taskfile" = "-" ]; then task=$(cat); else task=$(cat "$taskfile"); fi
   fi
 
-  if [ -n "$skill" ]; then
+  if [ "$skills_count" -gt 0 ]; then
+    local skill_flag='--skill'; [ -z "$role" ] || skill_flag='--role or --skill'
     [ "$dispatch" = 1 ] \
-      || die "--skill cannot be combined with --no-dispatch"
+      || die "$skill_flag cannot be combined with --no-dispatch"
     [ -n "$task" ] \
-      || die "--skill requires --task or --task-file"
-    task="$(skill_instruction "$skill")"$'\n\n'"$task"
+      || die "$skill_flag requires --task or --task-file"
+    local instructions=""
+    for skill in "${skills[@]}"; do
+      instructions=${instructions:+$instructions$'\n\n'}"$(skill_instruction "$skill")"
+    done
+    task="$instructions"$'\n\n'"$task"
   fi
 
   # The spawner is the foreman, by definition. foreman_handle() would be wrong here:
@@ -861,15 +983,20 @@ cmd_spawn() {
   # remove. Otherwise the failure orphans a worktree no fleet command can see.
   # Tier→model mapping was already validated above; this call only builds the
   # argv plan and the MODEL value recorded beside TIER.
-  local agent_args resolved_model=$model arg
+  local agent_args resolved_model=$model arg skills_csv
   agent_args=$(worker_agent_args "$tier" "$model")
   # When the foreman passed --tier, record the mapped selector so `meta_get MODEL`
   # answers the same question for both flags.
   if [ -z "$resolved_model" ] && [ -n "$agent_args" ]; then
     resolved_model=$(printf '%s\n' "$agent_args" | sed -n '$p')
   fi
+  if [ "$skills_count" -gt 0 ]; then
+    skills_csv=$(IFS=,; printf '%s' "${skills[*]}")
+  else
+    skills_csv=""
+  fi
   meta_set "$handle" "FOREMAN=$foreman" "BRANCH=$branch" "DIR=$wtpath" "WORKSPACE=$ws" \
-    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "SKILL=$skill" \
+    "REPO=$repo" "REPO_KEY=$(repo_key "$repo")" "SKILLS=$skills_csv" "ROLE=$role" \
     "TIER=$tier" "MODEL=$resolved_model"
   : >"$(report_file "$handle")"
   : >"$(report_token_file "$handle")"
@@ -1752,6 +1879,22 @@ cmd_reap() {
   [ "$failed" = 0 ]
 }
 
+# The workspace the operator is actually looking at, independent of the pane
+# this command happens to run from. `reap_one` needs it to undo a herdr-level
+# side effect on `worktree remove` — see the comment there. Best-effort, not
+# `h`: this is UX polish, not a correctness requirement, so a failure here
+# (herdr momentarily unreachable, an older herdr without `workspace list`)
+# degrades to "skip the restore" rather than aborting the whole reap. The
+# trailing `|| true` is load-bearing under this file's `set -e -o pipefail`:
+# without it, `restore_ws=$(focused_workspace_id)` at the call site would
+# abort the entire `fleet reap` on exactly the failure this is meant to
+# tolerate.
+focused_workspace_id() {
+  herdr workspace list 2>/dev/null \
+    | jq -r '(.result.workspaces[]? | select(.focused == true) | .workspace_id) // empty' 2>/dev/null \
+    || true
+}
+
 # Remove one worker: its workspace, then its record. Returns non-zero when the
 # workspace could not be removed, and in that case the record is deliberately
 # left behind — forgetting a worker whose worktree is still on disk is exactly
@@ -1769,10 +1912,24 @@ reap_one() {
     local -a args
     args=(worktree remove --workspace "$ws")
     [ "$force" = 1 ] && args+=(--force)
+    # `worktree remove` focuses the removed worktree's parent workspace as an
+    # unconditional herdr-level side effect (the parent is whichever workspace
+    # `fleet spawn` ran from) — unlike `worktree create`, it has no --no-focus
+    # flag to suppress that. `fleet_reap` runs from a background aside inside
+    # the foreman's own pane, so without this the operator gets yanked away
+    # from whatever repo they were actually looking at every time a worker is
+    # reaped. Capturing and restoring focus around the one call that moves it
+    # undoes the side effect without herdr needing to add a flag it doesn't
+    # have.
+    local restore_ws; restore_ws=$(focused_workspace_id)
     # A worker with uncommitted work makes herdr refuse; that refusal is the
     # safety net, so it is reported and skipped rather than forced silently.
     if out=$(herdr "${args[@]}" 2>&1); then
       note "fleet: removed $handle ($(meta_get "$handle" BRANCH))"
+      # `|| true`: if the operator was looking straight at the worktree that
+      # was just removed, refocusing its now-gone id fails — harmlessly,
+      # since herdr already picked something reasonable on its own then.
+      [ -n "$restore_ws" ] && herdr workspace focus "$restore_ws" >/dev/null 2>&1 || true
     else
       code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null || true)
       # `spawn --replace` is the one caller allowed to treat workspace_not_found
@@ -1834,6 +1991,7 @@ Worker
 Both
   fleet doctor                   check prerequisites
   fleet version                  print the fleet version
+  fleet roles                    list role -> skill mappings from fleet's config
   fleet dm <handle> <text>       raw steering to any fleet member
 
 --raw sends text alone; without it fleet appends its protocol block, which is
@@ -1867,6 +2025,7 @@ main() {
     dm)      cmd_dm "$@" ;;
     keys)    cmd_keys "$@" ;;
     doctor)  cmd_doctor "$@" ;;
+    roles)   cmd_roles "$@" ;;
     version|--version|-V) cmd_version ;;
     -h|--help|help) usage ;;
     *) die "unknown command '$cmd' (try: fleet --help)" ;;

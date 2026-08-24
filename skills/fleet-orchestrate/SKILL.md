@@ -1,10 +1,10 @@
 ---
-name: fleet
-description: Operate the `fleet` CLI — create a worktree per task, dispatch a separate coding-agent process into each, collect reports, and answer worker questions. Use when orchestrating parallel branch work or when the user says fleet, orchestrator, or dispatch. Not for local subagents that stay inside this process.
+name: fleet-orchestrate
+description: Operate the `fleet` CLI as the orchestrator — claim a handle, spawn workers into worktrees, collect their reports, answer their questions, reap when done. Use when orchestrating parallel branch work or when the user says fleet, orchestrator, or dispatch. Not for a fleet worker itself (read `skill://fleet-worker` instead), and not for local subagents that stay inside this process.
 user-invocable: false
 ---
 
-# Fleet
+# Fleet (orchestrator)
 
 Dispatch work to coding-agent processes that are not yours.
 
@@ -18,15 +18,18 @@ That independence is also the cost. Harness-local channels such as omp's `hub`,
 `history://`, and `agent://` do not reach a separate process. Every message in
 both directions goes through herdr's agent surface, which `fleet` wraps.
 
-This skill is the CLI contract. For *what to put in a worker's brief* — the
-orchestrator's actual job — read `skill://fleet-dispatch`.
+This skill is the CLI contract for the orchestrator side. For *what to put in
+a worker's brief* — the orchestrator's actual job — read
+`skill://fleet-dispatch`. For what a worker itself can do once dispatched,
+read `skill://fleet-worker` instead — you should not need it here; every
+dispatched task already carries its own protocol block.
 
 Every `fleet_*` custom tool (`fleet_foreman`, `fleet_spawn`, `fleet_send`, …) is
 the CLI subcommand of the same name, one parameter for one flag. The CLI is
 the contract; the tools are the interface — call the tool when one is
 registered, and fall back to the shell form shown in this doc only where no
-tool is loaded (a worker's own commands, or a shell without the extension
-installed). Both hit the identical command underneath.
+tool is loaded (a shell without the extension installed). Both hit the
+identical command underneath.
 
 ## Requirements
 
@@ -76,23 +79,38 @@ the workspace's own pane under a handle derived from the branch, builds the
 selected layout, and submits the task:
 
 ```bash
-fleet spawn feat/412-webhook-retry --tier deep --skill implement \
+fleet spawn feat/412-webhook-retry --tier deep \
   --task "Add exponential backoff to the webhook dispatcher. Tests in
 tests/webhooks/. Do not change the public dispatch() signature."
 ```
 
 Write the task the way you would write a local subagent assignment: target
 files, concrete change, acceptance criteria. The worker has no memory of this
-conversation — every requirement must be in the text. `--skill` prepends the
-instruction to read `skill://<name>`, which loads that skill's procedure in
-the worker's own omp session; `fleet` appends the protocol block (report,
-reply, commit, stay-in-worktree), so repeat neither one.
+conversation — every requirement must be in the text. `--role <name>` is
+optional and accepted once: it looks up a named convention in `roles:` in
+fleet's config and prepends that role's mapped skill instruction. Use it where
+a role such as `review` should survive a skill rename without changing every
+dispatch. `--skill <name>` is repeatable; each occurrence prepends that
+skill's instruction. When both are present, the role-mapped skill comes first,
+then literal skills in the order passed. Leave both absent and the worker gets
+the task text alone.
+
+`fleet roles` prints the current mapping and where its config was found. A
+missing role dies naming the config path it looked for. The config lives
+wherever `herdr plugin config-dir andyhite.fleet` points (or
+`$FLEET_CONFIG`):
+
+```yaml
+roles:
+  review: code-review
+  implement: my-house-implement-skill
+```
 
 Long tasks read better from a file, and a brief worth dispatching is almost
 always long:
 
 ```bash
-fleet spawn fix/301-null-guard --tier deep --skill diagnosing-bugs --task-file /tmp/task-301.md
+fleet spawn fix/301-null-guard --tier deep --task-file /tmp/task-301.md
 ```
 
 `--tier standard|deep` selects a worker model band; `--model <selector>` is
@@ -126,9 +144,9 @@ Two modes, and picking the wrong one is the main way this goes badly.
 each returns as soon as its task is submitted — then block once:
 
 ```bash
-fleet spawn feat/a --tier deep --skill implement --task-file /tmp/a.md
-fleet spawn feat/b --tier deep --skill implement --task-file /tmp/b.md
-fleet spawn feat/c --tier deep --skill implement --task-file /tmp/c.md
+fleet spawn feat/a --tier deep --task-file /tmp/a.md
+fleet spawn feat/b --tier deep --task-file /tmp/b.md
+fleet spawn feat/c --tier deep --task-file /tmp/c.md
 fleet join
 ```
 
@@ -206,7 +224,9 @@ must not carry a protocol block behind it.
 ## Peer messaging
 
 Three more commands send raw, untracked text — like `fleet send --raw`, none
-of them bump a worker's dispatch counter or touch its report freshness:
+of them bump a worker's dispatch counter or touch its report freshness. This
+is the orchestrator-initiated side; a worker reaching a peer or you the same
+way is covered by `skill://fleet-worker`:
 
 ```bash
 fleet broadcast "Contract changed: retries now live in core/retry.ts."

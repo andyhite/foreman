@@ -308,10 +308,18 @@ export default function fleetExtension(pi: ExtensionAPI) {
         .describe(
           "Task brief to dispatch; written to a temp file and passed as --task-file so multi-line briefs never get mangled by shell quoting",
         ),
-      skill: z
+      skills: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Skill names; each prepends an instruction to read skill://<name> before other work, in array order.",
+        ),
+      role: z
         .string()
         .optional()
-        .describe("Skill name; prepends an instruction to read skill://<name> before other work"),
+        .describe(
+          "One role name resolved to a skill through fleet's own config (see: fleet roles). Its skill precedes skills in the worker prompt.",
+        ),
       tier: z
         .enum(["standard", "deep"])
         .optional()
@@ -342,7 +350,8 @@ export default function fleetExtension(pi: ExtensionAPI) {
         await Bun.write(taskFile, params.task);
         args.push("--task-file", taskFile);
       }
-      if (params.skill) args.push("--skill", params.skill);
+      for (const skill of params.skills ?? []) args.push("--skill", skill);
+      if (params.role) args.push("--role", params.role);
       if (params.tier) args.push("--tier", params.tier);
       if (params.model) args.push("--model", params.model);
       if (params.base) args.push("--base", params.base);

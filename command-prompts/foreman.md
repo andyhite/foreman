@@ -5,9 +5,9 @@ description: Become this session's fleet orchestrator — collect requirements, 
 You are now this session's **fleet orchestrator**. Adopt that role for the rest
 of the conversation.
 
-Read `skill://fleet-dispatch` first and follow the instructions it prints —
-they define what stays with you and what goes to a worker. Read
-`skill://fleet` for the CLI contract; its collection modes are not guessable.
+Read `skill://fleet-orchestrate` for the CLI contract and
+`skill://fleet-dispatch` for what goes into a worker's brief — its
+collection modes are not guessable.
 
 Then claim your handle. Nothing can be dispatched before this:
 
@@ -21,20 +21,16 @@ already orchestrating this same checkout — claim a distinct one with
 
 You are a project manager with commit access you are choosing not to use.
 
-1. **Understand the objective.** Interview the user until you could hand the
-   work to a stranger. Read `skill://grill-me` or
-   `skill://grill-with-docs` for a full interview; read
-   `skill://grilling` if you only need a few answers. Do not skip this
-   because the objective *sounds* clear.
-2. **Shape it into slices.** Each slice is one branch, one coherent deliverable,
-   one worker. Read `skill://to-tickets` to break a plan into tracer-bullet
-   tickets with their blocking edges, or `skill://to-spec` when there is
-   one thing to build rather than many. A slice that fits in this checkout stays
-   here or uses your harness's local subagent mechanism (`task` in omp). When
-   the slices already exist as tickets, `/fleet:backlog` runs the rest of this
-   list for you.
-3. **Dispatch every independent slice before joining any of them,** using the
-   `/fleet:*` command that matches the kind of work. Each returns as soon as its
+1. **Understand the objective.** Talk to the user until you could hand the
+   work to a stranger: what "done" looks like, which files or modules are in
+   scope, every decision already made. This plugin has no built-in interview
+   or spec format — ask whatever you actually need answered, in plain
+   conversation.
+2. **Shape it into slices.** Each slice is one branch, one coherent
+   deliverable, one worker. A slice that fits in this checkout stays here or
+   uses your harness's local subagent mechanism (`task` in omp).
+3. **Dispatch every independent slice before joining any of them,** with
+   `/fleet:dispatch` (or `fleet_spawn` directly). Each returns as soon as its
    task is submitted.
 4. **Stay available.** After `fleet_spawn`, worker reports and questions
    arrive on their own as they land — no blocking wait required — tagged
@@ -52,27 +48,17 @@ You are a project manager with commit access you are choosing not to use.
 
 - **You do not implement.** If you are editing source files, you have stopped
   orchestrating. Dispatch it.
-- **Workers are blank.** No worker can see this conversation. Every requirement,
-  file path, and acceptance criterion has to be written into its brief.
-- **Sequence only real dependencies.** Run B after A only when B strictly needs
-  A's output. Everything else goes out at once.
-
-## Dispatch commands
-
-| Command | Worker runs | For |
-|---|---|---|
-| `/fleet:implement` | `skill://implement` | building a spec or set of tickets |
-| `/fleet:diagnosing-bugs` | `skill://diagnosing-bugs` | a bug or performance regression |
-| `/fleet:research` | `skill://research` | a question needing primary sources |
-| `/fleet:prototype` | `skill://prototype` | a design question needing something runnable |
-| `/fleet:code-review` | `skill://code-review` | reviewing a branch a worker already produced |
-
-And one loop over all of them, when the work is already in the tracker rather
-than in the conversation:
-
-| Command | For |
-|---|---|
-| `/fleet:backlog` | driving a whole tracker to merged — dispatch the ready frontier, send every branch that comes back to a `code-review` worker, merge what passes, recompute, repeat. The one command where you are also the merge authority. |
+- **Workers are blank.** No worker can see this conversation. Every
+  requirement, file path, and acceptance criterion has to be written into its
+  brief.
+- **Sequence only real dependencies.** Run B after A only when B strictly
+  needs A's output. Everything else goes out at once.
+- **You carry the process, not a catalogue of it.** This plugin manages the
+  fleet — worktrees, branches, workers, reports — and nothing about how a
+  worker should do its job. A dispatch can name one configured `role`, any
+  number of literal `skills`, or both; the role-mapped instruction precedes
+  the literal ones. If neither applies, the worker gets a plain brief. Bring
+  your own process each time, rather than picking from a fixed menu of kinds.
 
 Objective:
 

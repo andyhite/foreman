@@ -1,6 +1,6 @@
 ---
 name: fleet-dispatch
-description: How an orchestrator turns requirements into a fleet worker brief that runs a specific mattpocock/skills skill. Use when dispatching implementation, diagnosis, research, prototyping, or review to a peer agent, or when a /fleet:* command asks for the dispatch contract.
+description: How an orchestrator turns requirements into a fleet worker brief. Use when dispatching work to a peer agent, or when a /fleet:* command asks for the dispatch contract.
 user-invocable: false
 ---
 
@@ -13,29 +13,30 @@ stranger could build it*. A fleet worker is exactly that stranger: a blank
 agent process with no memory of this conversation, no access to your context,
 and no way to guess. Everything it needs travels in one block of text.
 
-This skill is the contract for writing that text. Read `skill://fleet` for
-the CLI contract underneath it.
+This skill is the contract for writing that text. Read
+`skill://fleet-orchestrate` for the CLI contract underneath it, and
+`skill://fleet-worker` for what a worker itself can do once dispatched.
 
 ## The split
 
-Requirements work is interactive — it needs the user in the room — so it stays
-with you. Execution work is autonomous and wants its own branch, so it goes to a
-worker.
+Requirements work is interactive — it needs the user in the room — so it
+stays with you. Execution work is autonomous and wants its own branch, so it
+goes to a worker.
 
-| Stays with you (the orchestrator) | Goes to a worker |
-|---|---|
-| `skill://grill-me`, `skill://grill-with-docs` — interviewing the user | `skill://implement` — build the spec or tickets |
-| `skill://to-spec`, `skill://to-tickets` — turning the conversation into work | `skill://diagnosing-bugs` — reproduce, fix, regression-test |
-| `skill://triage`, `skill://wayfinder` — shaping the backlog | `skill://research` — investigate and write up |
-| `skill://domain-modeling`, `skill://codebase-design` — deciding the shape | `skill://prototype` — throwaway answer to a design question |
-| Reviewing branches, answering `[fleet:*]` questions, merging | `skill://code-review` — two-axis review of a branch |
+This plugin has no opinion on *how* a worker does its job, and ships no
+execution skills of its own. A dispatch may name one configured role, any
+number of literal skills, or neither. The role resolves to its configured
+skill and appears first in the prompt; literal skills follow in the order
+passed. Use a role for a convention reused across dispatches, and literal
+skills for procedures specific to this job — see `skill://fleet-orchestrate`.
 
 If you catch yourself editing source files, you have stopped orchestrating.
 Dispatch it.
 
 Concurrency is the whole point. Slices that do not depend on each other are
-spawned **before** anything is joined. A slice that fits in this checkout stays
-here or uses the orchestrator harness's local subagent mechanism (`task` in omp).
+spawned **before** anything is joined. A slice that fits in this checkout
+stays here or uses the orchestrator harness's own local subagent mechanism
+(`task` in omp).
 
 ## The requirements gate
 
@@ -46,18 +47,18 @@ able to state, without hedging:
 - which files, modules, or seams are in scope — and which are explicitly not
 - every decision already made, so the worker does not re-litigate it
 
-If any of those is fuzzy, that is a question for the user, not for the worker.
-Read `skill://grilling` to interview them until it is sharp. One clarifying
-round now is cheaper than a worker that builds the wrong thing for an hour.
+If any of those is fuzzy, that is a question for the user, not for the
+worker. One clarifying round now is cheaper than a worker that builds the
+wrong thing for an hour.
 
 The exception is a decision the worker is *better placed* to make because it
-depends on what the code turns out to look like. Say so explicitly in the brief
-and tell the worker to `fleet reply` if it needs you to choose.
+depends on what the code turns out to look like. Say so explicitly in the
+brief and tell the worker to `fleet reply` if it needs you to choose.
 
 ## Anatomy of a brief
 
-Three sections. Nothing else. The skill invocation does not belong in the file:
-`fleet_spawn`'s `skill` field prepends it deterministically.
+Three sections. Nothing else. Role and skill invocations, if any, do not
+belong in the file: `fleet_spawn` prepends them deterministically.
 
 ```markdown
 ## <what this is>
@@ -70,28 +71,17 @@ Three sections. Nothing else. The skill invocation does not belong in the file:
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
-**`skill` is what puts the procedure in front of the worker.** Naming the
-skill explicitly is what guarantees the worker works from *that* skill's own
-procedure, rather than trusting a blank agent to auto-select the right one
-out of a list of forty. Fleet prepends the instruction "Before doing any
-other work, read `skill://<name>` and follow it." — omp's own
-skill-activation path, since workers are always omp now. Without `skill` you
-get a generic agent doing generic work; with it the worker follows the named
-skill's own procedure.
+**A role or skill puts a procedure in front of the worker.** A role selects
+one skill through fleet's config; every literal skill is included as named.
+Fleet prepends one `skill://<name>` instruction for each, so the worker reads
+every required procedure rather than auto-selecting from what happens to be
+installed. With neither, the worker works straight from the brief. Which mix
+fits is a decision made per dispatch, not something this plugin bakes in.
 
-**`tier` picks the worker's model band.** Each `/fleet:*` command names the
-tier that fits its skill — `standard` for dispatch-heavy work, `deep` when the
-worker itself has to hold judgement. `model` is the escape hatch when a foreman
-needs an omp model selector the tier table does not cover.
-
-`disable-model-invocation: true` lands mostly on the other side of this split
-than you would expect. Every one of your own interview skills sets it —
-`triage`, `to-tickets`, `to-spec`, `grill-me`, `wayfinder` — while among the
-execution skills only `implement` does. So it is mostly *your* menu that is
-missing entries, not the worker's: naming a skill and reading it, rather than
-expecting to find it in a list, is the same discipline you are asking of the
-worker, applied to yourself. `skill://<name>` reads the skill directly and
-ignores the field either way.
+**`tier` picks the worker's model band.** `standard` for dispatch-heavy work,
+`deep` when the worker itself has to hold judgement. `model` is the escape
+hatch when an orchestrator needs an omp model selector the tier names don't
+cover.
 
 **Do not include:** where to commit, whether to push, how to report back, a
 reminder to stay in the worktree, that other workers exist, or a nudge to
@@ -107,11 +97,17 @@ conclusions, not the deliberation.
 
 ## Dispatching
 
-Compose each brief as text, name the execution skill explicitly, and move on
-to the next slice:
+Compose each brief as text, name a configured role, literal skills, or both
+when the work calls for them, and move on to the next slice:
 
 ```
-fleet_spawn({ branch: "feat/412-webhook-retry", tier: "deep", skill: "implement", task: "<the brief above>" })
+fleet_spawn({ branch: "feat/412-webhook-retry", tier: "deep", role: "implement", skills: ["tdd", "code-review"], task: "<the brief above>" })
+```
+
+Or, with no procedures, a plain task brief:
+
+```
+fleet_spawn({ branch: "spike/dashboard-loading-state", tier: "standard", task: "<the brief above>" })
 ```
 
 `fleet_spawn`'s `task` field is the brief itself — the tool writes it to a
@@ -119,11 +115,10 @@ temp file and passes it through, so you never manage `/tmp/fleet-*.md` files
 by hand.
 
 Branch names follow the repo's convention if it has one. Otherwise:
-`feat/` for new behaviour, `fix/` for defects, `spike/` for prototypes and
-research, `review/` for a review pass — reviewing `feat/412-webhook-retry`
-spawns `review/412-webhook-retry`, the same `<n>-<slug>` (or `<slug>`) shape
-with only the prefix swapped. The worker's handle is derived from the
-branch, so keep branches distinguishable in their first 32 characters.
+`feat/` for new behaviour, `fix/` for defects, `spike/` for throwaway or
+exploratory work, `review/` for a review pass. The worker's handle is derived
+from the branch, so keep branches distinguishable in their first 32
+characters.
 
 Claim your own handle with `fleet_foreman({})` before the first spawn — a worker
 stamped with the wrong orchestrator sends its questions to the wrong pane.
@@ -143,8 +138,8 @@ review the branches and tell the user what landed where.
 ## Sizing a slice
 
 One worker, one branch, one coherent deliverable. A slice is too big if you
-cannot write its "Done when" as a short list; split it. A slice is too small if
-its branch would be a one-line diff; batch it with a neighbour or do it
+cannot write its "Done when" as a short list; split it. A slice is too small
+if its branch would be a one-line diff; batch it with a neighbour or do it
 yourself.
 
 Two workers touching the same files will produce conflicting branches, and

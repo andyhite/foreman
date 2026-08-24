@@ -85,6 +85,35 @@ is 'renders the omp-native skill instruction' "$(skill_instruction implement)" \
 assert_not 'skill names reject traversal' valid_skill_name '../implement'
 assert_not 'skill names reject uppercase' valid_skill_name 'Implement'
 
+# ── role config ──────────────────────────────────────────────────────────────
+#
+# `--role` resolves through fleet's own config instead of naming a skill at
+# every dispatch site. Regression coverage for the parser (decoys, comments,
+# malformed lines) and the lookup (found, missing key, missing config).
+
+printf '\nrole config\n'
+role_cfg="$sandbox/fleet-roles.yml"
+cat >"$role_cfg" <<'YAML'
+not-a-role: decoy
+roles:
+  review: code-review
+  implement: my-house-implement  # trailing comment
+  broken
+YAML
+role_ent=$(role_entries "$role_cfg")
+is 'reads two well-formed roles, not the decoy or the keyless line' \
+  "$(printf '%s\n' "$role_ent" | wc -l | tr -d ' ')" '2'
+assert 'reads the review mapping' [ "${role_ent#*review	code-review}" != "$role_ent" ]
+assert 'strips a trailing comment' [ "${role_ent#*# trailing}" = "$role_ent" ]
+assert 'ignores the top-level decoy key' [ "${role_ent#*not-a-role}" = "$role_ent" ]
+
+fleet_config() { printf '%s' "$role_cfg"; }
+is 'role_skill resolves a configured role' "$(role_skill review)" 'code-review'
+assert_not 'role_skill fails an unconfigured role' role_skill missing
+fleet_config() { return 1; }
+assert_not 'role_skill fails with no config at all' role_skill review
+unset -f fleet_config
+
 printf '\nagent tiers and models\n'
 assert 'accepts standard' valid_agent_tier 'standard'
 assert 'accepts deep' valid_agent_tier 'deep'
@@ -203,8 +232,8 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
   assert 'every worker starts as omp' \
     [ "${started_cmd#*--kind omp}" != "$started_cmd" ]
-  is 'the skill is recorded for later inspection' \
-    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILL)" 'implement'
+  is 'the skills are recorded for later inspection' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x SKILLS)" 'implement'
   is 'the tier is recorded for later inspection' \
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-x TIER)" 'deep'
   is 'the mapped model is recorded for later inspection' \
@@ -228,6 +257,40 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-y MODEL)" 'sonnet'
   assert 'the explicit --model reached agent start' \
     [ "${started_cmd#*--model sonnet}" != "$started_cmd" ]
+
+  # A role contributes its mapped skill first, then every literal --skill in
+  # argv order. The prompt must preserve all three procedures: losing either
+  # one silently turns a combined dispatch into a different job.
+  rm -f "$prompt_file" "$started_file" "$start_args"
+  role_skill() { [ "$1" = review ] && { printf 'code-review'; return 0; }; return 1; }
+  ( cd "$spawn_repo" \
+    && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+       cmd_spawn feat/z --tier deep --role review --skill implement --skill research \
+         --task 'Review the retry policy change.' ) >/dev/null 2>&1
+  prompt=$(cat "$prompt_file" 2>/dev/null || true)
+  expected_instructions=$'Before doing any other work, read `skill://code-review` and follow it.\n\nBefore doing any other work, read `skill://implement` and follow it.\n\nBefore doing any other work, read `skill://research` and follow it.'
+  is 'a role and repeated --skill flags all load their procedures first' \
+    "${prompt%%$'\n\n'Review the retry policy change.*}" "$expected_instructions"
+  is 'all resolved and literal skills are recorded in prompt order' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-z SKILLS)" 'code-review,implement,research'
+  is 'the role itself is also recorded' \
+    "$(FLEET_STATE="$sandbox/spawn-state" meta_get feat-z ROLE)" 'review'
+
+  ( cd "$spawn_repo" && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+      cmd_spawn feat/two-roles --role review --role review --task x ) >"$sandbox/fleet-two-roles" 2>&1
+  assert 'a second --role is a die' \
+    [ "$?" != 0 ]
+  assert 'and explains the single-role limit' \
+    grep -q 'only once' "$sandbox/fleet-two-roles"
+
+  ( cd "$spawn_repo" && FLEET_STATE="$sandbox/spawn-state" HERDR_ENV=1 HERDR_PANE_ID=p0 \
+      cmd_spawn feat/unmapped --role ghost --task x ) >"$sandbox/fleet-role-unmapped" 2>&1
+  assert 'an unmapped --role is a die' \
+    [ "$?" != 0 ]
+  assert 'and names the role' \
+    grep -q "role 'ghost'" "$sandbox/fleet-role-unmapped"
+  rm -f "$sandbox/fleet-two-roles" "$sandbox/fleet-role-unmapped"
+  unset -f role_skill
 
   unset -f herdr
 else
@@ -254,11 +317,11 @@ if [ -n "$plugin_dir" ]; then
   done
   is 'no removed fleet-skill reference survives in the plugin prose' "${offenders# }" ''
 
-  # `orchestrate` arms omp's magic-keyword orchestration contract on the
-  # worker's very first turn. It belongs only in the three commands whose
-  # dispatched work is genuinely multi-phase; leaking it into a fifth file
-  # (a copy-paste from one of these three, say) would silently change a
-  # worker's behavior with no review signal.
+  # `orchestrate` arms omp's magic-keyword orchestration contract on a
+  # worker's very first turn. This plugin dispatches generic briefs with no
+  # skill catalogue of its own, so nothing in its prose should reach for that
+  # keyword — a stray copy-paste would silently change a worker's behavior
+  # with no review signal.
   offenders=""
   for f in "$plugin_dir"/command-prompts/*.md "$plugin_dir"/skills/*/SKILL.md; do
     [ -f "$f" ] || continue
@@ -266,27 +329,7 @@ if [ -n "$plugin_dir" ]; then
       offenders="$offenders $(basename "$f")"
     fi
   done
-  is 'orchestrate appears only in the commands that dispatch multi-phase work' \
-    "${offenders# }" 'backlog.md implement.md prototype.md'
-
-
-  # Each dispatch command must name the skill it dispatches, or the worker gets
-  # the brief with no procedure attached.
-  missing=""
-  for c in implement diagnosing-bugs research prototype code-review; do
-    f="$plugin_dir/command-prompts/$c.md"
-    [ -f "$f" ] || continue
-    [ -n "$(sed -n "/skill: \"$c\"/p" "$f")" ] || missing="$missing $c"
-  done
-  is 'every dispatch command passes its own skill:' "${missing# }" ''
-
-  missing=""
-  for c in implement diagnosing-bugs research prototype code-review; do
-    f="$plugin_dir/command-prompts/$c.md"
-    [ -f "$f" ] || continue
-    [ -n "$(sed -n '/tier: "/p' "$f")" ] || missing="$missing $c"
-  done
-  is 'every dispatch command names a tier:' "${missing# }" ''
+  is 'orchestrate does not appear in the plugin prose' "${offenders# }" ''
 else
   printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
 fi
@@ -592,6 +635,7 @@ unset -f require_herdr
 
 printf '\nspawn flag conflicts\n'
 export FLEET_STATE="$sandbox/state-spawn-flags"
+require_herdr() { :; }
 herdr() { printf 'herdr was called\n' >&2; return 1; }
 
 out=$( (cmd_spawn br --task x --task-file y) 2>&1 )
@@ -608,8 +652,8 @@ assert_not 'herdr was not called' [ "${out#*herdr was called}" != "$out" ]
 
 out=$( (cmd_spawn br --tier deep --model opus --task x) 2>&1 )
 rc=$?
-assert     'spawn dies on --tier/--model conflict' [ "$rc" != 0 ]
-assert     'output contains tier/model mutually exclusive' [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
+assert     'output contains tier/model mutually exclusive' \
+  [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
 assert_not 'herdr was not called for tier/model' [ "${out#*herdr was called}" != "$out" ]
 
 # `$FLEET_AGENT_TIER` is a default, not a flag. An explicit `--model` must
@@ -620,6 +664,7 @@ assert_not 'env FLEET_AGENT_TIER does not block --model' \
   [ "${out#*--tier and --model are mutually exclusive}" != "$out" ]
 
 unset -f herdr
+unset -f require_herdr
 
 # ── join --timeout validation ───────────────────────────────────────────────────
 
