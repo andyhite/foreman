@@ -19,26 +19,35 @@ block's summary gives.
 When your work is done, write your report **last** — after everything else
 is committed:
 
-```bash
-foreman report "<summary>"
-foreman report -f <file>
+```
+foreman_report({ text: "<summary>" })
+foreman_report({ file: "<path>" })
 ```
 
-or the `foreman_report` tool when it's registered. The boss reads that
-file; terminal output never reaches it. A report is overwritten only by your
-own later one, so nothing you filed earlier is lost by filing another.
+Fall back to the CLI form — `foreman report "<summary>"` / `foreman report -f
+<file>` — only when `foreman_*` tools are not registered (a shell without
+the extension loaded). Either way this pushes the report straight to the
+boss's pane, tagged `[foreman:<handle>]`, and writes it to disk as the
+durable record. Terminal output alone never reaches the boss — only the
+pushed message and the file do. If the push can't reach the boss (its pane
+isn't live right then), the report still lands on disk and surfaces on the
+boss's next sweep. A report is overwritten only by your own later one, so
+nothing you filed earlier is lost by filing another.
 
 ## Asking a blocked question
 
-```bash
-foreman reply "<question>"
+```
+foreman_reply({ text: "<question>" })
 ```
 
-or the `foreman_reply` tool. This files the question to disk and interrupts
-the boss's pane, so a `foreman join` it is sitting in returns
-immediately instead of waiting out its timeout. Use it for a decision only
-the boss can make — not for progress updates, which belong in the
-eventual report.
+Fall back to `foreman reply "<question>"` on the CLI when the tools are not
+registered. This pushes the question straight to the boss's pane, tagged
+`[foreman:<handle>]`, and files it to disk as the durable record. The file is
+the half that reaches a boss *inside* a blocking `foreman join`/`foreman ask`:
+a pushed message only lands between its tool calls, so the file is what makes
+that wait return early instead of running out its full timeout. Use it for a
+decision only the boss can make — not for progress updates, which belong in
+the eventual report.
 
 ## Conventions
 
@@ -47,18 +56,22 @@ eventual report.
   open a PR unless the task said to.
 - Delegate substantial independent slices of your own task to your own
   subagents instead of working serially.
+- Never run a bare `foreman join` from a worker. Its scope is that worker's
+  siblings, not workers of its own — it would collect reports the boss is
+  waiting for.
 
 ## Peers
 
-```bash
-foreman ls
-foreman dm <handle> "<text>"
+```
+foreman_ls({})
+foreman_dm({ handle: "<handle>", text: "<text>" })
 ```
 
-`foreman ls` lists the other workers and the boss. `foreman dm` reaches
-one directly — any member, worker or boss, can message any other by
-handle — for coordinating over a shared seam you both touch, not for status
-updates.
+Fall back to `foreman ls` / `foreman dm <handle> "<text>"` on the CLI when
+the tools are not registered. `foreman_ls`/`foreman ls` lists the other
+workers and the boss. `foreman_dm`/`foreman dm` reaches one directly — any
+member, worker or boss, can message any other by handle — for coordinating
+over a shared seam you both touch, not for status updates.
 
 You may also be on the receiving end of `foreman send --raw` (a one-line steer
 from the boss that does not bump your dispatch counter or touch your

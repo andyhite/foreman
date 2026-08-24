@@ -4,7 +4,7 @@ description: Dispatch one piece of work to a foreman worker on its own branch
 
 Dispatch the work below to a foreman worker. Read `skill://foreman-dispatch` and
 follow the brief contract it prints, then `skill://foreman-boss` for the
-CLI mechanics underneath it if you have not already.
+boss mechanics underneath it if you have not already.
 
 Work to dispatch:
 

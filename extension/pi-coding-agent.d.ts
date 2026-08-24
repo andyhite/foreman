@@ -136,6 +136,16 @@ declare module "@oh-my-pi/pi-coding-agent" {
     cwd: string;
   }
 
+  // Payload for the `tool_call` pre-exec event (see `omp://extensions.md`
+  // "Tool lifecycle") — only the two fields the boss-side aside-arming
+  // handler below actually reads. The real payload carries more (revised
+  // input, tool-call id, etc.); declaring those would invite drift from a
+  // surface this file otherwise deliberately narrows to actual call sites.
+  interface ToolCallEvent {
+    toolName: string;
+    input: { command?: string; [key: string]: unknown };
+  }
+
   export interface ExtensionAPI {
     zod: ZodStatic;
     // Result is `unknown`, never a concrete shape: every call site in
@@ -144,6 +154,14 @@ declare module "@oh-my-pi/pi-coding-agent" {
     exec(command: string, args: string[], options: ExecOptions): Promise<unknown>;
     registerTool<Shape extends ZodRawShape>(config: ExtensionToolConfig<Shape>): void;
     registerCommand(name: string, config: ExtensionCommandConfig): void;
+    // `tool_call` is the only event this extension subscribes to; declaring a
+    // generic `on(event: string, ...)` here would let a typo'd event name
+    // type-check silently instead of failing the build. `ctx` reuses
+    // `ExtensionToolContext` (not a third shape) because
+    // `omp://extensions.md` documents every handler receiving the same
+    // `ExtensionContext`, and the extension only ever reads
+    // `setInterval`/`clearTimer`/`cwd` off it, identical to a tool's own ctx.
+    on(event: "tool_call", handler: (event: ToolCallEvent, ctx: ExtensionToolContext) => void): void;
     sendMessage(message: ExtensionCustomMessage, options: ExtensionSendMessageOptions): Promise<void>;
     sendUserMessage(text: string): Promise<void>;
   }

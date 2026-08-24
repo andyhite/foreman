@@ -1,6 +1,6 @@
 ---
 name: foreman-boss
-description: Operate the `foreman` CLI as the boss — claim a handle, spawn workers into worktrees, collect their reports, answer their questions, reap when done. Use when bossing parallel branch work or when the user says foreman, boss, or dispatch. Not for a foreman worker itself (read `skill://foreman-worker` instead), and not for local subagents that stay inside this process.
+description: Operate foreman as the boss — claim a handle, spawn workers into worktrees, collect their reports, answer their questions, reap when done. Use when bossing parallel branch work or when the user says foreman, boss, or dispatch. Not for a foreman worker itself (read `skill://foreman-worker` instead), and not for local subagents that stay inside this process.
 user-invocable: false
 ---
 
@@ -16,94 +16,130 @@ its output is a branch rather than a message.
 
 That independence is also the cost. Harness-local channels such as omp's `hub`,
 `history://`, and `agent://` do not reach a separate process. Every message in
-both directions goes through herdr's agent surface, which `foreman` wraps.
+both directions goes through herdr's agent surface, which the `foreman_*` tools
+and the `foreman` CLI both wrap.
 
-This skill is the CLI contract for the boss side. For *what to put in
-a worker's brief* — the boss's actual job — read
-`skill://foreman-dispatch`. For what a worker itself can do once dispatched,
-read `skill://foreman-worker` instead — you should not need it here; every
-dispatched task already carries its own protocol block.
+This skill is the boss-side contract. For *what to put in a worker's brief* —
+the boss's actual job — read `skill://foreman-dispatch`. For what a worker
+itself can do once dispatched, read `skill://foreman-worker` instead — you
+should not need it here; every dispatched task already carries its own
+protocol block.
 
-Every `foreman_*` custom tool (`foreman_boss`, `foreman_spawn`, `foreman_send`, …) is
-the CLI subcommand of the same name, one parameter for one flag. The CLI is
-the contract; the tools are the interface — call the tool when one is
-registered, and fall back to the shell form shown in this doc only where no
-tool is loaded (a shell without the extension installed). Both hit the
-identical command underneath.
+Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
+`foreman_send`, `foreman_ask`, `foreman_join`, `foreman_ls`, `foreman_read`,
+`foreman_reap`, `foreman_broadcast`, `foreman_dm`, `foreman_keys`,
+`foreman_doctor`, `foreman_roles`. Call the tool, not the shell command it
+wraps — the reason is not merely style.
+
+Delivery itself is protocol-level, not harness-level: a worker's
+`foreman_report`/`foreman_reply` — and the bare `foreman report`/`foreman reply`
+CLI they wrap — push straight into this pane over herdr's agent surface. That
+happens whether or not you have ever called a tool here, which is why reports
+arrive on their own; see *How a wave reports back* below.
+
+What a boss-side tool call arms is the extension's background sweeper, and that
+is a narrower thing: a slow `foreman join --once` tick that catches only what a
+push cannot — a worker that ended its turn without reporting, one whose agent
+died, and a push that found no live boss to receive it. It parks itself when
+there is nothing left to sweep and re-arms on the next boss-side tool call. A
+bash invocation of a boss-side `foreman` subcommand is intercepted and arms the
+same sweeper, so the shell form is not a dead end — this skill still shows it
+for the handful of operations that have no tool wrapper. Outside an omp session
+with this extension loaded — a bare terminal, another harness — nothing sweeps
+at all, and `foreman join` is the only way to pick up an anomaly.
+
+Three reasons beyond the sweeper to prefer the tool: `foreman_spawn`
+takes the whole brief as its `task` string and writes the temp file and
+passes `--task-file` itself, so no shell quoting can mangle a multi-line
+brief; `foreman_join` and `foreman_ask` stream each report as its worker
+settles rather than returning one blob at the end of the wave; and the
+wrappers return stderr as well as stdout, so a `note()` diagnostic —
+including the first-dispatch pickup warning — is not silently dropped the
+way it is from a bash call that only captures stdout.
 
 ## Requirements
 
 `foreman` comes from the companion herdr plugin, which symlinks it onto your PATH
-when herdr starts. If `foreman` is not found, the plugin is not installed:
+when herdr starts. If `foreman` is not found, the plugin is not installed. There
+is no tool for this — install it from the shell, one of the CLI-only operations
+covered below:
 
 ```bash
 herdr plugin install andyhite/foreman/herdr
 ```
 
-Every command must run inside a herdr pane (`HERDR_ENV=1`) and needs `jq`.
+Every worker process must run inside a herdr pane (`HERDR_ENV=1`).
 
 ## Before anything else
 
-```bash
-foreman boss
+```
+foreman_boss()
 ```
 
 Claims a handle for this pane, defaulting to the repo root's name — `webapp`
 in `~/Code/acme/webapp`. Workers address their questions to it, so nothing
-can be dispatched until it exists. On a pane that already has a handle, a bare
-`foreman boss` is a query rather than a claim: it prints the existing one and
-changes nothing.
+can be dispatched until it exists. On a pane that already has a handle, a
+bare `foreman_boss()` is a query rather than a claim: it prints the existing
+one and changes nothing.
 
 Nothing limits how many bosses exist; each just needs a handle no live
-agent is using. The repo-root default is only a default — it stops one checkout
-from monopolizing a shared name, and `foreman boss <name>` in the same checkout is
-a second, equally valid boss. Two unrelated checkouts with the same
-directory name derive the same default, and the second one has to name itself.
-Claiming a taken handle fails and names the pane holding it:
+agent is using. The repo-root default is only a default — it stops one
+checkout from monopolizing a shared name, and `foreman_boss(name: "lead2")`
+in the same checkout is a second, equally valid boss. Two unrelated
+checkouts with the same directory name derive the same default, and the
+second one has to name itself. Claiming a taken handle fails and names the
+pane holding it:
 
-```bash
-foreman boss lead2          # any [a-z][a-z0-9_-]{0,31} name
-foreman boss webapp --steal   # take it over; the holder is renamed aside, not unnamed
+```
+foreman_boss(name: "lead2")                    # any [a-z][a-z0-9_-]{0,31} name
+foreman_boss(name: "webapp", steal: true)      # take it over; the holder is renamed aside, not unnamed
 ```
 
 Claim the handle **before** spawning. Whichever handle this pane holds at spawn
-time is stamped into each worker, and that is where its `foreman reply` goes.
-Renaming a boss afterwards is safe — `foreman boss <newname>` repoints
-every worker that reported to the old handle, and `--steal` does the same for
+time is stamped into each worker, and that is where its `foreman_reply` goes.
+Renaming a boss afterwards is safe — `foreman_boss(name: "newname")` repoints
+every worker that reported to the old handle, and `steal: true` does the same for
 the foreman of whoever it displaces.
 
 ## Dispatching
 
-One worker per branch. `spawn` creates the worktree, starts an omp agent in
+One worker per branch. `foreman_spawn` creates the worktree, starts an omp agent in
 the workspace's own pane under a handle derived from the branch, builds the
 selected layout, and submits the task:
 
-```bash
-foreman spawn feat/412-webhook-retry --tier deep \
-  --task "Add exponential backoff to the webhook dispatcher. Tests in
+```
+foreman_spawn(
+  branch: "feat/412-webhook-retry",
+  tier: "deep",
+  task: "Add exponential backoff to the webhook dispatcher. Tests in
 tests/webhooks/. Do not change the public dispatch() signature."
+)
 ```
 
 Write the task the way you would write a local subagent assignment: target
 files, concrete change, acceptance criteria. The worker has no memory of this
-conversation — every requirement must be in the text. `--role <name>` is
-optional and accepted once: it looks up a named convention in `roles:` in
-foreman's config and prepends that role's mapped skill instruction. Use it
-where a role such as `review` should survive a skill rename without
-changing every dispatch. `--skill <name>` is repeatable; each occurrence
-prepends that skill's instruction. When both are present, the role-mapped
-skill comes first, then literal skills in the order passed. Leave both
-absent and the worker gets the task text alone. A role can also pin a
-model — `review: code-review @review` — so `--role review` alone applies
-that model without a separate `--tier`/`--model`; an explicit
-`--tier`/`--model` at the call site still wins.
+conversation — every requirement must be in the text. `role` is optional and
+accepted once: it looks up a named convention in `roles:` in foreman's config
+and prepends that role's mapped skill instruction. Use it where a role such
+as `review` should survive a skill rename without changing every dispatch.
+`skills` is a list; each entry prepends that skill's instruction. When both
+are present, the role-mapped skill comes first, then literal skills in the
+order given. Leave both absent and the worker gets the task text alone. A
+role can also pin a model — `review: code-review @review` — so
+`foreman_spawn(role: "review")` alone applies that model without a separate
+`tier`/`model`; an explicit `tier`/`model` at the call site still wins.
 
-`foreman roles` prints the current mapping, where its config was found, and
+`foreman_roles()` prints the current mapping, where its config was found, and
 each mapped skill's own frontmatter description as a "what is this role
 for" hint — read from the skill itself, not a second copy in the config. A
 missing role dies naming the config path it looked for. The config is
 project-local: `.foreman/config.yml` at the repo root (or `$FOREMAN_CONFIG`
-as an override). `foreman init` scaffolds it if it does not exist yet:
+as an override). `foreman init` scaffolds it if it does not exist yet — one
+of the four operations with no tool wrapper, run from the shell:
+
+```bash
+foreman init
+```
 
 ```yaml
 roles:
@@ -112,21 +148,21 @@ roles:
 ```
 
 Long tasks read better from a file, and a brief worth dispatching is almost
-always long:
+always long. With `foreman_spawn` you are spared the file dance entirely: pass
+the whole brief as `task` and the wrapper writes it to a temp file and passes
+`--task-file` itself. `--task-file` on the raw CLI is only the shape that
+fallback takes when no tool is loaded — there is no `task_file` parameter on
+the tool; `task` is always the full text.
 
-```bash
-foreman spawn fix/301-null-guard --tier deep --task-file /tmp/task-301.md
-```
+`tier: "standard" | "deep"` selects a worker model band; `model` is the escape
+hatch that passes an omp model selector straight through. The two are
+mutually exclusive. `$FOREMAN_AGENT_TIER` sets a default when neither is
+passed. `base` overrides the branch point (default: `origin/HEAD`).
+`no_dispatch: true` creates the worktree and starts its agent without
+assigning work.
 
-`--tier standard|deep` selects a worker model band; `--model <selector>` is
-the escape hatch that passes an omp model selector straight through. The two
-are mutually exclusive. `$FOREMAN_AGENT_TIER` sets a default when neither flag
-is passed. `--base` overrides the branch point (default: `origin/HEAD`).
-`--no-dispatch` creates the worktree and starts its agent without assigning
-work.
-
-`--layout agent` (the default) is the worker shape: one `agent` tab, one pane
-named for the selected harness. `--layout full` is for a worktree a human will
+`layout: "agent"` (the default) is the worker shape: one `agent` tab, one pane
+named for the selected harness. `layout: "full"` is for a worktree a human will
 also occupy:
 
 ```text
@@ -145,68 +181,80 @@ and `$FOREMAN_GIT_UI` override `nvim` and `lazygit`.
 
 Two modes, and picking the wrong one is the main way this goes badly.
 
-**Fan out, then join.** The real reason to use foreman. Spawn every worker first —
-each returns as soon as its task is submitted — then block once:
+**Fan out, then keep working.** The real reason to use foreman, and the
+default. Spawn every worker first — each returns as soon as its task is
+submitted — then get back to your own work instead of blocking:
 
-```bash
-foreman spawn feat/a --tier deep --task-file /tmp/a.md
-foreman spawn feat/b --tier deep --task-file /tmp/b.md
-foreman spawn feat/c --tier deep --task-file /tmp/c.md
-foreman join
+```
+foreman_spawn(branch: "feat/a", tier: "deep", task: "…")
+foreman_spawn(branch: "feat/b", tier: "deep", task: "…")
+foreman_spawn(branch: "feat/c", tier: "deep", task: "…")
 ```
 
-`join` watches every live worker at once and prints each report the moment that
-worker settles, so the one that finishes first is the one you read first. A
-worker whose agent is no longer live prints as `gone` and the rest of the wave
-still comes back — one dead pane does not discard the collection.
+Workers deliver themselves: `foreman_report` and `foreman_reply` push straight
+to your pane, tagged `[foreman:<handle>]`, in whatever order the wave settles.
+Receiving that costs you nothing — no `foreman_join`, no blocked tool call. So
+a later `foreman_join` printing `nothing to join` is not a malfunction; it
+means every worker's own push already landed. A slow background sweep covers
+only what a push cannot: a worker that ended its turn without reporting, one
+whose agent died, and a push that found no live boss.
 
-**One at a time.** `foreman ask <handle> "<task>"` dispatches and blocks for that
-one worker. Use it for a follow-up on an existing worker, or when the second
-task genuinely depends on the first one's result. Never use it to start a batch
-— it serializes the thing you came here to parallelize.
+**A deliberate blocking wait.** Sometimes waiting is still the right call: a
+genuine serial dependency (the next step needs one worker's result and
+there is nothing else to do until it lands), or you have simply run out of
+other work. `foreman_ask(handle, text)` dispatches and blocks for that one
+worker; a bare `foreman_join()` blocks for whatever in the wave is still
+outstanding — its own tool description says as much. Never reach for either
+to *start* a batch — that serializes the thing you came here to parallelize.
 
-Reports come from files, not the terminal. Interactive agent TUIs do not provide
-a reliable scrollback transport through herdr; `foreman read <handle>` shows the
-visible terminal and is a debugging aid, not a way to collect durable results.
+Reports reach you as the worker's own push, backed by a file — never from the
+terminal. Interactive agent TUIs do not provide a reliable scrollback transport
+through herdr; `foreman_read(handle)` shows the visible terminal and is a
+debugging aid, not a way to collect durable results.
 
-A report is overwritten only by its own worker, so a follow-up `foreman send`
-leaves the previous one intact. `join` dates it instead of trusting it: a report
-older than the most recent dispatch prints under `(nothing reported since the
-last dispatch)` rather than being mistaken for an answer to it.
+A report is overwritten only by its own worker, so a follow-up `foreman_send`
+leaves the previous one intact. `foreman_join` dates it instead of trusting it: a
+report older than the most recent dispatch prints under `(nothing reported since
+the last dispatch)` rather than being mistaken for an answer to it.
 
-**Re-joining terminates.** Nothing forces a worker to run `foreman report` — an
-omp that ends its turn is simply idle, and idle settles instantly. So `join`
-records each settle against the dispatch it answers, and a bare `foreman join`
-skips workers already collected. Re-run it freely; it returns
+**Re-joining terminates.** Nothing forces a worker to run `foreman_report` — an
+omp that ends its turn is simply idle, and idle settles instantly. So
+`foreman_join` records each settle against the dispatch it answers, and a bare
+`foreman_join()` skips workers already collected. Re-run it freely; it returns
 `nothing to join` once the wave is in, rather than spinning on a worker that
-quietly stopped. A `foreman send` makes that worker joinable again, which is
+quietly stopped. A `foreman_send` makes that worker joinable again, which is
 precisely when re-joining is meaningful. Naming a handle explicitly always
 joins it, collected or not.
 
 ## When a worker interrupts you
 
-A blocked worker runs `foreman reply "<question>"`. That does two things: it
-prompts your pane, so the question arrives as a user message tagged
-`[foreman:<handle>]`, and it files the question to disk.
+A blocked worker runs `foreman_reply` (or the CLI `foreman reply "<question>"`
+it wraps). That pushes the question straight to your pane, tagged
+`[foreman:<handle>]`, and files it to disk as the durable record.
 
-The file is the half that matters. A herdr prompt only reaches you *between*
-tool calls — a boss sitting inside `foreman join` does not read its
-input until that call returns, which by default is an hour away. So `join`
-polls for filed questions itself and returns the instant one appears, printing
-it. That is what actually lets a worker waiting on a decision jump the queue
-instead of sitting behind another worker's build.
+The push is the primary path — most of the time the question just arrives,
+the same way a report does. The file exists for the case a push cannot cover:
+a herdr prompt only reaches you *between* tool calls, so a boss sitting
+inside a blocking `foreman_join` or `foreman_ask` will not see it until that
+call returns, which by default is an hour away. A blocking join polls the
+filed question instead, and breaks out on any question that is still
+unanswered — delivered to you or not. That is what stops it from deadlocking
+behind a worker waiting on exactly the answer you are blocking instead of
+giving. The background sweep is the one reader that skips a delivered
+question: re-serving it every tick would be the duplicate you already have.
 
-Answer it and resume:
+Answer it and get back to your own work; the worker resumes and its report
+arrives the same way the question did:
 
-```bash
-foreman send --raw <handle> "Use the existing RetryPolicy in core/retry.ts; don't add a new one."
-foreman join
+```
+foreman_send(handle: "feat-412-webhook-retry", text: "Use the existing RetryPolicy in core/retry.ts; don't add a new one.", raw: true)
 ```
 
-**Use `--raw` for answers.** Without it `send` appends the whole protocol block,
-which is right for a task and wrong for a reply: re-stating "do not open a PR
-unless the task above says to" over a one-line answer makes *that answer* the
-task above, and the worker talks itself out of the PR its brief asked for.
+**Use `raw: true` for answers.** Without it `foreman_send` appends the whole
+protocol block, which is right for a task and wrong for a reply: re-stating
+"do not open a PR unless the task above says to" over a one-line answer makes
+*that answer* the task above, and the worker talks itself out of the PR its
+brief asked for.
 
 Raw text is steering, not a new tracked dispatch. It does not bump the dispatch
 counter or make the worker's eventual report for its original task look stale.
@@ -216,68 +264,72 @@ behind a working turn has no transition of its own until that turn yields.
 A *follow-up* tracked task is accepted only from `idle` or `done`. Foreman refuses
 one while the worker is `working` or `blocked`, because herdr exposes no turn
 id: queueing dispatch 2 behind dispatch 1 would let dispatch 1's eventual
-report label itself as dispatch 2. Use `--raw` to steer the current turn; use
-ordinary `foreman send` for follow-up work after that turn settles. A worker's
-first dispatch — the one `foreman spawn` makes — is exempt, since there is no
-earlier report to mislabel.
+report label itself as dispatch 2. Use `raw: true` to steer the current turn; use
+an ordinary tracked `foreman_send` for follow-up work after that turn settles. A
+worker's first dispatch — the one `foreman_spawn` makes — is exempt, since there
+is no earlier report to mislabel.
 
-If `join` reports a worker as `blocked`, that is herdr seeing an approval or
-question UI in the pane, not a `foreman reply`. Read the pane with `foreman read`
-and answer it with `foreman send --raw` — a keystroke into an approval prompt
-must not carry a protocol block behind it.
+If `foreman_join` reports a worker as `blocked`, that is herdr seeing an approval
+or question UI in the pane, not a `foreman_reply`. Read the pane with
+`foreman_read` and answer it with `foreman_send(raw: true)` — a keystroke into
+an approval prompt must not carry a protocol block behind it.
 
 ## Peer messaging
 
-Three more commands send raw, untracked text — like `foreman send --raw`, none
+Three more tools send raw, untracked text — like `foreman_send(raw: true)`, none
 of them bump a worker's dispatch counter or touch its report freshness. This
 is the boss-initiated side; a worker reaching a peer or you the same
 way is covered by `skill://foreman-worker`:
 
-```bash
-foreman broadcast "Contract changed: retries now live in core/retry.ts."
-foreman dm feat-412-webhook-retry "Are you touching core/retry.ts? I need it untouched for fix-418."
-foreman keys feat-412-webhook-retry down down enter
+```
+foreman_broadcast(text: "Contract changed: retries now live in core/retry.ts.")
+foreman_dm(handle: "feat-412-webhook-retry", text: "Are you touching core/retry.ts? I need it untouched for fix-418.")
+foreman_keys(handle: "feat-412-webhook-retry", keys: ["down", "down", "enter"])
 ```
 
-`broadcast` reaches every live worker in this repo in one call — a wave-wide
-notice cheaper than repeating `foreman send --raw` per handle. `dm` is peer to
-peer: any member — boss or worker — can message any other by handle,
-for coordinating over a shared seam rather than for status updates. `keys`
-passes terminal keys straight through to `herdr agent send-keys`, for
-unblocking a worker parked on an approval or question UI that a line of text
-can't dismiss — read the pane with `foreman read <handle>` first to see what it
-is waiting on.
+`foreman_broadcast` reaches every live worker in this repo in one call — a
+wave-wide notice cheaper than repeating `foreman_send(raw: true)` per handle.
+`foreman_dm` is peer to peer: any member — boss or worker — can message any
+other by handle, for coordinating over a shared seam rather than for status
+updates. `foreman_keys` passes terminal keys straight through to `herdr agent
+send-keys`, for unblocking a worker parked on an approval or question UI that
+a line of text can't dismiss — read the pane with `foreman_read` first to see
+what it is waiting on.
 
 ## Finishing
 
 Workers commit to their own branch and stop. They do not push and do not open
 PRs unless the task said to. Review the branches yourself, then:
 
-```bash
-foreman ls                     # handles, states, branches, paths
-foreman reap <handle>          # remove one worktree
-foreman reap --all             # remove this repo's worktrees
-foreman reap <handle> --forget # drop the record, leave the worktree
+```
+foreman_ls()                                     # handles, states, branches, paths
+foreman_reap(handles: ["<handle>"])              # remove one worktree
+foreman_reap(all: true)                          # remove this repo's worktrees
+foreman_reap(handles: ["<handle>"], forget: true) # drop the record, leave the worktree
 ```
 
-`reap` refuses a worktree with uncommitted changes. That refusal is the point —
-read the diff before reaching for `--force`. It removes the worktree, never the
-branch; the commits are the deliverable.
+`foreman_reap` refuses a worktree with uncommitted changes unless `force: true`
+is set — that refusal is the point; read the diff before reaching for it. It
+also throws unless `all: true` or a non-empty `handles` is given: there is no
+bare "reap whatever" call. It removes the worktree, never the branch; the
+commits are the deliverable.
 
-`--forget` is the other direction: a worktree you already removed by hand
-leaves a record `reap` can never satisfy, and the worker would otherwise sit in
-`foreman ls` as `gone` forever.
+`forget: true` is the other direction: a worktree you already removed by hand
+leaves a record `foreman_reap` can never satisfy, and the worker would otherwise
+sit in `foreman_ls` as `gone` forever.
 
-A record whose agent has died still owns its handle. `foreman spawn` refuses to
+A record whose agent has died still owns its handle. `foreman_spawn` refuses to
 reuse one rather than silently repointing it at a new worktree and stranding
 the old one — branches collide on handles easily, since `feat/x`, `feat_x` and
-`feat-x` all reduce to `feat-x`. Pass `--replace` to clear the old worktree and
+`feat-x` all reduce to `feat-x`. Pass `replace: true` to clear the old worktree and
 respawn in one step.
 
-Worker state is machine-global, so `ls`, a bare `join`, and `reap --all` are
-scoped to the current repo — otherwise they would block on, and delete, another
-checkout's foreman. `--all-repos` widens `ls` and `reap` deliberately. Outside a
-git repo there is nothing to scope to, and they refuse rather than guess.
+Worker state is machine-global, so `foreman_ls`, a bare `foreman_join`, and
+`foreman_reap(all: true)` are scoped to the current repo — otherwise they
+would block on, and delete, another checkout's foreman. `foreman_ls(all_repos:
+true)` widens deliberately, and the same scoping applies to `foreman_reap`.
+Outside a git repo there is nothing to scope to, and they refuse rather than
+guess.
 
 ## Worker states
 
@@ -286,24 +338,31 @@ The boss sees each worker in one of four states:
 **`working`** — A turn is running. The worker's current output is in the pane.
 
 **`idle` or `done`** — A turn ended. A report may have been filed
-(`foreman report`), or the turn may have simply completed without one. Either
-way, the worker is joinable: `foreman join` will settle it.
+(`foreman_report`), or the turn may have simply completed without one. Either
+way, the worker is joinable: `foreman_join` will settle it.
 
 **`blocked`** — An approval or question UI in the pane is waiting for input.
-`foreman join` prints its last output and notes the blockage. Re-join the worker
-by name — `foreman join <handle>` — after unblocking it with `foreman send --raw`;
-a bare join will not resurface it.
+`foreman_join` prints its last output and notes the blockage. Re-join the worker
+by name — `foreman_join(handles: ["<handle>"])` — after unblocking it with
+`foreman_send(raw: true)`; a bare join will not resurface it.
 
 **`gone`** — The agent process died. The report file, if it exists, survives
-and `join` prints it; the handle remains in `foreman ls` until `foreman reap`
-or `foreman reap --forget` releases it.
+and `foreman_join` prints it; the handle remains in `foreman_ls` until
+`foreman_reap` or `foreman_reap(forget: true)` releases it.
 
-`foreman join --timeout <seconds>` and `foreman ask --timeout <seconds>` override
-`FOREMAN_WAIT_TIMEOUT_MS` for one call. `foreman ask` rejects `--raw`: raw
-steering files no report to wait for. `foreman ls` has a Q column — `?` marks a
-worker whose question has not been collected, `-` everyone else. `foreman doctor`
-checks environment sanity and exits nonzero on a hard failure; `foreman version`
-prints the CLI version.
+`foreman_join(timeout_s)` and `foreman_ask(timeout_s)` override
+`FOREMAN_WAIT_TIMEOUT_MS` for one call. `foreman_ask` has no `raw` parameter:
+raw steering files no report to wait for. `foreman_ls` has a Q column — `?`
+marks a worker whose question has not been collected, `-` everyone else.
+`foreman_doctor()` checks environment sanity and reports a hard failure;
+`foreman version` prints the CLI version — the last of the four CLI-only
+operations (alongside `herdr plugin install`, `foreman init`, and `foreman
+dashboard`), run from the shell since there is nothing to wrap:
+
+```bash
+foreman version
+foreman dashboard
+```
 
 ## What this is not for
 
@@ -311,4 +370,4 @@ prints the CLI version.
   local subagents; they are faster, cheaper, and have a direct message channel.
 - Read-only investigation that a local research subagent can do.
 - Work with a strict serial dependency chain. A foreman's value is concurrency; a
-  chain of one-at-a-time `foreman ask` calls is a slow, expensive local-agent loop.
+  chain of one-at-a-time `foreman_ask` calls is a slow, expensive local-agent loop.

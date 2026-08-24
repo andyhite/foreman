@@ -270,6 +270,7 @@ mkdir -p "$cfg_repo"
 ( cd "$cfg_repo" && git init -q . )
 
 ( cd "$cfg_repo" && unset FOREMAN_CONFIG
+  # shellcheck source=../bin/foreman
   source "$FOREMAN_BIN" 2>/dev/null
   assert_not 'foreman_config fails with no .foreman dir and no override' foreman_config
 )
@@ -277,6 +278,7 @@ mkdir -p "$cfg_repo"
 mkdir -p "$cfg_repo/.foreman"
 printf 'roles:\n  review: code-review\n' >"$cfg_repo/.foreman/config.yml"
 ( cd "$cfg_repo" && unset FOREMAN_CONFIG
+  # shellcheck source=../bin/foreman
   source "$FOREMAN_BIN" 2>/dev/null
   is 'foreman_config resolves .foreman/config.yml at the repo toplevel' \
     "$(foreman_config)" "$(git rev-parse --show-toplevel)/.foreman/config.yml"
@@ -286,6 +288,7 @@ override_cfg="$sandbox/override.yml"
 printf 'roles:\n  implement: house-implement\n' >"$override_cfg"
 ( cd "$cfg_repo" && FOREMAN_CONFIG=$override_cfg
   export FOREMAN_CONFIG
+  # shellcheck source=../bin/foreman
   source "$FOREMAN_BIN" 2>/dev/null
   is '$FOREMAN_CONFIG overrides the repo-local file' "$(foreman_config)" "$override_cfg"
 )
@@ -596,6 +599,25 @@ if [ -n "$plugin_dir" ]; then
     fi
   done
   is 'orchestrate does not appear in the plugin prose' "${offenders# }" ''
+
+  # Every foreman_* tool the extension registers must be named somewhere in
+  # skills/*/SKILL.md, or nobody using this plugin is ever told the tool
+  # exists. The bug this catches shipped for real: `foreman_join` existed as
+  # a registered tool, but skills/foreman-boss/SKILL.md wrote every worked
+  # example in raw CLI form, so a bossing agent never discovered the tool and
+  # shelled out instead — which arms none of the extension's aside-delivery
+  # poller (see ensureJoinPoller in extension/index.ts). Expected to fail
+  # until the sibling doc task adds the missing tool references; must not be
+  # weakened to pass around that gap.
+  tool_names=$(sed -n -E 's/^[[:space:]]*name: "(foreman_[a-zA-Z_]+)",?$/\1/p' \
+    "$plugin_dir/extension/index.ts")
+  offenders=""
+  for t in $tool_names; do
+    if [ -z "$(sed -n -E "/$t/p" "$plugin_dir"/skills/*/SKILL.md 2>/dev/null)" ]; then
+      offenders="$offenders $t"
+    fi
+  done
+  is 'every registered foreman_* tool is named in some SKILL.md' "${offenders# }" ''
 else
   printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
 fi
@@ -771,15 +793,15 @@ raw_after=$(
 )
 is 'a raw answer does not bump the dispatch counter' "$raw_after" "$raw_before"
 
-assert_not 'no question filed yet' question_pending asker
+assert_not 'no question filed yet' question_undelivered asker
 printf 'which retry policy?\n' >"$(question_file asker)"
 counter_bump "$(question_seq_file asker)"
-assert 'foreman reply files a pending question' question_pending asker
+assert 'foreman reply files an undelivered question' question_undelivered asker
 joinable=$(joinable_workers | tr -d '[:space:]')
 assert 'a question makes an already-collected worker joinable again' \
   [ "${joinable#*asker}" != "$joinable" ]
 print_question asker >/dev/null
-assert_not 'and showing it clears the pending flag' question_pending asker
+assert_not 'and showing it clears the undelivered flag' question_undelivered asker
 unset -f agent_exists
 
 # ── workspace-manager coexistence ────────────────────────────────────────────
@@ -862,6 +884,73 @@ rc=$?
 assert     'join fails for invalid handle' [ "$rc" != 0 ]
 assert     'output contains invalid handle' [ "${out#*invalid handle}" != "$out" ]
 unset -f require_herdr
+
+# ── join refuses bare/--once from a worker pane ──────────────────────────────
+#
+# repo_key() scopes joinable_workers() by repo, not by boss: a worker pane
+# calling bare `foreman join` lands in the same scope its siblings live in,
+# and would silently collect their reports instead of its own. `--once` gets
+# no exemption — it is what the omp extension's poller runs unattended, and a
+# poller armed inside a worker session must fail loudly, not quietly steal.
+
+printf '\njoin refuses bare/--once from a worker pane\n'
+export FOREMAN_STATE="$sandbox/state-join-worker-guard"
+mkdir -p "$(meta_dir w1)" "$(meta_dir sibling)"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
+meta_set sibling "BOSS=me" "BRANCH=b" "DIR=/tmp/sibling" "REPO_KEY=k"
+counter_bump "$(dispatch_file sibling)"
+printf 'settled ok' >"$(report_file sibling)"
+cp "$(dispatch_file sibling)" "$(report_token_file sibling)"
+require_herdr() { :; }
+self_handle() { printf 'w1'; }
+
+out=$( (cmd_join) 2>&1 )
+rc=$?
+assert 'bare join from a worker pane dies' [ "$rc" != 0 ]
+assert 'and names the pane'"'"'s own handle' \
+  [ -n "$(printf '%s' "$out" | grep -F "w1' is a registered foreman worker")" ]
+assert 'and points at naming handles explicitly' \
+  [ "${out#*foreman join <handle...>}" != "$out" ]
+
+out=$( (cmd_join --once) 2>&1 )
+rc=$?
+assert '--once from a worker pane dies too, no exemption' [ "$rc" != 0 ]
+assert 'and gives the same worker-guard message' \
+  [ "${out#*is a registered foreman worker}" != "$out" ]
+
+scoped_key() { printf 'k'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"sibling","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$( (cmd_join sibling) 2>&1 )
+rc=$?
+is 'a named foreman join <handle> from a worker pane still works' "$rc" '0'
+assert 'and reports the named handle' [ "${out#*sibling (idle)}" != "$out" ]
+unset -f self_handle scoped_key herdr
+
+export FOREMAN_STATE="$sandbox/state-join-worker-guard-boss"
+mkdir -p "$(meta_dir solo)"
+meta_set solo "BOSS=boss" "BRANCH=b" "DIR=/tmp/solo" "REPO_KEY=k2"
+counter_bump "$(dispatch_file solo)"
+printf 'settled ok' >"$(report_file solo)"
+cp "$(dispatch_file solo)" "$(report_token_file solo)"
+self_handle() { printf ''; }
+scoped_key() { printf 'k2'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"solo","agent_status":"idle"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$( (cmd_join --once) 2>&1 )
+rc=$?
+is 'a bare join from a non-worker (boss) pane is unaffected' "$rc" '0'
+assert 'and still collects the joinable worker' [ "${out#*solo (idle)}" != "$out" ]
+unset -f self_handle require_herdr scoped_key herdr
+
 
 # ── tracked send refuses unregistered agents ────────────────────────────────────
 
@@ -960,6 +1049,10 @@ printf 'settled ok' >"$(report_file w1)"
 cp "$(dispatch_file w1)" "$(report_token_file w1)"
 require_herdr() { :; }
 scoped_key() { printf 'k'; }
+# cmd_join's bare-form worker-guard calls self_handle(); stub it so these
+# boss-side tests read as "not a worker" instead of leaking the real
+# self_handle's "HERDR_PANE_ID is unset" die text into captured stdout.
+self_handle() { printf ''; }
 herdr() {
   case "$*" in
     "agent list") printf '{"result":{"agents":[{"name":"w1","agent_status":"idle"}]}}' ;;
@@ -974,6 +1067,14 @@ assert 'join --once prints the settled worker' [ "${out#*w1 (idle)}" != "$out" ]
 is     'join --once marks the worker joined' \
   "$(counter_read "$(joined_token_file w1)")" "$(counter_read "$(dispatch_file w1)")"
 unset -f herdr
+
+# Once that settle leaves the worker fully collected, another sweep on the
+# same state must report nothing left rather than repeating the settled
+# result — the exit code, not the worker set, is what tells a poller to park.
+out_swept=$(cmd_join --once 2>&1)
+rc_swept=$?
+is 'join --once exits 3 once nothing is left to sweep' "$rc_swept" '3'
+is 'and prints nothing' "$out_swept" ''
 
 # A still-working worker must return after exactly one tick, not fall through
 # to the normal deadline/`sleep_ms` loop — `sleep_ms` here would hang the
@@ -997,14 +1098,16 @@ is     'join --once leaves a still-working worker unjoined' \
   "$(counter_read "$(joined_token_file w2)")" ''
 unset -f herdr sleep_ms
 
-# A poller ticks every few seconds; with nothing joinable it must stay silent
-# rather than repeat "nothing to join" on every tick.
+# A poller ticks every few seconds; with nothing registered at all it must
+# park on exit 3 rather than repeat "nothing to join" on every tick — exit 3
+# is the signal an empty repo and a fully-collected one share, distinct from
+# 0 (settled something) and 1 (deadline expired).
 export FOREMAN_STATE="$sandbox/state-join-once-empty"
 out3=$( (cmd_join --once) 2>&1 )
 rc3=$?
-is 'join --once with nothing joinable exits 0' "$rc3" '0'
-is 'join --once with nothing joinable prints nothing' "$out3" ''
-unset -f require_herdr scoped_key
+is 'join --once with nothing registered exits 3' "$rc3" '3'
+is 'join --once with nothing registered prints nothing' "$out3" ''
+unset -f require_herdr scoped_key self_handle
 
 # ── join settle-confirm race ─────────────────────────────────────────────────
 #
@@ -1023,6 +1126,7 @@ meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/w1" "REPO_KEY=k"
 counter_bump "$(dispatch_file w1)"
 require_herdr() { :; }
 scoped_key() { printf 'k'; }
+self_handle() { printf ''; }
 herdr() {
   case "$*" in
     "agent list") printf '{"result":{"agents":[{"name":"w1","agent_status":"idle"}]}}' ;;
@@ -1072,7 +1176,7 @@ assert 'settle race: no-report worker eventually reports no report written' \
   [ "${out4#*no report written}" != "$out4" ]
 is     'settle race: no-report worker second identical tick marks joined' \
   "$(counter_read "$(joined_token_file w2)")" "$(counter_read "$(dispatch_file w2)")"
-unset -f herdr require_herdr scoped_key
+unset -f herdr require_herdr scoped_key self_handle
 
 # ── reply appends an uncollected question ────────────────────────────────────────
 
@@ -1081,7 +1185,6 @@ export FOREMAN_STATE="$sandbox/state-reply-append"
 mkdir -p "$FOREMAN_STATE/w1"
 meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
 self_handle() { printf 'w1'; }
-boss_handle() { printf 'me'; }
 agent_exists() { return 1; }
 require_herdr() { :; }
 
@@ -1094,12 +1197,313 @@ assert     'question.md contains first question' [ -n "$(grep -F 'first question
 assert     'question.md contains second question' [ -n "$(grep -F 'second question' "$qf")" ]
 assert     'question.md contains separator' [ -n "$(grep -F -- '---' "$qf")" ]
 is         'question.seq reads 2' "$(counter_read "$FOREMAN_STATE/w1/question.seq")" '2'
-unset -f self_handle boss_handle agent_exists require_herdr
+# Only the stubs above, and never a function foreman itself defines: this file
+# sources the CLI exactly once, so `unset -f boss_handle` would delete the real
+# implementation for every later section too. That is what made the report-push
+# tests below fail with `boss_handle: command not found` — the stub they never
+# asked for was unset out from under them. `boss_handle` needs no stub anyway;
+# it resolves through the BOSS line meta_set already wrote.
+unset -f self_handle agent_exists require_herdr
+
+# ── report push delivery ─────────────────────────────────────────────────────
+#
+# `foreman report` used to just write report.md and leave the boss to notice
+# on its next `foreman join`. Now it pushes the report into the boss's own
+# pane and stamps `joined` itself, so a bare `foreman join` never hands the
+# boss the same report twice — the bug that made every report arrive twice,
+# seconds apart, once a poller started sweeping on a timer.
+
+printf '\nreport push delivery\n'
+export FOREMAN_STATE="$sandbox/state-report-push"
+h1=worker1
+mkdir -p "$(meta_dir "$h1")"
+meta_set "$h1" "BOSS=boss1" "BRANCH=feat/x" "DIR=/tmp/w1" "REPO_KEY=k1"
+counter_bump "$(dispatch_file "$h1")"
+require_herdr() { :; }
+self_handle() { printf '%s' "$h1"; }
+agent_exists() { [ "$1" = boss1 ]; }
+push_target="$sandbox/push-target-report"; push_text="$sandbox/push-text-report"
+herdr() {
+  case "$1 $2" in
+    "agent prompt") printf '%s' "$3" >"$push_target"; printf '%s' "$4" >"$push_text" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+out=$(printf 'the findings' | cmd_report 2>&1)
+is     'report push reaches the boss pane' "$(cat "$push_target")" 'boss1'
+assert 'report push tags the worker and its kind' \
+  [ -n "$(grep -F "[foreman:$h1] report" "$push_text")" ]
+assert 'report push names the branch' [ -n "$(grep -F 'branch feat/x' "$push_text")" ]
+assert 'report push carries the report body' [ -n "$(grep -F 'the findings' "$push_text")" ]
+is     'a successful push stamps joined equal to dispatched' \
+  "$(counter_read "$(joined_token_file "$h1")")" "$(counter_read "$(dispatch_file "$h1")")"
+unset -f herdr
+
+# The duplicate-delivery bug itself: once the push has landed, a bare sweep
+# must not hand the boss the same report again — but a named join still
+# re-prints on demand, which is what lets a boss deliberately re-read it.
+self_handle() { printf ''; }
+scoped_key() { printf 'k1'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h1" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out_bare=$(cmd_join --once 2>&1); rc_bare=$?
+is         'a bare sweep after a delivered report exits 3' "$rc_bare" '3'
+is         'and does not re-deliver it' "$out_bare" ''
+out_named=$(cmd_join --once "$h1" 2>&1)
+assert     'an explicit join still re-prints it on demand' \
+  [ "${out_named#*the findings}" != "$out_named" ]
+unset -f herdr
+
+# The fallback: a boss that is not live must not lose the report. `joined` is
+# deliberately left unstamped so the sweeper — not just an unreachable push —
+# is what eventually gets it to the boss.
+export FOREMAN_STATE="$sandbox/state-report-nopush"
+h2=worker2
+mkdir -p "$(meta_dir "$h2")"
+meta_set "$h2" "BOSS=deadboss" "BRANCH=feat/y" "DIR=/tmp/w2" "REPO_KEY=k2"
+counter_bump "$(dispatch_file "$h2")"
+self_handle() { printf '%s' "$h2"; }
+agent_exists() { return 1; }
+out=$(printf 'stranded findings' | cmd_report 2>&1)
+assert 'stdout says the report was filed, not delivered' [ "${out#*filed for}" != "$out" ]
+assert 'and stderr warns the boss is unreachable' [ "${out#*not reachable}" != "$out" ]
+is     'joined is left unstamped so the sweeper still collects it' \
+  "$(counter_read "$(joined_token_file "$h2")")" ''
+self_handle() { printf ''; }
+scoped_key() { printf 'k2'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h2" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out2=$(cmd_join --once 2>&1)
+assert 'a following bare sweep does deliver the filed report' \
+  [ "${out2#*stranded findings}" != "$out2" ]
+unset -f herdr self_handle agent_exists require_herdr scoped_key
+
+# ── reply push delivery ──────────────────────────────────────────────────────
+#
+# Same duplicate-delivery bug as report, for questions: `foreman reply` pushes
+# straight into the boss's pane and stamps question.seen on a successful
+# push, so a bare sweep does not ask the same question twice.
+
+printf '\nreply push delivery\n'
+export FOREMAN_STATE="$sandbox/state-reply-push"
+h3=asker1
+mkdir -p "$(meta_dir "$h3")"
+meta_set "$h3" "BOSS=boss3" "BRANCH=feat/z" "DIR=/tmp/w3" "REPO_KEY=k3"
+require_herdr() { :; }
+self_handle() { printf '%s' "$h3"; }
+agent_exists() { [ "$1" = boss3 ]; }
+push_target3="$sandbox/push-target3"; push_text3="$sandbox/push-text3"
+herdr() {
+  case "$1 $2" in
+    "agent prompt") printf '%s' "$3" >"$push_target3"; printf '%s' "$4" >"$push_text3" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+cmd_reply 'which branch should I use?' >/dev/null 2>&1
+is     'reply pushes to the boss pane' "$(cat "$push_target3")" 'boss3'
+assert 'reply push tags the question and its branch' \
+  [ -n "$(grep -F "[foreman:$h3] question" "$push_text3")" ]
+assert 'reply push carries the question text' \
+  [ -n "$(grep -F 'which branch should I use?' "$push_text3")" ]
+assert 'reply push tells the boss how to answer' \
+  [ -n "$(grep -F "foreman send --raw $h3" "$push_text3")" ]
+is 'question.seq is filed'   "$(counter_read "$(question_seq_file "$h3")")" '1'
+is 'a delivered push stamps question.seen to match question.seq' \
+  "$(counter_read "$(question_seen_file "$h3")")" \
+  "$(counter_read "$(question_seq_file "$h3")")"
+is 'question.answered is untouched — the boss has not responded yet' \
+  "$(counter_read "$(question_answered_file "$h3")")" ''
+unset -f herdr
+
+# The sweeper must not re-ask a question the boss already has.
+self_handle() { printf ''; }
+scoped_key() { printf 'k3'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h3" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$(cmd_join --once 2>&1)
+assert_not 'a bare sweep no longer re-delivers a pushed question' \
+  [ "${out#*which branch should I use?}" != "$out" ]
+unset -f herdr self_handle agent_exists require_herdr scoped_key
+
+# ── explicit join on an open question does not block ────────────────────────
+#
+# `foreman ask` blocks inside `foreman join` for up to an hour, and a pushed
+# prompt cannot reach a boss that is already stuck in that call — the
+# delivery already happened. Only the file can break the wait: an explicitly
+# named join on a delivered-but-unanswered question returns immediately,
+# without ever reaching the deadline loop, saying the question is already
+# delivered rather than reprinting it.
+
+printf '\nexplicit join on an open question does not block\n'
+export FOREMAN_STATE="$sandbox/state-join-open"
+h4=asker2
+mkdir -p "$(meta_dir "$h4")"
+meta_set "$h4" "BOSS=boss4" "BRANCH=b" "DIR=/tmp/w4" "REPO_KEY=k4"
+printf 'which retry policy?\n' >"$(question_file "$h4")"
+counter_bump "$(question_seq_file "$h4")"
+counter_ack "$(question_seq_file "$h4")" "$(question_seen_file "$h4")"
+require_herdr() { :; }
+scoped_key() { printf 'k4'; }
+sleep_ms() { bad 'explicit join on an open question must not fall into the deadline loop'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h4" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$(cmd_join "$h4" 2>&1)
+is         'an explicit join on a delivered-but-open question exits cleanly' "$?" '0'
+assert     'it reports the question as already delivered' \
+  [ "${out#*already delivered}" != "$out" ]
+assert_not 'and does not reprint the question body' \
+  [ "${out#*which retry policy?}" != "$out" ]
+unset -f herdr sleep_ms require_herdr scoped_key
+
+# ── an unanswered question is not a settle ───────────────────────────────────
+#
+# A worker parked on a question is idle with no fresh report — exactly what
+# settled_confirmed() reads as "finished, wrote nothing". Sweeping it that way
+# handed the boss "(no report written for the current dispatch)" for work that
+# had not stopped, and stamped `joined`, so the report the worker filed after
+# its answer never swept. A bare *blocking* join has the opposite duty on the
+# same state: waiting for a report that cannot come until the boss answers is
+# the deadlock, so it must break out instead.
+
+printf '\nan unanswered question is not a settle\n'
+export FOREMAN_STATE="$sandbox/state-open-not-settled"
+h6=asker4
+mkdir -p "$(meta_dir "$h6")"
+meta_set "$h6" "BOSS=boss6" "BRANCH=b" "DIR=/tmp/w6" "REPO_KEY=k6"
+counter_bump "$(dispatch_file "$h6")"
+printf 'which retry policy?\n' >"$(question_file "$h6")"
+counter_bump "$(question_seq_file "$h6")"
+counter_ack "$(question_seq_file "$h6")" "$(question_seen_file "$h6")"
+require_herdr() { :; }
+self_handle() { printf ''; }
+scoped_key() { printf 'k6'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h6" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+# Two ticks, not one: the first is all settled_confirmed() needs to arm itself
+# and the second is what makes it fire, so a single-tick test would pass with
+# the guard missing.
+out=$(cmd_join --once 2>&1)
+out2=$(cmd_join --once 2>&1)
+is     'a sweep tick prints nothing for a worker parked on a question' "$out$out2" ''
+is     'joined stays unstamped, so its real report can still sweep' \
+  "$(counter_read "$(joined_token_file "$h6")")" ''
+assert 'and the worker is still joinable after both ticks' \
+  [ -n "$(joinable_workers k6)" ]
+
+sleep_ms() { bad 'a bare blocking join must not wait on an unanswered question'; }
+out3=$(cmd_join 2>&1)
+assert 'a bare blocking join breaks out on the unanswered question' \
+  [ "${out3#*already delivered}" != "$out3" ]
+assert 'and says the worker is waiting on the boss' \
+  [ "${out3#*waiting on you}" != "$out3" ]
+unset -f herdr sleep_ms self_handle require_herdr scoped_key
+
+# ── send stamps question.answered ────────────────────────────────────────────
+#
+# `foreman send` — raw or tracked — is what unblocks a worker waiting on an
+# answer: it is the boss's response, whatever form it takes. Missing this
+# made question_open stay true forever even after the boss had clearly acted.
+
+printf '\nsend stamps question.answered\n'
+export FOREMAN_STATE="$sandbox/state-send-answers"
+h5=asker3
+mkdir -p "$(meta_dir "$h5")"
+meta_set "$h5" "BOSS=boss5" "BRANCH=b" "DIR=/tmp/w5"
+counter_bump "$(question_seq_file "$h5")"
+require_herdr() { :; }
+agent_exists() { return 0; }
+
+agent_field() { printf 'idle'; }
+herdr() { printf '{"result":{}}'; }
+cmd_send --raw "$h5" 'use the existing retry policy' >/dev/null 2>&1
+is 'a raw send stamps question.answered to match question.seq' \
+  "$(counter_read "$(question_answered_file "$h5")")" \
+  "$(counter_read "$(question_seq_file "$h5")")"
+assert_not 'question_open is now false' question_open "$h5"
+assert_not 'question_undelivered is false too' question_undelivered "$h5"
+
+# A second question filed after the answer, cleared by a tracked send instead
+# — re-tasking a worker is itself an answer, not just a raw steer.
+counter_bump "$(question_seq_file "$h5")"
+agent_field() { printf 'blocked'; }   # skips the settle-confirm loop, like the dispatch_to tests above
+herdr() { printf '{"id":"t","result":{}}'; }
+cmd_send "$h5" 'move on to the next task' >/dev/null 2>&1
+is 'a tracked send also stamps question.answered' \
+  "$(counter_read "$(question_answered_file "$h5")")" \
+  "$(counter_read "$(question_seq_file "$h5")")"
+unset -f herdr agent_field agent_exists require_herdr
+
+# ── question_undelivered / question_open truth table ────────────────────────
+#
+# Both are string comparisons of the same counters, on purpose: numeric
+# comparison would treat "never asked" (empty file) and a stale-but-equal
+# generation as the same thing, which is the exact bash 3.2 trap
+# `report_is_fresh` already exists to dodge for the dispatch counter.
+
+printf '\nquestion_undelivered / question_open truth table\n'
+export FOREMAN_STATE="$sandbox/state-question-truth-table"
+t=truthworker
+mkdir -p "$(meta_dir "$t")"
+
+assert_not 'never asked: not undelivered' question_undelivered "$t"
+assert_not 'never asked: not open'        question_open "$t"
+
+counter_bump "$(question_seq_file "$t")"
+assert 'filed, not yet seen: undelivered' question_undelivered "$t"
+assert 'filed, not yet answered: open'    question_open "$t"
+
+mark_question_seen "$t"
+assert_not 'delivered: no longer undelivered'      question_undelivered "$t"
+assert     'delivered but unanswered: still open'  question_open "$t"
+
+mark_question_answered "$t"
+assert_not 'answered: not undelivered' question_undelivered "$t"
+assert_not 'answered: not open'        question_open "$t"
+
+# A later question must read undelivered/open again — seq advances while
+# seen/answered still hold the previous question's stamp, so the comparison
+# must not treat "same digits, different generation" as settled.
+counter_bump "$(question_seq_file "$t")"
+assert 'a new question is undelivered again' question_undelivered "$t"
+assert 'and open again'                      question_open "$t"
 
 # ── foreman version ───────────────────────────────────────────────────────────────
+#
+# Derived with a different parser than foreman_version()'s awk, not hardcoded:
+# a literal here is a fourth place to remember on every release (the three
+# manifests CI already cross-checks are enough), and it fails on the bump
+# rather than on the bug. This still catches what the assertion is for — the
+# wrong file, the wrong key, or a version picked up from a `[section]` below
+# the top-level table.
 
 printf '\nforeman version\n'
-is 'version comes from the plugin manifest' "$(cmd_version)" 'foreman 0.5.0'
+manifest_version=$(sed -n '/^\[/q; s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' \
+  "$(dirname "$FOREMAN_BIN")/../herdr-plugin.toml")
+assert 'the manifest really carries a version to read' [ -n "$manifest_version" ]
+is 'version comes from the plugin manifest' "$(cmd_version)" "foreman $manifest_version"
 
 # ── ls shows a pending question ──────────────────────────────────────────────────
 

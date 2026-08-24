@@ -86,6 +86,17 @@ h() {
   printf '%s' "$out"
 }
 
+# Best-effort delivery to another pane, the deliberate opposite of `h`: a push
+# that cannot land must not fail the command that made it. Every caller has
+# already written the state file a `foreman join` collects from, so a boss that
+# is not live and a payload herdr rejects both degrade to that same fallback —
+# and callers stamp their acknowledgement counter only when this returns 0.
+notify_agent() {
+  local handle=$1 text=$2
+  agent_exists "$handle" || return 1
+  herdr agent prompt "$handle" "$text" >/dev/null 2>&1
+}
+
 # ── Timing ───────────────────────────────────────────────────────────────────
 #
 # Every bound in this file is wall-clock, computed as an absolute deadline up
@@ -329,13 +340,18 @@ report_file() { printf '%s/report.md' "$(meta_dir "$1")"; }
 dispatch_file() { printf '%s/dispatched' "$(meta_dir "$1")"; }
 # The dispatch counter the current report answers, stamped by `foreman report`.
 report_token_file() { printf '%s/report.token' "$(meta_dir "$1")"; }
-# The question a worker filed with `foreman reply`, and the counter pair that
-# says whether the boss has seen it. `foreman join` polls these: a queued
-# `agent prompt` does not reach a boss that is inside a blocking tool
-# call, so herdr's own interrupt cannot preempt a join. Watching a file can.
+# The question a worker filed with `foreman reply`, and the three counters that
+# track its life: filed (seq), delivered to the boss (seen), answered by the
+# boss (answered). One counter cannot serve both readers of it. A sweep must
+# not re-deliver a question the worker already pushed, while a *blocking* join
+# must still break out on one that is merely unanswered: a queued `agent
+# prompt` does not reach a boss that is inside a blocking tool call, so the
+# file is the only thing that can preempt a join — and "the boss has the text"
+# is not the same fact as "the worker is no longer waiting on it".
 question_file() { printf '%s/question.md' "$(meta_dir "$1")"; }
 question_seq_file() { printf '%s/question.seq' "$(meta_dir "$1")"; }
 question_seen_file() { printf '%s/question.seen' "$(meta_dir "$1")"; }
+question_answered_file() { printf '%s/question.answered' "$(meta_dir "$1")"; }
 # The dispatch counter `foreman join` last reported a settled result for. A bare
 # `join` skips a worker whose settle has already been collected, so re-joining
 # terminates instead of returning instantly, forever, on a worker that ended
@@ -353,6 +369,15 @@ counter_bump() {
   n=$(counter_read "$f")
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s' "$((n + 1))" >"$f"
+}
+
+# Record one counter as acknowledged by copying it onto another. A missing
+# source still leaves an empty file rather than no file: counter_read maps both
+# to "", so the acknowledgement of a worker that was never dispatched has to be
+# writable too, and `cp` of a nonexistent path is a fatal error under `set -e`.
+counter_ack() {
+  mkdir -p "$(dirname "$2")"
+  if [ -f "$1" ]; then cp "$1" "$2"; else : >"$2"; fi
 }
 
 meta_set() {
@@ -927,11 +952,11 @@ Your boss is the agent \`$boss\`.
 - Commit your work on this branch when it is done. Do not push and do not open
   a PR unless the task above says to.
 - When finished, write your report last: the \`foreman_report\` tool, or
-  \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell. The
-  boss reads that file; terminal output does not reach it.
+  \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell.
+  Filing it delivers it to the boss; terminal output does not reach it.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
-  \`foreman reply "<question>"\`. It files the question and interrupts the
-  boss, so a \`foreman join\` it is sitting in returns immediately. Use it
+  \`foreman reply "<question>"\`. It delivers the question to the boss and
+  files it, so the answer comes back even if the boss was mid-task. Use it
   for questions, not progress updates.
 - Peers: \`foreman ls\` lists the other workers; \`foreman dm <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
@@ -1579,6 +1604,11 @@ cmd_send() {
   else
     dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
   fi
+  # Anything the boss sends a worker settles whatever that worker was waiting
+  # on: a raw send is the answer itself, and a tracked task supersedes the
+  # question outright. Guarded on the meta file so a raw steer to some
+  # non-foreman agent cannot mint a phantom state directory.
+  if [ -f "$(meta_file "$handle")" ]; then mark_question_answered "$handle"; fi
 }
 
 cmd_ask() {
@@ -1705,28 +1735,54 @@ print_result() {
   fi
 }
 
-# A worker's `foreman reply` bumps question.seq; join records what it has shown
-# in question.seen. An unseen question means the worker is waiting on a person,
-# and nothing else in the wave matters until that is answered.
-question_pending() {
+# A worker's `foreman reply` bumps question.seq. Two acknowledgements are then
+# tracked separately because two readers need different facts: a sweep asks
+# "does the boss have this text yet" (seen), while a blocking join asks "is
+# this worker still stuck on me" (answered). Collapsing them into one counter
+# either re-asks, every tick, a question the worker already pushed, or lets a
+# `foreman ask` sit out its full hour waiting for a report that is never coming
+# because the worker is waiting on an answer.
+question_undelivered() {
   [ "$(counter_read "$(question_seq_file "$1")")" \
     != "$(counter_read "$(question_seen_file "$1")")" ]
 }
 
+question_open() {
+  [ "$(counter_read "$(question_seq_file "$1")")" \
+    != "$(counter_read "$(question_answered_file "$1")")" ]
+}
+
+mark_question_seen() {
+  counter_ack "$(question_seq_file "$1")" "$(question_seen_file "$1")"
+}
+
+# Answering marks the text delivered too: a boss cannot answer a question it
+# never received, and leaving `seen` behind would make the next join reprint a
+# question that is already settled.
+mark_question_answered() {
+  mark_question_seen "$1"
+  counter_ack "$(question_seq_file "$1")" "$(question_answered_file "$1")"
+}
+
 print_question() {
-  local handle=$1 qf sf; qf=$(question_file "$handle"); sf=$(question_seq_file "$handle")
+  local handle=$1 qf; qf=$(question_file "$handle")
   printf '\n=== %s — QUESTION — branch %s\n' "$handle" "$(meta_get "$handle" BRANCH)"
-  if [ -s "$qf" ]; then cat "$qf"; fi
-  printf '\nanswer it with: foreman send --raw %s "<answer>"\nthen re-run:    foreman join\n' "$handle"
-  if [ -f "$sf" ]; then cp "$sf" "$(question_seen_file "$handle")"
-  else : >"$(question_seen_file "$handle")"; fi
+  if question_undelivered "$handle"; then
+    if [ -s "$qf" ]; then cat "$qf"; fi
+  else
+    # `foreman reply` already pushed this body to the boss's pane. Printing it
+    # again is how a sweep every few seconds becomes the same question asked
+    # over and over.
+    printf '(already delivered — %s is still waiting on your answer)\n' "$handle"
+  fi
+  # No "then re-run: foreman join": the answer resumes the worker, and the
+  # report it files next arrives on its own.
+  printf '\nanswer it with: foreman send --raw %s "<answer>"\n' "$handle"
+  mark_question_seen "$handle"
 }
 
 mark_joined() {
-  mkdir -p "$(meta_dir "$1")"
-  local df; df=$(dispatch_file "$1")
-  if [ -f "$df" ]; then cp "$df" "$(joined_token_file "$1")"
-  else : >"$(joined_token_file "$1")"; fi
+  counter_ack "$(dispatch_file "$1")" "$(joined_token_file "$1")"
 }
 
 pending_confirm_file() { printf '%s/pending_confirm' "$(meta_dir "$1")"; }
@@ -1761,14 +1817,19 @@ settled_confirmed() {
   return 1
 }
 
-# Registered workers whose most recent dispatch has not been collected yet,
-# plus any worker holding an unanswered question. Deliberately `known`, not
-# `live`: a worker can die after dispatch and before join, and silently
-# filtering it out is the same lost-result bug as aborting on agent_not_found.
+# Registered workers holding something the boss has not been handed yet: an
+# undelivered question, or a dispatch whose result has not been collected.
+# Strictly *undelivered*, never merely unanswered — a worker waiting on an
+# answer stays waiting for as long as the boss takes, and keying this on that
+# would make every sweep tick re-serve the same question forever.
+#
+# Deliberately `known`, not `live`: a worker can die after dispatch and before
+# join, and silently filtering it out is the same lost-result bug as aborting
+# on agent_not_found.
 joinable_workers() {
   local handle
   for handle in $(known_workers "${1-}"); do
-    if question_pending "$handle"; then printf '%s\n' "$handle"; continue; fi
+    if question_undelivered "$handle"; then printf '%s\n' "$handle"; continue; fi
     if [ "$(counter_read "$(dispatch_file "$handle")")" \
        = "$(counter_read "$(joined_token_file "$handle")")" ]; then continue; fi
     printf '%s\n' "$handle"
@@ -1801,17 +1862,22 @@ snapshot_status() {
 #    re-joining means something.
 #
 # And it returns early on a filed question, which is what actually lets a
-# blocked worker preempt the wave.
+# blocked worker preempt the wave. For a named handle that early return covers
+# an already-delivered question too: the pushed copy reached the boss's pane,
+# but not a boss that is *inside* this call, so without it `foreman ask` would
+# sit out its entire timeout waiting for a report from a worker that is itself
+# waiting on the caller.
 #
 # `--once` runs exactly that inner tick — no deadline, no `sleep_ms` — and
 # returns whatever settled (possibly nothing). It exists so something outside
-# this process can poll cheaply on its own schedule: the omp foreman extension
-# runs it from a session-owned timer to deliver worker reports as a
-# non-interrupting aside instead of the boss blocking a tool call for
-# up to `WAIT_TIMEOUT_MS`. A blocked boss can't be reached by an
-# outside interrupt (see the note above `question_file`), but a timer ticking
-# inside the *same* process the boss's tool call would otherwise be
-# stuck in has no such wall to hit — there is no blocking call to preempt.
+# this process can sweep cheaply on its own schedule: the omp foreman extension
+# runs it from a session-owned timer. Since `foreman report` and `foreman reply`
+# push straight to the boss's pane, that sweep is no longer the delivery path —
+# it is the net under what a push cannot cover: a worker that ended its turn
+# without reporting, one that died, and a push that had no live boss to land
+# on. It exits 3 when there is nothing registered to sweep at all, so a poller
+# can park its timer instead of spawning a subprocess every few seconds for a
+# repo whose workers are all collected.
 cmd_join() {
   require_herdr
   # Built as a string, not an array: bash 3.2 (what ships on macOS) treats
@@ -1853,12 +1919,31 @@ cmd_join() {
   fi
 
   if [ -z "$handles" ]; then
+    # A worker's own scope is its siblings, not the workers it spawned:
+    # repo_key() (see :202) deliberately groups a worktree with the repo it
+    # came from, so joinable_workers() scoped by REPO_KEY here would collect
+    # whatever its siblings left un-joined — reports that belong to the real
+    # boss, not this pane. `--once` gets no exemption: it is what the omp
+    # extension's poller runs unattended, and a poller mistakenly armed
+    # inside a worker session would otherwise silently steal from its
+    # siblings on every tick until its own 5-consecutive-failure backoff (see
+    # extension/index.ts) shuts it down having collected nothing.
+    local me; me=$(self_handle)
+    if [ -n "$me" ] && [ -f "$(meta_file "$me")" ]; then
+      die "'$me' is a registered foreman worker; a bare 'foreman join' here
+  would collect its siblings' reports, not any it spawned itself —
+  repo_key() scopes by the repo, not by boss. Name the handles you
+  actually want: foreman join <handle...>"
+    fi
     scope=$(scoped_key "foreman join" "run it from inside a repo, or name the handles to join")
     handles=$(joinable_workers "$scope")
     if [ -z "${handles// /}" ]; then
-      # A poller calling `--once` every few seconds hits this constantly while
-      # a wave is quiet; noting it every tick would drown real output.
-      [ "$once" = 1 ] || note "foreman: nothing to join — every worker in this repo has been collected since its last dispatch (see: foreman ls)"
+      # A sweep hits this constantly while a wave is quiet; noting it every
+      # tick would drown real output. Exit 3 is distinct from both "collected
+      # something" and "failed", which is what lets a poller tell "nothing is
+      # registered here" from "nothing has settled yet" and stop ticking.
+      if [ "$once" = 1 ]; then return 3; fi
+      note "foreman: nothing to join — every worker in this repo has been collected since its last dispatch (see: foreman ls)"
       return 0
     fi
   fi
@@ -1872,7 +1957,15 @@ cmd_join() {
     agents=$(h agent list)
     remaining=""
     for handle in $pending; do
-      if question_pending "$handle"; then
+      # Two different readers of one question. A blocking join must return the
+      # moment a worker is waiting on the boss — whether or not the question
+      # already reached it — because continuing to wait for a report that
+      # cannot come is the deadlock `foreman ask` used to sit in for an hour.
+      # A sweep tick must only carry a question the boss has *not* seen, or it
+      # would re-serve the same one every tick for as long as it went
+      # unanswered.
+      if question_undelivered "$handle" \
+         || { [ "$once" = 0 ] && question_open "$handle"; }; then
         print_question "$handle"
         [ "$once" = 1 ] || note "foreman: '$handle' is waiting on you; join returned early"
         return 0
@@ -1886,7 +1979,14 @@ cmd_join() {
           mark_joined "$handle"
           ;;
         idle|done)
-          if report_is_fresh "$handle" || settled_confirmed "$handle"; then
+          # An unanswered question means the worker is parked on the boss, not
+          # finished. Settling it here would hand the boss "(no report
+          # written)" for work that has not stopped, and stamp `joined` so the
+          # real report never sweeps. A fresh report still wins: a worker may
+          # report anyway after asking, and if its own push failed this loop
+          # is the only thing left to carry it.
+          if report_is_fresh "$handle" \
+             || { ! question_open "$handle" && settled_confirmed "$handle"; }; then
             print_result "$handle" "$status"
             mark_joined "$handle"
           else
@@ -1937,9 +2037,24 @@ cmd_report() {
   fi
   # Stamp the report with the dispatch it answers, so the boss can tell
   # a fresh report from the one this worker filed before its last instruction.
-  local df tf; df=$(dispatch_file "$me"); tf=$(report_token_file "$me")
-  if [ -f "$df" ]; then cp "$df" "$tf"; else : >"$tf"; fi
-  printf 'reported %s bytes to %s\n' "$(wc -c <"$rf" | tr -d ' ')" "$me"
+  counter_ack "$(dispatch_file "$me")" "$(report_token_file "$me")"
+
+  local bytes boss; bytes=$(wc -c <"$rf" | tr -d ' '); boss=$(boss_handle)
+  # Delivery belongs to the protocol, not to whatever the boss's harness
+  # happens to poll. A report nobody is told about is one the boss finds only
+  # if it thinks to run `foreman join` — which is why collecting a wave used to
+  # mean blocking a tool call on it.
+  if notify_agent "$boss" "$(printf '[foreman:%s] report — branch %s\n\n%s' \
+      "$me" "$(meta_get "$me" BRANCH)" "$(cat "$rf")")"; then
+    # The boss has the text, so a bare `foreman join` must not hand it the same
+    # report a second time. A named `foreman join <handle>` still re-prints on
+    # demand: it bypasses the joinable filter by design.
+    mark_joined "$me"
+    printf 'reported %s bytes to %s\n' "$bytes" "$boss"
+  else
+    note "foreman: boss '$boss' is not reachable; the report is filed and will surface on its next 'foreman join'"
+    printf 'reported %s bytes (filed for %s)\n' "$bytes" "$boss"
+  fi
 }
 
 cmd_reply() {
@@ -1951,26 +2066,32 @@ cmd_reply() {
   local boss; boss=$(boss_handle)
   local text; text=$(read_message "reply <text...>" "$@")
 
-  # Filed first, delivered second. herdr's prompt only reaches a boss
-  # that is between tool calls; one sitting inside `foreman join` does not read
-  # its input until that call returns, which for a default join is an hour
-  # away. The file is what `foreman join` polls, and it is what makes a blocked
-  # worker actually preempt the wave.
-  # A second question filed before the first is collected must not destroy
-  # the first.
+  # Filed first, delivered second. The file is not a redundant copy of the
+  # push: herdr's prompt only reaches a boss that is between tool calls, and
+  # one sitting inside `foreman join` does not read its input until that call
+  # returns — an hour away by default — so the file is what lets a blocked
+  # worker preempt a wave the boss is already blocked on.
+  # A second question filed before the first is answered must not destroy the
+  # first, which is why this keys on unanswered rather than undelivered: the
+  # push stamps the first one delivered immediately.
   local qf; qf=$(question_file "$me")
-  if question_pending "$me" && [ -s "$qf" ]; then
+  if question_open "$me" && [ -s "$qf" ]; then
     printf -- '\n---\n%s\n' "$text" >>"$qf"
   else
     printf '%s\n' "$text" >"$qf"
   fi
   counter_bump "$(question_seq_file "$me")"
 
-  if agent_exists "$boss"; then
-    h agent prompt "$boss" "[foreman:$me] $text" >/dev/null
-    printf 'asked %s (question filed for its next foreman join)\n' "$boss"
+  # The answer command rides along with the question: this lands in the boss's
+  # pane, where nothing else is going to tell it how to reply.
+  if notify_agent "$boss" "$(printf '[foreman:%s] question — branch %s\n\n%s\n\nanswer it with: foreman send --raw %s "<answer>"' \
+      "$me" "$(meta_get "$me" BRANCH)" "$text" "$me")"; then
+    # Delivered, so a sweep must not ask it again on its next tick. Skipping
+    # this stamp is what made every question arrive twice, seconds apart.
+    mark_question_seen "$me"
+    printf 'asked %s\n' "$boss"
   else
-    # No longer fatal: the question is on disk, so a boss that comes
+    # Not fatal: the question is on disk, so a boss that comes
     # back — or a different one — still collects it.
     note "foreman: boss '$boss' is not live; the question is filed and will surface on the next 'foreman join'"
   fi
@@ -2025,9 +2146,10 @@ cmd_ls() {
   for handle in $(known_workers "$scope"); do
     status=$(agent_field "$handle" agent_status)
     [ -n "$status" ] || status=gone
-    # A filed question is invisible outside foreman join.
+    # Unanswered, not undelivered: the column answers "who is waiting on me",
+    # and a question the worker already pushed is still waiting.
     q=-
-    if question_pending "$handle"; then q='?'; fi
+    if question_open "$handle"; then q='?'; fi
     printf '%-20s %-9s %-2s %-28s %s\n' "$handle" "$status" "$q" \
       "$(meta_get "$handle" BRANCH)" "$(meta_get "$handle" DIR)"
   done
@@ -2171,9 +2293,9 @@ Boss
   foreman spawn <branch> [opts]    create a worktree, start an agent, dispatch
   foreman send [--raw] <h> <text>  dispatch work, return immediately
   foreman ask <h> <text>           dispatch and block until the report is in
-  foreman join [handle...]         collect this repo's workers, print reports
+  foreman join [handle...]         re-read workers, or wait on named ones
                                  [--timeout <seconds>] bounds either wait
-                                 [--once] single non-blocking poll tick
+                                 [--once] one sweep tick; exit 3 = nothing to sweep
   foreman ls [--all-repos]         list workers and their states
   foreman dashboard [--all-repos]  inspect and operate the foreman interactively
   foreman read <handle> [-n N]     read a worker's terminal directly
@@ -2183,8 +2305,8 @@ Boss
   foreman keys <handle> <key>...   send terminal keys (e.g. unblock an approval)
 
 Worker
-  foreman report [-f file|text]    write the report the boss collects
-  foreman reply <text>             file a question and interrupt the boss
+  foreman report [-f file|text]    deliver the report to the boss, and file it
+  foreman reply <text>             deliver a question to the boss, and file it
   foreman whoami                   print this pane's handle
 
 Both

@@ -105,8 +105,11 @@ Tests in tests/webhooks/. Do not change the public dispatch() signature.
 
 Every dispatch does the same three things: check that the requirements are
 precise enough to hand to a stranger, write a brief to a file, and dispatch
-a worker against it (the `foreman_spawn` tool, or `foreman spawn` on the CLI —
-they are the same operation). The spawn is always this shape:
+a worker with the `foreman_spawn` tool. It takes the whole brief as its
+`task` field and writes it to a temp file itself, so no shell quoting can
+mangle a multi-line brief — that is why it leads over the CLI form. Outside
+an omp session with the extension loaded, `foreman spawn` on the CLI is the
+fallback, and the spawn is always this shape:
 
 ```bash
 foreman spawn <branch> --tier <standard|deep> \

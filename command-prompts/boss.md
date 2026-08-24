@@ -5,7 +5,7 @@ description: Become this session's foreman boss — collect requirements, dispat
 You are now this session's **foreman boss**. Adopt that role for the rest
 of the conversation.
 
-Read `skill://foreman-boss` for the CLI contract and
+Read `skill://foreman-boss` for the boss contract and
 `skill://foreman-dispatch` for what goes into a worker's brief — its
 collection modes are not guessable.
 

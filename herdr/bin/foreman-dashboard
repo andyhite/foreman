@@ -46,7 +46,7 @@ FOREMAN_BIN="$DASH_DIR/foreman"
 }
 
 # Sourced, not executed: `foreman` guards its own entry point, so this brings in
-# meta_get, known_workers, report_is_fresh, question_pending and the rest
+# meta_get, known_workers, report_is_fresh, question_open and the rest
 # without running a command.
 # shellcheck source=./foreman
 . "$FOREMAN_BIN"
@@ -390,7 +390,7 @@ dash_row() {
   [ -n "$status" ] || status=gone
   branch=$(meta_get "$handle" BRANCH)
   dir=$(dash_tilde "$(meta_get "$handle" DIR)")
-  if question_pending "$handle"; then question=1; fi
+  if question_open "$handle"; then question=1; fi
   glyph=$(dash_glyph "$status" "$question")
   color=$(dash_status_color "$status")
   [ "$question" = 0 ] || color=$C_YELLOW
@@ -439,7 +439,7 @@ dash_detail_lines() {
     printf 'no workers here — n spawns one, A widens the scope to every repo\n'
     return 0
   fi
-  if question_pending "$handle"; then
+  if question_open "$handle"; then
     printf 'QUESTION from %s — a answers it\n' "$handle"
     f=$(question_file "$handle")
     if [ -s "$f" ]; then sed -n "1,${budget}p" "$f" | dash_sanitize; fi
@@ -719,13 +719,13 @@ dash_op_send() {
   fi
 }
 
-# Answering is a raw send plus the acknowledgement `foreman join` would have
-# written. Without the second half the question stays pending forever, and the
-# next join returns early on a question that has already been answered.
+# Answering is a raw send, and nothing more: `foreman send` stamps the
+# question answered itself. The dashboard used to write that acknowledgement
+# by hand, which meant two files knowing one rule.
 dash_op_answer() {
-  local handle=$1 text seq seen
+  local handle=$1 text
   [ -n "$handle" ] || return 0
-  if ! question_pending "$handle"; then
+  if ! question_open "$handle"; then
     DASH_MESSAGE="$handle is not waiting on an answer"
     return 0
   fi
@@ -734,8 +734,6 @@ dash_op_answer() {
     return 0
   fi
   dash_run "answer $handle" "$FOREMAN_BIN" send --raw "$handle" "$text" || return 0
-  seq=$(question_seq_file "$handle"); seen=$(question_seen_file "$handle")
-  if [ -f "$seq" ]; then cp "$seq" "$seen"; else : >"$seen"; fi
 }
 
 dash_op_spawn() {

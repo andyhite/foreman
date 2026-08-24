@@ -239,75 +239,156 @@ export default function foremanExtension(pi: ExtensionAPI) {
   }
 
   // ---------------------------------------------------------------------
-  // Background join poller — delivers worker settlement/questions as a
-  // non-interrupting aside instead of the boss blocking a tool call.
+  // Background join poller — anomaly sweeper, not the delivery path. A
+  // worker's own `foreman report`/`foreman reply` pushes straight to this
+  // pane and stamps its ack counter on success, so the happy path never
+  // touches this loop. It exists to catch what a direct push can't: a
+  // worker that ended its turn without reporting, a worker that died, or a
+  // push that failed because the boss wasn't live to receive it.
   // ---------------------------------------------------------------------
 
   let joinPollTimer: unknown = null;
   let joinPollFailures = 0;
-  const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 5000;
+  let joinPollInFlight = false;
+  const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 15000;
 
   /**
    * Starts (once per session) a `ctx.setInterval` tick that runs
-   * `foreman join --once` — a single, non-blocking poll pass, never the
-   * deadline/`sleep_ms` loop `foreman join` uses on its own. Any output (a
-   * settled worker's report, or a filed question) is delivered as a
-   * `followUp` custom message: queued behind whatever the boss is
-   * doing rather than interrupting it — the same non-interrupting-aside
-   * shape `hub`'s own IRC delivery uses for a running recipient — and it
-   * starts a turn on its own if the boss is idle. This is what lets
-   * the boss keep working after `foreman_spawn` instead of blocking a
-   * `foreman_join` tool call for up to an hour. Idempotent, so every
-   * boss-side tool can call it unconditionally.
+   * `foreman join --once` — a single, non-blocking sweep pass, never the
+   * deadline/`sleep_ms` loop `foreman join` uses on its own. Delivery is now
+   * the worker's job (a direct push to this pane on `report`/`reply`); this
+   * tick only picks up what a push missed — an unreported worker, a dead
+   * one, or a delivery that failed for a boss that wasn't live — and surfaces
+   * it as a `followUp` custom message: queued behind whatever the boss is
+   * doing rather than interrupting it, and it starts a turn on its own if
+   * the boss is idle. Idempotent, so every boss-side tool can call it
+   * unconditionally.
    */
   function ensureJoinPoller(ctx: ForemanToolCtx) {
     if (joinPollTimer) return;
     joinPollTimer = ctx.setInterval(async () => {
-      let result: ForemanExecResult;
+      // A hung herdr call under `pi.exec` has no timeout of its own; without
+      // this guard every subsequent tick would pile another child process on
+      // top of the one still stuck, instead of just skipping its turn.
+      if (joinPollInFlight) return;
+      joinPollInFlight = true;
       try {
-        result = (await pi.exec(foremanBin, ["join", "--once"], { cwd: ctx.cwd })) as ForemanExecResult;
-      } catch (err) {
-        // A transient herdr hiccup shouldn't kill the poller, but a missing
-        // binary never recovers on its own — stop instead of erroring on
-        // every tick for the rest of the session.
-        if (isMissingBinaryError(err) && joinPollTimer) {
-          ctx.clearTimer(joinPollTimer);
-          joinPollTimer = null;
+        let result: ForemanExecResult;
+        try {
+          result = (await pi.exec(foremanBin, ["join", "--once"], { cwd: ctx.cwd })) as ForemanExecResult;
+        } catch (err) {
+          // A transient herdr hiccup shouldn't kill the poller, but a missing
+          // binary never recovers on its own — stop instead of erroring on
+          // every tick for the rest of the session.
+          if (isMissingBinaryError(err) && joinPollTimer) {
+            ctx.clearTimer(joinPollTimer);
+            joinPollTimer = null;
+          }
+          return;
         }
-        return;
-      }
 
-      if (result.code !== 0) {
-        // Most commonly "not in a git repo" if the boss's cwd changed out
-        // from under it. Five in a row means polling itself is broken, not
-        // that nothing happened — stop rather than repeat the same die()
-        // text as a steer message forever.
-        joinPollFailures += 1;
-        if (joinPollFailures >= 5 && joinPollTimer) {
-          ctx.clearTimer(joinPollTimer);
-          joinPollTimer = null;
+        if (result.code === 3) {
+          // Nothing registered in this repo needs sweeping (no workers, or
+          // every worker already collected). Not a failure — park the timer
+          // so an idle repo doesn't spend a subprocess every tick forever;
+          // the next `foreman_spawn`/`foreman_send`/etc. calls
+          // `ensureJoinPoller` again and restarts it. Parking is safe now
+          // because a worker's push already delivered anything that
+          // mattered — nothing is lost while this loop is stopped.
+          if (joinPollTimer) {
+            ctx.clearTimer(joinPollTimer);
+            joinPollTimer = null;
+          }
+          return;
         }
-        return;
-      }
-      joinPollFailures = 0;
 
-      const text = result.stdout.trim();
-      if (!text) return;
-      await pi.sendMessage(
-        {
-          customType: "Foreman Update",
-          content: text,
-          display: true,
-          attribution: "user",
-        },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
+        if (result.code !== 0) {
+          // Most commonly "not in a git repo" if the boss's cwd changed out
+          // from under it. Five in a row means polling itself is broken, not
+          // that nothing happened — stop rather than repeat the same die()
+          // text as a steer message forever.
+          joinPollFailures += 1;
+          if (joinPollFailures >= 5 && joinPollTimer) {
+            ctx.clearTimer(joinPollTimer);
+            joinPollTimer = null;
+          }
+          return;
+        }
+        joinPollFailures = 0;
+
+        const text = result.stdout.trim();
+        if (!text) return;
+        await pi.sendMessage(
+          {
+            customType: "Foreman Update",
+            content: text,
+            display: true,
+            attribution: "user",
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
+      } finally {
+        joinPollInFlight = false;
+      }
     }, joinPollMs);
   }
 
   function cancelled() {
     return { content: [{ type: "text" as const, text: "Cancelled" }] };
   }
+
+  // A single anchored regex, not a substring/`.includes` check: it must
+  // reject `foreman_spawn` (the tool name itself appearing in a `grep`/echo
+  // in a worker's own bash command) and a different word merely ending in
+  // "foreman" (e.g. `xforeman spawn`), while still finding a real
+  // invocation after a leading path (`/usr/local/bin/foreman`), an env
+  // assignment (`FOREMAN_BIN=... foreman join`), or a preceding
+  // `&&`/`;`/`|`/newline in a multi-command bash string. Precision here is
+  // best-effort by design — a false positive only costs a poller tick that
+  // finds nothing and prints nothing (see `ensureJoinPoller` above), so
+  // erring toward matching realistic shapes is the right tradeoff, not a
+  // correctness requirement.
+  const FOREMAN_BOSS_SUBCOMMAND =
+    /(?:^|&&|[;&|\n])\s*(?:[A-Za-z_]\w*=\S+\s+)*(?:\S*\/)?foreman\s+(?:boss|spawn|send|ask|join|reap|broadcast|keys|read)\b/;
+
+  // Arms the sweeper for a boss that only ever shells out. Delivery itself no
+  // longer depends on this handler: a worker's `foreman report`/`foreman reply`
+  // pushes over herdr's agent surface from the CLI exactly as it does from the
+  // tool (`cmd_report` in `herdr/bin/foreman`), so the happy path lands either
+  // way. What still depends on it is everything a push cannot carry — a worker
+  // that ended its turn without reporting, one whose agent died, a push that
+  // found no live boss — since only `ensureJoinPoller` above surfaces those,
+  // and a boss that never calls a `foreman_*` tool never runs the `execute`
+  // bodies below that arm it. Those would wait until the boss thought to run
+  // `foreman join` by hand: the failure this handler exists to prevent.
+  // `ls` and `dm` are deliberately
+  // excluded even though they are boss-reachable subcommands: they are also
+  // documented worker operations (`skills/foreman-worker/SKILL.md`), and a
+  // poller armed from a worker's own session would run `join --once`
+  // scoped by `repo_key()` (`herdr/bin/foreman:195-202`, which groups a
+  // worktree with the repo it came from, not with who dispatched it) —
+  // i.e. it would poll that worker's siblings, not its own workers, and
+  // could steal their settle-count credit from the real boss's next join.
+  // A boss reaches `ls`/`dm` only after `boss`/`spawn` already armed the
+  // poller in this session, so leaving them out costs the boss nothing.
+  // `report`/`reply`/`roles`/`doctor`/`version`/`init`/`dashboard` are
+  // excluded for the same reason as `ls`/`dm` (worker-side or informational,
+  // never the sole boss action in a session) or because they have no
+  // tool-registered boss-side equivalent to imitate.
+  pi.on("tool_call", (event, ctx) => {
+    // `omp://extensions.md` documents `tool_call` errors as fail-closed —
+    // a throw here would block every subsequent bash call in the session,
+    // not just this best-effort detection, so nothing may escape.
+    try {
+      if (event.toolName !== "bash") return;
+      const command = event.input.command;
+      if (typeof command === "string" && FOREMAN_BOSS_SUBCOMMAND.test(command)) {
+        ensureJoinPoller(ctx);
+      }
+    } catch {
+      // Best-effort detection; never let it take the session down.
+    }
+  });
 
   // ---------------------------------------------------------------------
   // Boss-side tools
@@ -477,7 +558,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_join",
     label: "Foreman Join",
     description:
-      "Explicit blocking wait on the given worker handles (or every known worker in this repo if none given). Rarely needed: once foreman_spawn has run, worker reports and questions already arrive on their own as non-interrupting asides — use this only when there is truly nothing else to do and you want to sit until something lands.",
+      "Explicit blocking wait on the given worker handles (or every known worker in this repo if none given). Rarely needed: once foreman_spawn has run, worker reports and questions already arrive on their own by pushing straight to this pane — use this only for an explicit re-read of one worker or a deliberate blocking wait.",
     parameters: z.object({
       handles: z
         .array(z.string())
@@ -677,7 +758,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_report",
     label: "Foreman Report",
     description:
-      "File this worker's report to disk (worker-side). Overwritten only by this worker's own later report.",
+      "File this worker's report to disk (worker-side). Also pushes it straight to the boss's pane immediately; the file is the fallback the boss's sweeper picks up if that push can't reach it. Overwritten only by this worker's own later report.",
     parameters: z.object({
       text: z.string().optional().describe("Report text; mutually exclusive with file"),
       file: z.string().optional().describe("Path to a file containing the report; mutually exclusive with text"),
@@ -699,7 +780,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_reply",
     label: "Foreman Reply",
     description:
-      "File a question to the boss and interrupt its pane (worker-side). Use when blocked on a decision only the boss can make.",
+      "File a question to the boss and push it to the boss's pane (worker-side). Use when blocked on a decision only the boss can make.",
     parameters: z.object({
       text: z.string(),
     }),

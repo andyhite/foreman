@@ -295,10 +295,45 @@ is 'and the question itself follows' \
   "$(printf '%s\n' "$(dash_detail_lines "$d" 5)" | sed -n '2p')" \
   'which branch should I use?'
 
-# What `a` does after the send: without this half the question stays pending
-# forever, and the next `foreman join` returns early on an answered question.
+# What `a` does after the send: without this the '?' glyph and detail pane
+# would never clear even once the boss has answered, and the next
+# `foreman join` would keep returning early on a question already settled.
 cp "$(question_seq_file "$d")" "$(question_seen_file "$d")"
-assert_not 'acknowledging clears the pending question' question_pending "$d"
+cp "$(question_seq_file "$d")" "$(question_answered_file "$d")"
+assert_not 'answering clears the open question' question_open "$d"
+
+# ── question glyph tracks the answer, not delivery ──────────────────────────
+#
+# The '?' used to clear the instant a question was merely printed anywhere —
+# by dash_op_answer's own read, or by a join sweep. That collapsed "the boss
+# has seen it" into "the boss has acted on it", so a delivered-but-unanswered
+# question silently stopped flagging who the boss still owes an answer to.
+
+printf '\nquestion glyph tracks the answer, not delivery\n'
+g=glyphworker
+mkdir -p "$(meta_dir "$g")"
+meta_set "$g" BRANCH=feat/glyph DIR=/tmp/glyph
+DASH_STATUSES=$(printf '%s\tidle\n' "$g")
+DASH_COLS=120; dash_columns
+
+printf 'which retry policy?\n' >"$(question_file "$g")"
+counter_bump "$(question_seq_file "$g")"
+row=$(dash_row "$g" 0)
+assert 'a freshly filed question shows the ? glyph' [ "${row#*'?'}" != "$row" ]
+is 'and the detail pane names it as a question' \
+  "$(first_line "$(dash_detail_lines "$g" 5)")" \
+  "QUESTION from $g — a answers it"
+
+cp "$(question_seq_file "$g")" "$(question_seen_file "$g")"
+row=$(dash_row "$g" 0)
+assert 'delivered but unanswered: the ? glyph still shows' [ "${row#*'?'}" != "$row" ]
+is 'and the detail pane still calls it out' \
+  "$(first_line "$(dash_detail_lines "$g" 5)")" \
+  "QUESTION from $g — a answers it"
+
+cp "$(question_seq_file "$g")" "$(question_answered_file "$g")"
+row=$(dash_row "$g" 0)
+assert_not 'answered: the ? glyph clears' [ "${row#*'?'}" != "$row" ]
 
 # ── control-sequence sanitizing ─────────────────────────────────────────────
 #

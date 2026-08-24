@@ -14,7 +14,7 @@ agent process with no memory of this conversation, no access to your context,
 and no way to guess. Everything it needs travels in one block of text.
 
 This skill is the contract for writing that text. Read
-`skill://foreman-boss` for the CLI contract underneath it, and
+`skill://foreman-boss` for the boss contract underneath it, and
 `skill://foreman-worker` for what a worker itself can do once dispatched.
 
 ## The split
@@ -53,7 +53,7 @@ wrong thing for an hour.
 
 The exception is a decision the worker is *better placed* to make because it
 depends on what the code turns out to look like. Say so explicitly in the
-brief and tell the worker to `foreman reply` if it needs you to choose.
+brief and tell the worker to call `foreman_reply` if it needs you to choose.
 
 ## Anatomy of a brief
 
@@ -86,8 +86,8 @@ cover.
 **Do not include:** where to commit, whether to push, how to report back, a
 reminder to stay in the worktree, that other workers exist, or a nudge to
 delegate independent work. `foreman` appends its own protocol block covering
-all of that — including that `foreman ls`/`foreman_ls` lists the other workers
-and `foreman dm`/`foreman_dm` reaches one directly over a declared shared seam
+all of that — including that `foreman_ls`/`foreman ls` lists the other workers
+and `foreman_dm`/`foreman dm` reaches one directly over a declared shared seam
 (never for status updates), and that substantial independent slices of the
 worker's own task should go to its own subagents instead of running
 serially. Repeating any of it wastes context and invites contradictions.

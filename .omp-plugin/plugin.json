@@ -1,6 +1,6 @@
 {
   "name": "foreman",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Boss-side commands that dispatch work to peer coding agents in herdr worktrees.",
   "author": {
     "name": "Andy Hite"

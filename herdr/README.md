@@ -91,24 +91,34 @@ roles:
 
 ### Collecting
 
-`foreman join` polls every worker it is watching rather than waiting on them in
+`foreman report` and `foreman reply` deliver to the boss themselves: each
+does a best-effort push straight to the boss's pane (`herdr agent prompt`),
+tagged `[foreman:<handle>]`, and stamps its own acknowledgement counter when
+that push lands — `joined` for a report, `question.seen` for a question — so
+a later bare `foreman join` will not re-print the same content. `foreman
+join` is for two things now: an explicit re-read of one worker (`foreman
+join <handle>` always reprints, delivered or not), or a deliberate blocking
+wait (`foreman join` with no handle, or `foreman ask`) when there is
+genuinely nothing else to do. A blocking join returns early on any question
+that is still unanswered, delivered or not, since a pushed prompt cannot
+reach a boss that is itself stuck inside that same blocking call. Only the
+`--once` sweep skips a delivered one, so a timer cannot re-serve the same
+question every tick.
+
+`foreman join --once` is a single non-blocking sweep, not a delivery path: it
+picks up what a push could not — a worker that ended its turn without ever
+running `foreman report`, a worker whose agent died, and a report or
+question that was filed but could not be pushed (boss pane not live at the
+time). It polls every worker it is watching rather than waiting on them in
 order, so a worker that finishes first is printed first and a worker whose
 agent is no longer live is reported as `gone` instead of aborting the whole
-collection.
-
-A settle is recorded against the dispatch counter it answers. A bare
-`foreman join` skips workers already collected at their current counter, so
-re-joining terminates rather than returning instantly, forever, on a worker
-that ended its turn without ever running `foreman report`. A `foreman send` bumps
-that counter and makes the worker joinable again — which is exactly when
-re-joining means something. Naming a handle explicitly always joins it.
-
-`foreman reply` writes the question to disk *and* prompts the boss.
-The file is the load-bearing half: herdr's prompt only reaches a boss
-that is between tool calls, and one sitting inside `foreman join` does not read
-its input until that call returns. `join` polls for filed questions and
-returns as soon as one appears, which is what actually lets a blocked worker
-preempt the wave. Answer it with `foreman send --raw`.
+collection. A settle is recorded against the dispatch counter it answers,
+so a bare `foreman join` skips a worker already collected at its current
+counter — a `foreman send` bumps that counter and makes the worker joinable
+again, which is exactly when re-joining means something. `--once` exits `3`
+when there is nothing registered in this repo to sweep (no workers, or
+everything already collected); exit `0` means a tick ran, whether or not it
+printed anything.
 
 ### Timeout control
 
@@ -242,6 +252,7 @@ record with `foreman reap <handle> [--forget]`.
 | `FOREMAN_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `foreman ask` or `foreman join`. |
 | `FOREMAN_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
 | `FOREMAN_JOIN_POLL_MS` | `2000` | How often `foreman join` re-reads the workers it is watching. |
+| `FOREMAN_ASIDE_POLL_MS` | `15000` | How often the omp extension's own sweeper (`foreman join --once`) runs, to catch anomalies a push cannot: a worker that ended its turn without reporting, a dead worker, or an undelivered push. |
 | `FOREMAN_EDITOR` | `nvim` | Editor command run beside the agent in the `full` layout. |
 | `FOREMAN_GIT_UI` | `lazygit` | Git UI command run beside the agent in the `full` layout. |
 | `FOREMAN_LAYOUT_START_TIMEOUT_MS` | `15000` | Maximum milliseconds to verify that a layout's requested TUI became foreground before retrying. |
