@@ -943,6 +943,91 @@ rc=$?
 assert 'keys rejects a non-live handle' [ "$rc" != 0 ]
 unset -f require_herdr agent_exists herdr
 
+# ── boss identity ────────────────────────────────────────────────────────────
+#
+# `foreman boss` is the mandatory first step of every session, and
+# `rebind_boss` repoints the BOSS field of every worker that reported to a
+# renamed handle — a bug in either misroutes every `foreman reply` in the wave,
+# and neither had a single assertion.
+
+printf '\nboss identity\n'
+export FOREMAN_STATE="$sandbox/state-boss"
+require_herdr() { :; }
+export HERDR_PANE_ID=p1
+
+# A pane that already has a handle keeps it: `boss` with no argument has to
+# stay a read, or running it a second time would silently rename the caller.
+self_handle() { printf 'already-named'; }
+h() { printf 'h was called: %s\n' "$*" >>"$h_calls"; }
+h_calls="$sandbox/boss-h-calls"; : >"$h_calls"
+is 'a bare boss on a named pane reports the existing handle' \
+  "$(cmd_boss)" 'already-named'
+is 'and never calls into herdr to rename anything' "$(cat "$h_calls")" ''
+unset -f self_handle
+
+# Two repos each wanting a foreman is the ordinary case: claiming a handle
+# already held elsewhere must fail and name the holder, not overwrite it.
+self_handle() { printf ''; }
+agent_field() { case "$1" in taken) printf 'other-pane' ;; *) printf '' ;; esac; }
+out=$( (cmd_boss taken) 2>&1 )
+rc=$?
+is 'claiming a held handle fails' "$rc" '1'
+assert 'and names the pane holding it' [ "${out#*held by pane other-pane}" != "$out" ]
+assert 'and offers a different handle' [ "${out#*foreman boss <name>}" != "$out" ]
+assert 'and offers --steal as the alternative' [ "${out#*--steal}" != "$out" ]
+unset -f agent_field self_handle
+
+# --steal takes the handle over. The previous holder must be moved to a FREE
+# name, not unnamed — an unnamed agent cannot be addressed by `foreman send`,
+# `foreman read` or even its own `foreman whoami`.
+self_handle() { printf ''; }
+agent_field() { case "$1" in taken) printf 'other-pane' ;; *) printf '' ;; esac; }
+agent_exists() { return 1; }  # every candidate name free_handle tries is open
+: >"$h_calls"
+out=$(cmd_boss taken --steal)
+is 'stealing still returns the claimed handle' "$out" 'taken'
+h_calls_content=$(cat "$h_calls")
+assert 'the previous holder is renamed to a free variant, not cleared' \
+  [ "${h_calls_content#*agent rename other-pane taken-1}" != "$h_calls_content" ]
+assert 'and the caller'"'"'s pane is renamed to the claimed handle' \
+  [ "${h_calls_content#*agent rename p1 taken}" != "$h_calls_content" ]
+unset -f agent_field agent_exists self_handle
+unset h_calls_content
+
+# rebind_boss repoints only the workers that pointed at the old handle —
+# leaving any worker that reports elsewhere untouched.
+mkdir -p "$(meta_dir mine)" "$(meta_dir also-mine)" "$(meta_dir elsewhere)"
+meta_set mine       "BOSS=old-handle" "BRANCH=b" "DIR=/tmp/mine"
+meta_set also-mine  "BOSS=old-handle" "BRANCH=b" "DIR=/tmp/also-mine"
+meta_set elsewhere  "BOSS=someone-else" "BRANCH=b" "DIR=/tmp/elsewhere"
+rebind_note=$(rebind_boss old-handle new-handle 2>&1)
+is 'a worker pointed at the old handle now points at the new one' \
+  "$(meta_get mine BOSS)" 'new-handle'
+is 'so does a second worker pointed at the same old handle' \
+  "$(meta_get also-mine BOSS)" 'new-handle'
+is 'a worker reporting elsewhere is left alone' \
+  "$(meta_get elsewhere BOSS)" 'someone-else'
+assert 'the rebind is noted with the count moved' \
+  [ "${rebind_note#*repointed 2 worker(s)}" != "$rebind_note" ]
+
+# The default handle tracks the repo, not a constant — a constant would let
+# only one repo on the machine ever hold `boss`.
+if command -v git >/dev/null 2>&1; then
+  boss_repo="$sandbox/boss-repo"
+  mkdir -p "$boss_repo"
+  ( cd "$boss_repo" && git init -q . )
+  is 'the default handle is slugified from the repo root name' \
+    "$(cd "$boss_repo" && unset FOREMAN_BOSS_HANDLE; default_boss)" \
+    "$(basename "$boss_repo")"
+  is 'FOREMAN_BOSS_HANDLE overrides the repo-derived default' \
+    "$(cd "$boss_repo" && FOREMAN_BOSS_HANDLE=explicit default_boss)" 'explicit'
+else
+  printf '  skip  default handle derivation (needs git)\n'
+fi
+
+unset -f require_herdr h
+unset HERDR_PANE_ID
+
 printf '\n'
 if [ "$failures" = 0 ]; then
   printf 'all tests passed\n'; exit 0
