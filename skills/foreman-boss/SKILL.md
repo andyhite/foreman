@@ -96,9 +96,9 @@ then literal skills in the order passed. Leave both absent and the worker gets
 the task text alone.
 
 `foreman roles` prints the current mapping and where its config was found. A
-missing role dies naming the config path it looked for. The config lives
-wherever `herdr plugin config-dir andyhite.foreman` points (or
-`$FOREMAN_CONFIG`):
+missing role dies naming the config path it looked for. The config is
+project-local: `.foreman/config.yml` at the repo root (or `$FOREMAN_CONFIG`
+as an override). `foreman init` scaffolds it if it does not exist yet:
 
 ```yaml
 roles:

@@ -557,7 +557,7 @@ cmd_doctor() {
   if [ -n "$rc" ]; then
     printf '%-6s %s\n' 'ok' "role config at $rc"
   else
-    printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — see: foreman roles)'
+    printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — run: foreman init)'
   fi
 
   [ "$failed" = 0 ]
@@ -654,8 +654,7 @@ cmd_version() { printf 'foreman %s\n' "$(foreman_version)"; }
 cmd_roles() {
   local config
   if ! config=$(foreman_config); then
-    printf 'no foreman config found (checked $FOREMAN_CONFIG, herdr plugin config-dir %s, and ~/.herdr/plugins/%s/config.yml)\n' \
-      "$FOREMAN_PLUGIN_ID" "$FOREMAN_PLUGIN_ID"
+    printf 'no foreman config found (checked $FOREMAN_CONFIG and .foreman/config.yml at the repo root); run: foreman init\n'
     return 0
   fi
   local entries; entries=$(role_entries "$config")
@@ -665,6 +664,34 @@ cmd_roles() {
   fi
   printf 'roles (%s):\n' "$config"
   printf '%s\n' "$entries" | awk -F'\t' '{ printf "  %-20s -> %s\n", $1, $2 }'
+}
+
+# Scaffolds the project-local config `foreman roles`/`--role` read from.
+# Deliberately does not touch anything under $FOREMAN_STATE and does not
+# require a herdr pane: unlike every other cmd_*, this only ever writes one
+# file into the repo, so a user can run it once right after cloning.
+cmd_init() {
+  local root target
+  root=$(project_root) || die "not in a git repo"
+  [ -n "$root" ] || die "not in a git repo"
+  target="$root/.foreman/config.yml"
+  if [ -e "$target" ]; then
+    printf 'foreman: %s already exists; leaving it alone\n' "$target"
+    return 0
+  fi
+  mkdir -p "$root/.foreman" || die "could not create $root/.foreman"
+  cat >"$target" <<'EOF'
+# foreman project config — see `foreman roles` and skill://foreman-dispatch
+#
+# roles: maps a --role name (foreman spawn --role <name>, foreman_spawn
+# { role }) to one skill to load before the worker's task. Uncomment and
+# edit to name this project's own conventions:
+#
+# roles:
+#   review: code-review
+#   implement: my-house-implement-skill
+EOF
+  printf 'foreman: created %s\n' "$target"
 }
 
 skill_instruction() {
@@ -682,24 +709,27 @@ skill_instruction() {
 # config rather than baked into the CLI, so repointing "review" at a different
 # skill touches one line in one file instead of every dispatch site.
 
-FOREMAN_PLUGIN_ID=andyhite.foreman
+# Deliberately project-local, not machine-global: a `roles:` mapping is a
+# house convention of one repo, and a global config would apply someone
+# else's convention to every checkout on the machine. `foreman init` scaffolds
+# the file this looks for.
+project_root() { git rev-parse --show-toplevel 2>/dev/null; }
 
-# Mirrors workspace_manager_config(): $FOREMAN_CONFIG wins outright, then the
-# herdr-managed config dir, then the legacy path under ~/.herdr.
+# $FOREMAN_CONFIG wins outright as an escape hatch (tests use it to inject a
+# config without a real repo); otherwise the only place looked at is
+# `.foreman/config.yml` under the current repo's toplevel, so the mapping
+# travels with the checkout instead of living somewhere machine-global.
 foreman_config() {
   local dir f
   if [ -n "${FOREMAN_CONFIG:-}" ]; then
     [ -f "$FOREMAN_CONFIG" ] || return 1
     printf '%s' "$FOREMAN_CONFIG"; return 0
   fi
-  dir=$(herdr plugin config-dir "$FOREMAN_PLUGIN_ID" 2>/dev/null || true)
-  if [ -n "$dir" ]; then
-    for f in "$dir/config.yml" "$dir/config.yaml"; do
-      [ -f "$f" ] && { printf '%s' "$f"; return 0; }
-    done
-  fi
-  f="$HOME/.herdr/plugins/$FOREMAN_PLUGIN_ID/config.yml"
-  [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  dir=$(project_root) || return 1
+  [ -n "$dir" ] || return 1
+  for f in "$dir/.foreman/config.yml" "$dir/.foreman/config.yaml"; do
+    [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  done
   return 1
 }
 
@@ -859,7 +889,7 @@ cmd_spawn() {
     || die "invalid role name '$role'"
   if [ -n "$role" ]; then
     skill=$(role_skill "$role") || die "role '$role' has no mapping in foreman's config
-  add it under roles: in $(foreman_config 2>/dev/null || printf '<config dir>/config.yml — see: herdr plugin config-dir %s' "$FOREMAN_PLUGIN_ID")"
+  add it under roles: in $(foreman_config 2>/dev/null || printf '.foreman/config.yml at the repo root — run: foreman init')"
     valid_skill_name "$skill" \
       || die "role '$role' maps to invalid skill name '$skill'"
     if [ "$skills_count" -gt 0 ]; then
@@ -1992,6 +2022,7 @@ Both
   foreman doctor                   check prerequisites
   foreman version                  print the foreman version
   foreman roles                    list role -> skill mappings from foreman's config
+  foreman init                     scaffold .foreman/config.yml for this repo
   foreman dm <handle> <text>       raw steering to any foreman member
 
 --raw sends text alone; without it foreman appends its protocol block, which is
@@ -2026,6 +2057,7 @@ main() {
     keys)    cmd_keys "$@" ;;
     doctor)  cmd_doctor "$@" ;;
     roles)   cmd_roles "$@" ;;
+    init)    cmd_init "$@" ;;
     version|--version|-V) cmd_version ;;
     -h|--help|help) usage ;;
     *) die "unknown command '$cmd' (try: foreman --help)" ;;

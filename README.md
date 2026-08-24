@@ -77,6 +77,17 @@ mid-session.
 
 ## Use
 
+Once per project, before the first `/foreman:boss`:
+
+```
+/foreman:init
+```
+
+Creates `.foreman/config.yml` if it doesn't exist yet, then digs through the
+repo — its documented conventions and whatever skills it can find, both its
+own and this session's — to propose a starting `roles:` mapping. Safe to
+re-run; it never overwrites a mapping already there.
+
 ```
 /foreman:boss Ship the webhook retry work in #412 and #413
 ```
@@ -121,13 +132,13 @@ once `foreman:<name>` commands exist — while staying reachable to a model, and
 to any session through `skill://<name>`, which reads the file directly and
 ignores the flag.
 
-The two boss commands work differently: `extension/index.ts` reads
-`command-prompts/*.md` at load and registers each directly as `foreman:<name>`
-— see [Install](#install) for why. A dispatch command creates a branch, a
-worktree, and a live agent process: a side effect a user asks for, never one
-a model decides on its own. Registering it directly, rather than through any
-auto-discovery path, is what guarantees that — there is no frontmatter flag
-to set on that side, only the skills need one.
+`extension/index.ts` reads `command-prompts/*.md` at load and registers each
+directly as `foreman:<name>` — see [Install](#install) for why. `boss` and
+`dispatch` create a branch, a worktree, and a live agent process; `init`
+writes a project config file. All three are side effects a user asks for,
+never ones a model decides on its own, which is what registering them
+directly — rather than through any auto-discovery path — guarantees; there is
+no frontmatter flag to set on that side, only the skills need one.
 
 ## Skills
 

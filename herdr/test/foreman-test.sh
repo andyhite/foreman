@@ -114,6 +114,62 @@ foreman_config() { return 1; }
 assert_not 'role_skill fails with no config at all' role_skill review
 unset -f foreman_config
 
+# ── project-local config resolution ─────────────────────────────────────────
+#
+# foreman_config() used to check a machine-global herdr plugin config dir and
+# a legacy ~/.herdr path — a `roles:` mapping is one repo's house convention,
+# not something that should leak into every checkout on the machine. Now it
+# only ever looks at $FOREMAN_CONFIG (an escape hatch) or .foreman/config.yml
+# under the current repo's toplevel.
+
+printf '\nproject-local config resolution\n'
+cfg_repo="$sandbox/cfg-repo"
+mkdir -p "$cfg_repo"
+( cd "$cfg_repo" && git init -q . )
+
+( cd "$cfg_repo" && unset FOREMAN_CONFIG
+  source "$FOREMAN_BIN" 2>/dev/null
+  assert_not 'foreman_config fails with no .foreman dir and no override' foreman_config
+)
+
+mkdir -p "$cfg_repo/.foreman"
+printf 'roles:\n  review: code-review\n' >"$cfg_repo/.foreman/config.yml"
+( cd "$cfg_repo" && unset FOREMAN_CONFIG
+  source "$FOREMAN_BIN" 2>/dev/null
+  is 'foreman_config resolves .foreman/config.yml at the repo toplevel' \
+    "$(foreman_config)" "$(git rev-parse --show-toplevel)/.foreman/config.yml"
+)
+
+override_cfg="$sandbox/override.yml"
+printf 'roles:\n  implement: house-implement\n' >"$override_cfg"
+( cd "$cfg_repo" && FOREMAN_CONFIG=$override_cfg
+  export FOREMAN_CONFIG
+  source "$FOREMAN_BIN" 2>/dev/null
+  is '$FOREMAN_CONFIG overrides the repo-local file' "$(foreman_config)" "$override_cfg"
+)
+
+# ── foreman init ─────────────────────────────────────────────────────────────
+
+printf '\nforeman init\n'
+init_repo="$sandbox/init-repo"
+mkdir -p "$init_repo"
+( cd "$init_repo" && git init -q . )
+
+( cd "$init_repo" && unset FOREMAN_CONFIG && "$FOREMAN_BIN" init >/dev/null )
+assert 'init creates .foreman/config.yml' [ -f "$init_repo/.foreman/config.yml" ]
+assert 'the scaffold documents roles:' \
+  bash -c 'grep -q "^# roles:" "$0"' "$init_repo/.foreman/config.yml"
+
+printf 'roles:\n  custom: my-skill\n' >"$init_repo/.foreman/config.yml"
+( cd "$init_repo" && unset FOREMAN_CONFIG && "$FOREMAN_BIN" init >/dev/null )
+is 'a second init leaves an existing config alone' \
+  "$(cat "$init_repo/.foreman/config.yml")" "$(printf 'roles:\n  custom: my-skill\n')"
+
+outside=$(mktemp -d)
+assert_not 'init fails outside a git repo' \
+  bash -c 'cd "$0" && "$1" init >/dev/null 2>&1' "$outside" "$FOREMAN_BIN"
+rm -rf "$outside"
+
 printf '\nagent tiers and models\n'
 assert 'accepts standard' valid_agent_tier 'standard'
 assert 'accepts deep' valid_agent_tier 'deep'

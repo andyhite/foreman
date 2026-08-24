@@ -45,8 +45,27 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman reply <text>` | From a worker, file a question and interrupt the boss. |
 | `foreman whoami` | Print this pane's handle. |
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
-| `foreman roles` | List the role → skill mappings read from foreman's config. |
+| `foreman roles` | List the role → skill mappings read from foreman's project-local config. |
+| `foreman init` | Scaffold `.foreman/config.yml` at the repo root, commented and empty. Refuses to overwrite an existing file. |
 | `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, and the current repo's worker count. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. |
+
+### Role config
+
+`roles:` in `.foreman/config.yml` at the repo root maps a `--role` name to one
+skill instruction, so a named house convention (`review`, `implement`) survives
+a skill rename without touching every dispatch site. The file is project-local
+by design — one repo's convention should not leak into every other checkout on
+the machine — and travels with the checkout the same way any other committed
+config does, including into a worker's own worktree. `foreman init` creates it;
+`foreman roles` shows what it currently resolves to. `$FOREMAN_CONFIG` is an
+escape hatch that overrides the repo-local lookup outright, for testing or a
+config that intentionally lives elsewhere.
+
+```yaml
+roles:
+  review: code-review
+  implement: my-house-implement-skill
+```
 
 ### Collecting
 
