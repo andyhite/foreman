@@ -202,6 +202,14 @@ means every worker's own push already landed. A slow background sweep covers
 only what a push cannot: a worker that ended its turn without reporting, one
 whose agent died, and a push that found no live boss.
 
+Do not go looking in your session's own peer-messaging tools. `hub wait`,
+`hub inbox` and friends cover subagents inside your process; a foreman worker
+is a separate agent reached over the herdr bus and never appears there. One
+shipped run polled `hub wait`, then `hub inbox`, got `Inbox empty`, and
+reported delivery as broken — while the report was in flight, and it arrived
+on its own a minute later. An empty inbox there is evidence of nothing. If you
+genuinely want to block, block with `foreman_join`.
+
 **A deliberate blocking wait.** Sometimes waiting is still the right call: a
 genuine serial dependency (the next step needs one worker's result and
 there is nothing else to do until it lands), or you have simply run out of
