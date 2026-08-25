@@ -1954,6 +1954,48 @@ wait "$term_pid" 2>/dev/null
 
 unset -f require_herdr self_handle
 
+# ── doctor: bus delivery ─────────────────────────────────────────────────────
+#
+# The condition doctor could not see, and the reason it gained a tenth check:
+# with no live sidecar every report still arrives, but as an interrupting
+# prompt instead of an aside. Nothing errors — so without this line the only
+# symptom is agents that feel like they interrupt each other, and the tool
+# whose whole job is "why is nothing working" answered ok to everything.
+
+printf '\ndoctor: bus delivery\n'
+export FOREMAN_STATE="$sandbox/state-doctor"
+mkdir -p "$FOREMAN_STATE"
+doc_pane=doctor-pane
+# bus_publish() creates this on its way past; a test writing the record by hand
+# has to make the directory itself.
+doc_file=$(bus_sidecar_file "$doc_pane"); mkdir -p "$(dirname "$doc_file")"
+
+# A pane with no record at all: the plugin never declared the server for this
+# session. Distinguished from a stale record because restarting fixes one and
+# not the other.
+out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
+assert 'doctor reports a missing sidecar' [ "${out#*no bus sidecar for this pane}" != "$out" ]
+
+# Both pids live — `$$` is this test shell, which is as live as it gets.
+printf '%s\n%s\n' "$$" "$$" >"$(bus_sidecar_file "$doc_pane")"
+out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
+assert 'doctor reports a live sidecar' [ "${out#*bus sidecar live}" != "$out" ]
+assert 'and names the pid to signal' [ "${out#*pid $$}" != "$out" ]
+
+# A sidecar SIGKILLed before its EXIT trap ran leaves the file behind.
+# Existence is not liveness — the same rule the delivery path enforces.
+printf '%s\n%s\n' 999999999 999999999 >"$(bus_sidecar_file "$doc_pane")"
+out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
+assert 'doctor calls a dead record stale, not live' \
+  [ "${out#*bus sidecar record is stale}" != "$out" ]
+
+# Outside herdr there is no pane to ring, and check 4 already says the pane is
+# missing. A second warning for the same cause would be noise.
+out=$(unset HERDR_PANE_ID; cmd_doctor 2>&1)
+assert_not 'and says nothing about the bus when there is no pane' \
+  [ "${out#*bus sidecar}" != "$out" ]
+rm -f "$(bus_sidecar_file "$doc_pane")"
+
 printf '\n'
 if [ "$failures" = 0 ]; then
   printf 'all tests passed\n'; exit 0

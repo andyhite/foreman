@@ -645,6 +645,31 @@ cmd_doctor() {
     printf '%-6s %s\n' 'warn' 'no role config found (--role unusable; --skill still works — run: foreman init)'
   fi
 
+  # 10. Bus sidecar for this pane.
+  #
+  # The one failure this tool existed to explain and could not see: with no
+  # live sidecar every report, question and dispatch still arrives, but as an
+  # interrupting `herdr agent prompt` instead of an aside. Nothing errors, so
+  # the only symptom is agents that feel like they interrupt each other. That
+  # is a warning rather than a failure — the fallback is a supported path, and
+  # a session outside herdr has no pane to ring at all.
+  #
+  # Missing and stale are reported apart because the fixes differ: missing
+  # means no plugin declared the server for this session (restart it), stale
+  # means a sidecar died without its EXIT trap running (nothing to do; the
+  # record is reclaimed on the next publish).
+  if [ -n "${HERDR_PANE_ID:-}" ]; then
+    local bus_file bus_pid
+    bus_file=$(bus_sidecar_file "$HERDR_PANE_ID")
+    if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
+      printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and dispatches arrive as asides"
+    elif [ -f "$bus_file" ]; then
+      printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
+    else
+      printf '%-6s %s\n' 'warn' 'no bus sidecar for this pane; delivery falls back to an interrupting prompt (is the omp plugin loaded? restart the session)'
+    fi
+  fi
+
   [ "$failed" = 0 ]
 }
 

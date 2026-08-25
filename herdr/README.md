@@ -47,7 +47,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
 | `foreman roles` | List the role → skill mappings read from foreman's project-local config, plus each mapped skill's own frontmatter description as a hint. |
 | `foreman init` | Scaffold `.foreman/config.yml` at the repo root, commented and empty. Refuses to overwrite an existing file. |
-| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, and the current repo's worker count. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. |
+| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, the current repo's worker count, the role config, and whether this pane has a live bus sidecar. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. The bus line is the one to read when reports arrive as interruptions rather than asides: no live sidecar means every delivery is taking the `herdr agent prompt` fallback. |
 
 ### Role config
 
