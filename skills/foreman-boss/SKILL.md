@@ -33,14 +33,17 @@ wraps — the reason is not merely style.
 
 Delivery is a real push, not a poll, and it splits by direction. **Inbound
 interrupts**: a worker's `foreman_report` or `foreman_reply` cuts into your
-current turn at the next tool-call boundary, because collecting those workers
-is your whole job and you are the one waiting. **Outbound queues**: a tracked
-task you dispatch waits for the worker's next turn, since a worker interrupted
-mid-change is exactly what foreman refuses to create.
+session as steering, because collecting those workers is your whole job and you
+are the one waiting. **Outbound queues**: a tracked task you dispatch waits for
+the worker's next turn, since a worker interrupted mid-change is exactly what
+foreman refuses to create.
 
-So you do not poll for a result, and you do not need to: it arrives on its own,
-seconds after the worker files it. What you do need is a way to absorb an
-interruption without wrecking what you were holding — see [Handling an
+Steering lands when the turn you are in ends, so most of the delay you feel is
+the length of your own turn, not the speed of the bus. A measured run filed its
+report while the boss was ten seconds into a turn, and the boss was handed it
+0.3s into the next one. So a report that has not arrived yet is not a report
+that failed; it is one waiting for you to stop. What you do need is a way to
+absorb it without wrecking what you were holding — see [Handling an
 interruption](#handling-an-interruption).
 
 If a signal can't be delivered, everything falls back to an interrupting `herdr
@@ -218,6 +221,12 @@ worker; a bare `foreman_join()` blocks for whatever in the wave is still
 outstanding — its own tool description says as much. Never reach for either
 to *start* a batch — that serializes the thing you came here to parallelize.
 
+What you must not do is manufacture the wait yourself. One shipped run reached
+for `sleep 15`, three times over. That works by accident and wastes every
+second it sleeps, because a report landing one second in still waits out the
+full fifteen. `foreman_join` is the same wait done properly: it returns the
+moment something lands.
+
 Reports reach you as the worker's own push, backed by a file — never from the
 terminal. Interactive agent TUIs do not provide a reliable scrollback transport
 through herdr; `foreman_read(handle)` shows the visible terminal and is a
@@ -240,8 +249,8 @@ joins it, collected or not.
 ## Handling an interruption
 
 Both inbound kinds interrupt you: a worker's report when it finishes, and a
-worker's question when it blocks. Each lands at the next tool-call boundary,
-tagged `[foreman:<handle>]`, seconds after the worker filed it.
+worker's question when it blocks. Each lands when your current turn ends,
+tagged `[foreman:<handle>]`.
 
 Being interrupted is not permission to drop what you are holding. Every one of
 them arrives carrying this protocol, and it is the whole discipline:

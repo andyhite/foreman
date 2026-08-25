@@ -86,8 +86,8 @@ only if a session has this plugin loaded, and nothing is written outside the
 session. A worker's `foreman report`/`foreman reply`, and a boss's dispatch,
 signal that sidecar directly with `SIGUSR1`; the sidecar turns the signal into
 an MCP notification the extension then delivers. Delivery splits by direction:
-anything from a worker — report or question — interrupts the boss at the next
-tool-call boundary, because collecting workers is the boss's job and it is the
+anything from a worker — report or question — interrupts the boss when its
+current turn ends, because collecting workers is the boss's job and it is the
 side that is waiting; a task the boss dispatches queues for the worker's next
 turn, because a worker interrupted mid-change is the thing foreman exists to
 avoid. Every interrupting payload carries its own handling protocol (log it,
