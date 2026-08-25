@@ -889,6 +889,61 @@ assert     '--forget clears the record anyway'          reap_one stuck 0 1
 assert_not 'and the record is gone'                     [ -d "$(meta_dir stuck)" ]
 unset -f herdr
 
+# ── reap rescues an uncollected report ───────────────────────────────────────
+#
+# report.md lives inside the record `reap` removes, so reaping is the last
+# moment it exists. A boss reaps when it thinks it is finished, which is
+# exactly when delivery may not have reached it: 01a03a7c reaped a worker
+# seconds before its report surfaced.
+
+printf '\nreap rescues an uncollected report\n'
+export FOREMAN_STATE="$sandbox/reap-rescue"
+herdr() { return 0; }   # every `worktree remove` succeeds
+
+meta_set unread "BRANCH=feat/unread" "DIR=/tmp/unread" "WORKSPACE=w1"
+printf 'the deliverable\n' >"$(report_file unread)"
+counter_bump "$(dispatch_file unread)"
+# stderr, not stdout: `spawn --replace` reaps through reap_one before printing
+# the new handle, and that stdout is read as `handle=$(foreman spawn ...)`.
+out=$(reap_one unread 0 0 2>&1 >/dev/null)
+assert 'an uncollected report is printed before the record is destroyed' \
+  [ "${out#*the deliverable}" != "$out" ]
+assert 'and says why it is being shown now' \
+  [ "${out#*reaped before its report was collected}" != "$out" ]
+# Matched against the rescue header itself, not just anywhere in the output:
+# the ordinary removal note names the branch too, so a looser check passed
+# with the rescue deleted entirely.
+assert 'and names the branch on that same line' \
+  [ "${out#*its report was collected) — branch feat/unread}" != "$out" ]
+assert_not 'the record is still removed' [ -d "$(meta_dir unread)" ]
+
+# A report the boss already has must not come back as a surprise at teardown.
+meta_set seen "BRANCH=feat/seen" "DIR=/tmp/seen" "WORKSPACE=w2"
+printf 'already handed over\n' >"$(report_file seen)"
+counter_bump "$(dispatch_file seen)"
+mark_joined seen
+out=$(reap_one seen 0 0 2>&1 >/dev/null)
+assert_not 'a collected report is not reprinted' \
+  [ "${out#*already handed over}" != "$out" ]
+
+# Never dispatched and never joined compare equal as strings, so a worker with
+# no report of its own must not trip the rescue on an empty file.
+meta_set quiet "BRANCH=feat/quiet" "DIR=/tmp/quiet" "WORKSPACE=w3"
+: >"$(report_file quiet)"
+out=$(reap_one quiet 0 0 2>&1 >/dev/null)
+assert_not 'an empty report file says nothing' \
+  [ "${out#*reaped before}" != "$out" ]
+
+# --forget drops the record too, so it destroys report.md just the same.
+meta_set forgotten "BRANCH=feat/forgotten" "DIR=/tmp/forgotten" "WORKSPACE=w4"
+printf 'lost on forget\n' >"$(report_file forgotten)"
+counter_bump "$(dispatch_file forgotten)"
+out=$(reap_one forgotten 0 1 2>&1 >/dev/null)
+assert '--forget rescues the report as well' \
+  [ "${out#*lost on forget}" != "$out" ]
+
+unset -f herdr
+
 # ── join validates explicit handles ─────────────────────────────────────────────
 
 printf '\njoin validates explicit handles\n'

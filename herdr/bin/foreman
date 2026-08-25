@@ -2642,6 +2642,29 @@ reap_one() {
       fi
     fi
   fi
+  # Last chance. report.md lives under $FOREMAN_STATE/$handle, so the rm below
+  # is the moment a filed-but-never-collected report stops existing — and a
+  # boss reaps precisely when it believes it is finished, which is exactly when
+  # it may not have been handed the deliverable. 01a03a7c reaped a worker
+  # seconds before its report surfaced; had the push failed outright, the only
+  # copy would have gone with the record and the 60s sweep would have found
+  # nothing to carry.
+  #
+  # To stderr, not stdout: `foreman spawn --replace` reaps through here before
+  # printing the new handle, and spawn's stdout is a machine value that
+  # `handle=$(foreman spawn ...)` reads. stderr still reaches an agent, since
+  # runForeman folds it into the tool result.
+  #
+  # Rescuing rather than refusing: a boss that has to run `foreman join
+  # <handle>` and then reap again to see what it already asked for will just
+  # pass --force, and the report is lost anyway.
+  local rf; rf=$(report_file "$handle")
+  if [ -s "$rf" ] && [ "$(counter_read "$(dispatch_file "$handle")")" \
+       != "$(counter_read "$(joined_token_file "$handle")")" ]; then
+    note "
+=== $handle (reaped before its report was collected) — branch $(meta_get "$handle" BRANCH)
+$(cat "$rf")"
+  fi
   rm -rf "${FOREMAN_STATE:?}/$handle"
 }
 

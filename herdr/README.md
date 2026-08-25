@@ -37,7 +37,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose filed question has not been collected by a join, `-` everyone else. |
 | `foreman dashboard [--all-repos]` | Interactive counterpart to `foreman ls`; also aliased `dash`. |
 | `foreman read <handle> [-n N]` | Read a worker's terminal. |
-| `foreman reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. |
+| `foreman reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. A report that was filed but never collected is printed to stderr first: the record being removed is where it lived. |
 | `foreman broadcast <text>` | Untracked raw steering to every live worker in this repository; leaves the dispatch counter alone, so it never produces a report. |
 | `foreman dm <handle> <text>` | Untracked raw steering to any foreman member (boss or worker) by handle; same no-report contract as `broadcast`. |
 | `foreman keys <handle> <key>...` | Send terminal keys straight through to `herdr agent send-keys`; how you clear a worker stuck on an approval prompt. |
