@@ -390,19 +390,14 @@ export default function foremanExtension(pi: ExtensionAPI) {
         }
         return;
       }
-      if (outcome === "empty") {
-        // Nothing to deliver right now. Not a failure — park the timer so
-        // an idle repo doesn't spend a subprocess every tick forever; the
-        // next `session_start` (a new pane/session) calls `ensureJoinPoller`
-        // again and restarts it. Parking is safe because a push already
-        // delivered anything that mattered — nothing is lost while this
-        // loop is stopped.
-        if (joinPollTimer) {
-          ctx.clearTimer(joinPollTimer);
-          joinPollTimer = null;
-        }
-        return;
-      }
+      // Deliberately no parking on an empty tick. Parking here read "nothing
+      // pending" as "nothing will ever be pending", on the reasoning that a
+      // push had already delivered anything that mattered — which assumes the
+      // very mechanism this timer is the net under. A worker still working at
+      // the first tick switched the net off for the rest of the session, so
+      // when the push then dropped a report there was nothing left to catch
+      // it. One short-lived `foreman pickup` a minute is the cost of a net
+      // that actually nets.
       if (outcome === "error") {
         // Most commonly "not in a git repo" if the pane's cwd changed out
         // from under it — a registered worker pane's own `pickup` now exits
@@ -429,6 +424,8 @@ export default function foremanExtension(pi: ExtensionAPI) {
   // filter is required, not defensive — anything else on the bus is not
   // this extension's concern.
   pi.on("mcp_notification", (event, ctx) => {
+    // `server` is the `.mcp.json` key verbatim — observed, not assumed: omp
+    // does not namespace a plugin-declared server by its plugin id.
     if (event.server !== "foreman" || event.method !== "notifications/foreman/wake") return;
     void deliverer.deliverInbound(ctx.cwd);
   });

@@ -89,8 +89,23 @@ h() {
 # Best-effort delivery to another pane, the deliberate opposite of `h`: a push
 # that cannot land must not fail the command that made it. Every caller has
 # already written the state file a `foreman join` collects from, so a boss that
-# is not live and a payload herdr rejects both degrade to that same fallback —
-# and callers stamp their acknowledgement counter only when this returns 0.
+# is not live and a payload herdr rejects both degrade to that same fallback.
+#
+# The exit code is a delivery *contract*, not a success flag, because only one
+# of the two paths actually moves the text:
+#
+#   0  the text is in the agent's session (herdr prompt). The caller must stamp
+#      its acknowledgement counter, or the boss's own sweep hands the same
+#      report over a second time.
+#   2  a doorbell was rung and nothing else. The payload still sits on disk for
+#      `foreman pickup` to read, so the caller must NOT stamp: the only
+#      delivery that matters has not happened yet.
+#   1  neither — no live pane. Filed for a later `foreman join`.
+#
+# Collapsing 2 into 0 is what silently ate every pushed report and question:
+# the worker rang the bell, stamped the delivery as collected on the strength
+# of `kill` succeeding, and the boss's pickup then skipped it as already
+# handed over. `dispatch_to` (:1613, :1636) always had this right for tasks.
 notify_agent() {
   local handle=$1 text=$2 pane
   # The pane doubles as the existence check: agent_exists() is this same
@@ -98,13 +113,10 @@ notify_agent() {
   # one herdr round trip it cost before the bus existed.
   pane=$(agent_field "$handle" pane_id)
   [ -n "$pane" ] || return 1
-  # A delivered wake means the extension will inject this via `foreman pickup`
+  # A rung doorbell means the extension will inject this via `foreman pickup`
   # instead: prompting on top of it would double-inject the same text, once as
-  # a herdr prompt and once as the aside. Returning 0 here keeps the same trust
-  # level as the prompt path — accepted is not the same fact as read — which is
-  # exactly what the boss-side sweep and the un-stamped `joined` counter
-  # already exist to cover.
-  if bus_signal "$pane"; then return 0; fi
+  # a herdr prompt and once as the aside.
+  if bus_signal "$pane"; then return 2; fi
   herdr agent prompt "$handle" "$text" >/dev/null 2>&1
 }
 
@@ -659,14 +671,24 @@ cmd_doctor() {
   # means a sidecar died without its EXIT trap running (nothing to do; the
   # record is reclaimed on the next publish).
   if [ -n "${HERDR_PANE_ID:-}" ]; then
-    local bus_file bus_pid
+    local bus_me bus_file bus_pid
+    bus_me=$(self_handle 2>/dev/null) || true
     bus_file=$(bus_sidecar_file "$HERDR_PANE_ID")
-    if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
-      printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and dispatches arrive as asides"
-    elif [ -f "$bus_file" ]; then
-      printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
-    else
-      printf '%-6s %s\n' 'warn' 'no bus sidecar for this pane; delivery falls back to an interrupting prompt (is the omp plugin loaded? restart the session)'
+    # Delivery resolves a handle to a pane and rings that pane's sidecar, so a
+    # pane herdr does not list as an agent is unreachable by construction and
+    # the sidecar question is moot. Keying this on HERDR_PANE_ID instead — set
+    # in every pane, shell panes included — warned a plain shell that it was
+    # missing a sidecar it could never have, and told it to restart a session
+    # that was not running. A record with no handle still reports: that is an
+    # agent pane herdr has since forgotten, and a stale record there is real.
+    if [ -n "$bus_me" ] || [ -f "$bus_file" ]; then
+      if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
+        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and dispatches arrive as asides"
+      elif [ -f "$bus_file" ]; then
+        printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
+      else
+        printf '%-6s %s\n' 'warn' 'no bus sidecar for this pane; delivery falls back to an interrupting prompt (is the omp plugin loaded? restart the session)'
+      fi
     fi
   fi
 
@@ -2156,17 +2178,29 @@ cmd_report() {
   # happens to poll. A report nobody is told about is one the boss finds only
   # if it thinks to run `foreman join` — which is why collecting a wave used to
   # mean blocking a tool call on it.
-  if notify_agent "$boss" "$(printf '[foreman:%s] report — branch %s\n\n%s' \
-      "$me" "$(meta_get "$me" BRANCH)" "$(cat "$rf")")"; then
-    # The boss has the text, so a bare `foreman join` must not hand it the same
-    # report a second time. A named `foreman join <handle>` still re-prints on
-    # demand: it bypasses the joinable filter by design.
-    mark_joined "$me"
-    printf 'reported %s bytes to %s\n' "$bytes" "$boss"
-  else
-    note "foreman: boss '$boss' is not reachable; the report is filed and will surface on its next 'foreman join'"
-    printf 'reported %s bytes (filed for %s)\n' "$bytes" "$boss"
-  fi
+  local rc=0
+  notify_agent "$boss" "$(printf '[foreman:%s] report — branch %s\n\n%s' \
+    "$me" "$(meta_get "$me" BRANCH)" "$(cat "$rf")")" || rc=$?
+  case $rc in
+    0)
+      # The prompt put the text in the boss's session, so a bare `foreman join`
+      # must not hand it the same report a second time. A named `foreman join
+      # <handle>` still re-prints on demand: it bypasses the joinable filter.
+      mark_joined "$me"
+      printf 'reported %s bytes to %s\n' "$bytes" "$boss"
+      ;;
+    2)
+      # A doorbell moved no text. `foreman pickup` on the boss's side is what
+      # delivers it, and marks it joined once it has — stamping here instead
+      # made pickup skip the report as already collected, so it arrived
+      # nowhere and the worker still reported success.
+      printf 'reported %s bytes to %s\n' "$bytes" "$boss"
+      ;;
+    *)
+      note "foreman: boss '$boss' is not reachable; the report is filed and will surface on its next 'foreman join'"
+      printf 'reported %s bytes (filed for %s)\n' "$bytes" "$boss"
+      ;;
+  esac
 }
 
 cmd_reply() {
@@ -2196,17 +2230,28 @@ cmd_reply() {
 
   # The answer command rides along with the question: this lands in the boss's
   # pane, where nothing else is going to tell it how to reply.
-  if notify_agent "$boss" "$(printf '[foreman:%s] question — branch %s\n\n%s\n\nanswer it with: foreman send --raw %s "<answer>"' \
-      "$me" "$(meta_get "$me" BRANCH)" "$text" "$me")"; then
-    # Delivered, so a sweep must not ask it again on its next tick. Skipping
-    # this stamp is what made every question arrive twice, seconds apart.
-    mark_question_seen "$me"
-    printf 'asked %s\n' "$boss"
-  else
-    # Not fatal: the question is on disk, so a boss that comes
-    # back — or a different one — still collects it.
-    note "foreman: boss '$boss' is not live; the question is filed and will surface on the next 'foreman join'"
-  fi
+  local rc=0
+  notify_agent "$boss" "$(printf '[foreman:%s] question — branch %s\n\n%s\n\nanswer it with: foreman send --raw %s "<answer>"' \
+    "$me" "$(meta_get "$me" BRANCH)" "$text" "$me")" || rc=$?
+  case $rc in
+    0)
+      # The prompt delivered it, so a sweep must not ask it again on its next
+      # tick. Skipping this stamp is what made every question arrive twice.
+      mark_question_seen "$me"
+      printf 'asked %s\n' "$boss"
+      ;;
+    2)
+      # Doorbell only: `foreman pickup` still has to read the question off disk
+      # and stamps it seen once it has. Stamping here left the boss with a
+      # question it was never handed — the same silent loss as a report.
+      printf 'asked %s\n' "$boss"
+      ;;
+    *)
+      # Not fatal: the question is on disk, so a boss that comes
+      # back — or a different one — still collects it.
+      note "foreman: boss '$boss' is not live; the question is filed and will surface on the next 'foreman join'"
+      ;;
+  esac
 }
 
 # ── Bus (MCP notification sidecar) ──────────────────────────────────────────

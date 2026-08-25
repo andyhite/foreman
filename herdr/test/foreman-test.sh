@@ -1366,6 +1366,92 @@ assert_not 'a bare sweep no longer re-delivers a pushed question' \
   [ "${out#*which branch should I use?}" != "$out" ]
 unset -f herdr self_handle agent_field require_herdr scoped_key
 
+# ── push delivery: the doorbell carries no payload ───────────────────────────
+#
+# The bug this section exists for, and the one the two sections above could not
+# catch: they stub `herdr agent prompt`, so both drive the *fallback*, where
+# stamping the delivery is correct because the prompt really did move the text.
+# A rung doorbell moves nothing — `foreman pickup` on the boss's side is the
+# only thing that can — so stamping there marked the payload collected before
+# anyone had been handed it, and the boss's own pickup then skipped it as
+# already delivered. Every command still exited 0 and printed success, so the
+# only symptom was reports and questions that reached nobody.
+#
+# A live sidecar is what selects the doorbell branch, so these need one. The
+# signalled pid traps USR1 and survives being rung; the session pid is only
+# ever `kill -0`'d, which is why naming this shell there is safe and naming it
+# as the signal target would not be — USR1's default disposition is terminate.
+
+printf '\npush delivery: doorbell carries no payload\n'
+export FOREMAN_STATE="$sandbox/state-doorbell"
+require_herdr() { :; }
+agent_field() { case "$1" in boss1) printf 'boss1-pane' ;; *) printf '' ;; esac; }
+scoped_key() { printf 'k1'; }
+bell_file=$(bus_sidecar_file boss1-pane); mkdir -p "$(dirname "$bell_file")"
+bash -c 'trap ":" USR1; sleep 30' &
+bell_pid=$!
+printf '%s\n%s\n' "$bell_pid" "$$" >"$bell_file"
+bell_prompt="$sandbox/doorbell-prompt"
+
+hb=worker-bell
+mkdir -p "$(meta_dir "$hb")"
+meta_set "$hb" "BOSS=boss1" "BRANCH=feat/x" "DIR=/tmp/wb" "REPO_KEY=k1"
+counter_bump "$(dispatch_file "$hb")"
+self_handle() { printf '%s' "$hb"; }
+herdr() {
+  case "$1 $2" in
+    "agent prompt") printf '%s' "$3" >"$bell_prompt" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+printf 'bell findings' | cmd_report >/dev/null 2>&1
+assert_not 'a rung doorbell does not also send a prompt' [ -f "$bell_prompt" ]
+assert_not 'and does not stamp joined, because it delivered no text' \
+  [ "$(counter_read "$(joined_token_file "$hb")")" \
+    = "$(counter_read "$(dispatch_file "$hb")")" ]
+
+# The consequence that actually bit: the pickup the doorbell wakes must find
+# the report. This is the sweep pickup runs.
+unset -f herdr
+self_handle() { printf ''; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$hb" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$(cmd_join --once 2>&1)
+assert 'so the pickup a doorbell wakes does deliver the report' \
+  [ "${out#*bell findings}" != "$out" ]
+rc_again=0; cmd_join --once >/dev/null 2>&1 || rc_again=$?
+is 'and the sweep that delivered it stamps joined, so only once' "$rc_again" '3'
+unset -f herdr self_handle
+
+# Same contract for a question.
+hq=worker-ask
+mkdir -p "$(meta_dir "$hq")"
+meta_set "$hq" "BOSS=boss1" "BRANCH=feat/y" "DIR=/tmp/wq" "REPO_KEY=k1"
+counter_bump "$(dispatch_file "$hq")"
+self_handle() { printf '%s' "$hq"; }
+cmd_reply 'A or B?' >/dev/null 2>&1
+assert_not 'a rung doorbell does not stamp question.seen either' \
+  [ "$(counter_read "$(question_seen_file "$hq")")" \
+    = "$(counter_read "$(question_seq_file "$hq")")" ]
+unset -f self_handle
+self_handle() { printf ''; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"blocked"}]}}' "$hq" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+out=$(cmd_join --once "$hq" 2>&1)
+assert 'so the pickup a doorbell wakes does deliver the question' \
+  [ "${out#*A or B?}" != "$out" ]
+kill "$bell_pid" 2>/dev/null
+wait "$bell_pid" 2>/dev/null
+unset -f herdr self_handle agent_field require_herdr scoped_key
+
 # ── explicit join on an open question does not block ────────────────────────
 #
 # `foreman ask` blocks inside `foreman join` for up to an hour, and a pushed
@@ -1969,6 +2055,9 @@ doc_pane=doctor-pane
 # bus_publish() creates this on its way past; a test writing the record by hand
 # has to make the directory itself.
 doc_file=$(bus_sidecar_file "$doc_pane"); mkdir -p "$(dirname "$doc_file")"
+# An agent pane, which is the only kind delivery can reach. Stubbed rather than
+# stood up: the branch under test is what doctor prints, not how herdr answers.
+self_handle() { printf '%s' 'doctor-agent'; }
 
 # A pane with no record at all: the plugin never declared the server for this
 # session. Distinguished from a stale record because restarting fixes one and
@@ -1977,24 +2066,40 @@ out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor reports a missing sidecar' [ "${out#*no bus sidecar for this pane}" != "$out" ]
 
 # Both pids live — `$$` is this test shell, which is as live as it gets.
-printf '%s\n%s\n' "$$" "$$" >"$(bus_sidecar_file "$doc_pane")"
+printf '%s\n%s\n' "$$" "$$" >"$doc_file"
 out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor reports a live sidecar' [ "${out#*bus sidecar live}" != "$out" ]
 assert 'and names the pid to signal' [ "${out#*pid $$}" != "$out" ]
 
 # A sidecar SIGKILLed before its EXIT trap ran leaves the file behind.
 # Existence is not liveness — the same rule the delivery path enforces.
-printf '%s\n%s\n' 999999999 999999999 >"$(bus_sidecar_file "$doc_pane")"
+printf '%s\n%s\n' 999999999 999999999 >"$doc_file"
 out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor calls a dead record stale, not live' \
   [ "${out#*bus sidecar record is stale}" != "$out" ]
+
+# A record surviving a pane herdr no longer lists as an agent: the pane is not
+# reachable now, but the stale file is real and naming it is the point.
+self_handle() { printf ''; }
+out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
+assert 'a record without a handle is still reported' \
+  [ "${out#*bus sidecar record is stale}" != "$out" ]
+rm -f "$doc_file"
+
+# The shipped bug: keyed on HERDR_PANE_ID, which every pane has, doctor warned
+# a plain shell pane that it was missing a sidecar — and told it to restart an
+# omp session that was not running there. Nothing is ever delivered to a pane
+# herdr does not list as an agent, so there is nothing to say.
+out=$(HERDR_PANE_ID=shell-pane cmd_doctor 2>&1)
+assert_not 'and a shell pane is not warned about a sidecar it cannot have' \
+  [ "${out#*bus sidecar}" != "$out" ]
 
 # Outside herdr there is no pane to ring, and check 4 already says the pane is
 # missing. A second warning for the same cause would be noise.
 out=$(unset HERDR_PANE_ID; cmd_doctor 2>&1)
 assert_not 'and says nothing about the bus when there is no pane' \
   [ "${out#*bus sidecar}" != "$out" ]
-rm -f "$(bus_sidecar_file "$doc_pane")"
+unset -f self_handle
 
 printf '\n'
 if [ "$failures" = 0 ]; then
