@@ -1,6 +1,6 @@
 id = "andyhite.foreman"
 name = "Foreman"
-version = "0.7.1"
+version = "0.7.2"
 min_herdr_version = "0.8.0"
 description = "Dispatch peer coding agents into herdr worktree workspaces."
 platforms = ["linux", "macos"]

@@ -91,11 +91,12 @@ roles:
 
 `foreman report` and `foreman reply` deliver to the boss themselves: each rings
 the boss's bus sidecar, and the omp extension on the other side pulls the
-content with `foreman pickup` and injects it. Both interrupt the boss as its
-current turn ends, carrying the protocol for absorbing an interruption
-without abandoning half-done work. Only the outbound direction queues: a
-dispatched task waits for the worker's next turn. With no sidecar to ring, the
-push falls back to `herdr agent prompt`, tagged `[foreman:<handle>]`, which
+content with `foreman pickup` and injects it. Only `foreman reply` interrupts,
+and only because a worker is blocked until the boss answers; it carries the
+protocol for absorbing that without abandoning half-done work. Everything
+else queues to the receiver's next turn boundary — a report, a dispatched
+task, a `foreman msg` either direction. With no sidecar to ring, the push
+falls back to `herdr agent prompt`, tagged `[foreman:<handle>]`, which
 interrupts in both directions.
 
 Only a delivery that actually moved text stamps an acknowledgement counter —

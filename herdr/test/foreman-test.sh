@@ -2336,11 +2336,13 @@ out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor reports a live sidecar' [ "${out#*bus sidecar live}" != "$out" ]
 assert 'and names the pid to signal' [ "${out#*pid $$}" != "$out" ]
 # The line is read by an agent deciding whether an interruption it just took
-# was the designed path or the fallback, so it has to name the direction rule:
-# inbound interrupts, outbound queues. Under the fallback everything
-# interrupts, including the task that should have queued.
-assert 'and names which direction interrupts and which queues' \
-  [ "${out#*report or question interrupts this pane, a task queues}" != "$out" ]
+# was the designed path or the fallback, so it has to name the rule that
+# decides: a blocked worker's question interrupts, everything else queues.
+# v0.7.0 made that the contract in code but left this line — and five prose
+# sites — still claiming a report interrupts too. Under the fallback
+# everything interrupts, including the report that should have queued.
+assert 'and names what interrupts and what queues' \
+  [ "${out#*question interrupts this pane, a report or task queues}" != "$out" ]
 
 # A sidecar SIGKILLed before its EXIT trap ran leaves the file behind.
 # Existence is not liveness — the same rule the delivery path enforces.

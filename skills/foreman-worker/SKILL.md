@@ -15,14 +15,16 @@ them. Read it here only for what the block's summary leaves out: exact
 fallback CLI forms for when the `foreman_*` tools are not registered, and
 behavior the block doesn't spell out.
 
-Everything you send the boss interrupts it: `foreman_report` when you finish,
-`foreman_reply` when you block. That is by design — orchestrating workers is
-the boss's actual job, and it knows how to absorb an interruption without
-dropping what it holds. It is not free, though, so file one report when you
-are done, and ask a question only when you are genuinely blocked, never to
-check in.
+The two things you send the boss do not arrive the same way.
+`foreman_reply` interrupts it, because you are blocked until it answers —
+that is by design: orchestrating workers is the boss's actual job, and it
+knows how to absorb an interruption without dropping what it holds.
+`foreman_report` does not interrupt; it queues to the boss's next turn
+boundary, because finished work can wait. Neither is free, so file one report
+when you are done, and ask a question only when you are genuinely blocked,
+never to check in.
 
-Inbound is the other way round. A task the boss dispatches waits for your next
+Nothing inbound interrupts you. A task the boss dispatches waits for your next
 turn rather than cutting into a half-applied edit. So does `foreman msg` —
 it queues behind your current turn just like a task, because `h agent
 prompt`, what both use underneath, lands at a turn boundary, never mid-turn.

@@ -705,7 +705,7 @@ cmd_doctor() {
     # agent pane herdr has since forgotten, and a stale record there is real.
     if [ -n "$bus_me" ] || [ -f "$bus_file" ]; then
       if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
-        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); a worker's report or question interrupts this pane, a task queues for the worker's next turn"
+        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); a blocked worker's question interrupts this pane, a report or task queues for the receiver's next turn"
       elif [ -f "$bus_file" ]; then
         printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
       else
@@ -1085,10 +1085,10 @@ Your boss is the agent \`$boss\`.
   Filing it delivers it to the boss; terminal output does not reach it.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
   \`foreman reply "<question>"\`.
-- Both reach the boss by interrupting it, so the answer comes back even if it
-  was mid-task. That is the cost of each: file one report when you are done,
-  and ask a question only when you are genuinely blocked, never for a progress
-  update.
+- A question interrupts the boss, so the answer comes back even if it was
+  mid-task; a report queues for the end of the boss's current turn. That
+  asymmetry is the cost of each: file one report when you are done, and ask a
+  question only when you are genuinely blocked, never for a progress update.
 - Peers: \`foreman ls\` lists the other workers; \`foreman msg <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
   updates.

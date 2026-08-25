@@ -30,54 +30,37 @@ Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
 `foreman_reap`, `foreman_keys`, `foreman_doctor`, `foreman_roles`. Call the
 tool, not the shell command it wraps — the reason is not merely style.
 
-Delivery is a real push, not a poll, and it splits by direction. **Inbound
-interrupts**: a worker's `foreman_report` or `foreman_reply` cuts into your
-session as steering, because collecting those workers is your whole job and you
-are the one waiting. **Outbound queues**: a tracked task you dispatch waits for
-the worker's next turn, since a worker interrupted mid-change is exactly what
-foreman refuses to create.
+Delivery is a real push, not a poll, and the receiver's urgency is declared by
+the sender rather than guessed from the payload. **Interrupt** is a narrower
+word than it looks: it means someone is blocked waiting on you, and in this
+system that is only ever a worker's `foreman_reply`. Everything else
+queues to the receiver's next turn boundary — a worker's report, a task you
+dispatch, a `foreman_msg` in either direction. `foreman_keys` is the sole
+immediate path, because terminal keys bypass the agent's input queue rather
+than joining it; that is the only way to clear a worker parked on an approval
+prompt a queued message would sit behind forever. If a push cannot be
+delivered at all it falls back to an interrupting `herdr agent prompt`, so
+nothing is silently lost — a queued thing just arrives more rudely than it
+should.
 
-Steering lands when the turn you are in ends, so most of the delay you feel is
-the length of your own turn, not the speed of the bus. A measured run filed its
-report while the boss was ten seconds into a turn, and the boss was handed it
-0.3s into the next one. So a report that has not arrived yet is not a report
-that failed; it is one waiting for you to stop. What you do need is a way to
-absorb it without wrecking what you were holding — see [Handling an
-interruption](#handling-an-interruption).
+**Your own turn is what releases a queued delivery, and nothing tells you one
+is waiting.** There is no pending-delivery indicator, and a successful push
+looks identical from your side whether it landed or is sitting behind you. So
+the delay you feel is the length of your own turn, not the speed of the bus:
+one run that stopped promptly was handed a report 0.3s into its next turn,
+while a run told to keep working filed at 17:29:39 and was not handed it
+until 17:41:40 — twelve minutes, both workers' reports arriving together the
+moment it finally stopped. A report that has not arrived is not a report that
+failed; it is one waiting for you to stop.
 
-If a signal can't be delivered, everything falls back to an interrupting `herdr
-agent prompt`, so nothing is silently lost; a task just arrives more rudely
-than it should. `foreman_msg` is the deliberate untracked exception, but it
-is not the interrupting one: it still queues behind the target's current
-turn, the same as a tracked task — `h agent prompt`, what both use
-underneath, lands at a turn boundary, never mid-turn. `foreman_keys` is the
-one exception that reaches a worker immediately, because terminal keys
-bypass the agent's input queue entirely rather than joining it; that is the
-only way to clear a worker parked on an approval prompt a queued message
-would sit behind forever.
-
-Interrupt is a narrower word than it looks: it means someone is blocked
-waiting on you, and in this system that is only ever a worker's
-`foreman_reply`. A worker's report and anything a boss sends — task or
-`foreman_msg` — queue and surface at the receiver's next turn boundary, not
-mid-turn. So a boss must never poll for a report: one shipped run burned
-twelve tool calls hunting a report that was already queued behind its own
-long turn. `foreman_join` is the correct way to wait — see
-[Collecting](#collecting). See [README.md](../../README.md#install) for how
-the delivery channel is wired up.
-
-**Your own turn is what releases a queued report, and nothing tells you one
-is waiting.** A queued delivery lands when the turn you are in ends, so a
-boss that chains tool calls without stopping holds its own reports hostage
-for as long as it keeps going. A shipped run did exactly this: both workers
-pushed successfully, the boss kept working for two minutes and forty-five
-seconds, and both reports arrived together the moment it finally stopped —
-it had by then lost track of them and went digging through worker panes with
-`foreman_read`. There is no pending-delivery indicator to check, and a
-successful push looks identical from your side whether it landed or is
-waiting behind you. The rule that follows: when the next thing you need is a
-worker's report, end the turn or call `foreman_join` — do not fill the wait
-with unrelated tool calls, because the filling is what postpones the report.
+So when the next thing you need is a worker's report, end the turn or call
+`foreman_join`. Do not poll — one shipped run burned twelve tool calls
+hunting a report already queued behind its own long turn — and do not fill
+the wait with unrelated tool calls, because the filling is what postpones the
+report. What you do need is a way to absorb an arrival without wrecking what
+you were holding — see [Handling an interruption](#handling-an-interruption)
+and [Collecting](#collecting). See [README.md](../../README.md#install) for
+how the delivery channel is wired up.
 
 Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
 takes the whole brief as its `task` string and writes the temp file and
@@ -274,12 +257,14 @@ joins it, collected or not.
 
 ## Handling an interruption
 
-Both inbound kinds interrupt you: a worker's report when it finishes, and a
-worker's question when it blocks. Each lands when your current turn ends,
-tagged `[foreman:<handle>]`.
+The two land in different places. A question cuts in mid-turn, at your next
+tool-call boundary: any calls already in flight are skipped and reported as
+such, so re-issue the ones you still need. A report waits for the turn to
+end. Both arrive tagged `[foreman:<handle>]`, and both carry this protocol —
+what makes the discipline necessary is the arrival, not which kind it was.
 
-Being interrupted is not permission to drop what you are holding. Every one of
-them arrives carrying this protocol, and it is the whole discipline:
+Arriving is not permission to drop what you are holding. That protocol is the
+whole discipline:
 
 1. Put it on your todo list immediately, so it cannot be forgotten if the step
    you are on turns out to be long.
@@ -338,6 +323,12 @@ worker mid-turn, queued for the next boundary; reserve an ordinary tracked
 `foreman_send` for follow-up work once that turn actually settles. A worker's
 first dispatch — the one `foreman_spawn` makes — is exempt from the
 idle/done gate, since there is no earlier report to mislabel.
+
+Reaching that state is `foreman_join`'s job, not `foreman_ls`'s: a join on
+that handle returns when the worker settles, and a settled worker is through
+the gate. This is the genuine serial dependency the blocking wait exists for.
+Ending a turn and re-listing until `working` clears gets there too, but that
+is the same wait done by hand.
 
 If `foreman_join` reports a worker as `blocked`, that is herdr seeing an approval
 or question UI in the pane, not a `foreman_reply`. Read the pane with
