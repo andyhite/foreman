@@ -4,11 +4,22 @@ Foreman is a repo with two Foreman plugins. `herdr/` is a herdr plugin shipping
 the `foreman` CLI — the mechanism that creates worktrees, spawns peer coding
 agents, and carries reports and questions between them. The repo root is an
 omp-native agent plugin (`package.json`, `.omp-plugin/plugin.json`,
-`command-prompts/`, `skills/`, `extension/`). `extension/index.ts` reads
-`command-prompts/*.md` at load and registers each as a `foreman:<name>` slash
-command — not left to omp's own file-based command discovery, which does not
-namespace commands from a link/git-installed plugin the way it does for a
-marketplace-installed one.
+`.mcp.json`, `command-prompts/`, `skills/`, `extension/`).
+`extension/index.ts` reads `command-prompts/*.md` at load and registers each
+as a `foreman:<name>` slash command — not left to omp's own file-based command
+discovery, which does not namespace commands from a link/git-installed plugin
+the way it does for a marketplace-installed one.
+
+omp discovers a plugin's capabilities by scanning conventional paths under its
+root, not by reading fields out of `.omp-plugin/plugin.json`. Two consequences
+bit this repo, in opposite directions: `commands/` is scanned, which is why the
+slash-command sources live in `command-prompts/` and the extension registers
+them itself; and `.mcp.json` is scanned, which is why the bus is declared
+there. A `mcpServers` field in the manifest is carried as metadata and starts
+nothing — v0.6.0 shipped the bus declared that way, so no sidecar ever spawned
+and every delivery silently took the `herdr agent prompt` fallback. Verify a
+capability by observing it (`omp -p` in a scratch directory, then look for the
+process), never by reading the manifest back.
 
 ## Verify
 

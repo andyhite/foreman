@@ -600,6 +600,28 @@ if [ -n "$plugin_dir" ]; then
   done
   is 'orchestrate does not appear in the plugin prose' "${offenders# }" ''
 
+  # v0.6.0 declared the bus as an `mcpServers` entry in
+  # `.omp-plugin/plugin.json`. omp carries that field as metadata and never
+  # starts anything from it — capabilities are discovered by scanning
+  # conventional paths under the plugin root — so no sidecar ever spawned and
+  # every delivery silently took the `herdr agent prompt` fallback. Nothing
+  # failed loudly: the field is well-formed, the manifest parses, and the
+  # fallback works. Only the root `.mcp.json` actually starts the bus.
+  mcp_decl="$plugin_dir/.mcp.json"
+  assert 'the bus is declared where omp actually scans for it' [ -f "$mcp_decl" ]
+  # Matched as text, not via jq: this suite stubs jq for the CLI tests, and a
+  # declaration this small is unambiguous without a parser.
+  assert 'and it names the foreman server' \
+    [ -n "$(sed -n -E '/"foreman"[[:space:]]*:/p' "$mcp_decl")" ]
+  assert 'running the bus subcommand of the foreman command' \
+    [ -n "$(sed -n -E '/"command"[[:space:]]*:[[:space:]]*"foreman"/p' "$mcp_decl")" ]
+  assert 'with bus as its argument' \
+    [ -n "$(sed -n -E '/"bus"/p' "$mcp_decl")" ]
+  # The inert field must not creep back as a second source of truth: two
+  # declarations of one server read as thoroughness while only one works.
+  assert_not 'and the manifest does not redeclare it' \
+    [ -n "$(sed -n -E '/mcpServers/p' "$plugin_dir/.omp-plugin/plugin.json")" ]
+
   # Every foreman_* tool the extension registers must be named somewhere in
   # skills/*/SKILL.md, or nobody using this plugin is ever told the tool
   # exists. The bug this catches shipped for real: `foreman_join` existed as

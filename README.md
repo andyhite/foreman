@@ -8,8 +8,9 @@ branches:
   git worktree, start a separate coding agent in it, dispatch work, collect the
   report.
 - **the repo root** — an omp-native agent plugin (`package.json`,
-  `.omp-plugin/plugin.json`, `command-prompts/`, `skills/`, `extension/`)
-  providing the boss's slash commands and custom tools.
+  `.omp-plugin/plugin.json`, `.mcp.json`, `command-prompts/`, `skills/`,
+  `extension/`) providing the boss's slash commands, custom tools, and the
+  `foreman bus` sidecar.
 
 Both plugins share the name `foreman` with the GitHub repo — coincidence, not
 an install-time namespace; there is no marketplace here, so nothing keys an
@@ -72,10 +73,16 @@ omp install ./
 ```
 
 Installing the omp plugin registers the `foreman_*` custom tools and declares
-the `foreman bus` sidecar as an `mcpServers` entry in this plugin's own
-`.omp-plugin/plugin.json` (`{"command": "foreman", "args": ["bus"]}`). The
-sidecar is therefore plugin-scoped, not machine-global: it exists if and only
-if a session has this plugin loaded, and nothing is written outside the
+the `foreman bus` sidecar in this plugin's own root `.mcp.json`
+(`{"command": "foreman", "args": ["bus"]}`). That file, not the
+`.omp-plugin/plugin.json` manifest, is what omp actually reads: the
+`omp-plugins` capability provider discovers MCP by scanning conventional paths
+under each enabled plugin root, and the manifest's `mcpServers` field is
+carried as metadata only. Declaring it there instead looks right, type-checks,
+and starts nothing — see [AGENTS.md](./AGENTS.md).
+
+The sidecar is therefore plugin-scoped, not machine-global: it exists if and
+only if a session has this plugin loaded, and nothing is written outside the
 session. A worker's `foreman report`/`foreman reply`, and a boss's dispatch,
 signal that sidecar directly with `SIGUSR1`; the sidecar turns the signal into
 an MCP notification the extension delivers as a non-interrupting aside. If the
@@ -87,8 +94,9 @@ whose agent died. Restart the session after either install; `/mcp reconnect`
 is not enough, since extension modules load only at startup.
 
 `herdr/bin/foreman-link` no longer writes anything to
-`~/.omp/agent/mcp.json`. If an older install left a `mcpServers.foreman`
-entry there, it is redundant now — remove it by hand.
+`~/.omp/agent/mcp.json`, and removes the entry an older version of it left
+there — one machine-wide sidecar per session, in sessions that never loaded
+this plugin and so could never turn a wake into an aside.
 
 ## Use
 
