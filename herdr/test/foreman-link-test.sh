@@ -237,6 +237,21 @@ assert 'and the symlink was still created' [ -L "$s/bin/foreman" ]
 assert 'leaving no temp file behind' \
   [ -z "$(find "$s/home/.omp/agent" -name 'mcp.json.tmp.*' 2>/dev/null)" ]
 
+# Every warning branch in the link block exits 0, so a migration placed after
+# it never ran for the one user who most needs it: the entry is stale whether
+# or not the symlink could be created.
+printf '\nomp MCP: the old entry goes even when the link target is occupied\n'
+s="$sandbox/s16"; mkdir -p "$s/home/.omp/agent" "$s/bin"
+make_checkout "$s/ck" foreman.test.s16
+printf '#!/bin/sh\necho not ours\n' >"$s/bin/foreman"
+chmod +x "$s/bin/foreman"
+printf '{"mcpServers":{"foreman":{"command":"foreman","args":["bus"]}}}\n' \
+  >"$s/home/.omp/agent/mcp.json"
+out=$(run_link "$s/ck" "$s")
+assert 'the link is still refused' [ "${out#*already exists}" != "$out" ]
+is 'but the stale entry is gone anyway' \
+  "$(jq -c '.mcpServers.foreman // "absent"' "$s/home/.omp/agent/mcp.json")" '"absent"'
+
 
 # ── foreman-ls: parse guard against malformed JSON ───────────────────────────────
 

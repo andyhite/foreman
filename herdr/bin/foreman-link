@@ -119,6 +119,59 @@ dangling_link_is_ours() {
   [ -n "$recorded" ] && [ "$recorded" = "$2" ]
 }
 
+# Migration, not registration. Earlier versions of this installer wrote a
+# `foreman` stdio server into the user-level omp config, which started a
+# `foreman bus` in every omp session on the machine — including sessions that
+# never loaded the plugin. The bus is now declared by .omp-plugin/plugin.json,
+# so an upgraded install that kept the old entry would run two sidecars per
+# session. Removing it belongs here because this script is what created it;
+# nothing else knows the entry was ours.
+#
+# Runs before the link work below, not after: the entry is stale however that
+# turns out, and every warning branch down there exits 0 — so a user whose
+# ~/.local/bin/foreman is occupied by an unrelated binary would otherwise keep
+# running two sidecars with nothing to tell them why.
+unregister_stale_mcp() {
+  file="$HOME/.omp/agent/mcp.json"
+  # Byte-for-byte what register_mcp used to write. A foreman entry pointing
+  # anywhere else was hand-written by the user and is theirs, not ours.
+  ours='{"command":"foreman","args":["bus"]}'
+
+  [ -f "$file" ] || return 0
+
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'foreman-link: warning: jq not found; the old foreman entry in %s is left in place and will start a second bus in every omp session (remove .mcpServers.foreman by hand)\n' \
+      "$file" >&2
+    return 0
+  fi
+
+  # Not our file to repair: a config we cannot parse is one we must not
+  # rewrite, and the stale entry is wasteful rather than harmful.
+  jq -e . "$file" >/dev/null 2>&1 || return 0
+
+  existing=$(jq -Sc '.mcpServers.foreman // empty' "$file" 2>/dev/null)
+  [ -n "$existing" ] || return 0
+  if [ "$existing" != "$(printf '%s' "$ours" | jq -Sc .)" ]; then
+    $quiet || printf 'omp MCP: leaving customised foreman entry in %s untouched (found: %s)\n' "$file" "$existing"
+    return 0
+  fi
+
+  # Same temp-then-rename discipline the old writer used: a config this script
+  # does not own must never be left truncated by an interrupted write.
+  tmp="$file.tmp.$$"
+  if ! jq 'del(.mcpServers.foreman)' "$file" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ] \
+    || ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    printf 'foreman-link: warning: could not rewrite %s; remove .mcpServers.foreman by hand to stop a second bus per omp session\n' \
+      "$file" >&2
+    return 0
+  fi
+  $quiet || printf 'omp MCP: removed the old user-level foreman entry from %s; the bus now comes from the plugin manifest — restart existing omp sessions to drop their extra sidecar\n' \
+    "$file"
+}
+
+unregister_stale_mcp
+
 source=$(resolve_path "$0") || exit 1
 source_dir=$(dirname "$source")
 source=$source_dir/foreman
@@ -164,54 +217,6 @@ else
   printf 'foreman-link: warning: %s already exists; remove it or set FOREMAN_LINK_DIR\n' "$target" >&2
   exit 0
 fi
-
-# Migration, not registration. Earlier versions of this installer wrote a
-# `foreman` stdio server into the user-level omp config, which started a
-# `foreman bus` in every omp session on the machine — including sessions that
-# never loaded the plugin. The bus is now declared by .omp-plugin/plugin.json,
-# so an upgraded install that kept the old entry would run two sidecars per
-# session. Removing it belongs here because this script is what created it;
-# nothing else knows the entry was ours.
-unregister_stale_mcp() {
-  file="$HOME/.omp/agent/mcp.json"
-  # Byte-for-byte what register_mcp used to write. A foreman entry pointing
-  # anywhere else was hand-written by the user and is theirs, not ours.
-  ours='{"command":"foreman","args":["bus"]}'
-
-  [ -f "$file" ] || return 0
-
-  if ! command -v jq >/dev/null 2>&1; then
-    printf 'foreman-link: warning: jq not found; the old foreman entry in %s is left in place and will start a second bus in every omp session (remove .mcpServers.foreman by hand)\n' \
-      "$file" >&2
-    return 0
-  fi
-
-  # Not our file to repair: a config we cannot parse is one we must not
-  # rewrite, and the stale entry is wasteful rather than harmful.
-  jq -e . "$file" >/dev/null 2>&1 || return 0
-
-  existing=$(jq -Sc '.mcpServers.foreman // empty' "$file" 2>/dev/null)
-  [ -n "$existing" ] || return 0
-  if [ "$existing" != "$(printf '%s' "$ours" | jq -Sc .)" ]; then
-    $quiet || printf 'omp MCP: leaving customised foreman entry in %s untouched (found: %s)\n' "$file" "$existing"
-    return 0
-  fi
-
-  # Same temp-then-rename discipline the old writer used: a config this script
-  # does not own must never be left truncated by an interrupted write.
-  tmp="$file.tmp.$$"
-  if ! jq 'del(.mcpServers.foreman)' "$file" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ] \
-    || ! mv "$tmp" "$file" 2>/dev/null; then
-    rm -f "$tmp"
-    printf 'foreman-link: warning: could not rewrite %s; remove .mcpServers.foreman by hand to stop a second bus per omp session\n' \
-      "$file" >&2
-    return 0
-  fi
-  $quiet || printf 'omp MCP: removed the old user-level foreman entry from %s; the bus now comes from the plugin manifest — restart existing omp sessions to drop their extra sidecar\n' \
-    "$file"
-}
-
-unregister_stale_mcp
 
 case ":${PATH-}:" in
   *":$target_dir:"*) ;;
