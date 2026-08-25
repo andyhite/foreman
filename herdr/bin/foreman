@@ -569,7 +569,14 @@ cmd_boss() {
   # pointing at a handle nobody answers to any more: the live agent name is the
   # source of truth, so their records follow it.
   [ -z "$current" ] || rebind_boss "$current" "$name"
-  note "foreman: claimed boss handle '$name'; workers spawned from this pane report to it"
+  # Pointing at the skill here for the same reason the worker's protocol block
+  # does: a boss that has not read it invents a delivery mechanism. 01a03aa0
+  # polled omp's own `hub wait`/`hub inbox` — which carry no foreman traffic at
+  # all — and reported delivery as broken while the report was still in flight.
+  # This is the first foreman call any boss makes, so it is the one place a
+  # pointer is certain to be read before anything is dispatched.
+  note "foreman: claimed boss handle '$name'; workers spawned from this pane report to it
+  read skill://foreman-boss first — it covers how reports and questions arrive"
   printf '%s\n' "$name"
 }
 
