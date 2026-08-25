@@ -87,9 +87,9 @@ cover.
 reminder to stay in the worktree, that other workers exist, or a nudge to
 delegate independent work. `foreman` appends its own protocol block covering
 all of that — including that `foreman_ls`/`foreman ls` lists the other workers
-and `foreman_dm`/`foreman dm` reaches one directly over a declared shared seam
-(never for status updates), and that substantial independent slices of the
-worker's own task should go to its own subagents instead of running
+and `foreman_msg`/`foreman msg` reaches one directly over a declared shared
+seam (never for status updates), and that substantial independent slices of
+the worker's own task should go to its own subagents instead of running
 serially. Repeating any of it wastes context and invites contradictions.
 
 **Do not include** a summary of this conversation either. Include the
@@ -126,14 +126,15 @@ stamped with the wrong boss sends its questions to the wrong pane.
 Then, once every independent slice is out, keep working. Reports and
 questions arrive on their own, tagged `[foreman:<handle>]`, as each worker
 settles — no blocking wait required. Answer any of them with
-`foreman_send({ handle, text: <answer>, raw: true })` — `raw: true` sends the
-answer alone; the default re-appends foreman's protocol block, which fits a
-fresh brief and nothing else. Raw answers are steering rather than new
-tracked dispatches, so they do not make the eventual report for the worker's
-original task look stale. Call `foreman_join({})` only if you have genuinely
-nothing else to do and want to sit until the next one lands — it is a
-fallback, not the primary way results reach you. Once everyone has reported,
-review the branches and tell the user what landed where.
+`foreman_msg({ handle, text: <answer> })` — untracked text that queues
+behind the worker's current turn and lands at its next boundary, same as a
+task; the default `foreman_send` re-appends foreman's protocol block, which
+fits a fresh brief and nothing else. Untracked answers do not make the
+eventual report for the worker's original task look stale, since they never
+touch its dispatch counter. Call `foreman_join({})` only if you have
+genuinely nothing else to do and want to sit until the next one lands — it
+is a fallback, not the primary way results reach you. Once everyone has
+reported, review the branches and tell the user what landed where.
 
 ## Sizing a slice
 

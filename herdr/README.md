@@ -31,16 +31,14 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | --- | --- |
 | `foreman boss [name] [--steal]` | Claim the boss handle for this pane. |
 | `foreman spawn <branch> [opts]` | Create a worktree, start an agent, and dispatch work. Options: `--base`, `--repo`, `--path`, `--handle`, `--tier`, `--model`, `--skill`, `--role`, `--layout`, `--task`, `--task-file`, `--no-dispatch`, `--replace`. |
-| `foreman send [--raw] <handle> <text>` | Dispatch a tracked task and return; `--raw` steers the current turn. |
-| `foreman ask [--timeout <seconds>] <handle> <text>` | Send, then block for the response. Rejects `--raw` because there is no report to wait for. For ask the flag comes first. |
+| `foreman send <handle> <text>` | Dispatch a tracked task and return; queues behind the worker's current turn. |
+| `foreman msg <handle\|all> <text>` | Untracked text to one member by handle or every live worker in this repository; queues the same as `send`, prefixed `[foreman msg from <sender>]`, and never bumps the dispatch counter. |
 | `foreman join [handle...] [--timeout <seconds>] [--once]` | Collect this repository's workers and print each report as it settles. `--timeout` overrides `FOREMAN_WAIT_TIMEOUT_MS` for this call. `--once` runs a single non-blocking poll pass instead of the blocking deadline loop. |
 | `foreman ls [--all-repos]` | List workers and their states. Includes a Q column: `?` marks a worker whose filed question has not been collected by a join, `-` everyone else. |
 | `foreman dashboard [--all-repos]` | Interactive counterpart to `foreman ls`; also aliased `dash`. |
 | `foreman read <handle> [-n N]` | Read a worker's terminal. |
 | `foreman reap <handle>...\|--all` | Remove worktrees and forget workers. `--all` covers this repository, `--all-repos` every repository, `--force` overrides the refusal to remove a worktree with uncommitted changes, `--forget` drops the record and leaves the worktree alone. A report that was filed but never collected is printed to stderr first: the record being removed is where it lived. |
-| `foreman broadcast <text>` | Untracked raw steering to every live worker in this repository; leaves the dispatch counter alone, so it never produces a report. |
-| `foreman dm <handle> <text>` | Untracked raw steering to any foreman member (boss or worker) by handle; same no-report contract as `broadcast`. |
-| `foreman keys <handle> <key>...` | Send terminal keys straight through to `herdr agent send-keys`; how you clear a worker stuck on an approval prompt. |
+| `foreman keys <handle> <key>...` | Send terminal keys straight through to `herdr agent send-keys`; how you clear a worker stuck on an approval prompt — the only channel that reaches one immediately instead of queuing. |
 | `foreman report [-f file\|text]` | From a worker, file its report. |
 | `foreman reply <text>` | From a worker, file a question and interrupt the boss. |
 | `foreman whoami` | Print this pane's handle. |
@@ -108,8 +106,9 @@ collected before anyone had been handed it.
 
 `foreman join` is for two things now: an explicit re-read of one worker
 (`foreman join <handle>` always reprints, delivered or not), or a deliberate
-blocking wait (`foreman join` with no handle, or `foreman ask`) when there is
-genuinely nothing else to do. A blocking join returns early on any question
+blocking wait (`foreman join` with no handle, or `foreman join <handle>`
+right after a `foreman send` to that handle) when there is genuinely
+nothing else to do. A blocking join returns early on any question
 that is still unanswered, delivered or not, since a pushed prompt cannot reach
 a boss that is itself stuck inside that same blocking call — and it hands over
 the question body, because `question.seen` records that pickup handed the text
@@ -133,28 +132,42 @@ printed anything.
 
 ### Timeout control
 
-`foreman join [--timeout <seconds>]` and `foreman ask [--timeout <seconds>]` (flag first for ask) override `FOREMAN_WAIT_TIMEOUT_MS` for a single call. Non-numeric values cause an error with usage displayed.
+`foreman join [--timeout <seconds>]` overrides `FOREMAN_WAIT_TIMEOUT_MS` for
+a single call — the only timeout knob now that a blocking dispatch is
+`foreman send <handle> <text>` followed by `foreman join <handle> [--timeout
+<seconds>]` rather than one combined verb. Non-numeric values cause an error
+with usage displayed.
 
-### `--raw`
+### `msg` versus `send`
 
-Without `--raw`, `send` and `ask` both append foreman's protocol block — right for a task,
-wrong for a one-line answer. Re-appending "do not open a PR unless the task
-above says to" over an answer makes *that answer* the task above, which is how
-a worker talks itself out of the PR its original brief asked for. `--raw` is
-also the only way to put a bare keystroke into a worker blocked on an approval
-prompt.
+`send` always appends foreman's protocol block — right for a task, wrong for
+a one-line answer. Re-appending "do not open a PR unless the task above says
+to" over an answer makes *that answer* the task above, which is how a worker
+talks itself out of the PR its original brief asked for. `msg` sends the
+text alone, prefixed `[foreman msg from <sender>]`, which is what a reply, a
+peer coordination note, or a wave-wide notice to `all` actually needs.
 
-Raw text is steering, not a new tracked dispatch. It does not bump the dispatch
-counter or make the worker's eventual report for its original task look stale,
-and it does not wait for an agent lifecycle transition — a keystroke into a
-blocked approval UI may leave the agent blocked, and an answer queued behind a
-working turn has no transition of its own yet.
+Both queue: `msg` is untracked, not a lower-latency channel. `h agent
+prompt`, what the fallback delivery for both uses, lands at the target's
+next turn boundary, never mid-turn — an answer queued behind a working turn
+simply waits there, the same as a task would. `foreman keys` is the one
+command that reaches a worker immediately, because terminal keys bypass the
+input queue rather than joining it; it is the only way to put a keystroke
+into a worker blocked on an approval prompt.
 
-A *re*-dispatch is accepted only from `idle` or `done`. Foreman refuses one while
-the worker is `working` or `blocked`: herdr exposes no turn id, so if dispatch
-2 were queued while dispatch 1 was running, dispatch 1's eventual report would
-read the now-current counter and label itself as dispatch 2. Use `--raw` to
-steer the current turn, or collect it before assigning another task.
+`msg` does not bump the dispatch counter or make the worker's eventual
+report for its original task look stale, and — when the target has a filed
+question — it stamps the same acknowledgement a `join` would have on
+collection, so answering a question over `msg` still clears the `?` in
+`foreman ls`.
+
+A *re*-dispatch with `send` is accepted only from `idle` or `done`. Foreman
+refuses one while the worker is `working` or `blocked`: herdr exposes no
+turn id, so if dispatch 2 were queued while dispatch 1 was running, dispatch
+1's eventual report would read the now-current counter and label itself as
+dispatch 2. `msg` has no such gate — it never touches the counter — so it is
+what reaches a worker mid-turn; use an ordinary `send` for follow-up work
+once that turn actually settles.
 
 A worker's first dispatch is exempt, because there is no earlier report to
 mislabel. A freshly started worker may still be initializing or sitting on a
@@ -211,7 +224,7 @@ defaults to `off`, so the log is the half that is always written.
 | `l` | view this dashboard's own operation log |
 | `?` | view this keymap |
 | `enter` | focus the worker's agent and close the dashboard |
-| `s` / `S` | dispatch a task (`foreman send`) / steer the current turn (`foreman send --raw`) |
+| `s` / `S` | dispatch a task (`foreman send`) / send an untracked note (`foreman msg`) |
 | `a` | answer a pending question |
 | `n` | spawn a new worker (`foreman spawn`, in the background) |
 | `x` / `X` | reap the worker (`foreman reap`) / reap and discard uncommitted work (`foreman reap --force`) |
@@ -237,7 +250,7 @@ session-modal, so a focus issued while it is still open lands underneath it;
 the dashboard closes first and issues the focus from a detached child a beat
 later, once the modal is actually gone.
 
-Answering a question with `a` is a raw send plus the acknowledgement `foreman
+Answering a question with `a` is a `foreman msg` plus the acknowledgement `foreman
 join` would have written on collection — without it the question would stay
 pending forever, since nothing else records that it was seen. `n` runs `foreman
 spawn` detached rather than inline, because spawn blocks for as long as an
@@ -260,7 +273,7 @@ record with `foreman reap <handle> [--forget]`.
 | `FOREMAN_STATE` | `${XDG_STATE_HOME:-$HOME/.local/state}/foreman` | Directory holding foreman's machine-local worker metadata. |
 | `FOREMAN_SPAWN_TIMEOUT_MS` | `120000` | Maximum milliseconds to wait for a fresh worker's named, input-ready startup; herdr clamps it to 300000. |
 | `FOREMAN_AGENT_TIER` | unset | Worker model tier (`standard`\|`deep`) for new workers unless `foreman spawn --tier` overrides it; empty means omp's own default. An explicit `--model` beats an env-derived tier. |
-| `FOREMAN_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `foreman ask` or `foreman join`. |
+| `FOREMAN_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `foreman join`. |
 | `FOREMAN_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
 | `FOREMAN_JOIN_POLL_MS` | `2000` | How often `foreman join` re-reads the workers it is watching. |
 | `FOREMAN_ASIDE_POLL_MS` | `60000` | How often the omp extension's own sweeper (`foreman join --once`) runs, to catch anomalies a push cannot: a worker that ended its turn without reporting, a dead worker, or an undelivered push. |

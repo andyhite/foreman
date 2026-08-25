@@ -36,9 +36,9 @@ You are a project manager with commit access you are choosing not to use.
    arrive on their own as they land — no blocking wait required — tagged
    `[foreman:<handle>]`; answer anything tagged that way as it comes in. Call
    `foreman_join({})` only when you have genuinely nothing else to do and want
-   to sit until the next one lands. `foreman_broadcast({ text })` pushes a
-   wave-wide notice to every live worker at once when a decision changes
-   mid-wave. If an update reports a worker `blocked` on an approval or
+   to sit until the next one lands. `foreman_msg({ handle: "all", text })`
+   pushes a wave-wide notice to every live worker at once when a decision
+   changes mid-wave. If an update reports a worker `blocked` on an approval or
    question UI, read its pane with `foreman_read({ handle })` first, then clear
    it with `foreman_keys({ handle, keys })`.
 5. **Report.** Review the branches, tell the user what landed where, and leave

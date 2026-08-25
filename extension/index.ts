@@ -114,13 +114,13 @@ export type PickupResult =
   | { kind: "error" };
 
 /**
- * The one body argument `foreman_send` and `foreman_ask` carry, under either
+ * The one body argument `foreman_send` and `foreman_msg` carry, under either
  * name an agent is likely to reach for.
  *
  * `foreman_spawn` calls a brief `task`, so an agent dispatching a follow-up
  * writes `task` as well — two shipped runs did, and both burned a call on
  * `text must be a string (was missing)` before retrying. Neither spelling is
- * wrong on its own: `raw: true` steering really is text, and a tracked brief
+ * wrong on its own: an untracked message really is text, and a tracked brief
  * really is a task. Accepting both is cheaper than a schema that is right
  * about English and wrong about every first call, and this is already the
  * shape `foreman_report` uses for its own two-of-one argument.
@@ -140,48 +140,73 @@ export function taskText(
 /**
  * How a collected `pickup` payload should reach the agent it is for.
  *
- * The split is by direction, not by content. Anything *inbound to a boss* — a
- * worker's report or its question — interrupts, because orchestrating those
- * workers is the boss's whole job and it is the one waiting. Anything
- * *outbound to a worker* — a tracked task — queues for its next turn, because
- * a worker interrupted mid-change is the case the CLI already refuses to
- * create (a re-dispatch is accepted only from `idle` or `done`).
+ * Interrupt means someone is blocked waiting on the receiver — that is a
+ * worker's `foreman reply` question and nothing else in the system. A
+ * report queues, and a tracked task queues: neither has anybody stalled on
+ * it, so neither is worth breaking a half-applied edit for.
  *
- * Measured, not assumed. One run delivered both kinds over this exact channel
- * with only the mode differing: the question steered and landed 1.65s after it
- * was filed, mid-turn; the report queued and landed 78.6s after it was filed,
- * after the boss's closing message. In those 78 seconds the boss spent twelve
- * tool calls hunting for it and ended up reading `report.md` off disk — the
- * failure that started all of this, reproduced by delivery mode alone.
+ * The CLI declares which applies. `foreman pickup`'s first line is
+ * `foreman-delivery: <priority> <kind>` — `<priority>` is `interrupt` or
+ * `queue`, `<kind>` is `question`, `report`, or `task` — and that line is
+ * stripped before the rest of the payload is used as delivery content.
+ * Classified there rather than here because delivery mode is presentation,
+ * which is this extension's half of the split, but *what happened* (a join
+ * sweep saw a question versus a plain report) is state the CLI already
+ * computed once; re-deriving it here by re-sniffing `foreman join`'s own
+ * `=== ` framing was a second, driftable copy of the same decision.
  *
- * Arriving mid-turn is not permission to abandon a half-applied edit, which is
- * why every steer carries its own handling protocol. Without it a steer reads
- * as "drop everything", and the boss loses the work it was in the middle of.
+ * Measured, not assumed, why the queued path still needs care even though
+ * it no longer steers: one run delivered a report over this exact channel
+ * queued, and it landed 78.6s after it was filed, after the boss's closing
+ * message — in those 78 seconds the boss spent twelve tool calls hunting
+ * for it and ended up reading `report.md` off disk. `followUp` is
+ * documented (`omp://extensions.md`) as "queued to run after current run",
+ * so that 78.6s was a long turn, not a lost message; the fix is a boss that
+ * knows a report is coming — via `foreman_join`, not polling for one — and
+ * not a rule that makes every report interrupt.
  *
- * Classified here rather than by a `pickup` exit code because delivery mode is
- * presentation, which is this extension's half of the split — the CLI owns
- * state. `=== ` is `foreman join`'s own framing, on every report and question
- * and on nothing else, so its absence is what identifies a task. A sweep can
- * return several workers at once, so a question anywhere in the payload picks
- * the question preamble: it names the only part that blocks somebody.
+ * Missing or unparseable header defaults to `queue`/`Foreman Task` with the
+ * text passed through untouched, since queue is the delivery that cannot
+ * itself become the destructive case (an errant interrupt) if the CLI's
+ * contract ever drifts out from under this parser.
  */
 export function deliveryFor(text: string): {
   deliverAs: "steer" | "followUp";
   customType: string;
   content: string;
 } {
-  if (!/^=== /m.test(text)) {
+  const match = /^foreman-delivery: (interrupt|queue) (question|report|task)\n?/.exec(text);
+  if (!match) {
     return { deliverAs: "followUp", customType: "Foreman Task", content: text };
   }
+  const [header, priority, kind] = match;
+  const body = text.slice(header.length);
+  if (kind === "task") {
+    return { deliverAs: "followUp", customType: "Foreman Task", content: body };
+  }
+  const preamble =
+    kind === "question"
+      ? "A worker is blocked and waiting on your answer."
+      : "A worker you dispatched has finished and filed its report.";
+  if (priority === "queue") {
+    // A queued delivery lands at the next turn boundary, where there is no
+    // half-applied edit for `absorb`'s "finish the step you are already on"
+    // to protect — carrying it here would be dead weight on every report.
+    return {
+      deliverAs: "followUp",
+      customType: kind === "question" ? "Foreman Question" : "Foreman Report",
+      content: `${preamble}\n\n${body}`,
+    };
+  }
+  // Interrupting mid-turn is not permission to abandon a half-applied edit,
+  // which is why the one interrupt case — a worker's blocking question —
+  // still carries this handling protocol.
   const absorb =
     "Add it to your todo list now and finish the step you are already on, then handle it from the todo — do not abandon a half-applied change to deal with this immediately.";
-  const question = /^=== .+ — QUESTION — /m.test(text);
   return {
     deliverAs: "steer",
-    customType: question ? "Foreman Question" : "Foreman Report",
-    content: question
-      ? `A worker is blocked and waiting on your answer.\n\n${absorb}\n\n${text}`
-      : `A worker you dispatched has finished and filed its report.\n\n${absorb}\n\n${text}`,
+    customType: kind === "question" ? "Foreman Question" : "Foreman Report",
+    content: `${preamble}\n\n${absorb}\n\n${body}`,
   };
 }
 
@@ -265,10 +290,10 @@ export default function foremanExtension(pi: ExtensionAPI) {
 
   /**
    * Runs `foreman <args>` to completion via `pi.exec` and returns both
-   * streams joined. Every tool except `foreman_join`/`foreman_ask` uses this:
-   * a non-zero exit is always a real failure here, so it throws with the
-   * subcommand and exit code — unless `allowNonZero` is set, for the one
-   * subcommand (`doctor`) whose non-zero exit is itself the useful result.
+   * streams joined. Every tool except `foreman_join` uses this: a non-zero
+   * exit is always a real failure here, so it throws with the subcommand
+   * and exit code — unless `allowNonZero` is set, for the one subcommand
+   * (`doctor`) whose non-zero exit is itself the useful result.
    */
   async function runForeman(
     args: string[],
@@ -307,7 +332,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
 
   /**
    * Runs `foreman <args>` with `Bun.spawn` so stdout can be forwarded through
-   * `onUpdate` as it arrives — `foreman join`/`foreman ask` print each worker's
+   * `onUpdate` as it arrives — `foreman join` prints each worker's
    * report the moment it settles rather than all at once at the end. Kills
    * the child on abort. Callers decide how to interpret `exitCode`.
    */
@@ -646,54 +671,28 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_send",
     label: "Foreman Send",
     description:
-      "Send a follow-up task to a worker, or (with raw: true) untracked raw steering text — the right way to answer a blocked worker or a foreman_reply question. Pass the body as task or text; either name works.",
+      "Send a tracked follow-up task to a worker — the right way to dispatch more work once it's idle or done. Pass the body as task or text; either name works.",
     parameters: z.object({
       handle: z.string(),
-      task: z.string().optional().describe("The body to send; interchangeable with text"),
-      text: z.string().optional().describe("The body to send; interchangeable with task"),
-      raw: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Send as untracked raw steering instead of a tracked follow-up dispatch"),
+      task: z.string().optional().describe("The task to send; interchangeable with text"),
+      text: z.string().optional().describe("The task to send; interchangeable with task"),
     }),
-    args: (params) => {
-      const args = ["send"];
-      if (params.raw) args.push("--raw");
-      args.push(params.handle, taskText(params, "foreman_send"));
-      return args;
-    },
-    details: (params) => ({ handle: params.handle, raw: !!params.raw }),
+    args: (params) => ["send", params.handle, taskText(params, "foreman_send")],
+    details: (params) => ({ handle: params.handle }),
   });
 
-  pi.registerTool({
-    name: "foreman_ask",
-    label: "Foreman Ask",
+  registerForemanTool({
+    name: "foreman_msg",
+    label: "Foreman Msg",
     description:
-      "Dispatch a task to one worker and block until it settles. Use only for a genuine follow-up or a serial dependency; never to start a batch — use foreman_spawn + foreman_join for that. Pass the body as task or text; either name works.",
+      "Send an untracked message to one foreman member's handle, or the literal all for every live worker in this repo — the way to answer a worker's blocked question or push a wave-wide notice. Not dispatch: no counter bump, no report expected. Lands at the target's next turn boundary. Pass the body as task or text; either name works.",
     parameters: z.object({
-      handle: z.string(),
-      task: z.string().optional().describe("The task to dispatch; interchangeable with text"),
-      text: z.string().optional().describe("The task to dispatch; interchangeable with task"),
-      timeout_s: z.number().int().positive().optional().describe("Override the wait timeout, in seconds"),
+      target: z.string().describe("A foreman member's handle, or the literal 'all' for every live worker"),
+      task: z.string().optional().describe("The message to send; interchangeable with text"),
+      text: z.string().optional().describe("The message to send; interchangeable with task"),
     }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      const args = ["ask"];
-      if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
-      args.push(params.handle, taskText(params, "foreman_ask"));
-      const { stdout, stderr, exitCode } = await runForemanStreaming(args, ctx, signal, onUpdate);
-      if (exitCode !== 0) {
-        // cmd_ask runs cmd_send BEFORE the join wait (herdr/bin/foreman:1412-1413),
-        // so a killed/silent child (empty stdout and stderr) would otherwise
-        // throw a blank error for work that already dispatched and is running.
-        throw new Error(stderr || stdout || `foreman ask exited ${exitCode}: (no output)`);
-      }
-      return {
-        content: [{ type: "text", text: stdout }],
-        details: { handle: params.handle, exitCode },
-      };
-    },
+    args: (params) => ["msg", params.target, taskText(params, "foreman_msg")],
+    details: (params) => ({ target: params.target }),
   });
 
   pi.registerTool({
@@ -748,7 +747,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_read",
     label: "Foreman Read",
     description:
-      "Show the visible terminal of a worker pane. A debugging aid, not a durable way to collect a result — use foreman_join/foreman_ask for that.",
+      "Show the visible terminal of a worker pane. A debugging aid, not a durable way to collect a result — use foreman_join for that.",
     parameters: z.object({
       handle: z.string(),
       lines: z.number().int().positive().optional().describe("Number of trailing lines to show"),
@@ -784,29 +783,6 @@ export default function foremanExtension(pi: ExtensionAPI) {
       return args;
     },
     details: (params) => ({ handles: params.handles ?? [], all: !!params.all }),
-  });
-
-  registerForemanTool({
-    name: "foreman_broadcast",
-    label: "Foreman Broadcast",
-    description:
-      "Send untracked raw steering text to every live worker in this repo. Use for wave-wide notices, not for a task.",
-    parameters: z.object({
-      text: z.string(),
-    }),
-    args: (params) => ["broadcast", params.text],
-  });
-
-  registerForemanTool({
-    name: "foreman_dm",
-    label: "Foreman DM",
-    description: "Send untracked raw steering text directly to one other foreman member.",
-    parameters: z.object({
-      handle: z.string(),
-      text: z.string(),
-    }),
-    args: (params) => ["dm", params.handle, params.text],
-    details: (params) => ({ handle: params.handle }),
   });
 
   registerForemanTool({

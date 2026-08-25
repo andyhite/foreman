@@ -713,7 +713,7 @@ dash_op_send() {
     return 0
   fi
   if [ "$raw" = 1 ]; then
-    dash_run "steer $handle" "$FOREMAN_BIN" send --raw "$handle" "$text" || true
+    dash_run "message $handle" "$FOREMAN_BIN" msg "$handle" "$text" || true
   else
     dash_run "dispatch to $handle" "$FOREMAN_BIN" send "$handle" "$text" || true
   fi
@@ -733,7 +733,7 @@ dash_op_answer() {
     DASH_MESSAGE="cancelled"
     return 0
   fi
-  dash_run "answer $handle" "$FOREMAN_BIN" send --raw "$handle" "$text" || return 0
+  dash_run "answer $handle" "$FOREMAN_BIN" msg "$handle" "$text" || return 0
 }
 
 dash_op_spawn() {
@@ -793,7 +793,7 @@ DASH_HELP='foreman dashboard
   Operate
     enter           focus the worker agent, and close the dashboard
     s               dispatch a task           (foreman send)
-    S               steer the current turn    (foreman send --raw)
+    S               message the worker        (foreman msg)
     a               answer a pending question, and clear it
     n               spawn a new worker        (foreman spawn, in the background)
     x               reap the worker           (foreman reap)

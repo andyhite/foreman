@@ -26,10 +26,9 @@ should not need it here; every dispatched task already carries its own
 protocol block.
 
 Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
-`foreman_send`, `foreman_ask`, `foreman_join`, `foreman_ls`, `foreman_read`,
-`foreman_reap`, `foreman_broadcast`, `foreman_dm`, `foreman_keys`,
-`foreman_doctor`, `foreman_roles`. Call the tool, not the shell command it
-wraps — the reason is not merely style.
+`foreman_send`, `foreman_msg`, `foreman_join`, `foreman_ls`, `foreman_read`,
+`foreman_reap`, `foreman_keys`, `foreman_doctor`, `foreman_roles`. Call the
+tool, not the shell command it wraps — the reason is not merely style.
 
 Delivery is a real push, not a poll, and it splits by direction. **Inbound
 interrupts**: a worker's `foreman_report` or `foreman_reply` cuts into your
@@ -48,16 +47,29 @@ interruption](#handling-an-interruption).
 
 If a signal can't be delivered, everything falls back to an interrupting `herdr
 agent prompt`, so nothing is silently lost; a task just arrives more rudely
-than it should. Steering is the deliberate outbound exception:
-`foreman_send(raw: true)`, `foreman_broadcast`, `foreman_dm`, and `foreman_keys`
-interrupt a worker's *current* turn on purpose, because unblocking a stuck
-approval prompt only works if it cuts the queue. See
-[README.md](../../README.md#install) for how the delivery channel is wired up.
+than it should. `foreman_msg` is the deliberate untracked exception, but it
+is not the interrupting one: it still queues behind the target's current
+turn, the same as a tracked task — `h agent prompt`, what both use
+underneath, lands at a turn boundary, never mid-turn. `foreman_keys` is the
+one exception that reaches a worker immediately, because terminal keys
+bypass the agent's input queue entirely rather than joining it; that is the
+only way to clear a worker parked on an approval prompt a queued message
+would sit behind forever.
+
+Interrupt is a narrower word than it looks: it means someone is blocked
+waiting on you, and in this system that is only ever a worker's
+`foreman_reply`. A worker's report and anything a boss sends — task or
+`foreman_msg` — queue and surface at the receiver's next turn boundary, not
+mid-turn. So a boss must never poll for a report: one shipped run burned
+twelve tool calls hunting a report that was already queued behind its own
+long turn. `foreman_join` is the correct way to wait — see
+[Collecting](#collecting). See [README.md](../../README.md#install) for how
+the delivery channel is wired up.
 
 Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
 takes the whole brief as its `task` string and writes the temp file and
 passes `--task-file` itself, so no shell quoting can mangle a multi-line
-brief; `foreman_join` and `foreman_ask` stream each report as its worker
+brief; `foreman_join` streams each report as its worker
 settles rather than returning one blob at the end of the wave; and the
 wrappers return stderr as well as stdout, so a `note()` diagnostic —
 including the first-dispatch pickup warning — is not silently dropped the
@@ -216,10 +228,11 @@ genuinely want to block, block with `foreman_join`.
 **A deliberate blocking wait.** Sometimes waiting is still the right call: a
 genuine serial dependency (the next step needs one worker's result and
 there is nothing else to do until it lands), or you have simply run out of
-other work. `foreman_ask(handle, task)` dispatches and blocks for that one
-worker; a bare `foreman_join()` blocks for whatever in the wave is still
-outstanding — its own tool description says as much. Never reach for either
-to *start* a batch — that serializes the thing you came here to parallelize.
+other work. Dispatch with `foreman_send(handle, task)`, then block for that
+one worker with `foreman_join(handles: [handle])`; a bare `foreman_join()`
+blocks for whatever in the wave is still outstanding — its own tool
+description says as much. Never reach for either to *start* a batch — that
+serializes the thing you came here to parallelize.
 
 What you must not do is manufacture the wait yourself. One shipped run reached
 for `sleep 15`, three times over. That works by accident and wastes every
@@ -270,9 +283,9 @@ a repo left half-edited costs you the rest of the session.
 
 The push is the primary path — most of the time it just arrives. The filed copy
 on disk covers what a push cannot: nothing lands *inside* a running tool call,
-so a boss sitting in a blocking `foreman_join` or `foreman_ask` will not see it
-until that call returns, which by default is an hour away. A blocking join
-polls the filed question instead, and breaks out on any question that is still
+so a boss sitting in a blocking `foreman_join` will not see it until that call
+returns, which by default is an hour away. A blocking join polls the filed
+question instead, and breaks out on any question that is still
 unanswered — delivered to you or not. That is what stops it from deadlocking
 behind a worker waiting on exactly the answer you are blocking instead of
 giving. The background sweep is the one reader that skips a delivered question:
@@ -282,60 +295,67 @@ Answer from the todo and get back to your own work; the worker resumes and its
 report arrives the same way the question did:
 
 ```
-foreman_send(handle: "feat-412-webhook-retry", text: "Use the existing RetryPolicy in core/retry.ts; don't add a new one.", raw: true)
+foreman_msg(handle: "feat-412-webhook-retry", text: "Use the existing RetryPolicy in core/retry.ts; don't add a new one.")
 ```
 
 Either name carries the body: `task` and `text` are interchangeable on both
-`foreman_send` and `foreman_ask`. Two shipped runs reached for `task` on a
+`foreman_send` and `foreman_msg`. Two shipped runs reached for `task` on a
 follow-up because that is what `foreman_spawn` calls a brief, and burned a call
 on a schema error before retrying. Write whichever fits — a tracked brief reads
-as a task, a raw answer reads as text.
+as a task, an untracked answer reads as text.
 
-**Use `raw: true` for answers.** Without it `foreman_send` appends the whole
+**Use `foreman_msg` for answers.** `foreman_send` always appends the whole
 protocol block, which is right for a task and wrong for a reply: re-stating
 "do not open a PR unless the task above says to" over a one-line answer makes
 *that answer* the task above, and the worker talks itself out of the PR its
 brief asked for.
 
-Raw text is steering, not a new tracked dispatch. It does not bump the dispatch
-counter or make the worker's eventual report for its original task look stale.
-That also means it does not wait for a lifecycle transition: an answer queued
-behind a working turn has no transition of its own until that turn yields.
+`foreman_msg` is untracked, not a new dispatch: it does not bump the dispatch
+counter or make the worker's eventual report for its original task look
+stale. It also does not interrupt — like a tracked task, it queues behind the
+worker's current turn and lands at the next boundary, so it does not wait for
+a lifecycle transition of its own either way.
 
-A *follow-up* tracked task is accepted only from `idle` or `done`. Foreman refuses
-one while the worker is `working` or `blocked`, because herdr exposes no turn
-id: queueing dispatch 2 behind dispatch 1 would let dispatch 1's eventual
-report label itself as dispatch 2. Use `raw: true` to steer the current turn; use
-an ordinary tracked `foreman_send` for follow-up work after that turn settles. A
-worker's first dispatch — the one `foreman_spawn` makes — is exempt, since there
-is no earlier report to mislabel.
+A *follow-up* tracked task is accepted only from `idle` or `done`. Foreman
+refuses one while the worker is `working` or `blocked`, because herdr exposes
+no turn id: queueing dispatch 2 behind dispatch 1 would let dispatch 1's
+eventual report label itself as dispatch 2. `foreman_msg` has no such
+restriction — it never touches the dispatch counter — so it is what reaches a
+worker mid-turn, queued for the next boundary; reserve an ordinary tracked
+`foreman_send` for follow-up work once that turn actually settles. A worker's
+first dispatch — the one `foreman_spawn` makes — is exempt from the
+idle/done gate, since there is no earlier report to mislabel.
 
 If `foreman_join` reports a worker as `blocked`, that is herdr seeing an approval
 or question UI in the pane, not a `foreman_reply`. Read the pane with
-`foreman_read` and answer it with `foreman_send(raw: true)` — a keystroke into
-an approval prompt must not carry a protocol block behind it.
+`foreman_read` and clear it with `foreman_keys` — a keystroke into an
+approval prompt is the only thing that reaches it immediately; queued text
+would sit behind it forever.
 
 ## Peer messaging
 
-Three more tools send raw, untracked text — like `foreman_send(raw: true)`, none
-of them bump a worker's dispatch counter or touch its report freshness. This
-is the boss-initiated side; a worker reaching a peer or you the same
-way is covered by `skill://foreman-worker`:
+`foreman_msg` is untracked text to any member — boss or worker — by handle,
+or to `all` for every live worker in this repo at once; neither form bumps a
+worker's dispatch counter or touches its report freshness. This is the
+boss-initiated side; a worker reaching a peer or you the same way is covered
+by `skill://foreman-worker`:
 
 ```
-foreman_broadcast(text: "Contract changed: retries now live in core/retry.ts.")
-foreman_dm(handle: "feat-412-webhook-retry", text: "Are you touching core/retry.ts? I need it untouched for fix-418.")
+foreman_msg(handle: "all", text: "Contract changed: retries now live in core/retry.ts.")
+foreman_msg(handle: "feat-412-webhook-retry", text: "Are you touching core/retry.ts? I need it untouched for fix-418.")
 foreman_keys(handle: "feat-412-webhook-retry", keys: ["down", "down", "enter"])
 ```
 
-`foreman_broadcast` reaches every live worker in this repo in one call — a
-wave-wide notice cheaper than repeating `foreman_send(raw: true)` per handle.
-`foreman_dm` is peer to peer: any member — boss or worker — can message any
-other by handle, for coordinating over a shared seam rather than for status
-updates. `foreman_keys` passes terminal keys straight through to `herdr agent
-send-keys`, for unblocking a worker parked on an approval or question UI that
-a line of text can't dismiss — read the pane with `foreman_read` first to see
-what it is waiting on.
+`foreman_msg` prefixes every message `[foreman msg from <sender>]` and, when
+the target has a filed question, records the same acknowledgement
+`foreman_join` would have written on collection — the removed peer-messaging
+verbs skipped that, which is why answering a worker's question with one
+used to leave `foreman_ls` showing `?` forever. It reaches one peer directly for
+coordinating over a shared seam, or `all` for a wave-wide notice cheaper than
+repeating individual calls. `foreman_keys` passes terminal keys straight
+through to `herdr agent send-keys`, for unblocking a worker parked on an
+approval or question UI that queued text can't reach in time — read the pane
+with `foreman_read` first to see what it is waiting on.
 
 ## Finishing
 
@@ -385,16 +405,17 @@ way, the worker is joinable: `foreman_join` will settle it.
 **`blocked`** — An approval or question UI in the pane is waiting for input.
 `foreman_join` prints its last output and notes the blockage. Re-join the worker
 by name — `foreman_join(handles: ["<handle>"])` — after unblocking it with
-`foreman_send(raw: true)`; a bare join will not resurface it.
+`foreman_keys`; a bare join will not resurface it.
 
 **`gone`** — The agent process died. The report file, if it exists, survives
 and `foreman_join` prints it; the handle remains in `foreman_ls` until
 `foreman_reap` or `foreman_reap(forget: true)` releases it.
 
-`foreman_join(timeout_s)` and `foreman_ask(timeout_s)` override
-`FOREMAN_WAIT_TIMEOUT_MS` for one call. `foreman_ask` has no `raw` parameter:
-raw steering files no report to wait for. `foreman_ls` has a Q column — `?`
-marks a worker whose question has not been collected, `-` everyone else.
+`foreman_join(timeout_s)` overrides `FOREMAN_WAIT_TIMEOUT_MS` for one call —
+now the only timeout knob; block for one worker with `foreman_send` followed
+by `foreman_join(handles: [...])` instead.
+`foreman_ls` has a Q column — `?` marks a worker whose question has not been
+collected, `-` everyone else.
 `foreman_doctor()` checks environment sanity and reports a hard failure;
 `foreman version` prints the CLI version — the last of the four CLI-only
 operations (alongside `herdr plugin install`, `foreman init`, and `foreman
@@ -411,4 +432,5 @@ foreman dashboard
   local subagents; they are faster, cheaper, and have a direct message channel.
 - Read-only investigation that a local research subagent can do.
 - Work with a strict serial dependency chain. A foreman's value is concurrency; a
-  chain of one-at-a-time `foreman_ask` calls is a slow, expensive local-agent loop.
+  chain of one-at-a-time `foreman_send` + `foreman_join` round trips is a
+  slow, expensive local-agent loop.

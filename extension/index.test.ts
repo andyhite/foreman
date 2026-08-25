@@ -65,58 +65,57 @@ describe("loadCommandPrompts", () => {
 });
 
 describe("deliveryFor", () => {
-  const question = "\n=== smoke — QUESTION — branch test/bus-smoke\nShould I call it A or B?\n";
-  const report = "\n=== smoke (done) — branch test/bus-smoke\nforeman 0.6.0\n";
-  const task = "Rework the retry policy in core/retry.ts.\n\n-- foreman protocol --\n";
+  const question = "foreman-delivery: interrupt question\nShould I call it A or B?\n";
+  const report = "foreman-delivery: queue report\nforeman 0.6.0\n";
+  const task = "foreman-delivery: queue task\nRework the retry policy in core/retry.ts.\n\n-- foreman protocol --\n";
 
-  test("a report interrupts the boss, because the boss is the one waiting on it", () => {
-    // Measured on one live run over this same channel: queued, the report
-    // landed 78.6s after filing and after the boss's closing message, having
-    // sent it hunting through twelve tool calls to `report.md` on disk.
-    // Steered, its sibling question landed in 1.65s.
-    const { deliverAs, customType, content } = deliveryFor(report);
-    expect(deliverAs).toBe("steer");
-    expect(customType).toBe("Foreman Report");
-    expect(content).toContain("foreman 0.6.0");
-  });
-
-  test("a question interrupts, and says it is blocking somebody", () => {
+  test("interrupt question steers and says it is blocking somebody", () => {
+    // Interrupt means someone is blocked waiting on the receiver — that is
+    // a worker's question and nothing else, so this is the one case that
+    // still carries the absorb protocol.
     const { deliverAs, customType, content } = deliveryFor(question);
     expect(deliverAs).toBe("steer");
     expect(customType).toBe("Foreman Question");
     expect(content).toContain("Should I call it A or B?");
     expect(content).toContain("blocked and waiting");
+    expect(content).toContain("todo list");
   });
 
-  test("a task queues, because a worker interrupted mid-change is what the CLI refuses to create", () => {
+  test("queue report queues and drops the absorb sentence", () => {
+    // A queued delivery lands at a turn boundary, where there is no
+    // half-applied edit for `absorb` to protect — carrying it anyway would
+    // make every report read as an interruption nobody is waiting on.
+    const { deliverAs, customType, content } = deliveryFor(report);
+    expect(deliverAs).toBe("followUp");
+    expect(customType).toBe("Foreman Report");
+    expect(content).toContain("foreman 0.6.0");
+    expect(content).toContain("filed its report");
+    expect(content).not.toContain("todo list");
+  });
+
+  test("queue task queues untouched, because the CLI already classified it", () => {
     const { deliverAs, customType, content } = deliveryFor(task);
     expect(deliverAs).toBe("followUp");
     expect(customType).toBe("Foreman Task");
-    expect(content).toBe(task);
+    expect(content).toBe(task.slice(task.indexOf("\n") + 1));
   });
 
-  test("every interruption carries the protocol for absorbing it", () => {
-    // A bare steer reads as "drop everything", which loses a half-applied
-    // edit. Being interrupted is normal for a boss; finishing the current
-    // step first is what keeps it from being destructive.
-    for (const text of [report, question]) {
-      expect(deliveryFor(text).content).toContain("todo list");
-      expect(deliveryFor(text).content).toContain("finish the step you are already on");
+  test("the declared header is stripped from every payload, not just tasks", () => {
+    // Leaving the header in the delivered content would leak CLI-internal
+    // framing into what the receiving agent reads as the message body.
+    for (const text of [question, report, task]) {
+      expect(deliveryFor(text).content).not.toContain("foreman-delivery:");
     }
   });
 
-  test("a mixed sweep leads with the part that is blocking somebody", () => {
-    // One sweep can print several workers. The question is the only half with
-    // an agent stalled on it, so it names the interruption.
-    const mixed = deliveryFor(report + question);
-    expect(mixed.deliverAs).toBe("steer");
-    expect(mixed.customType).toBe("Foreman Question");
-  });
-
-  test("a task body that merely mentions a report header does not count as one", () => {
-    // The header has to start the line: `=== ` mid-sentence is prose.
-    const chatty = "Refactor so the output reads === smoke (done) — branch b\n";
-    expect(deliveryFor(chatty).deliverAs).toBe("followUp");
+  test("a missing or unparseable header defaults to the safe queue path, text untouched", () => {
+    // Queue is the delivery that cannot itself become the destructive case
+    // (an errant interrupt) if the CLI's header contract ever drifts.
+    const stray = "Rework the retry policy in core/retry.ts.\n";
+    const { deliverAs, customType, content } = deliveryFor(stray);
+    expect(deliverAs).toBe("followUp");
+    expect(customType).toBe("Foreman Task");
+    expect(content).toBe(stray);
   });
 });
 
@@ -128,7 +127,7 @@ describe("taskText", () => {
     expect(taskText({ task: "rework retries" }, "foreman_send")).toBe("rework retries");
   });
 
-  test("text is accepted, because raw steering really is text", () => {
+  test("text is accepted, because an untracked message really is text", () => {
     expect(taskText({ text: "B" }, "foreman_send")).toBe("B");
   });
 
@@ -139,8 +138,8 @@ describe("taskText", () => {
   });
 
   test("both names at once is refused rather than silently picking one", () => {
-    expect(() => taskText({ task: "a", text: "b" }, "foreman_ask")).toThrow(
-      "foreman_ask requires exactly one of task or text",
+    expect(() => taskText({ task: "a", text: "b" }, "foreman_msg")).toThrow(
+      "foreman_msg requires exactly one of task or text",
     );
   });
 

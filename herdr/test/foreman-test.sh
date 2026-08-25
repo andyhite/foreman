@@ -644,6 +644,32 @@ else
   printf '  skip  plugin prose cases (plugin tree not beside this checkout)\n'
 fi
 
+# ── removed-verb prose sweep ─────────────────────────────────────────────────
+#
+# `foreman ask`, `foreman broadcast`, `foreman dm`, and `send --raw` are gone
+# — `msg` replaced all three. A removed verb left in prose sends a future
+# agent (or this plugin's own skills) at a command that no longer exists;
+# swept across the CLI, the dashboard, both READMEs, every skill, and every
+# command prompt so the cutover cannot rot back in through a doc nobody
+# re-read.
+
+printf '\nremoved-verb prose sweep\n'
+if [ -n "$plugin_dir" ]; then
+  offenders=""
+  for f in "$plugin_dir/herdr/bin/foreman" "$plugin_dir/herdr/bin/foreman-dashboard" \
+           "$plugin_dir/README.md" "$plugin_dir/herdr/README.md" \
+           "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/command-prompts/*.md; do
+    [ -f "$f" ] || continue
+    if [ -n "$(sed -n -E '/foreman[[:space:]]+ask([^a-zA-Z_-]|$)|foreman[[:space:]]+broadcast|foreman[[:space:]]+dm([^a-zA-Z_-]|$)|send[[:space:]]+--raw/p' "$f")" ]; then
+      offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
+    fi
+  done
+  is 'no removed verb (ask/broadcast/dm/send --raw) survives in CLI, dashboard, README, or skill prose' \
+    "${offenders# }" ''
+else
+  printf '  skip  removed-verb prose sweep (plugin tree not beside this checkout)\n'
+fi
+
 # ── reap argument handling ───────────────────────────────────────────────────
 #
 # `cmd_reap` joins a handle onto $FOREMAN_STATE and `rm -rf`s it, and its handles
@@ -802,7 +828,7 @@ out=$(
     dispatch_to quiet 'a second tracked task' ) 2>&1
 )
 is 'a working worker refuses a REdispatch' "$?" '1'
-assert 'and explains the raw steering path' [ "${out#*foreman send --raw}" != "$out" ]
+assert 'and explains the msg steering path' [ "${out#*foreman msg}" != "$out" ]
 is 'and leaves the counter alone' "$(counter_read "$(dispatch_file quiet)")" '1'
 
 # Raw answers are steering: no protocol block, no new dispatch counter.
@@ -1058,28 +1084,9 @@ out=$( (cmd_send intruder 'hi') 2>&1 )
 rc=$?
 assert     'send fails for unregistered agent' [ "$rc" != 0 ]
 assert     'output contains not registered' [ "${out#*not a registered foreman worker}" != "$out" ]
-assert     'output suggests foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
+assert     'output suggests foreman msg' [ "${out#*foreman msg}" != "$out" ]
 assert_not 'no state dir created for handle' [ -d "$FOREMAN_STATE/intruder" ]
 unset -f agent_exists require_herdr
-
-# ── ask rejects --raw ────────────────────────────────────────────────────────────
-
-printf '\nask rejects --raw\n'
-export FOREMAN_STATE="$sandbox/state-ask-raw"
-require_herdr() { :; }
-
-out=$( (cmd_ask --raw intruder 'hi') 2>&1 )
-rc=$?
-assert 'ask --raw dies' [ "$rc" != 0 ]
-assert 'output mentions foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
-
-# cmd_send also honors --raw in the position right after the handle, so ask
-# must refuse it there too — not just in the leading position.
-out=$( (cmd_ask intruder --raw 'hi') 2>&1 )
-rc=$?
-assert 'ask <handle> --raw dies too' [ "$rc" != 0 ]
-assert 'trailing form also points at foreman send --raw' [ "${out#*foreman send --raw}" != "$out" ]
-unset -f require_herdr
 
 # ── spawn flag conflicts ─────────────────────────────────────────────────────────
 
@@ -1447,7 +1454,7 @@ assert 'reply push tags the question and its branch' \
 assert 'reply push carries the question text' \
   [ -n "$(grep -F 'which branch should I use?' "$push_text3")" ]
 assert 'reply push tells the boss how to answer' \
-  [ -n "$(grep -F "foreman send --raw $h3" "$push_text3")" ]
+  [ -n "$(grep -F "foreman msg $h3" "$push_text3")" ]
 is 'question.seq is filed'   "$(counter_read "$(question_seq_file "$h3")")" '1'
 is 'a delivered push stamps question.seen to match question.seq' \
   "$(counter_read "$(question_seen_file "$h3")")" \
@@ -1650,13 +1657,14 @@ assert 'and says the worker is waiting on the boss' \
   [ "${out3#*waiting on you}" != "$out3" ]
 unset -f herdr sleep_ms self_handle require_herdr scoped_key
 
-# ── send stamps question.answered ────────────────────────────────────────────
+# ── msg and send stamp question.answered ────────────────────────────────────
 #
-# `foreman send` — raw or tracked — is what unblocks a worker waiting on an
-# answer: it is the boss's response, whatever form it takes. Missing this
-# made question_open stay true forever even after the boss had clearly acted.
+# `foreman msg` (untracked) and `foreman send` (tracked) are what unblocks a
+# worker waiting on an answer: each is the boss's response, whatever form it
+# takes. Missing this made question_open stay true forever even after the
+# boss had clearly acted.
 
-printf '\nsend stamps question.answered\n'
+printf '\nmsg and send stamp question.answered\n'
 export FOREMAN_STATE="$sandbox/state-send-answers"
 h5=asker3
 mkdir -p "$(meta_dir "$h5")"
@@ -1664,18 +1672,19 @@ meta_set "$h5" "BOSS=boss5" "BRANCH=b" "DIR=/tmp/w5"
 counter_bump "$(question_seq_file "$h5")"
 require_herdr() { :; }
 agent_exists() { return 0; }
+self_handle() { printf 'boss5'; }
 
 agent_field() { printf 'idle'; }
 herdr() { printf '{"result":{}}'; }
-cmd_send --raw "$h5" 'use the existing retry policy' >/dev/null 2>&1
-is 'a raw send stamps question.answered to match question.seq' \
+cmd_msg "$h5" 'use the existing retry policy' >/dev/null 2>&1
+is 'msg stamps question.answered to match question.seq' \
   "$(counter_read "$(question_answered_file "$h5")")" \
   "$(counter_read "$(question_seq_file "$h5")")"
 assert_not 'question_open is now false' question_open "$h5"
 assert_not 'question_undelivered is false too' question_undelivered "$h5"
 
 # A second question filed after the answer, cleared by a tracked send instead
-# — re-tasking a worker is itself an answer, not just a raw steer.
+# — re-tasking a worker is itself an answer, not just an untracked msg.
 counter_bump "$(question_seq_file "$h5")"
 agent_field() { printf 'blocked'; }   # skips the settle-confirm loop, like the dispatch_to tests above
 herdr() { printf '{"id":"t","result":{}}'; }
@@ -1683,7 +1692,7 @@ cmd_send "$h5" 'move on to the next task' >/dev/null 2>&1
 is 'a tracked send also stamps question.answered' \
   "$(counter_read "$(question_answered_file "$h5")")" \
   "$(counter_read "$(question_seq_file "$h5")")"
-unset -f herdr agent_field agent_exists require_herdr
+unset -f herdr agent_field agent_exists require_herdr self_handle
 
 # ── question_undelivered / question_open truth table ────────────────────────
 #
@@ -1752,15 +1761,17 @@ assert 'ls header contains Q column' [ "${ls_out#* Q }" != "$ls_out" ]
 assert 'ls row shows ? for pending question' [ "${ls_out#*w2*\?}" != "$ls_out" ]
 unset -f agent_field require_herdr scoped_key
 
-# ── broadcast ─────────────────────────────────────────────────────────────────
+# ── msg ───────────────────────────────────────────────────────────────────────
 #
-# Raw steering to every live worker in the repo. It must never bump the
-# dispatch counter dispatch_to guards — a broadcast is not a tracked task, and
-# bumping it would make a worker's eventual `foreman report` for its real task
-# look like it answers the broadcast instead.
+# Untracked steering, unified: `msg <handle>` replaces `dm`, `msg all`
+# replaces `broadcast`, and `send --raw` is gone entirely — none of the three
+# was a distinct operation, so one verb with a target argument covers all of
+# it. Same no-report contract throughout: it must never bump the dispatch
+# counter dispatch_to guards, or a worker's eventual `foreman report` for its
+# real task would look like it answers the aside instead.
 
-printf '\nbroadcast\n'
-export FOREMAN_STATE="$sandbox/state-broadcast"
+printf '\nmsg all\n'
+export FOREMAN_STATE="$sandbox/state-msg-all"
 for w in w1 w2 me; do mkdir -p "$(meta_dir "$w")"; meta_set "$w" "REPO_KEY=repo1"; done
 herdr() {
   case "$*" in
@@ -1773,27 +1784,27 @@ require_herdr() { :; }
 scoped_key() { printf 'repo1'; }
 
 before=$(counter_read "$(dispatch_file w1)")
-out=$(cmd_broadcast 'checkpoint' 2>&1)
+out=$(cmd_msg all 'checkpoint' 2>&1)
 after=$(counter_read "$(dispatch_file w1)")
-is 'broadcast leaves the dispatch counter untouched' "$after" "$before"
-assert 'broadcast sends to the live worker' [ "${out#*sent: w1}" != "$out" ]
-assert_not 'broadcast skips its own sender handle' [ "${out#*sent: me}" != "$out" ]
-assert 'broadcast skips the dead worker' [ "${out#*skipped*w2}" != "$out" ]
+is 'msg all leaves the dispatch counter untouched' "$after" "$before"
+assert 'msg all sends to the live worker' [ "${out#*sent: w1}" != "$out" ]
+assert_not 'msg all skips its own sender handle' [ "${out#*sent: me}" != "$out" ]
+assert 'msg all skips the dead worker' [ "${out#*skipped*w2}" != "$out" ]
 
-out2=$( (FOREMAN_STATE="$sandbox/state-broadcast-empty" cmd_broadcast 'hi') 2>&1 )
+out2=$( (FOREMAN_STATE="$sandbox/state-msg-all-empty" cmd_msg all 'hi') 2>&1 )
 rc2=$?
-assert 'broadcast fails with no live workers in scope' [ "$rc2" != 0 ]
+assert 'msg all fails with no live workers in scope' [ "$rc2" != 0 ]
 assert 'and explains why' [ "${out2#*no live workers in this repo}" != "$out2" ]
 unset -f herdr self_handle require_herdr scoped_key
 
-# ── dm ────────────────────────────────────────────────────────────────────────
+# ── msg <handle> ─────────────────────────────────────────────────────────────
 #
-# Raw steering to one foreman member. Same untracked-dispatch contract as
-# broadcast; the target gate (registered worker or the boss handle) is the one
-# thing that differs from `foreman send --raw`, which only checks liveness.
+# Same untracked-dispatch contract as `msg all`; the target gate (registered
+# worker or a recognized boss handle) is the one thing that differs from
+# `foreman send`, which only checks liveness.
 
-printf '\ndm\n'
-export FOREMAN_STATE="$sandbox/state-dm"
+printf '\nmsg <handle>\n'
+export FOREMAN_STATE="$sandbox/state-msg-handle"
 mkdir -p "$(meta_dir w1)"; meta_set w1 "BOSS=me"
 self_handle() { printf 'me'; }
 require_herdr() { :; }
@@ -1801,18 +1812,76 @@ agent_exists() { case "$1" in w1|intruder) return 0 ;; *) return 1 ;; esac; }
 sent_text=""
 prompt_raw() { sent_text="$2"; }
 
-cmd_dm w1 'ping' >/dev/null 2>&1
-is 'dm carries the [foreman dm from <sender>] prefix' "$sent_text" '[foreman dm from me] ping'
+cmd_msg w1 'ping' >/dev/null 2>&1
+is 'msg carries the [foreman msg from <sender>] prefix' "$sent_text" '[foreman msg from me] ping'
 
-out=$( (cmd_dm intruder 'hi') 2>&1 )
+out=$( (cmd_msg intruder 'hi') 2>&1 )
 rc=$?
-assert 'dm rejects an unregistered, non-boss target' [ "$rc" != 0 ]
+assert 'msg rejects an unregistered, non-boss target' [ "$rc" != 0 ]
 assert 'and points at foreman ls' [ "${out#*foreman ls}" != "$out" ]
 
 before=$(counter_read "$(dispatch_file w1)")
-cmd_dm w1 'ping again' >/dev/null 2>&1
+cmd_msg w1 'ping again' >/dev/null 2>&1
 after=$(counter_read "$(dispatch_file w1)")
-is 'dm leaves the dispatch counter untouched' "$after" "$before"
+is 'msg leaves the dispatch counter untouched' "$after" "$before"
+unset -f self_handle require_herdr agent_exists prompt_raw
+
+# ── msg stamps question.answered ─────────────────────────────────────────────
+#
+# `broadcast` and `dm` called prompt_raw directly and never called
+# mark_question_answered, so answering a worker's question through `dm` left
+# its question state open and `foreman ls` stuck showing `?` forever. `msg`
+# must clear it in both the single-target and the all-workers form — and must
+# not mint state for a target that never had a meta file of its own.
+
+printf '\nmsg stamps question.answered\n'
+export FOREMAN_STATE="$sandbox/state-msg-answers"
+h_msg=asker-msg
+mkdir -p "$(meta_dir "$h_msg")"
+meta_set "$h_msg" "BOSS=me" "REPO_KEY=repo-msg"
+counter_bump "$(question_seq_file "$h_msg")"
+self_handle() { printf 'me'; }
+require_herdr() { :; }
+agent_exists() { return 0; }
+prompt_raw() { :; }
+
+cmd_msg "$h_msg" 'use the existing retry policy' >/dev/null 2>&1
+is 'msg <handle> stamps question.answered to match question.seq' \
+  "$(counter_read "$(question_answered_file "$h_msg")")" \
+  "$(counter_read "$(question_seq_file "$h_msg")")"
+unset -f self_handle require_herdr agent_exists prompt_raw
+
+export FOREMAN_STATE="$sandbox/state-msg-all-answers"
+h_all=asker-all
+mkdir -p "$(meta_dir "$h_all")"
+meta_set "$h_all" "REPO_KEY=repo-all"
+counter_bump "$(question_seq_file "$h_all")"
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"%s","agent_status":"idle"}]}}' "$h_all" ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+self_handle() { printf 'me'; }
+require_herdr() { :; }
+scoped_key() { printf 'repo-all'; }
+
+cmd_msg all 'checkpoint' >/dev/null 2>&1
+is 'msg all also stamps question.answered to match question.seq' \
+  "$(counter_read "$(question_answered_file "$h_all")")" \
+  "$(counter_read "$(question_seq_file "$h_all")")"
+unset -f herdr self_handle require_herdr scoped_key
+
+export FOREMAN_STATE="$sandbox/state-msg-no-meta"
+mkdir -p "$(meta_dir ghost-worker)"
+meta_set ghost-worker "BOSS=ghost-boss"
+self_handle() { printf 'me'; }
+require_herdr() { :; }
+agent_exists() { return 0; }
+prompt_raw() { :; }
+cmd_msg ghost-boss 'ping' >/dev/null 2>&1
+assert_not 'a target with no meta file mints no state directory' \
+  [ -d "$FOREMAN_STATE/ghost-boss" ]
 unset -f self_handle require_herdr agent_exists prompt_raw
 
 # ── keys ──────────────────────────────────────────────────────────────────────
@@ -1956,7 +2025,10 @@ self_handle() { printf '%s' "$bus_worker"; }
 printf 'ship the bus' >"$(task_file "$bus_worker")"
 counter_bump "$(dispatch_file "$bus_worker")"
 pickup_out=$(cmd_pickup); pickup_rc=$?
-is 'pickup prints a pending task' "$pickup_out" 'ship the bus'
+is 'pickup declares queue task priority first' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '1p')" 'foreman-delivery: queue task'
+is 'pickup prints a pending task' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '2,$p')" 'ship the bus'
 is 'and acks its dispatched generation' \
   "$(counter_read "$(task_token_file "$bus_worker")")" \
   "$(counter_read "$(dispatch_file "$bus_worker")")"
@@ -2001,7 +2073,10 @@ counter_bump "$(dispatch_file "$worker_pickup")"
 # Shadowed to prove it is never reached from a worker pane at all.
 cmd_join() { printf 'must not run\n'; return 0; }
 pickup_out=$(cmd_pickup)
-is 'a registered worker collects its own tracked task' "$pickup_out" 'a tracked task'
+is 'pickup declares queue task priority for a worker-pane task too' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '1p')" 'foreman-delivery: queue task'
+is 'a registered worker collects its own tracked task' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '2,$p')" 'a tracked task'
 # With that acked there is nothing left to collect, and a bare join refuses on a
 # worker pane with a `die` — exit 1. The extension reads that as a real pickup
 # error and parks its sweeper after five consecutive ones, so an idle worker
@@ -2010,6 +2085,39 @@ pickup_out=$(cmd_pickup); pickup_rc=$?
 is 'then returns 3 rather than the join refusal error' "$pickup_rc" '3'
 is 'and prints nothing on that tick' "$pickup_out" ''
 unset -f cmd_join
+
+# ── pickup delivery header ───────────────────────────────────────────────────
+#
+# The extension used to sniff `=== ` framing to guess delivery priority; a
+# reformat of print_question's own text, or of a task's, could silently flip
+# queue vs interrupt with no review signal. cmd_pickup now declares it
+# explicitly as its first line, so deliveryFor parses a field this side
+# actually decided rather than guessing from prose.
+
+printf '\npickup delivery header\n'
+export FOREMAN_STATE="$sandbox/state-pickup-header"
+header_worker=header-worker
+mkdir -p "$(meta_dir "$header_worker")"
+self_handle() { printf '%s' "$header_worker"; }
+require_herdr() { :; }
+
+# A question in the sweep wins the header: it is the only part naming someone
+# actually blocked waiting on this pane, so it must outrank a settled report
+# sitting alongside it in the very same tick.
+cmd_join() { printf '\n=== asker — QUESTION — branch b\n\nwhich way?\n\n=== settled — worker-worker\n\ndone\n'; return 0; }
+pickup_out=$(cmd_pickup)
+is 'a question in the sweep declares interrupt question' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '1p')" 'foreman-delivery: interrupt question'
+unset -f cmd_join
+
+# A sweep carrying only settled reports, no question, is a queue delivery —
+# nobody is blocked on it, so it must never interrupt the receiver's turn.
+cmd_join() { printf '\n=== settled — worker-worker\n\ndone\n'; return 0; }
+pickup_out=$(cmd_pickup)
+is 'a report-only sweep declares queue report' \
+  "$(printf '%s\n' "$pickup_out" | sed -n '1p')" 'foreman-delivery: queue report'
+unset -f cmd_join
+unset -f self_handle require_herdr
 
 # Nothing published: dispatch has to fall back to an interrupting prompt rather
 # than trust a bus that was never there.

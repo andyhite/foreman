@@ -23,9 +23,12 @@ are done, and ask a question only when you are genuinely blocked, never to
 check in.
 
 Inbound is the other way round. A task the boss dispatches waits for your next
-turn rather than cutting into a half-applied edit. The exception is steering —
-`foreman send --raw`, `foreman broadcast`, `foreman keys` — which interrupts you
-on purpose, and is how an answer to your question gets back fast.
+turn rather than cutting into a half-applied edit. So does `foreman msg` —
+it queues behind your current turn just like a task, because `h agent
+prompt`, what both use underneath, lands at a turn boundary, never mid-turn.
+`foreman keys` is the one exception: terminal keys bypass your input queue
+entirely, which is how an answer to a stuck approval prompt reaches you
+immediately when text queued behind it could not.
 
 ## Reporting
 
@@ -49,8 +52,8 @@ foreman_reply({ text: "<question>" })
 
 Fall back to `foreman reply "<question>"` on the CLI when the tools are not
 registered. The file half is what reaches a boss *inside* a blocking
-`foreman join`/`foreman ask`: a pushed message only lands between its tool
-calls, so the file is what makes that wait return early instead of running
+`foreman join`: a pushed message only lands between its tool calls, so the
+file is what makes that wait return early instead of running
 out its full timeout. Use it for a decision only the boss can make, not for
 progress updates — those belong in the eventual report.
 
@@ -58,21 +61,23 @@ progress updates — those belong in the eventual report.
 
 ```
 foreman_ls({})
-foreman_dm({ handle: "<handle>", text: "<text>" })
+foreman_msg({ handle: "<handle>", text: "<text>" })
 ```
 
-Fall back to `foreman ls` / `foreman dm <handle> "<text>"` on the CLI when
-the tools are not registered. `foreman_dm`/`foreman dm` reaches one peer
-directly — any member, worker or boss, can message any other by handle — for
-coordinating over a shared seam you both touch, not for status updates.
+Fall back to `foreman ls` / `foreman msg <handle> "<text>"` on the CLI when
+the tools are not registered. `foreman_msg`/`foreman msg` reaches one peer
+directly — any member, worker or boss, can message any other by handle, or
+address `all` for every live worker in the repo — for coordinating over a
+shared seam you both touch, not for status updates.
 
 Never run a bare `foreman join` from a worker: its scope is *your* siblings,
 not workers of your own, so it would collect reports your boss is waiting
 for.
 
-You may also be on the receiving end of `foreman send --raw` (a one-line steer
-from the boss that does not bump your dispatch counter or touch your
-report's freshness), `foreman broadcast` (a wave-wide notice), or `foreman keys`
+You may also be on the receiving end of `foreman msg` (an untracked note from
+the boss or a peer, prefixed `[foreman msg from <sender>]`, that does not
+bump your dispatch counter or touch your report's freshness — it queues
+behind whatever turn you are in, the same as a task) or `foreman keys`
 (terminal keys forwarded straight through, for unblocking an approval prompt
-your own text can't dismiss). None of these need a reply beyond acting on
-them.
+your own text can't dismiss because it never reaches the input queue). None
+of these need a reply beyond acting on them.

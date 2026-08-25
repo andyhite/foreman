@@ -33,7 +33,7 @@ FOREMAN_STATE="${FOREMAN_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/foreman}"
 # the agent's own boot; herdr caps its --timeout at 300000 and the value is
 # clamped to that.
 SPAWN_TIMEOUT_MS="${FOREMAN_SPAWN_TIMEOUT_MS:-120000}"
-# Bound on a single `foreman ask`/`foreman join`. Long by default: the whole point
+# Bound on a single `foreman join` wait. Long by default: the whole point
 # of a worker is that it does something substantial.
 WAIT_TIMEOUT_MS="${FOREMAN_WAIT_TIMEOUT_MS:-3600000}"
 # A prompt that never lands is worse than a failed one: `foreman join` then waits
@@ -1089,7 +1089,7 @@ Your boss is the agent \`$boss\`.
   was mid-task. That is the cost of each: file one report when you are done,
   and ask a question only when you are genuinely blocked, never for a progress
   update.
-- Peers: \`foreman ls\` lists the other workers; \`foreman dm <handle> "<text>"\`
+- Peers: \`foreman ls\` lists the other workers; \`foreman msg <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
   updates.
 - Delegate substantial independent slices of your task to your own subagents
@@ -1631,7 +1631,7 @@ dispatch_to() {
         # is deliberately untracked, so answers and approval input remain
         # allowed.
         die "$handle is $before_status and cannot accept a new tracked task yet
-  steer its current turn:  foreman send --raw $handle \"<answer>\"
+  steer its current turn:  foreman msg $handle \"<answer>\"
   or collect it first:     foreman join $handle"
       fi
       # A first dispatch is the `foreman spawn` path, and a freshly started omp
@@ -1736,99 +1736,27 @@ prompt_raw() {
 
 cmd_send() {
   require_herdr
-  local raw=0
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --raw) raw=1; shift ;;
-      --) shift; break ;;
-      *) break ;;
-    esac
-  done
-  local handle=${1:?usage: foreman send [--raw] <handle> <text...>}; shift
-  case "${1:-}" in --raw) raw=1; shift ;; esac
+  local handle=${1:?usage: foreman send <handle> <text...>}; shift
   agent_exists "$handle" || die "no live agent named '$handle'"
-  local text; text=$(read_message "send [--raw] <handle> <text...>" "$@")
-  if [ "$raw" != 1 ] && [ ! -f "$(meta_file "$handle")" ]; then
+  local text; text=$(read_message "send <handle> <text...>" "$@")
+  if [ ! -f "$(meta_file "$handle")" ]; then
     die "'$handle' is live but not a registered foreman worker; a tracked task would send it a broken protocol block and mint a phantom record
-  steer it instead: foreman send --raw $handle \"<text>\""
+  steer it instead: foreman msg $handle \"<text>\""
   fi
-  if [ "$raw" = 1 ]; then
-    # No protocol block. A one-line answer does not want the contract
-    # restated, and re-appending "do not open a PR unless the task above says
-    # to" over an answer makes *that answer* "the task above" — which is how a
-    # worker talks itself out of the PR its original brief asked for. It is
-    # also the only way to put a bare keystroke into a blocked approval.
-    prompt_raw "$handle" "$text"
-  else
-    dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
-  fi
-  # Anything the boss sends a worker settles whatever that worker was waiting
-  # on: a raw send is the answer itself, and a tracked task supersedes the
-  # question outright. Guarded on the meta file so a raw steer to some
-  # non-foreman agent cannot mint a phantom state directory.
+  dispatch_to "$handle" "$(with_protocol "$handle" "$text")"
+  # A tracked task supersedes whatever the worker was waiting on: the new
+  # instruction is the boss's answer, so a stale question must not keep
+  # `foreman ls` showing this worker as still blocked. Guarded on the meta
+  # file so a send to some non-foreman agent cannot mint a phantom state dir.
   if [ -f "$(meta_file "$handle")" ]; then mark_question_answered "$handle"; fi
-}
-
-cmd_ask() {
-  require_herdr
-  local timeout=""
-  if [ "${1:-}" = --timeout ]; then
-    timeout=${2:?usage: foreman ask [--timeout <seconds>] <handle> <text...>}
-    shift 2
-  fi
-  # Rejected in both positions cmd_send would honor it — before the handle and
-  # immediately after it. A raw send has no pickup confirmation, so the join
-  # that follows would match the agent's pre-dispatch idle state and return a
-  # stale report: the exact race dispatch_to's settle check exists to prevent.
-  local raw_refused="foreman ask dispatches a tracked task and waits for its report; --raw steering files no report to wait for
-  send it instead:  foreman send --raw <handle> \"<text>\"
-  then if needed:   foreman join <handle>"
-  local a handle="" after_handle=0
-  for a in "$@"; do
-    if [ "$after_handle" = 1 ]; then
-      case "$a" in --raw) die "$raw_refused" ;; esac
-      break
-    fi
-    case "$a" in
-      --raw) die "$raw_refused" ;;
-      --) continue ;;
-      *) handle=$a; after_handle=1 ;;
-    esac
-  done
-  [ -n "$handle" ] || die "usage: foreman ask [--timeout <seconds>] <handle> <text...>"
-  cmd_send "$@"
-  if [ -n "$timeout" ]; then cmd_join --timeout "$timeout" "$handle"; else cmd_join "$handle"; fi
 }
 
 # ── Peer messaging ───────────────────────────────────────────────────────────
 #
-# broadcast, dm, and keys are steering, not dispatch: they must never touch
-# the dispatch counter dispatch_to guards above. A reply to the current turn
-# must not be mistaken for a new tracked task, and a keystroke into a working
-# agent has no report to be fresh against.
-
-cmd_broadcast() {
-  require_herdr
-  local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; run 'foreman boss' first"
-  local text; text=$(read_message "broadcast <text...>" "$@")
-  local scope; scope=$(scoped_key "foreman broadcast" "run it from inside a repo")
-  # One `agent list` for the whole wave, not one per worker — the same
-  # round-trip rationale as cmd_join's per-tick snapshot.
-  local agents handle sent=0
-  agents=$(h agent list)
-  for handle in $(known_workers "$scope"); do
-    [ "$handle" != "$me" ] || continue
-    if [ -n "$(snapshot_status "$agents" "$handle")" ]; then
-      prompt_raw "$handle" "[foreman broadcast from $me] $text"
-      printf 'sent: %s\n' "$handle"
-      sent=$((sent + 1))
-    else
-      printf 'skipped (not live): %s\n' "$handle"
-    fi
-  done
-  [ "$sent" -gt 0 ] || die "no live workers in this repo"
-}
+# msg and keys are steering, not dispatch: they must never touch the dispatch
+# counter dispatch_to guards above. A reply to the current turn must not be
+# mistaken for a new tracked task, and a keystroke into a working agent has no
+# report to be fresh against.
 
 # Whether $1 is currently recognized as a boss: either the handle a
 # boss would claim by default, or some worker's own record names it as BOSS —
@@ -1842,18 +1770,51 @@ is_boss_handle() {
   return 1
 }
 
-cmd_dm() {
+# Untracked steering to one member or the whole wave. This replaces what used
+# to be three separate verbs (send with the now-gone raw flag, `broadcast`,
+# `dm`): none of them was a distinct operation — broadcast was prompt_raw in
+# a loop, and dm differed from that raw send only in its prefix and target
+# gate. `all` reuses broadcast's exact loop; a bare handle reuses dm's exact
+# gate.
+cmd_msg() {
   require_herdr
   local me; me=$(self_handle)
-  [ -n "$me" ] || die "this pane has no herdr agent name; join the foreman first"
-  local handle=${1:?usage: foreman dm <handle> <text...>}; shift
+  [ -n "$me" ] || die "this pane has no herdr agent name; run 'foreman boss' first"
+  local target=${1:?usage: foreman msg <handle|all> <text...>}; shift
+  if [ "$target" = all ]; then
+    local text; text=$(read_message "msg all <text...>" "$@")
+    local scope; scope=$(scoped_key "foreman msg all" "run it from inside a repo")
+    # One `agent list` for the whole wave, not one per worker — the same
+    # round-trip rationale as cmd_join's per-tick snapshot.
+    local agents handle sent=0
+    agents=$(h agent list)
+    for handle in $(known_workers "$scope"); do
+      [ "$handle" != "$me" ] || continue
+      if [ -n "$(snapshot_status "$agents" "$handle")" ]; then
+        prompt_raw "$handle" "[foreman msg from $me] $text"
+        # The bug `broadcast`/`dm` had and `send` never did: without this, a
+        # question answered by `msg` left `foreman ls` showing `?` forever,
+        # because nothing ever stamped it as delivered to the boss.
+        if [ -f "$(meta_file "$handle")" ]; then mark_question_answered "$handle"; fi
+        printf 'sent: %s\n' "$handle"
+        sent=$((sent + 1))
+      else
+        printf 'skipped (not live): %s\n' "$handle"
+      fi
+    done
+    [ "$sent" -gt 0 ] || die "no live workers in this repo"
+    return 0
+  fi
+  local handle=$target
   valid_handle "$handle" || die "invalid handle '$handle'"
   agent_exists "$handle" || die "no live agent named '$handle'"
   if [ ! -f "$(meta_file "$handle")" ] && ! is_boss_handle "$handle"; then
     die "'$handle' is live but not a foreman member (see: foreman ls)"
   fi
-  local text; text=$(read_message "dm <handle> <text...>" "$@")
-  prompt_raw "$handle" "[foreman dm from $me] $text"
+  local text; text=$(read_message "msg <handle> <text...>" "$@")
+  prompt_raw "$handle" "[foreman msg from $me] $text"
+  # Same fix as the `all` branch above: `dm` used to skip this entirely.
+  if [ -f "$(meta_file "$handle")" ]; then mark_question_answered "$handle"; fi
 }
 
 cmd_keys() {
@@ -1882,7 +1843,7 @@ print_result() {
     printf '(blocked, nothing reported since the last dispatch — last output below)\n'
     herdr agent read "$handle" --source recent-unwrapped --lines 40 2>/dev/null \
       || printf '(could not read the pane; the agent may have just exited)\n'
-    printf '\nunblock it:       foreman send --raw %s "<answer or keystroke>"\nthen collect it:  foreman join %s\n' "$handle" "$handle"
+    printf '\nunblock it:       foreman msg %s "<answer or keystroke>"\nthen collect it:  foreman join %s\n' "$handle" "$handle"
   elif [ -s "$rf" ]; then
     # Stale, but kept: a follow-up `foreman send` must not destroy the report a
     # worker already filed, so staleness is dated rather than deleted.
@@ -1898,7 +1859,7 @@ print_result() {
 # "does the boss have this text yet" (seen), while a blocking join asks "is
 # this worker still stuck on me" (answered). Collapsing them into one counter
 # either re-asks, every tick, a question the worker already pushed, or lets a
-# `foreman ask` sit out its full hour waiting for a report that is never coming
+# `foreman join` sit out its full hour waiting for a report that is never coming
 # because the worker is waiting on an answer.
 question_undelivered() {
   [ "$(counter_read "$(question_seq_file "$1")")" \
@@ -1940,7 +1901,7 @@ print_question() {
   if [ -s "$qf" ]; then cat "$qf"; fi
   # No "then re-run: foreman join": the answer resumes the worker, and the
   # report it files next arrives on its own.
-  printf '\nanswer it with: foreman send --raw %s "<answer>"\n' "$handle"
+  printf '\nanswer it with: foreman msg %s "<answer>"\n' "$handle"
   mark_question_seen "$handle"
 }
 
@@ -2027,7 +1988,8 @@ snapshot_status() {
 # And it returns early on a filed question, which is what actually lets a
 # blocked worker preempt the wave. For a named handle that early return covers
 # an already-delivered question too: the pushed copy reached the boss's pane,
-# but not a boss that is *inside* this call, so without it `foreman ask` would
+# but not a boss that is *inside* this call, so without it a boss that dispatches
+# then blocks on `foreman join --timeout` would
 # sit out its entire timeout waiting for a report from a worker that is itself
 # waiting on the caller.
 #
@@ -2123,7 +2085,7 @@ cmd_join() {
       # Two different readers of one question. A blocking join must return the
       # moment a worker is waiting on the boss — whether or not the question
       # already reached it — because continuing to wait for a report that
-      # cannot come is the deadlock `foreman ask` used to sit in for an hour.
+      # cannot come is the deadlock a boss blocking on `foreman join` used to sit in for an hour.
       # A sweep tick must only carry a question the boss has *not* seen, or it
       # would re-serve the same one every tick for as long as it went
       # unanswered.
@@ -2275,7 +2237,7 @@ cmd_reply() {
   # The answer command rides along with the question: this lands in the boss's
   # pane, where nothing else is going to tell it how to reply.
   local rc=0
-  notify_agent "$boss" "$(printf '[foreman:%s] question — branch %s\n\n%s\n\nanswer it with: foreman send --raw %s "<answer>"' \
+  notify_agent "$boss" "$(printf '[foreman:%s] question — branch %s\n\n%s\n\nanswer it with: foreman msg %s "<answer>"' \
     "$me" "$(meta_get "$me" BRANCH)" "$text" "$me")" || rc=$?
   case $rc in
     0)
@@ -2329,6 +2291,12 @@ cmd_pickup() {
     # and "dispatched zero times" must read as equal so a task.md left over
     # from before task.seen existed is not replayed as new.
     if [ "$dispatched_n" != "$seen_n" ]; then
+      # The CLI declares the priority rather than letting the extension sniff
+      # `=== ` framing: this side owns the state that decided which branch
+      # ran, so it is the only side that actually knows. A declared field
+      # cannot drift the way string-sniffing does when print_question's or
+      # a task's own formatting changes later.
+      printf 'foreman-delivery: queue task\n'
       cat "$tf"
       counter_ack "$(dispatch_file "$handle")" "$tsf"
       return 0
@@ -2352,6 +2320,14 @@ cmd_pickup() {
   [ "$rc" = 3 ] && return 3
   [ "$rc" = 0 ] || return "$rc"
   [ -n "$out" ] || return 3
+  # A mixed sweep tick can carry both a question and settled reports; a
+  # question wins the header because it is the only part that names someone
+  # actually blocked waiting on this pane. "— QUESTION —" is print_question's
+  # own framing (:1887), so this can never diverge from what it emitted.
+  case "$out" in
+    *"— QUESTION —"*) printf 'foreman-delivery: interrupt question\n' ;;
+    *)                 printf 'foreman-delivery: queue report\n' ;;
+  esac
   printf '%s\n' "$out"
   return 0
 }
@@ -2714,8 +2690,7 @@ foreman — dispatch peer coding agents into herdr worktree workspaces
 Boss
   foreman boss [name] [--steal]    claim the boss handle for this pane
   foreman spawn <branch> [opts]    create a worktree, start an agent, dispatch
-  foreman send [--raw] <h> <text>  dispatch work, return immediately
-  foreman ask <h> <text>           dispatch and block until the report is in
+  foreman send <h> <text...>       dispatch a tracked task, return immediately
   foreman join [handle...]         re-read workers, or wait on named ones
                                  [--timeout <seconds>] bounds either wait
                                  [--once] one sweep tick; exit 3 = nothing to sweep
@@ -2724,7 +2699,6 @@ Boss
   foreman read <handle> [-n N]     read a worker's terminal directly
   foreman reap <handle>...|--all   remove worktrees and forget workers
                                  [--all-repos] [--force] [--forget]
-  foreman broadcast <text>         raw steering to every live worker in this repo
   foreman keys <handle> <key>...   send terminal keys (e.g. unblock an approval)
 
 Worker
@@ -2737,18 +2711,18 @@ Both
   foreman version                  print the foreman version
   foreman roles                    list role -> skill mappings from foreman's config
   foreman init                     scaffold .foreman/config.yml for this repo
-  foreman dm <handle> <text>       raw steering to any foreman member
+  foreman msg <handle|all> <text>  untracked steering to one member or every worker
   foreman pickup                   print this pane's next deliverable, if any
                                  exit 0 = printed, 3 = nothing pending, else error
 
 Machine interface (spawned by omp; not for interactive use)
   foreman bus                      stdio MCP server that wakes omp on delivery
 
---raw sends text alone; without it foreman appends its protocol block, which is
+foreman send appends foreman's protocol block; foreman msg sends text alone —
 right for a task and wrong for a one-line answer.
 --forget drops foreman's record and leaves the worktree alone.
-foreman broadcast and foreman dm are always raw, untracked steering: like --raw,
-no protocol block and no dispatch counter bump.
+foreman msg is always untracked steering: no protocol block, no dispatch
+counter bump.
 
 `foreman spawn --help` lists spawn options.
 EOF
@@ -2763,7 +2737,7 @@ main() {
     whoami)  cmd_whoami "$@" ;;
     spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;
-    ask)     cmd_ask "$@" ;;
+    msg)     cmd_msg "$@" ;;
     join)    cmd_join "$@" ;;
     read)    cmd_read "$@" ;;
     report)  cmd_report "$@" ;;
@@ -2771,8 +2745,6 @@ main() {
     ls|list) cmd_ls "$@" ;;
     dashboard|dash) cmd_dashboard "$@" ;;
     reap)    cmd_reap "$@" ;;
-    broadcast) cmd_broadcast "$@" ;;
-    dm)      cmd_dm "$@" ;;
     pickup)  cmd_pickup "$@" ;;
     bus)     cmd_bus "$@" ;;
     doctor)  cmd_doctor "$@" ;;
