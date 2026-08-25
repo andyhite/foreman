@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDeliverer, deliveryFor, loadCommandPrompts, type PickupResult } from "./index";
+import { createDeliverer, deliveryFor, loadCommandPrompts, taskText, type PickupResult } from "./index";
 
 describe("loadCommandPrompts", () => {
   let dir: string;
@@ -117,6 +117,39 @@ describe("deliveryFor", () => {
     // The header has to start the line: `=== ` mid-sentence is prose.
     const chatty = "Refactor so the output reads === smoke (done) — branch b\n";
     expect(deliveryFor(chatty).deliverAs).toBe("followUp");
+  });
+});
+
+describe("taskText", () => {
+  // `foreman_spawn` names a brief `task`, so two shipped runs reached for
+  // `task` on the follow-up too and burned a call on `text must be a string
+  // (was missing)`. Both names resolve to the one argument now.
+  test("task is accepted, because that is what foreman_spawn calls it", () => {
+    expect(taskText({ task: "rework retries" }, "foreman_send")).toBe("rework retries");
+  });
+
+  test("text is accepted, because raw steering really is text", () => {
+    expect(taskText({ text: "B" }, "foreman_send")).toBe("B");
+  });
+
+  test("neither name is a clear error naming both, not a bare schema failure", () => {
+    expect(() => taskText({}, "foreman_send")).toThrow(
+      "foreman_send requires exactly one of task or text",
+    );
+  });
+
+  test("both names at once is refused rather than silently picking one", () => {
+    expect(() => taskText({ task: "a", text: "b" }, "foreman_ask")).toThrow(
+      "foreman_ask requires exactly one of task or text",
+    );
+  });
+
+  // An empty string is the shape a caller lands on by building the body from
+  // something that turned out to be missing; treating it as present would
+  // dispatch a worker a blank brief.
+  test("an empty string counts as absent", () => {
+    expect(taskText({ task: "", text: "real body" }, "foreman_send")).toBe("real body");
+    expect(() => taskText({ task: "", text: "" }, "foreman_send")).toThrow("exactly one");
   });
 });
 

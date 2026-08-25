@@ -114,6 +114,30 @@ export type PickupResult =
   | { kind: "error" };
 
 /**
+ * The one body argument `foreman_send` and `foreman_ask` carry, under either
+ * name an agent is likely to reach for.
+ *
+ * `foreman_spawn` calls a brief `task`, so an agent dispatching a follow-up
+ * writes `task` as well — two shipped runs did, and both burned a call on
+ * `text must be a string (was missing)` before retrying. Neither spelling is
+ * wrong on its own: `raw: true` steering really is text, and a tracked brief
+ * really is a task. Accepting both is cheaper than a schema that is right
+ * about English and wrong about every first call, and this is already the
+ * shape `foreman_report` uses for its own two-of-one argument.
+ */
+export function taskText(
+  params: { task?: string; text?: string },
+  tool: string,
+): string {
+  const task = typeof params.task === "string" && params.task.length > 0 ? params.task : undefined;
+  const text = typeof params.text === "string" && params.text.length > 0 ? params.text : undefined;
+  if ((task === undefined) === (text === undefined)) {
+    throw new Error(`${tool} requires exactly one of task or text`);
+  }
+  return (task ?? text) as string;
+}
+
+/**
  * How a collected `pickup` payload should reach the agent it is for.
  *
  * The split is by direction, not by content. Anything *inbound to a boss* — a
@@ -622,10 +646,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_send",
     label: "Foreman Send",
     description:
-      "Send a follow-up task to a worker, or (with raw: true) untracked raw steering text — the right way to answer a blocked worker or a foreman_reply question.",
+      "Send a follow-up task to a worker, or (with raw: true) untracked raw steering text — the right way to answer a blocked worker or a foreman_reply question. Pass the body as task or text; either name works.",
     parameters: z.object({
       handle: z.string(),
-      text: z.string(),
+      task: z.string().optional().describe("The body to send; interchangeable with text"),
+      text: z.string().optional().describe("The body to send; interchangeable with task"),
       raw: z
         .boolean()
         .optional()
@@ -635,7 +660,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     args: (params) => {
       const args = ["send"];
       if (params.raw) args.push("--raw");
-      args.push(params.handle, params.text);
+      args.push(params.handle, taskText(params, "foreman_send"));
       return args;
     },
     details: (params) => ({ handle: params.handle, raw: !!params.raw }),
@@ -645,17 +670,18 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_ask",
     label: "Foreman Ask",
     description:
-      "Dispatch a task to one worker and block until it settles. Use only for a genuine follow-up or a serial dependency; never to start a batch — use foreman_spawn + foreman_join for that.",
+      "Dispatch a task to one worker and block until it settles. Use only for a genuine follow-up or a serial dependency; never to start a batch — use foreman_spawn + foreman_join for that. Pass the body as task or text; either name works.",
     parameters: z.object({
       handle: z.string(),
-      text: z.string(),
+      task: z.string().optional().describe("The task to dispatch; interchangeable with text"),
+      text: z.string().optional().describe("The task to dispatch; interchangeable with task"),
       timeout_s: z.number().int().positive().optional().describe("Override the wait timeout, in seconds"),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
       const args = ["ask"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
-      args.push(params.handle, params.text);
+      args.push(params.handle, taskText(params, "foreman_ask"));
       const { stdout, stderr, exitCode } = await runForemanStreaming(args, ctx, signal, onUpdate);
       if (exitCode !== 0) {
         // cmd_ask runs cmd_send BEFORE the join wait (herdr/bin/foreman:1412-1413),

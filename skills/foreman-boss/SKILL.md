@@ -216,7 +216,7 @@ genuinely want to block, block with `foreman_join`.
 **A deliberate blocking wait.** Sometimes waiting is still the right call: a
 genuine serial dependency (the next step needs one worker's result and
 there is nothing else to do until it lands), or you have simply run out of
-other work. `foreman_ask(handle, text)` dispatches and blocks for that one
+other work. `foreman_ask(handle, task)` dispatches and blocks for that one
 worker; a bare `foreman_join()` blocks for whatever in the wave is still
 outstanding — its own tool description says as much. Never reach for either
 to *start* a batch — that serializes the thing you came here to parallelize.
@@ -284,6 +284,12 @@ report arrives the same way the question did:
 ```
 foreman_send(handle: "feat-412-webhook-retry", text: "Use the existing RetryPolicy in core/retry.ts; don't add a new one.", raw: true)
 ```
+
+Either name carries the body: `task` and `text` are interchangeable on both
+`foreman_send` and `foreman_ask`. Two shipped runs reached for `task` on a
+follow-up because that is what `foreman_spawn` calls a brief, and burned a call
+on a schema error before retrying. Write whichever fits — a tracked brief reads
+as a task, a raw answer reads as text.
 
 **Use `raw: true` for answers.** Without it `foreman_send` appends the whole
 protocol block, which is right for a task and wrong for a reply: re-stating
