@@ -1175,6 +1175,37 @@ is     'join --once leaves a still-working worker unjoined' \
   "$(counter_read "$(joined_token_file w2)")" ''
 unset -f herdr sleep_ms
 
+# A worker that has filed a report must be collected even while its status is
+# still `working`. `foreman report` runs *inside* the worker's turn, so at the
+# moment its own doorbell rings the filer is still working — and this loop is
+# what that doorbell wakes. Deferring on status made the push deliver nothing
+# and left the report for the next 60s sweep: measured at 31s in session
+# 01a03aa0 (filed 20:34:19.004, arrived 20:34:50.116) across three boss
+# tool-call boundaries that should each have carried it. A sibling run won the
+# same race in 0.3s, which is why this has to be pinned rather than timed.
+export FOREMAN_STATE="$sandbox/state-join-once-working-reported"
+mkdir -p "$(meta_dir w3)"
+meta_set w3 "BOSS=me" "BRANCH=b" "DIR=/tmp/w3" "REPO_KEY=k"
+counter_bump "$(dispatch_file w3)"
+printf 'working findings' >"$(report_file w3)"
+stamp w3
+sleep_ms() { bad 'join --once must not call sleep_ms'; }
+herdr() {
+  case "$*" in
+    "agent list") printf '{"result":{"agents":[{"name":"w3","agent_status":"working"}]}}' ;;
+    *) printf '{"result":{}}' ;;
+  esac
+}
+
+out_wr=$(cmd_join --once 2>&1)
+is     'a working worker with a fresh report exits 0' "$?" '0'
+assert 'a fresh report is delivered even while the worker still works' \
+  [ "${out_wr#*working findings}" != "$out_wr" ]
+is     'and that delivery stamps joined, so it is not re-sent' \
+  "$(counter_read "$(joined_token_file w3)")" \
+  "$(counter_read "$(dispatch_file w3)")"
+unset -f herdr sleep_ms
+
 # A poller ticks every few seconds; with nothing registered at all it must
 # park on exit 3 rather than repeat "nothing to join" on every tick — exit 3
 # is the signal an empty repo and a fully-collected one share, distinct from

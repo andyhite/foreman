@@ -2128,6 +2128,23 @@ cmd_join() {
       fi
       status=$(snapshot_status "$agents" "$handle")
 
+      # A filed report is a deliverable, and the filer's lifecycle status has
+      # no bearing on whether the boss should have it. `foreman report` runs
+      # *inside* the worker's turn, so at the moment its own doorbell rings the
+      # worker is still `working` — and this loop is what that doorbell wakes.
+      # Falling through to the status case below deferred it, so the push
+      # delivered nothing and the report waited for the next 60s sweep: 31s in
+      # session 01a03aa0 across three boss tool-call boundaries, against 0.3s
+      # in a sibling run whose worker happened to settle first. Marking joined
+      # here cannot lose a later report the way a premature settle can — that
+      # is what `settled_confirmed` guards, and it only applies when there is
+      # no report to lose.
+      if report_is_fresh "$handle"; then
+        print_result "$handle" "$status"
+        mark_joined "$handle"
+        continue
+      fi
+
       case "$status" in
         '') print_result "$handle" gone; mark_joined "$handle" ;;
         blocked)
@@ -2138,11 +2155,9 @@ cmd_join() {
           # An unanswered question means the worker is parked on the boss, not
           # finished. Settling it here would hand the boss "(no report
           # written)" for work that has not stopped, and stamp `joined` so the
-          # real report never sweeps. A fresh report still wins: a worker may
-          # report anyway after asking, and if its own push failed this loop
-          # is the only thing left to carry it.
-          if report_is_fresh "$handle" \
-             || { ! question_open "$handle" && settled_confirmed "$handle"; }; then
+          # real report never sweeps. A worker that reported anyway after
+          # asking is already gone by here, collected above on its report.
+          if ! question_open "$handle" && settled_confirmed "$handle"; then
             print_result "$handle" "$status"
             mark_joined "$handle"
           else
