@@ -1901,14 +1901,19 @@ mark_question_answered() {
 print_question() {
   local handle=$1 qf; qf=$(question_file "$handle")
   printf '\n=== %s — QUESTION — branch %s\n' "$handle" "$(meta_get "$handle" BRANCH)"
-  if question_undelivered "$handle"; then
-    if [ -s "$qf" ]; then cat "$qf"; fi
-  else
-    # `foreman reply` already pushed this body to the boss's pane. Printing it
-    # again is how a sweep every few seconds becomes the same question asked
-    # over and over.
-    printf '(already delivered — %s is still waiting on your answer)\n' "$handle"
-  fi
+  # Always the body, never a "you already got this" placeholder. `seen` records
+  # that pickup handed the text to omp, not that the boss ever read it: omp
+  # holds the followUp behind the boss's current turn, so a boss mid-turn was
+  # told "already delivered" for a question still sitting in that queue. One
+  # shipped run reaped the worker on the strength of that placeholder and then
+  # received the real question 13ms after the turn ended.
+  #
+  # Nothing is lost by dropping the "asked over and over" guard that used to
+  # live here, because it never guarded anything: cmd_join (:2110) reaches this
+  # for an *already delivered* question only when `once` is 0, and a sweep —
+  # pickup included — is always `--once`. The blocking arm runs because a boss
+  # asked, which is precisely when withholding the text is wrong.
+  if [ -s "$qf" ]; then cat "$qf"; fi
   # No "then re-run: foreman join": the answer resumes the worker, and the
   # report it files next arrives on its own.
   printf '\nanswer it with: foreman send --raw %s "<answer>"\n' "$handle"
@@ -2300,7 +2305,9 @@ cmd_pickup() {
 
   # Falls through to exactly the tick `foreman join --once` already runs — same
   # report and question formatting, same acking — so a boss's pickup can never
-  # drift from what a human running `foreman join` sees.
+  # drift from what a human running `foreman join` sees. `--once` is also what
+  # keeps a timer tick from re-serving a question the boss already has: see
+  # cmd_join's own condition (:2110).
   local out rc=0
   out=$(cmd_join --once) || rc=$?
   [ "$rc" = 3 ] && return 3

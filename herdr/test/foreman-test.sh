@@ -1458,8 +1458,14 @@ unset -f herdr self_handle agent_field require_herdr scoped_key
 # prompt cannot reach a boss that is already stuck in that call — the
 # delivery already happened. Only the file can break the wait: an explicitly
 # named join on a delivered-but-unanswered question returns immediately,
-# without ever reaching the deadline loop, saying the question is already
-# delivered rather than reprinting it.
+# without ever reaching the deadline loop, and hands over the text.
+#
+# It hands over the body because `seen` records that pickup handed the text to
+# omp, not that the boss ever read it: omp holds a followUp behind the boss's
+# current turn, so a boss mid-turn was told "already delivered" for a question
+# still sitting in that queue. One shipped run reaped the worker on the
+# strength of that placeholder, then received the real question 13ms after the
+# turn ended.
 
 printf '\nexplicit join on an open question does not block\n'
 export FOREMAN_STATE="$sandbox/state-join-open"
@@ -1480,10 +1486,16 @@ herdr() {
 }
 out=$(cmd_join "$h4" 2>&1)
 is         'an explicit join on a delivered-but-open question exits cleanly' "$?" '0'
-assert     'it reports the question as already delivered' \
-  [ "${out#*already delivered}" != "$out" ]
-assert_not 'and does not reprint the question body' \
+assert     'it hands over the question body — the boss is looking now' \
   [ "${out#*which retry policy?}" != "$out" ]
+assert_not 'and does not fob the boss off with the delivered placeholder' \
+  [ "${out#*already delivered}" != "$out" ]
+
+# The guard that keeps a timer from re-asking is cmd_join's `--once` arm, not
+# anything in print_question: a sweep tick reaches a delivered question and
+# prints nothing at all. Asserted directly on the sweep below.
+out=$(cmd_join --once "$h4" 2>&1)
+is         'a sweep tick stays silent on a question the boss already has' "$out" ''
 unset -f herdr sleep_ms require_herdr scoped_key
 
 # ── an unanswered question is not a settle ───────────────────────────────────
@@ -1529,7 +1541,7 @@ assert 'and the worker is still joinable after both ticks' \
 sleep_ms() { bad 'a bare blocking join must not wait on an unanswered question'; }
 out3=$(cmd_join 2>&1)
 assert 'a bare blocking join breaks out on the unanswered question' \
-  [ "${out3#*already delivered}" != "$out3" ]
+  [ "${out3#*which retry policy?}" != "$out3" ]
 assert 'and says the worker is waiting on the boss' \
   [ "${out3#*waiting on you}" != "$out3" ]
 unset -f herdr sleep_ms self_handle require_herdr scoped_key
