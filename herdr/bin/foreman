@@ -2673,12 +2673,17 @@ reap_one() {
   # Rescuing rather than refusing: a boss that has to run `foreman join
   # <handle>` and then reap again to see what it already asked for will just
   # pass --force, and the report is lost anyway.
+  #
+  # print_result does the presenting, because it is the one place that knows
+  # how to label a report: the condition here only establishes that the
+  # *current dispatch* was never collected, which does not mean the report on
+  # disk answers it. Hand-rolling a "before its report was collected" header
+  # instead told 01a03aa0 that flatly, over a report the boss had already been
+  # handed one follow-up dispatch earlier.
   local rf; rf=$(report_file "$handle")
   if [ -s "$rf" ] && [ "$(counter_read "$(dispatch_file "$handle")")" \
        != "$(counter_read "$(joined_token_file "$handle")")" ]; then
-    note "
-=== $handle (reaped before its report was collected) — branch $(meta_get "$handle" BRANCH)
-$(cat "$rf")"
+    note "$(print_result "$handle" 'reaped before collection')"
   fi
   rm -rf "${FOREMAN_STATE:?}/$handle"
 }

@@ -903,18 +903,19 @@ herdr() { return 0; }   # every `worktree remove` succeeds
 meta_set unread "BRANCH=feat/unread" "DIR=/tmp/unread" "WORKSPACE=w1"
 printf 'the deliverable\n' >"$(report_file unread)"
 counter_bump "$(dispatch_file unread)"
+stamp unread                     # the report answers the dispatch it was filed for
 # stderr, not stdout: `spawn --replace` reaps through reap_one before printing
 # the new handle, and that stdout is read as `handle=$(foreman spawn ...)`.
 out=$(reap_one unread 0 0 2>&1 >/dev/null)
 assert 'an uncollected report is printed before the record is destroyed' \
   [ "${out#*the deliverable}" != "$out" ]
 assert 'and says why it is being shown now' \
-  [ "${out#*reaped before its report was collected}" != "$out" ]
+  [ "${out#*reaped before collection}" != "$out" ]
 # Matched against the rescue header itself, not just anywhere in the output:
 # the ordinary removal note names the branch too, so a looser check passed
 # with the rescue deleted entirely.
 assert 'and names the branch on that same line' \
-  [ "${out#*its report was collected) — branch feat/unread}" != "$out" ]
+  [ "${out#*reaped before collection) — branch feat/unread}" != "$out" ]
 assert_not 'the record is still removed' [ -d "$(meta_dir unread)" ]
 
 # A report the boss already has must not come back as a surprise at teardown.
@@ -925,6 +926,23 @@ mark_joined seen
 out=$(reap_one seen 0 0 2>&1 >/dev/null)
 assert_not 'a collected report is not reprinted' \
   [ "${out#*already handed over}" != "$out" ]
+
+# 01a03aa0's case: a report collected under dispatch 1, then a follow-up
+# dispatch that was never collected. The current dispatch genuinely is
+# uncollected, so the rescue does fire — but the report on disk is the one the
+# boss was already handed, and it has to be dated rather than announced as
+# something it never saw.
+meta_set restale "BRANCH=feat/restale" "DIR=/tmp/restale" "WORKSPACE=w5"
+printf 'first round findings\n' >"$(report_file restale)"
+counter_bump "$(dispatch_file restale)"
+stamp restale
+mark_joined restale
+counter_bump "$(dispatch_file restale)"   # the follow-up `foreman send`
+out=$(reap_one restale 0 0 2>&1 >/dev/null)
+assert 'a stale report at reap is dated as such' \
+  [ "${out#*nothing reported since the last dispatch}" != "$out" ]
+assert_not 'and is never announced as a report that was never collected' \
+  [ "${out#*its report was collected}" != "$out" ]
 
 # Never dispatched and never joined compare equal as strings, so a worker with
 # no report of its own must not trip the rescue on an empty file.
