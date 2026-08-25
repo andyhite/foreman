@@ -47,7 +47,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
 | `foreman roles` | List the role → skill mappings read from foreman's project-local config, plus each mapped skill's own frontmatter description as a hint. |
 | `foreman init` | Scaffold `.foreman/config.yml` at the repo root, commented and empty. Refuses to overwrite an existing file. |
-| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, the current repo's worker count, the role config, and whether this pane has a live bus sidecar. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. The bus line is the one to read when reports arrive as interruptions rather than asides: no live sidecar means every delivery is taking the `herdr agent prompt` fallback. |
+| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, the current repo's worker count, the role config, and whether this pane has a live bus sidecar. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. The bus line is the one to read when a *report* arrives as an interruption instead of waiting its turn: no live sidecar means every delivery is taking the `herdr agent prompt` fallback, which interrupts regardless of what it carries. |
 
 ### Role config
 
@@ -91,19 +91,28 @@ roles:
 
 ### Collecting
 
-`foreman report` and `foreman reply` deliver to the boss themselves: each
-does a best-effort push straight to the boss's pane (`herdr agent prompt`),
-tagged `[foreman:<handle>]`, and stamps its own acknowledgement counter when
-that push lands — `joined` for a report, `question.seen` for a question — so
-a later bare `foreman join` will not re-print the same content. `foreman
-join` is for two things now: an explicit re-read of one worker (`foreman
-join <handle>` always reprints, delivered or not), or a deliberate blocking
-wait (`foreman join` with no handle, or `foreman ask`) when there is
+`foreman report` and `foreman reply` deliver to the boss themselves: each rings
+the boss's bus sidecar, and the omp extension on the other side pulls the
+content with `foreman pickup` and injects it. A report is injected behind
+whatever the boss is doing; a question interrupts it, because the worker is
+stalled until the answer comes. With no sidecar to ring, the push falls back to
+`herdr agent prompt`, tagged `[foreman:<handle>]`, which interrupts either way.
+
+Only a delivery that actually moved text stamps an acknowledgement counter —
+`joined` for a report, `question.seen` for a question. A rung doorbell carries
+no payload, so it stamps nothing: the `foreman pickup` it wakes is what
+delivers and therefore what stamps. Stamping on the bell marked every report
+collected before anyone had been handed it.
+
+`foreman join` is for two things now: an explicit re-read of one worker
+(`foreman join <handle>` always reprints, delivered or not), or a deliberate
+blocking wait (`foreman join` with no handle, or `foreman ask`) when there is
 genuinely nothing else to do. A blocking join returns early on any question
-that is still unanswered, delivered or not, since a pushed prompt cannot
-reach a boss that is itself stuck inside that same blocking call. Only the
-`--once` sweep skips a delivered one, so a timer cannot re-serve the same
-question every tick.
+that is still unanswered, delivered or not, since a pushed prompt cannot reach
+a boss that is itself stuck inside that same blocking call — and it hands over
+the question body, because `question.seen` records that pickup handed the text
+to omp, never that the boss read it. Only the `--once` sweep skips a delivered
+one, so a timer cannot re-serve the same question every tick.
 
 `foreman join --once` is a single non-blocking sweep, not a delivery path: it
 picks up what a push could not — a worker that ended its turn without ever
@@ -252,7 +261,7 @@ record with `foreman reap <handle> [--forget]`.
 | `FOREMAN_WAIT_TIMEOUT_MS` | `3600000` | Maximum milliseconds for one `foreman ask` or `foreman join`. |
 | `FOREMAN_DISPATCH_SETTLE_MS` | `15000` | Maximum milliseconds to verify that a dispatched prompt reached the expected worker state. |
 | `FOREMAN_JOIN_POLL_MS` | `2000` | How often `foreman join` re-reads the workers it is watching. |
-| `FOREMAN_ASIDE_POLL_MS` | `15000` | How often the omp extension's own sweeper (`foreman join --once`) runs, to catch anomalies a push cannot: a worker that ended its turn without reporting, a dead worker, or an undelivered push. |
+| `FOREMAN_ASIDE_POLL_MS` | `60000` | How often the omp extension's own sweeper (`foreman join --once`) runs, to catch anomalies a push cannot: a worker that ended its turn without reporting, a dead worker, or an undelivered push. |
 | `FOREMAN_EDITOR` | `nvim` | Editor command run beside the agent in the `full` layout. |
 | `FOREMAN_GIT_UI` | `lazygit` | Git UI command run beside the agent in the `full` layout. |
 | `FOREMAN_LAYOUT_START_TIMEOUT_MS` | `15000` | Maximum milliseconds to verify that a layout's requested TUI became foreground before retrying. |

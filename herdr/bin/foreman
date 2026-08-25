@@ -660,9 +660,9 @@ cmd_doctor() {
   # 10. Bus sidecar for this pane.
   #
   # The one failure this tool existed to explain and could not see: with no
-  # live sidecar every report, question and dispatch still arrives, but as an
-  # interrupting `herdr agent prompt` instead of an aside. Nothing errors, so
-  # the only symptom is agents that feel like they interrupt each other. That
+  # live sidecar every report, question and dispatch still arrives, but always
+  # as an interrupting `herdr agent prompt`. Nothing errors, so the only
+  # symptom is reports barging in on work they should have queued behind. That
   # is a warning rather than a failure — the fallback is a supported path, and
   # a session outside herdr has no pane to ring at all.
   #
@@ -683,7 +683,7 @@ cmd_doctor() {
     # agent pane herdr has since forgotten, and a stale record there is real.
     if [ -n "$bus_me" ] || [ -f "$bus_file" ]; then
       if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
-        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and dispatches arrive as asides"
+        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and tasks arrive as asides, a blocked worker's question interrupts"
       elif [ -f "$bus_file" ]; then
         printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
       else
@@ -1062,9 +1062,10 @@ Your boss is the agent \`$boss\`.
   \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell.
   Filing it delivers it to the boss; terminal output does not reach it.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
-  \`foreman reply "<question>"\`. It delivers the question to the boss and
-  files it, so the answer comes back even if the boss was mid-task. Use it
-  for questions, not progress updates.
+  \`foreman reply "<question>"\`. It files the question and interrupts the
+  boss's current turn, so the answer comes back even if the boss was mid-task.
+  That interruption is the cost: use it when you are genuinely blocked, never
+  for a progress update.
 - Peers: \`foreman ls\` lists the other workers; \`foreman dm <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
   updates.

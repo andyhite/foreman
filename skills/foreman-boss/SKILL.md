@@ -31,17 +31,21 @@ Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
 `foreman_doctor`, `foreman_roles`. Call the tool, not the shell command it
 wraps — the reason is not merely style.
 
-Delivery is a real push, not a poll: a worker's `foreman_report`/`foreman_reply`,
-and your own dispatch, signal the other side directly and arrive as a
-non-interrupting aside between tool calls — never a prompt that cuts into
-whatever turn is running. If that signal can't be delivered, it falls back to
-an interrupting `herdr agent prompt`, so nothing is silently lost; it just
-arrives more rudely. Steering is the deliberate exception: `foreman_send(raw:
-true)`, `foreman_broadcast`, `foreman_dm`, and `foreman_keys` interrupt a
-worker's *current* turn on purpose, because unblocking a stuck approval prompt
-only works if it cuts the queue. A tracked task and a report never do that —
-both queue for the worker's next turn. See [README.md](../../README.md#install)
-for how the delivery channel is wired up.
+Delivery is a real push, not a poll: a worker's `foreman_report`, and your own
+dispatch, signal the other side directly and arrive as a non-interrupting
+aside — queued behind whatever turn is running, because nobody is waiting on
+them. A worker's `foreman_reply` is the one inbound exception: a question means
+that worker is *stalled* until you answer, so it cuts into your current turn at
+the next tool-call boundary rather than waiting for the turn to end. Handle it
+the way you would any interruption you are responsible for — see [Answering a
+question](#answering-a-question). If a signal can't be delivered, it falls back
+to an interrupting `herdr agent prompt`, so nothing is silently lost; it just
+arrives more rudely. Outbound, steering is the deliberate exception:
+`foreman_send(raw: true)`, `foreman_broadcast`, `foreman_dm`, and `foreman_keys`
+interrupt a worker's *current* turn on purpose, because unblocking a stuck
+approval prompt only works if it cuts the queue. A tracked task and a report
+never do that — both queue for the worker's next turn. See
+[README.md](../../README.md#install) for how the delivery channel is wired up.
 
 Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
 takes the whole brief as its `task` string and writes the temp file and
@@ -221,23 +225,39 @@ quietly stopped. A `foreman_send` makes that worker joinable again, which is
 precisely when re-joining is meaningful. Naming a handle explicitly always
 joins it, collected or not.
 
-## When a worker has a question for you
+## Answering a question
 
 A blocked worker runs `foreman_reply` (or the CLI `foreman reply "<question>"`
 it wraps). That writes the question to disk as the durable record and wakes
-your pane, delivered as an aside tagged `[foreman:<handle>]` — it does not
-interrupt whatever turn you are mid-way through.
+your pane, delivered tagged `[foreman:<handle>]`.
 
-The wake is the primary path — most of the time the question just arrives,
-the same way a report does. The file is what covers the case a wake cannot:
-an aside only lands *between* tool calls, so a boss sitting inside a
-blocking `foreman_join` or `foreman_ask` will not see it until that call
-returns, which by default is an hour away. A blocking join polls the filed
-question instead, and breaks out on any question that is still unanswered —
-delivered to you or not. That is what stops it from deadlocking behind a
-worker waiting on exactly the answer you are blocking instead of giving.
-The background sweep is the one reader that skips a delivered question:
-re-serving it every tick would be the duplicate you already have.
+Unlike a report, a question **interrupts** — it lands at the next tool-call
+boundary instead of waiting for your turn to finish, because that worker is
+stalled until you answer and orchestrating workers is your actual job.
+
+Being interrupted is not permission to drop what you are holding. When one
+arrives:
+
+1. Put it on your todo list immediately, so it cannot be forgotten if the
+   step you are on turns out to be long.
+2. Finish the step you are already on. Never abandon a half-applied edit, a
+   partial refactor, or an uncommitted worktree to answer faster.
+3. Then answer from the todo, and mark it done.
+
+A question is cheap to answer and expensive to lose: the worker is doing
+nothing until you reply, but a repo left half-edited costs you the rest of
+the session.
+
+The wake is the primary path — most of the time the question just arrives.
+The file is what covers the case a wake cannot: nothing lands *inside* a
+running tool call, so a boss sitting in a blocking `foreman_join` or
+`foreman_ask` will not see it until that call returns, which by default is an
+hour away. A blocking join polls the filed question instead, and breaks out on
+any question that is still unanswered — delivered to you or not. That is what
+stops it from deadlocking behind a worker waiting on exactly the answer you
+are blocking instead of giving. The background sweep is the one reader that
+skips a delivered question: re-serving it every tick would be the duplicate
+you already have.
 
 Answer it and get back to your own work; the worker resumes and its report
 arrives the same way the question did:

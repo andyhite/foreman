@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDeliverer, loadCommandPrompts, type PickupResult } from "./index";
+import { createDeliverer, deliveryFor, loadCommandPrompts, type PickupResult } from "./index";
 
 describe("loadCommandPrompts", () => {
   let dir: string;
@@ -61,6 +61,46 @@ describe("loadCommandPrompts", () => {
 
   test("a missing directory yields no prompts instead of throwing", () => {
     expect(loadCommandPrompts(join(dir, "does-not-exist"))).toEqual([]);
+  });
+});
+
+describe("deliveryFor", () => {
+  const question = '\n=== smoke — QUESTION — branch test/bus-smoke\nShould I call it A or B?\n';
+  const report = "\n=== smoke (done) — branch test/bus-smoke\nforeman 0.6.0\n";
+
+  test("a report waits its turn", () => {
+    const { deliverAs, customType, content } = deliveryFor(report);
+    expect(deliverAs).toBe("followUp");
+    expect(customType).toBe("Foreman Update");
+    expect(content).toBe(report);
+  });
+
+  test("a question interrupts, because a worker is stalled until it is answered", () => {
+    const { deliverAs, customType, content } = deliveryFor(question);
+    expect(deliverAs).toBe("steer");
+    expect(customType).toBe("Foreman Question");
+    expect(content).toContain("Should I call it A or B?");
+  });
+
+  test("an interrupting question tells the boss how to absorb the interruption", () => {
+    // A bare steer reads as "drop everything", which loses a half-applied
+    // edit. The protocol has to ride along with the question: the boss owns
+    // orchestration, so being interrupted is normal, but finishing the
+    // current step before answering is what keeps it from being destructive.
+    const { content } = deliveryFor(question);
+    expect(content).toContain("todo");
+    expect(content).toContain("finish the step you are already on");
+  });
+
+  test("a tick carrying both a report and a question interrupts", () => {
+    // One sweep can print several workers. Text is never lost by arriving
+    // early, only by arriving late, so any question makes the payload urgent.
+    expect(deliveryFor(report + question).deliverAs).toBe("steer");
+  });
+
+  test("a report body that merely mentions the word does not interrupt", () => {
+    const chatty = "\n=== smoke (done) — branch b\nI had a QUESTION — about naming.\n";
+    expect(deliveryFor(chatty).deliverAs).toBe("followUp");
   });
 });
 

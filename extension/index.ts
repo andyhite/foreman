@@ -113,6 +113,45 @@ export type PickupResult =
   | { kind: "missing-binary" }
   | { kind: "error" };
 
+/**
+ * How a collected `pickup` payload should reach the boss.
+ *
+ * A report is finished work: nobody is waiting on it, so it queues behind
+ * whatever the boss is doing. A question is a *stalled worker* — it burns
+ * wall-clock until answered, and the boss cannot answer what it has not been
+ * shown. Queuing that one produced the run this function exists for: the
+ * question landed 13ms after the boss's turn ended, naming a worker the boss
+ * had already reaped mid-turn.
+ *
+ * Orchestrating workers is the boss's actual job, so an interruption is
+ * legitimate — but arriving mid-turn is not permission to abandon a
+ * half-applied edit, which is why the steer carries its own handling
+ * protocol. Without it a steer reads as "drop everything", and the boss
+ * loses the work it was in the middle of.
+ *
+ * Classified here rather than by a `pickup` exit code because delivery mode
+ * is presentation, which is this extension's half of the split — the CLI
+ * owns state. A tick that swept reports *and* a question returns both in one
+ * payload, so any question present makes the whole payload urgent: that is
+ * the safe direction, since a followUp's contents are never lost, only late.
+ * The anchored line start keeps a report that merely mentions the word from
+ * tripping it, and a false positive only ever delivers sooner.
+ */
+export function deliveryFor(text: string): {
+  deliverAs: "steer" | "followUp";
+  customType: string;
+  content: string;
+} {
+  if (!/^=== .+ — QUESTION — /m.test(text)) {
+    return { deliverAs: "followUp", customType: "Foreman Update", content: text };
+  }
+  return {
+    deliverAs: "steer",
+    customType: "Foreman Question",
+    content: `A worker is blocked and waiting on your answer.\n\nAdd it to your todo list now, finish the step you are already on, then answer it from the todo — do not abandon a half-applied change to answer immediately.\n\n${text}`,
+  };
+}
+
 export interface Deliverer {
   deliverOnce(cwd: string): Promise<DeliverOutcome>;
   deliverInbound(cwd: string): Promise<DeliverOutcome>;
@@ -135,9 +174,9 @@ export function createDeliverer(
   /**
    * One `pickup` pass — a single, non-blocking check of this pane's own
    * inbound state, never the deadline/`sleep_ms` loop `foreman join` uses
-   * — injecting its stdout as a `followUp` custom message if it printed
-   * anything: queued behind whatever the agent is doing rather than
-   * interrupting it, and starting a turn on its own if the agent is idle.
+   * — injecting its stdout if it printed anything, and starting a turn on
+   * its own if the agent is idle. `deliveryFor` decides whether that
+   * injection waits its turn or interrupts.
    */
   async function deliverOnce(cwd: string): Promise<DeliverOutcome> {
     const result = await pickup(cwd);
@@ -352,14 +391,10 @@ export default function foremanExtension(pi: ExtensionAPI) {
       return text ? { kind: "delivered", text } : { kind: "empty" };
     },
     async (text) => {
+      const { deliverAs, customType, content } = deliveryFor(text);
       await pi.sendMessage(
-        {
-          customType: "Foreman Update",
-          content: text,
-          display: true,
-          attribution: "user",
-        },
-        { deliverAs: "followUp", triggerTurn: true },
+        { customType, content, display: true, attribution: "user" },
+        { deliverAs, triggerTurn: true },
       );
     },
   );
@@ -809,7 +844,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     name: "foreman_reply",
     label: "Foreman Reply",
     description:
-      "File a question to the boss and push it to the boss's pane (worker-side). Use when blocked on a decision only the boss can make.",
+      "File a question to the boss and push it to the boss's pane (worker-side). Interrupts the boss's current turn, because you are stalled until it answers — use it when genuinely blocked on a decision only the boss can make, never for a progress update.",
     parameters: z.object({
       text: z.string(),
     }),

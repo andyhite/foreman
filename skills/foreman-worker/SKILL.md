@@ -15,10 +15,12 @@ them. Read it here only for what the block's summary leaves out: exact
 fallback CLI forms for when the `foreman_*` tools are not registered, and
 behavior the block doesn't spell out.
 
-Everything you send with `foreman_report`/`foreman_reply` arrives at the boss
-as a non-interrupting aside, over the same channel the block's other
-instructions use. `foreman send --raw`, `foreman broadcast`, and `foreman
-keys` are the exception: that is steering, and it interrupts on purpose.
+`foreman_report` arrives at the boss as a non-interrupting aside, queued behind
+whatever it is doing — nobody is waiting on finished work. `foreman_reply` is
+different: a question interrupts the boss's current turn, because you are
+stalled until it answers. Ask one when you are genuinely blocked, not to check
+in. `foreman send --raw`, `foreman broadcast`, and `foreman keys` interrupt on
+purpose too: that is steering.
 
 ## Reporting
 

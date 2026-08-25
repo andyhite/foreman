@@ -2082,6 +2082,11 @@ printf '%s\n%s\n' "$$" "$$" >"$doc_file"
 out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor reports a live sidecar' [ "${out#*bus sidecar live}" != "$out" ]
 assert 'and names the pid to signal' [ "${out#*pid $$}" != "$out" ]
+# The line is read by an agent deciding whether an interruption it just took
+# was the designed path or the fallback, so it has to name both halves: a
+# report waiting its turn is healthy, a report interrupting is not.
+assert 'and distinguishes a queued report from an interrupting question' \
+  [ "${out#*arrive as asides, a blocked worker\'s question interrupts}" != "$out" ]
 
 # A sidecar SIGKILLed before its EXIT trap ran leaves the file behind.
 # Existence is not liveness — the same rule the delivery path enforces.
