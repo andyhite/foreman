@@ -48,15 +48,16 @@ make_checkout() {
   printf 'id = "%s"\n' "$id" >"$dir/herdr-plugin.toml"
 }
 
-# Runs foreman-link out of checkout $1, with FOREMAN_LINK_DIR and FOREMAN_STATE
-# scoped under scenario scratch dir $2 so scenarios never share a link target
-# or a receipt file. Merges stderr into stdout: every assertion below only
-# checks for a substring's presence, and the warnings are the point.
+# Runs foreman-link out of checkout $1, with FOREMAN_LINK_DIR, FOREMAN_STATE
+# and HOME scoped under scenario scratch dir $2 so scenarios never share a
+# link target, a receipt file, or an omp MCP config. Merges stderr into
+# stdout: every assertion below only checks for a substring's presence, and
+# the warnings are the point.
 run_link() {
   dir=$1
   scratch=$2
   shift 2
-  ( FOREMAN_LINK_DIR="$scratch/bin" FOREMAN_STATE="$scratch/state" sh "$dir/bin/foreman-link" "$@" 2>&1 )
+  ( FOREMAN_LINK_DIR="$scratch/bin" FOREMAN_STATE="$scratch/state" HOME="$scratch/home" sh "$dir/bin/foreman-link" "$@" 2>&1 )
 }
 
 # ── fresh install ────────────────────────────────────────────────────────────
@@ -161,9 +162,44 @@ s="$sandbox/s9"; mkdir -p "$s"
 make_checkout "$s/ck" foreman.test.s9
 linkdir="$s/with space/bin"
 mkdir -p "$linkdir"
-( FOREMAN_LINK_DIR="$linkdir" FOREMAN_STATE="$s/state" sh "$s/ck/bin/foreman-link" 2>&1 )
+( FOREMAN_LINK_DIR="$linkdir" FOREMAN_STATE="$s/state" HOME="$s/home" sh "$s/ck/bin/foreman-link" 2>&1 )
 assert 'symlink exists in space-containing dir' [ -L "$linkdir/foreman" ]
 is     'resolves to the plugin checkout' "$(readlink "$linkdir/foreman")" "$s/ck/bin/foreman"
+
+# ── omp MCP registration ─────────────────────────────────────────────────────
+
+printf '\nomp MCP: fresh install writes config\n'
+s="$sandbox/s11"; mkdir -p "$s"
+make_checkout "$s/ck" foreman.test.s11
+run_link "$s/ck" "$s" >/dev/null
+mcp_file="$s/home/.omp/agent/mcp.json"
+assert     'mcp.json created' [ -f "$mcp_file" ]
+is         'foreman entry command' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" 'foreman'
+is         'foreman entry args' "$(jq -c '.mcpServers.foreman.args' "$mcp_file")" '["bus"]'
+
+printf '\nomp MCP: idempotent re-run leaves exactly one entry\n'
+run_link "$s/ck" "$s" >/dev/null
+is 'still exactly one foreman entry' "$(jq -c '.mcpServers | keys | map(select(. == "foreman")) | length' "$mcp_file")" '1'
+
+printf '\nomp MCP: preserves an unrelated pre-existing server entry\n'
+s="$sandbox/s12"; mkdir -p "$s/home/.omp/agent"
+make_checkout "$s/ck" foreman.test.s12
+printf '{"mcpServers":{"other":{"command":"other-tool","args":[]}}}\n' >"$s/home/.omp/agent/mcp.json"
+run_link "$s/ck" "$s" >/dev/null
+mcp_file="$s/home/.omp/agent/mcp.json"
+is 'unrelated entry untouched' "$(jq -c '.mcpServers.other' "$mcp_file")" '{"command":"other-tool","args":[]}'
+is 'foreman entry added' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" 'foreman'
+
+printf '\nomp MCP: leaves a customised foreman entry intact\n'
+s="$sandbox/s13"; mkdir -p "$s/home/.omp/agent"
+make_checkout "$s/ck" foreman.test.s13
+printf '{"mcpServers":{"foreman":{"command":"/custom/foreman","args":["bus","--extra"]}}}\n' >"$s/home/.omp/agent/mcp.json"
+out=$(run_link "$s/ck" "$s")
+mcp_file="$s/home/.omp/agent/mcp.json"
+assert 'reports leaving customised entry' [ "${out#*customised foreman entry}" != "$out" ]
+is     'customised command untouched' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" '/custom/foreman'
+is     'customised args untouched' "$(jq -c '.mcpServers.foreman.args' "$mcp_file")" '["bus","--extra"]'
+
 
 # ── foreman-ls: parse guard against malformed JSON ───────────────────────────────
 

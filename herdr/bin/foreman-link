@@ -165,6 +165,73 @@ else
   exit 0
 fi
 
+# Registers `foreman bus` as an omp MCP server in the user-level config so
+# every omp session spawns it as a stdio child (never project-level: the
+# hard rule is nothing ever gets written into a repo a worker operates on,
+# and user-level is the only source `mcp.enableProjectConfig: false` cannot
+# suppress).
+mcp_config_file() {
+  printf '%s/.omp/agent/mcp.json\n' "$HOME"
+}
+
+register_mcp() {
+  file=$(mcp_config_file)
+  dir=$(dirname "$file")
+  wanted='{"command":"foreman","args":["bus"]}'
+
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'foreman-link: warning: jq not found; skipping omp MCP registration for foreman bus (add manually to %s: {"mcpServers":{"foreman":%s}})\n' \
+      "$file" "$wanted" >&2
+    return 0
+  fi
+
+  mkdir -p "$dir" || {
+    printf 'foreman-link: warning: could not create %s; skipping omp MCP registration\n' "$dir" >&2
+    return 0
+  }
+
+  if [ -f "$file" ] && ! jq -e . "$file" >/dev/null 2>&1; then
+    printf 'foreman-link: warning: %s is not valid JSON; skipping omp MCP registration\n' "$file" >&2
+    return 0
+  fi
+
+  if [ -f "$file" ]; then
+    existing=$(jq -c '.mcpServers.foreman // empty' "$file" 2>/dev/null)
+    if [ -n "$existing" ]; then
+      if [ "$(printf '%s' "$existing" | jq -Sc .)" = "$(printf '%s' "$wanted" | jq -Sc .)" ]; then
+        $quiet || printf 'omp MCP: foreman bus already registered in %s\n' "$file"
+      else
+        $quiet || printf 'omp MCP: leaving existing customised foreman entry in %s untouched (found: %s)\n' "$file" "$existing"
+      fi
+      return 0
+    fi
+  fi
+
+  # Never write a partially-serialised file over a good one: build the merged
+  # document in a temp file in the same directory, then rename — an interrupted
+  # write leaves the temp file orphaned, not a truncated config in its place.
+  tmp="$dir/mcp.json.tmp.$$"
+  if [ -f "$file" ]; then
+    jq --argjson entry "$wanted" '.mcpServers = ((.mcpServers // {}) + {foreman: $entry})' "$file" >"$tmp" 2>/dev/null
+  else
+    printf '{}\n' | jq --argjson entry "$wanted" '.mcpServers = ((.mcpServers // {}) + {foreman: $entry})' >"$tmp" 2>/dev/null
+  fi
+  if [ ! -s "$tmp" ]; then
+    printf 'foreman-link: warning: failed to build %s; skipping omp MCP registration\n' "$file" >&2
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! mv "$tmp" "$file" 2>/dev/null; then
+    printf 'foreman-link: warning: could not write %s; skipping omp MCP registration\n' "$file" >&2
+    rm -f "$tmp"
+    return 0
+  fi
+  $quiet || printf 'omp MCP: registered foreman bus (command: foreman bus) in %s — restart existing omp sessions, or run /mcp reconnect, to pick it up\n' "$file"
+  return 0
+}
+
+register_mcp
+
 case ":${PATH-}:" in
   *":$target_dir:"*) ;;
   *) printf 'foreman-link: warning: %s is not on PATH; add it to your interactive shell PATH to use foreman there\n' "$target_dir" >&2 ;;

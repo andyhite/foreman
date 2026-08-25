@@ -14,6 +14,11 @@ cover: the `foreman_*` tools are not registered (a shell without the extension
 installed, so you need the CLI form) or you want more context than the
 block's summary gives.
 
+Your task, and everything you send with `foreman_report`/`foreman_reply`,
+arrives as a non-interrupting aside — sub-second, over the same channel in
+both directions. `foreman send --raw`, `foreman broadcast`, and `foreman
+keys` are the exception: that is steering, and it is meant to interrupt.
+
 ## Reporting
 
 When your work is done, write your report **last** — after everything else

@@ -20,10 +20,13 @@ declare module "node:path" {
   export function join(...segments: string[]): string;
 }
 
-// `process.env` reads (HERDR_ENV, FOREMAN_BIN, FOREMAN_ASIDE_POLL_MS) are
-// the only Node process API this plugin touches.
+// The only Node process API this plugin touches: `env` reads (HERDR_ENV,
+// FOREMAN_BIN, FOREMAN_ASIDE_POLL_MS), plus `pid`/`cwd()` for the liveness
+// marker `foreman bus --arm` records for this session.
 declare const process: {
   env: Record<string, string | undefined>;
+  pid: number;
+  cwd: () => string;
 };
 
 // Ambient shapes for `@oh-my-pi/pi-coding-agent` and the Bun globals this
@@ -146,6 +149,19 @@ declare module "@oh-my-pi/pi-coding-agent" {
     input: { command?: string; [key: string]: unknown };
   }
 
+  // Payload for the notification bus's `mcp_notification` event — the
+  // sidecar's wake ping carries no `params` by design (see
+  // `herdr/bin/foreman`'s `bus` subcommand: the receiving extension asks the
+  // CLI what to deliver via `foreman pickup` rather than trusting a payload
+  // that could go stale between send and receive). Declaring `params` as
+  // `unknown` rather than omitting it matches the wire shape without
+  // inventing fields extension/index.ts never reads.
+  interface McpNotificationEvent {
+    server: string;
+    method: string;
+    params?: unknown;
+  }
+
   export interface ExtensionAPI {
     zod: ZodStatic;
     // Result is `unknown`, never a concrete shape: every call site in
@@ -154,14 +170,19 @@ declare module "@oh-my-pi/pi-coding-agent" {
     exec(command: string, args: string[], options: ExecOptions): Promise<unknown>;
     registerTool<Shape extends ZodRawShape>(config: ExtensionToolConfig<Shape>): void;
     registerCommand(name: string, config: ExtensionCommandConfig): void;
-    // `tool_call` is the only event this extension subscribes to; declaring a
-    // generic `on(event: string, ...)` here would let a typo'd event name
-    // type-check silently instead of failing the build. `ctx` reuses
-    // `ExtensionToolContext` (not a third shape) because
+    // `tool_call` and `mcp_notification` are the only events this extension
+    // subscribes to; declaring a generic `on(event: string, ...)` here would
+    // let a typo'd event name type-check silently instead of failing the
+    // build. `ctx` reuses `ExtensionToolContext` (not a third shape) because
     // `omp://extensions.md` documents every handler receiving the same
     // `ExtensionContext`, and the extension only ever reads
     // `setInterval`/`clearTimer`/`cwd` off it, identical to a tool's own ctx.
     on(event: "tool_call", handler: (event: ToolCallEvent, ctx: ExtensionToolContext) => void): void;
+    // Fired for every MCP server's push notifications this session has
+    // wired up, not just foreman's — extension/index.ts filters on
+    // `server`/`method` itself rather than this file inventing a
+    // foreman-only event name the real runtime doesn't have.
+    on(event: "mcp_notification", handler: (event: McpNotificationEvent, ctx: ExtensionToolContext) => void): void;
     sendMessage(message: ExtensionCustomMessage, options: ExtensionSendMessageOptions): Promise<void>;
     sendUserMessage(text: string): Promise<void>;
   }

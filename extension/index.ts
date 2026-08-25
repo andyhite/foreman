@@ -239,99 +239,174 @@ export default function foremanExtension(pi: ExtensionAPI) {
   }
 
   // ---------------------------------------------------------------------
-  // Background join poller — anomaly sweeper, not the delivery path. A
-  // worker's own `foreman report`/`foreman reply` pushes straight to this
-  // pane and stamps its ack counter on success, so the happy path never
-  // touches this loop. It exists to catch what a direct push can't: a
-  // worker that ended its turn without reporting, a worker that died, or a
-  // push that failed because the boss wasn't live to receive it.
+  // Inbound delivery — an MCP push (`notifications/foreman/wake`, armed
+  // below) is the delivery path; a worker's own `foreman report`/`reply`
+  // (and a boss's `dispatch_to`) fires it the moment state changes, so the
+  // happy path is sub-second, not polled. `deliverInbound` is the single
+  // function both the push handler and the timer call, sharing one
+  // in-flight guard, so a wake that lands mid-tick (or vice versa) can
+  // never inject the same `foreman pickup` output twice. The timer below
+  // survives only as the anomaly net a push cannot express: a worker that
+  // died without ever bumping a counter, or a push that failed because the
+  // boss wasn't live to receive it.
   // ---------------------------------------------------------------------
 
   let joinPollTimer: unknown = null;
   let joinPollFailures = 0;
-  let joinPollInFlight = false;
-  const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 15000;
+  let deliverInFlight = false;
+  let deliverPending = false;
+  const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 60000;
+
+  type DeliverOutcome = "delivered" | "empty" | "missing-binary" | "error";
 
   /**
-   * Starts (once per session) a `ctx.setInterval` tick that runs
-   * `foreman join --once` — a single, non-blocking sweep pass, never the
-   * deadline/`sleep_ms` loop `foreman join` uses on its own. Delivery is now
-   * the worker's job (a direct push to this pane on `report`/`reply`); this
-   * tick only picks up what a push missed — an unreported worker, a dead
-   * one, or a delivery that failed for a boss that wasn't live — and surfaces
-   * it as a `followUp` custom message: queued behind whatever the boss is
-   * doing rather than interrupting it, and it starts a turn on its own if
-   * the boss is idle. Idempotent, so every boss-side tool can call it
-   * unconditionally.
+   * One `foreman pickup` pass — a single, non-blocking check of this pane's
+   * own inbound state, never the deadline/`sleep_ms` loop `foreman join` uses
+   * — injecting its stdout as a `followUp` custom message if it printed
+   * anything: queued behind whatever the agent is doing rather than
+   * interrupting it, and starting a turn on its own if the agent is idle.
+   */
+  async function deliverOnce(ctx: ForemanToolCtx): Promise<DeliverOutcome> {
+    let result: ForemanExecResult;
+    try {
+      result = (await pi.exec(foremanBin, ["pickup"], { cwd: ctx.cwd })) as ForemanExecResult;
+    } catch (err) {
+      return isMissingBinaryError(err) ? "missing-binary" : "error";
+    }
+
+    // Exit 3 means nothing to deliver — not a failure, just nothing to do.
+    if (result.code === 3) return "empty";
+    if (result.code !== 0) return "error";
+
+    const text = result.stdout.trim();
+    if (!text) return "empty";
+    await pi.sendMessage(
+      {
+        customType: "Foreman Update",
+        content: text,
+        display: true,
+        attribution: "user",
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+    return "delivered";
+  }
+
+  /**
+   * Serialises `deliverOnce` across its two callers, the push listener and
+   * the timer tick. Concurrency has to be excluded: a hung `pi.exec` has no
+   * timeout of its own, so a second overlapping call would pile another
+   * stuck child on top of the first.
+   *
+   * A wake arriving mid-pickup is coalesced rather than dropped. Dropping it
+   * loses the delivery outright whenever the in-flight pass had already read
+   * state before the counter it would have been told about changed, leaving
+   * the payload to sit until the 60s anomaly sweep — the exact wait the bus
+   * exists to remove. One re-run covers any number of queued wakes, because
+   * a single pickup drains everything pending in one pass.
+   */
+  async function deliverInbound(ctx: ForemanToolCtx): Promise<DeliverOutcome> {
+    if (deliverInFlight) {
+      deliverPending = true;
+      return "empty";
+    }
+    deliverInFlight = true;
+    try {
+      let outcome: DeliverOutcome;
+      do {
+        deliverPending = false;
+        outcome = await deliverOnce(ctx);
+        // A missing binary or a hard error will not resolve on an immediate
+        // retry; re-run only where new state could genuinely be waiting.
+      } while (deliverPending && (outcome === "delivered" || outcome === "empty"));
+      return outcome;
+    } finally {
+      deliverInFlight = false;
+      deliverPending = false;
+    }
+  }
+
+  /**
+   * Starts (once per session) a `ctx.setInterval` tick that calls
+   * `deliverInbound`. A missing binary or five consecutive real errors
+   * stops the *timer* (polling itself is broken, or will never work); a
+   * push-triggered `deliverInbound` call must never be able to trip this —
+   * the listener below stays armed for the life of the session regardless
+   * of any one pickup's outcome. Idempotent, so every boss-side tool can
+   * call it unconditionally.
    */
   function ensureJoinPoller(ctx: ForemanToolCtx) {
     if (joinPollTimer) return;
     joinPollTimer = ctx.setInterval(async () => {
-      // A hung herdr call under `pi.exec` has no timeout of its own; without
-      // this guard every subsequent tick would pile another child process on
-      // top of the one still stuck, instead of just skipping its turn.
-      if (joinPollInFlight) return;
-      joinPollInFlight = true;
-      try {
-        let result: ForemanExecResult;
-        try {
-          result = (await pi.exec(foremanBin, ["join", "--once"], { cwd: ctx.cwd })) as ForemanExecResult;
-        } catch (err) {
-          // A transient herdr hiccup shouldn't kill the poller, but a missing
-          // binary never recovers on its own — stop instead of erroring on
-          // every tick for the rest of the session.
-          if (isMissingBinaryError(err) && joinPollTimer) {
-            ctx.clearTimer(joinPollTimer);
-            joinPollTimer = null;
-          }
-          return;
+      const outcome = await deliverInbound(ctx);
+      if (outcome === "missing-binary") {
+        // A transient herdr hiccup shouldn't kill the poller, but a missing
+        // binary never recovers on its own — stop instead of erroring on
+        // every tick for the rest of the session.
+        if (joinPollTimer) {
+          ctx.clearTimer(joinPollTimer);
+          joinPollTimer = null;
         }
-
-        if (result.code === 3) {
-          // Nothing registered in this repo needs sweeping (no workers, or
-          // every worker already collected). Not a failure — park the timer
-          // so an idle repo doesn't spend a subprocess every tick forever;
-          // the next `foreman_spawn`/`foreman_send`/etc. calls
-          // `ensureJoinPoller` again and restarts it. Parking is safe now
-          // because a worker's push already delivered anything that
-          // mattered — nothing is lost while this loop is stopped.
-          if (joinPollTimer) {
-            ctx.clearTimer(joinPollTimer);
-            joinPollTimer = null;
-          }
-          return;
-        }
-
-        if (result.code !== 0) {
-          // Most commonly "not in a git repo" if the boss's cwd changed out
-          // from under it. Five in a row means polling itself is broken, not
-          // that nothing happened — stop rather than repeat the same die()
-          // text as a steer message forever.
-          joinPollFailures += 1;
-          if (joinPollFailures >= 5 && joinPollTimer) {
-            ctx.clearTimer(joinPollTimer);
-            joinPollTimer = null;
-          }
-          return;
-        }
-        joinPollFailures = 0;
-
-        const text = result.stdout.trim();
-        if (!text) return;
-        await pi.sendMessage(
-          {
-            customType: "Foreman Update",
-            content: text,
-            display: true,
-            attribution: "user",
-          },
-          { deliverAs: "followUp", triggerTurn: true },
-        );
-      } finally {
-        joinPollInFlight = false;
+        return;
       }
+      if (outcome === "empty") {
+        // Nothing to deliver right now. Not a failure — park the timer so
+        // an idle repo doesn't spend a subprocess every tick forever; the
+        // next `foreman_spawn`/`foreman_send`/etc. calls `ensureJoinPoller`
+        // again and restarts it. Parking is safe because a push already
+        // delivered anything that mattered — nothing is lost while this
+        // loop is stopped.
+        if (joinPollTimer) {
+          ctx.clearTimer(joinPollTimer);
+          joinPollTimer = null;
+        }
+        return;
+      }
+      if (outcome === "error") {
+        // Most commonly "not in a git repo" if the boss's cwd changed out
+        // from under it. Five in a row means polling itself is broken, not
+        // that nothing happened — stop rather than repeat the same
+        // unactionable failure as a steer message forever.
+        joinPollFailures += 1;
+        if (joinPollFailures >= 5 && joinPollTimer) {
+          ctx.clearTimer(joinPollTimer);
+          joinPollTimer = null;
+        }
+        return;
+      }
+      joinPollFailures = 0;
     }, joinPollMs);
   }
+
+  // Armed unconditionally at load, not lazily from a tool handler: a worker
+  // session never calls a boss-side tool, so a lazily-armed listener would
+  // leave every worker deaf to its own dispatches. `mcp_notification` fires
+  // for every server this session has wired up, so the `server`/`method`
+  // filter is required, not defensive — anything else on the bus is not
+  // this extension's concern.
+  pi.on("mcp_notification", (event, ctx) => {
+    if (event.server !== "foreman" || event.method !== "notifications/foreman/wake") return;
+    void deliverInbound(ctx);
+  });
+
+  // Publishes the fact that a listener now exists in this session. The sidecar
+  // is registered in user-level mcp.json, so it runs in *every* omp session —
+  // including one that never loaded this plugin. A boss's `dispatch_to` cannot
+  // tell those apart from the sidecar's own liveness marker, and when it
+  // assumed a wake would become an aside it skipped the herdr prompt and the
+  // task reached nobody at all. Fire-and-forget, after the handler above is
+  // registered so the marker never claims more than is already true: the
+  // subcommand is itself fail-open, so the only failure that reaches the catch
+  // is a missing binary, which costs exactly the prompt fallback.
+  void (async () => {
+    try {
+      await pi.exec(foremanBin, ["bus", "--arm", String(process.pid)], {
+        cwd: process.cwd(),
+      });
+    } catch {
+      // Arming is an optimisation; never let it take the session down.
+    }
+  })();
 
   function cancelled() {
     return { content: [{ type: "text" as const, text: "Cancelled" }] };

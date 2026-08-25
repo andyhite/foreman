@@ -71,9 +71,15 @@ herdr plugin link ./herdr
 omp install ./
 ```
 
-Installing the omp plugin also registers the `foreman_*` custom tools. Restart
-the session afterward — omp loads extension modules at startup, not
-mid-session.
+Installing the omp plugin registers the `foreman_*` custom tools and the wake
+listener that turns a dispatch, report, or question into an aside. Registering
+the `foreman` MCP server in `~/.omp/agent/mcp.json` is the *herdr* plugin's
+installer, so the sidecar half runs in every omp session — including one with
+no agent plugin at all. Delivery therefore checks for both halves and falls
+back to a `herdr agent prompt` when only the sidecar is present. Restart the
+session after either install. `/mcp reconnect` is not enough: it reconnects
+configured MCP servers, but extension modules load only at startup, so a
+session that reconnects a fresh sidecar still has no listener to wake.
 
 ## Use
 

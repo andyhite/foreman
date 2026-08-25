@@ -33,14 +33,33 @@ wraps — the reason is not merely style.
 
 Delivery itself is protocol-level, not harness-level: a worker's
 `foreman_report`/`foreman_reply` — and the bare `foreman report`/`foreman reply`
-CLI they wrap — push straight into this pane over herdr's agent surface. That
+CLI they wrap — write to `$FOREMAN_STATE` and then wake this pane. That
 happens whether or not you have ever called a tool here, which is why reports
 arrive on their own; see *How a wave reports back* below.
 
-What a boss-side tool call arms is the extension's background sweeper, and that
-is a narrower thing: a slow `foreman join --once` tick that catches only what a
-push cannot — a worker that ended its turn without reporting, one whose agent
-died, and a push that found no live boss to receive it. It parks itself when
+The wake travels over a per-session `foreman bus` sidecar: omp spawns it as a
+stdio MCP server, and it pushes a payload-free `notifications/foreman/wake`
+the moment your counters change — sub-second, and a non-interrupting aside
+rather than a prompt. The extension answers by asking `foreman pickup` what
+changed and injecting that. A dispatch reaching a worker takes the same path
+in the other direction, so a worker no longer receives a boss's task as an
+interrupting fake prompt; it arrives as an aside too. Neither `foreman bus`
+nor `foreman pickup` is meant to be invoked directly — they are session
+plumbing, wired up by install and the extension, not another surface to call.
+The one thing that still interrupts on purpose is steering — `foreman send
+--raw`, `foreman broadcast`, `foreman dm`, `foreman keys` — because unblocking
+a stuck approval prompt only works if it cuts the queue.
+
+Delivery requires both halves of the bus: the sidecar, and a session that
+loaded this plugin and armed a listener. The sidecar comes from the herdr
+plugin's installer and so runs in every omp session, which is why the check is
+for both and not just the sidecar. If either is missing — the bus is down, the
+pane sits outside herdr, or the session has no agent plugin — delivery falls
+back to `herdr agent prompt`. What a boss-side tool call arms in that
+case is the extension's background sweeper — a slower net, on
+`FOREMAN_ASIDE_POLL_MS` (60s by default), that catches only what a wake
+cannot: a worker that ended its turn without reporting, one whose agent
+died, and a wake that fired with no live listener. It parks itself when
 there is nothing left to sweep and re-arms on the next boss-side tool call. A
 bash invocation of a boss-side `foreman` subcommand is intercepted and arms the
 same sweeper, so the shell form is not a dead end — this skill still shows it
@@ -226,22 +245,23 @@ quietly stopped. A `foreman_send` makes that worker joinable again, which is
 precisely when re-joining is meaningful. Naming a handle explicitly always
 joins it, collected or not.
 
-## When a worker interrupts you
+## When a worker has a question for you
 
 A blocked worker runs `foreman_reply` (or the CLI `foreman reply "<question>"`
-it wraps). That pushes the question straight to your pane, tagged
-`[foreman:<handle>]`, and files it to disk as the durable record.
+it wraps). That writes the question to disk as the durable record and wakes
+your pane, delivered as an aside tagged `[foreman:<handle>]` — it does not
+interrupt whatever turn you are mid-way through.
 
-The push is the primary path — most of the time the question just arrives,
-the same way a report does. The file exists for the case a push cannot cover:
-a herdr prompt only reaches you *between* tool calls, so a boss sitting
-inside a blocking `foreman_join` or `foreman_ask` will not see it until that
-call returns, which by default is an hour away. A blocking join polls the
-filed question instead, and breaks out on any question that is still
-unanswered — delivered to you or not. That is what stops it from deadlocking
-behind a worker waiting on exactly the answer you are blocking instead of
-giving. The background sweep is the one reader that skips a delivered
-question: re-serving it every tick would be the duplicate you already have.
+The wake is the primary path — most of the time the question just arrives,
+the same way a report does. The file is what covers the case a wake cannot:
+an aside only lands *between* tool calls, so a boss sitting inside a
+blocking `foreman_join` or `foreman_ask` will not see it until that call
+returns, which by default is an hour away. A blocking join polls the filed
+question instead, and breaks out on any question that is still unanswered —
+delivered to you or not. That is what stops it from deadlocking behind a
+worker waiting on exactly the answer you are blocking instead of giving.
+The background sweep is the one reader that skips a delivered question:
+re-serving it every tick would be the duplicate you already have.
 
 Answer it and get back to your own work; the worker resumes and its report
 arrives the same way the question did:
