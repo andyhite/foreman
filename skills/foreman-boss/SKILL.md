@@ -31,20 +31,24 @@ Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
 `foreman_doctor`, `foreman_roles`. Call the tool, not the shell command it
 wraps — the reason is not merely style.
 
-Delivery is a real push, not a poll: a worker's `foreman_report`, and your own
-dispatch, signal the other side directly and arrive as a non-interrupting
-aside — queued behind whatever turn is running, because nobody is waiting on
-them. A worker's `foreman_reply` is the one inbound exception: a question means
-that worker is *stalled* until you answer, so it cuts into your current turn at
-the next tool-call boundary rather than waiting for the turn to end. Handle it
-the way you would any interruption you are responsible for — see [Answering a
-question](#answering-a-question). If a signal can't be delivered, it falls back
-to an interrupting `herdr agent prompt`, so nothing is silently lost; it just
-arrives more rudely. Outbound, steering is the deliberate exception:
+Delivery is a real push, not a poll, and it splits by direction. **Inbound
+interrupts**: a worker's `foreman_report` or `foreman_reply` cuts into your
+current turn at the next tool-call boundary, because collecting those workers
+is your whole job and you are the one waiting. **Outbound queues**: a tracked
+task you dispatch waits for the worker's next turn, since a worker interrupted
+mid-change is exactly what foreman refuses to create.
+
+So you do not poll for a result, and you do not need to: it arrives on its own,
+seconds after the worker files it. What you do need is a way to absorb an
+interruption without wrecking what you were holding — see [Handling an
+interruption](#handling-an-interruption).
+
+If a signal can't be delivered, everything falls back to an interrupting `herdr
+agent prompt`, so nothing is silently lost; a task just arrives more rudely
+than it should. Steering is the deliberate outbound exception:
 `foreman_send(raw: true)`, `foreman_broadcast`, `foreman_dm`, and `foreman_keys`
 interrupt a worker's *current* turn on purpose, because unblocking a stuck
-approval prompt only works if it cuts the queue. A tracked task and a report
-never do that — both queue for the worker's next turn. See
+approval prompt only works if it cuts the queue. See
 [README.md](../../README.md#install) for how the delivery channel is wired up.
 
 Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
@@ -225,42 +229,40 @@ quietly stopped. A `foreman_send` makes that worker joinable again, which is
 precisely when re-joining is meaningful. Naming a handle explicitly always
 joins it, collected or not.
 
-## Answering a question
+## Handling an interruption
 
-A blocked worker runs `foreman_reply` (or the CLI `foreman reply "<question>"`
-it wraps). That writes the question to disk as the durable record and wakes
-your pane, delivered tagged `[foreman:<handle>]`.
+Both inbound kinds interrupt you: a worker's report when it finishes, and a
+worker's question when it blocks. Each lands at the next tool-call boundary,
+tagged `[foreman:<handle>]`, seconds after the worker filed it.
 
-Unlike a report, a question **interrupts** — it lands at the next tool-call
-boundary instead of waiting for your turn to finish, because that worker is
-stalled until you answer and orchestrating workers is your actual job.
+Being interrupted is not permission to drop what you are holding. Every one of
+them arrives carrying this protocol, and it is the whole discipline:
 
-Being interrupted is not permission to drop what you are holding. When one
-arrives:
-
-1. Put it on your todo list immediately, so it cannot be forgotten if the
-   step you are on turns out to be long.
+1. Put it on your todo list immediately, so it cannot be forgotten if the step
+   you are on turns out to be long.
 2. Finish the step you are already on. Never abandon a half-applied edit, a
-   partial refactor, or an uncommitted worktree to answer faster.
-3. Then answer from the todo, and mark it done.
+   partial refactor, or an uncommitted worktree to react faster.
+3. Then handle it from the todo, and mark it done.
 
-A question is cheap to answer and expensive to lose: the worker is doing
-nothing until you reply, but a repo left half-edited costs you the rest of
-the session.
+The asymmetry worth knowing: a question has a worker doing *nothing* until you
+reply, so it is the one to reach for first when two are queued. A report is
+finished work — it will keep.
 
-The wake is the primary path — most of the time the question just arrives.
-The file is what covers the case a wake cannot: nothing lands *inside* a
-running tool call, so a boss sitting in a blocking `foreman_join` or
-`foreman_ask` will not see it until that call returns, which by default is an
-hour away. A blocking join polls the filed question instead, and breaks out on
-any question that is still unanswered — delivered to you or not. That is what
-stops it from deadlocking behind a worker waiting on exactly the answer you
-are blocking instead of giving. The background sweep is the one reader that
-skips a delivered question: re-serving it every tick would be the duplicate
-you already have.
+Neither is worth losing your own place over. A question is cheap to answer;
+a repo left half-edited costs you the rest of the session.
 
-Answer it and get back to your own work; the worker resumes and its report
-arrives the same way the question did:
+The push is the primary path — most of the time it just arrives. The filed copy
+on disk covers what a push cannot: nothing lands *inside* a running tool call,
+so a boss sitting in a blocking `foreman_join` or `foreman_ask` will not see it
+until that call returns, which by default is an hour away. A blocking join
+polls the filed question instead, and breaks out on any question that is still
+unanswered — delivered to you or not. That is what stops it from deadlocking
+behind a worker waiting on exactly the answer you are blocking instead of
+giving. The background sweep is the one reader that skips a delivered question:
+re-serving it every tick would be the duplicate you already have.
+
+Answer from the todo and get back to your own work; the worker resumes and its
+report arrives the same way the question did:
 
 ```
 foreman_send(handle: "feat-412-webhook-retry", text: "Use the existing RetryPolicy in core/retry.ts; don't add a new one.", raw: true)

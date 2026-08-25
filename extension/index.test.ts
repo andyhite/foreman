@@ -65,41 +65,57 @@ describe("loadCommandPrompts", () => {
 });
 
 describe("deliveryFor", () => {
-  const question = '\n=== smoke — QUESTION — branch test/bus-smoke\nShould I call it A or B?\n';
+  const question = "\n=== smoke — QUESTION — branch test/bus-smoke\nShould I call it A or B?\n";
   const report = "\n=== smoke (done) — branch test/bus-smoke\nforeman 0.6.0\n";
+  const task = "Rework the retry policy in core/retry.ts.\n\n-- foreman protocol --\n";
 
-  test("a report waits its turn", () => {
+  test("a report interrupts the boss, because the boss is the one waiting on it", () => {
+    // Measured on one live run over this same channel: queued, the report
+    // landed 78.6s after filing and after the boss's closing message, having
+    // sent it hunting through twelve tool calls to `report.md` on disk.
+    // Steered, its sibling question landed in 1.65s.
     const { deliverAs, customType, content } = deliveryFor(report);
-    expect(deliverAs).toBe("followUp");
-    expect(customType).toBe("Foreman Update");
-    expect(content).toBe(report);
+    expect(deliverAs).toBe("steer");
+    expect(customType).toBe("Foreman Report");
+    expect(content).toContain("foreman 0.6.0");
   });
 
-  test("a question interrupts, because a worker is stalled until it is answered", () => {
+  test("a question interrupts, and says it is blocking somebody", () => {
     const { deliverAs, customType, content } = deliveryFor(question);
     expect(deliverAs).toBe("steer");
     expect(customType).toBe("Foreman Question");
     expect(content).toContain("Should I call it A or B?");
+    expect(content).toContain("blocked and waiting");
   });
 
-  test("an interrupting question tells the boss how to absorb the interruption", () => {
+  test("a task queues, because a worker interrupted mid-change is what the CLI refuses to create", () => {
+    const { deliverAs, customType, content } = deliveryFor(task);
+    expect(deliverAs).toBe("followUp");
+    expect(customType).toBe("Foreman Task");
+    expect(content).toBe(task);
+  });
+
+  test("every interruption carries the protocol for absorbing it", () => {
     // A bare steer reads as "drop everything", which loses a half-applied
-    // edit. The protocol has to ride along with the question: the boss owns
-    // orchestration, so being interrupted is normal, but finishing the
-    // current step before answering is what keeps it from being destructive.
-    const { content } = deliveryFor(question);
-    expect(content).toContain("todo");
-    expect(content).toContain("finish the step you are already on");
+    // edit. Being interrupted is normal for a boss; finishing the current
+    // step first is what keeps it from being destructive.
+    for (const text of [report, question]) {
+      expect(deliveryFor(text).content).toContain("todo list");
+      expect(deliveryFor(text).content).toContain("finish the step you are already on");
+    }
   });
 
-  test("a tick carrying both a report and a question interrupts", () => {
-    // One sweep can print several workers. Text is never lost by arriving
-    // early, only by arriving late, so any question makes the payload urgent.
-    expect(deliveryFor(report + question).deliverAs).toBe("steer");
+  test("a mixed sweep leads with the part that is blocking somebody", () => {
+    // One sweep can print several workers. The question is the only half with
+    // an agent stalled on it, so it names the interruption.
+    const mixed = deliveryFor(report + question);
+    expect(mixed.deliverAs).toBe("steer");
+    expect(mixed.customType).toBe("Foreman Question");
   });
 
-  test("a report body that merely mentions the word does not interrupt", () => {
-    const chatty = "\n=== smoke (done) — branch b\nI had a QUESTION — about naming.\n";
+  test("a task body that merely mentions a report header does not count as one", () => {
+    // The header has to start the line: `=== ` mid-sentence is prose.
+    const chatty = "Refactor so the output reads === smoke (done) — branch b\n";
     expect(deliveryFor(chatty).deliverAs).toBe("followUp");
   });
 });

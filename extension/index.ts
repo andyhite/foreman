@@ -114,41 +114,50 @@ export type PickupResult =
   | { kind: "error" };
 
 /**
- * How a collected `pickup` payload should reach the boss.
+ * How a collected `pickup` payload should reach the agent it is for.
  *
- * A report is finished work: nobody is waiting on it, so it queues behind
- * whatever the boss is doing. A question is a *stalled worker* — it burns
- * wall-clock until answered, and the boss cannot answer what it has not been
- * shown. Queuing that one produced the run this function exists for: the
- * question landed 13ms after the boss's turn ended, naming a worker the boss
- * had already reaped mid-turn.
+ * The split is by direction, not by content. Anything *inbound to a boss* — a
+ * worker's report or its question — interrupts, because orchestrating those
+ * workers is the boss's whole job and it is the one waiting. Anything
+ * *outbound to a worker* — a tracked task — queues for its next turn, because
+ * a worker interrupted mid-change is the case the CLI already refuses to
+ * create (a re-dispatch is accepted only from `idle` or `done`).
  *
- * Orchestrating workers is the boss's actual job, so an interruption is
- * legitimate — but arriving mid-turn is not permission to abandon a
- * half-applied edit, which is why the steer carries its own handling
- * protocol. Without it a steer reads as "drop everything", and the boss
- * loses the work it was in the middle of.
+ * Measured, not assumed. One run delivered both kinds over this exact channel
+ * with only the mode differing: the question steered and landed 1.65s after it
+ * was filed, mid-turn; the report queued and landed 78.6s after it was filed,
+ * after the boss's closing message. In those 78 seconds the boss spent twelve
+ * tool calls hunting for it and ended up reading `report.md` off disk — the
+ * failure that started all of this, reproduced by delivery mode alone.
  *
- * Classified here rather than by a `pickup` exit code because delivery mode
- * is presentation, which is this extension's half of the split — the CLI
- * owns state. A tick that swept reports *and* a question returns both in one
- * payload, so any question present makes the whole payload urgent: that is
- * the safe direction, since a followUp's contents are never lost, only late.
- * The anchored line start keeps a report that merely mentions the word from
- * tripping it, and a false positive only ever delivers sooner.
+ * Arriving mid-turn is not permission to abandon a half-applied edit, which is
+ * why every steer carries its own handling protocol. Without it a steer reads
+ * as "drop everything", and the boss loses the work it was in the middle of.
+ *
+ * Classified here rather than by a `pickup` exit code because delivery mode is
+ * presentation, which is this extension's half of the split — the CLI owns
+ * state. `=== ` is `foreman join`'s own framing, on every report and question
+ * and on nothing else, so its absence is what identifies a task. A sweep can
+ * return several workers at once, so a question anywhere in the payload picks
+ * the question preamble: it names the only part that blocks somebody.
  */
 export function deliveryFor(text: string): {
   deliverAs: "steer" | "followUp";
   customType: string;
   content: string;
 } {
-  if (!/^=== .+ — QUESTION — /m.test(text)) {
-    return { deliverAs: "followUp", customType: "Foreman Update", content: text };
+  if (!/^=== /m.test(text)) {
+    return { deliverAs: "followUp", customType: "Foreman Task", content: text };
   }
+  const absorb =
+    "Add it to your todo list now and finish the step you are already on, then handle it from the todo — do not abandon a half-applied change to deal with this immediately.";
+  const question = /^=== .+ — QUESTION — /m.test(text);
   return {
     deliverAs: "steer",
-    customType: "Foreman Question",
-    content: `A worker is blocked and waiting on your answer.\n\nAdd it to your todo list now, finish the step you are already on, then answer it from the todo — do not abandon a half-applied change to answer immediately.\n\n${text}`,
+    customType: question ? "Foreman Question" : "Foreman Report",
+    content: question
+      ? `A worker is blocked and waiting on your answer.\n\n${absorb}\n\n${text}`
+      : `A worker you dispatched has finished and filed its report.\n\n${absorb}\n\n${text}`,
   };
 }
 

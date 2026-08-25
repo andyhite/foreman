@@ -522,13 +522,26 @@ cmd_boss() {
   done
 
   local current; current=$(self_handle)
+  # Every path below prints the bare handle on stdout and says what it did on
+  # stderr. The handle alone is the machine contract — `$(foreman boss)` is a
+  # value — but it is also the entire tool result an agent sees, and a lone
+  # word that is by default the repo's own name reads as an echo of the command
+  # rather than an outcome. Agents handed only that went looking for the real
+  # result instead of trusting it: of four observed sessions one re-ran the
+  # claim and two tried to read a nonexistent artifact. Naming which of
+  # claim/query/no-op happened costs one line and settles it.
+  #
   # With no argument this is a query, not a claim: a pane that already has a
   # handle keeps it.
   if [ -z "$name" ]; then
-    if [ -n "$current" ]; then printf '%s\n' "$current"; return 0; fi
+    if [ -n "$current" ]; then
+      note "foreman: this pane already holds boss handle '$current' (pass a name to change it)"
+      printf '%s\n' "$current"; return 0
+    fi
     name=$(default_boss)
   fi
   if [ "$current" = "$name" ]; then
+    note "foreman: this pane already holds boss handle '$name'"
     printf '%s\n' "$name"; return 0
   fi
   valid_handle "$name" || die "handle '$name' is not a valid herdr agent name"
@@ -556,6 +569,7 @@ cmd_boss() {
   # pointing at a handle nobody answers to any more: the live agent name is the
   # source of truth, so their records follow it.
   [ -z "$current" ] || rebind_boss "$current" "$name"
+  note "foreman: claimed boss handle '$name'; workers spawned from this pane report to it"
   printf '%s\n' "$name"
 }
 
@@ -662,9 +676,10 @@ cmd_doctor() {
   # The one failure this tool existed to explain and could not see: with no
   # live sidecar every report, question and dispatch still arrives, but always
   # as an interrupting `herdr agent prompt`. Nothing errors, so the only
-  # symptom is reports barging in on work they should have queued behind. That
-  # is a warning rather than a failure — the fallback is a supported path, and
-  # a session outside herdr has no pane to ring at all.
+  # symptom is a task barging in on a worker mid-change — the one direction
+  # that is supposed to queue. That is a warning rather than a failure: the
+  # fallback is a supported path, and a session outside herdr has no pane to
+  # ring at all.
   #
   # Missing and stale are reported apart because the fixes differ: missing
   # means no plugin declared the server for this session (restart it), stale
@@ -683,7 +698,7 @@ cmd_doctor() {
     # agent pane herdr has since forgotten, and a stale record there is real.
     if [ -n "$bus_me" ] || [ -f "$bus_file" ]; then
       if bus_pid=$(bus_target "$HERDR_PANE_ID"); then
-        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); reports and tasks arrive as asides, a blocked worker's question interrupts"
+        printf '%-6s %s\n' 'ok' "bus sidecar live (pid $bus_pid); a worker's report or question interrupts this pane, a task queues for the worker's next turn"
       elif [ -f "$bus_file" ]; then
         printf '%-6s %s\n' 'warn' 'bus sidecar record is stale; delivery falls back to an interrupting prompt'
       else
@@ -1062,10 +1077,11 @@ Your boss is the agent \`$boss\`.
   \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell.
   Filing it delivers it to the boss; terminal output does not reach it.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
-  \`foreman reply "<question>"\`. It files the question and interrupts the
-  boss's current turn, so the answer comes back even if the boss was mid-task.
-  That interruption is the cost: use it when you are genuinely blocked, never
-  for a progress update.
+  \`foreman reply "<question>"\`.
+- Both reach the boss by interrupting it, so the answer comes back even if it
+  was mid-task. That is the cost of each: file one report when you are done,
+  and ask a question only when you are genuinely blocked, never for a progress
+  update.
 - Peers: \`foreman ls\` lists the other workers; \`foreman dm <handle> "<text>"\`
   messages one directly. Use it to coordinate on a shared seam, not for status
   updates.

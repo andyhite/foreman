@@ -85,16 +85,19 @@ The sidecar is therefore plugin-scoped, not machine-global: it exists if and
 only if a session has this plugin loaded, and nothing is written outside the
 session. A worker's `foreman report`/`foreman reply`, and a boss's dispatch,
 signal that sidecar directly with `SIGUSR1`; the sidecar turns the signal into
-an MCP notification the extension then delivers. A report or a task is queued
-behind whatever the receiving agent is doing — nobody is waiting on it. A
-worker's question interrupts instead, at the next tool-call boundary: that
-worker is stalled until the boss answers, so the payload carries the handling
-protocol with it (log it, finish the current step, then answer). If the signal
-can't be delivered — no live sidecar, or the target pane sits outside herdr —
-delivery falls back to an interrupting `herdr agent prompt` for everything, so
-nothing is silently lost. A ~60s background sweep in the extension is the
-remaining anomaly net, for a worker that ended its turn without reporting or
-whose agent died. Restart the session after either install; `/mcp reconnect`
+an MCP notification the extension then delivers. Delivery splits by direction:
+anything from a worker — report or question — interrupts the boss at the next
+tool-call boundary, because collecting workers is the boss's job and it is the
+side that is waiting; a task the boss dispatches queues for the worker's next
+turn, because a worker interrupted mid-change is the thing foreman exists to
+avoid. Every interrupting payload carries its own handling protocol (log it,
+finish the current step, then act), so an interruption cannot read as *drop
+everything*. If the signal can't be delivered — no live sidecar, or the target
+pane sits outside herdr — delivery falls back to an interrupting `herdr agent
+prompt` for everything, so nothing is silently lost; only the queued direction
+is degraded. A ~60s background sweep in the extension is the remaining anomaly
+net, for a worker that ended its turn without reporting or whose agent died.
+Restart the session after either install; `/mcp reconnect`
 is not enough, since extension modules load only at startup.
 
 `herdr/bin/foreman-link` no longer writes anything to

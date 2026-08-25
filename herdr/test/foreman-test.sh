@@ -1758,6 +1758,14 @@ h_calls="$sandbox/boss-h-calls"; : >"$h_calls"
 is 'a bare boss on a named pane reports the existing handle' \
   "$(cmd_boss)" 'already-named'
 is 'and never calls into herdr to rename anything' "$(cat "$h_calls")" ''
+# stdout stays the bare handle for `$(foreman boss)`, but it is also the whole
+# tool result an agent reads, and a lone word that defaults to the repo's own
+# name reads as an echo rather than an outcome. Observed sessions responded by
+# hunting for the real result — one re-ran the claim, two read a nonexistent
+# artifact. Each path says on stderr which of claim/query/no-op it was.
+is 'a query keeps stdout to the bare handle' "$(cmd_boss 2>/dev/null)" 'already-named'
+assert 'and says on stderr that it only read it' \
+  [ "$( (cmd_boss) 2>&1 >/dev/null | sed -n 's/.*already holds boss handle/held/p')" = "held 'already-named' (pass a name to change it)" ]
 unset -f self_handle
 
 # Two repos each wanting a foreman is the ordinary case: claiming a handle
@@ -1781,6 +1789,12 @@ agent_exists() { return 1; }  # every candidate name free_handle tries is open
 : >"$h_calls"
 out=$(cmd_boss taken --steal)
 is 'stealing still returns the claimed handle' "$out" 'taken'
+claim_err=$( (cmd_boss taken2 --steal) 2>&1 >/dev/null )
+assert 'a real claim says so, not just the handle' \
+  [ "${claim_err#*claimed boss handle \'taken2\'}" != "$claim_err" ]
+assert 'and says what claiming it means for spawns' \
+  [ "${claim_err#*workers spawned from this pane report to it}" != "$claim_err" ]
+unset claim_err
 h_calls_content=$(cat "$h_calls")
 assert 'the previous holder is renamed to a free variant, not cleared' \
   [ "${h_calls_content#*agent rename other-pane taken-1}" != "$h_calls_content" ]
@@ -2083,10 +2097,11 @@ out=$(HERDR_PANE_ID="$doc_pane" cmd_doctor 2>&1)
 assert 'doctor reports a live sidecar' [ "${out#*bus sidecar live}" != "$out" ]
 assert 'and names the pid to signal' [ "${out#*pid $$}" != "$out" ]
 # The line is read by an agent deciding whether an interruption it just took
-# was the designed path or the fallback, so it has to name both halves: a
-# report waiting its turn is healthy, a report interrupting is not.
-assert 'and distinguishes a queued report from an interrupting question' \
-  [ "${out#*arrive as asides, a blocked worker\'s question interrupts}" != "$out" ]
+# was the designed path or the fallback, so it has to name the direction rule:
+# inbound interrupts, outbound queues. Under the fallback everything
+# interrupts, including the task that should have queued.
+assert 'and names which direction interrupts and which queues' \
+  [ "${out#*report or question interrupts this pane, a task queues}" != "$out" ]
 
 # A sidecar SIGKILLed before its EXIT trap ran leaves the file behind.
 # Existence is not liveness — the same rule the delivery path enforces.

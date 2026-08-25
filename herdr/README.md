@@ -47,7 +47,7 @@ The hook only ever replaces a symlink that resolves into a checkout of *this* pl
 | `foreman version` | Print the CLI version, read at runtime from `herdr-plugin.toml` so it cannot drift from the plugin manifest. |
 | `foreman roles` | List the role → skill mappings read from foreman's project-local config, plus each mapped skill's own frontmatter description as a hint. |
 | `foreman init` | Scaffold `.foreman/config.yml` at the repo root, commented and empty. Refuses to overwrite an existing file. |
-| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, the current repo's worker count, the role config, and whether this pane has a live bus sidecar. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. The bus line is the one to read when a *report* arrives as an interruption instead of waiting its turn: no live sidecar means every delivery is taking the `herdr agent prompt` fallback, which interrupts regardless of what it carries. |
+| `foreman doctor` | Environment sanity check: `HERDR_ENV`, herdr on PATH (with version), `jq`, pane id, agent handle, `$FOREMAN_STATE` writability, the PATH symlink, the current repo's worker count, the role config, and whether this pane has a live bus sidecar. Prints one ok/warn/fail line per check; exits nonzero on any hard failure. Works outside herdr to help diagnose foreman misbehavior. The bus line is the one to read when a *task* arrives as an interruption instead of waiting for the worker's next turn: no live sidecar means every delivery is taking the `herdr agent prompt` fallback, which interrupts in both directions. |
 
 ### Role config
 
@@ -93,10 +93,12 @@ roles:
 
 `foreman report` and `foreman reply` deliver to the boss themselves: each rings
 the boss's bus sidecar, and the omp extension on the other side pulls the
-content with `foreman pickup` and injects it. A report is injected behind
-whatever the boss is doing; a question interrupts it, because the worker is
-stalled until the answer comes. With no sidecar to ring, the push falls back to
-`herdr agent prompt`, tagged `[foreman:<handle>]`, which interrupts either way.
+content with `foreman pickup` and injects it. Both interrupt the boss at its
+next tool-call boundary, carrying the protocol for absorbing an interruption
+without abandoning half-done work. Only the outbound direction queues: a
+dispatched task waits for the worker's next turn. With no sidecar to ring, the
+push falls back to `herdr agent prompt`, tagged `[foreman:<handle>]`, which
+interrupts in both directions.
 
 Only a delivery that actually moved text stamps an acknowledgement counter —
 `joined` for a report, `question.seen` for a question. A rung doorbell carries

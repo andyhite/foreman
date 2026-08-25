@@ -15,12 +15,17 @@ them. Read it here only for what the block's summary leaves out: exact
 fallback CLI forms for when the `foreman_*` tools are not registered, and
 behavior the block doesn't spell out.
 
-`foreman_report` arrives at the boss as a non-interrupting aside, queued behind
-whatever it is doing — nobody is waiting on finished work. `foreman_reply` is
-different: a question interrupts the boss's current turn, because you are
-stalled until it answers. Ask one when you are genuinely blocked, not to check
-in. `foreman send --raw`, `foreman broadcast`, and `foreman keys` interrupt on
-purpose too: that is steering.
+Everything you send the boss interrupts it: `foreman_report` when you finish,
+`foreman_reply` when you block. That is by design — orchestrating workers is
+the boss's actual job, and it knows how to absorb an interruption without
+dropping what it holds. It is not free, though, so file one report when you
+are done, and ask a question only when you are genuinely blocked, never to
+check in.
+
+Inbound is the other way round. A task the boss dispatches waits for your next
+turn rather than cutting into a half-applied edit. The exception is steering —
+`foreman send --raw`, `foreman broadcast`, `foreman keys` — which interrupts you
+on purpose, and is how an answer to your question gets back fast.
 
 ## Reporting
 
