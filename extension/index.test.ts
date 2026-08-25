@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDeliverer, deliveryFor, loadCommandPrompts, taskText, type PickupResult } from "./index";
+import foremanExtension, { createDeliverer, deliveryFor, loadCommandPrompts, taskText, type PickupResult } from "./index";
 
 describe("loadCommandPrompts", () => {
   let dir: string;
@@ -269,5 +269,83 @@ describe("createDeliverer", () => {
     // delivery) and not one per queued wake (redundant pickups).
     expect(pickupCalls).toBe(2);
     expect(published).toEqual(["first", "second"]);
+  });
+});
+
+/**
+ * Guards the parameter *names* the tools expose, not their behaviour. Two
+ * shipped runs failed their first call on a name alone — `text` where the
+ * schema said only `task`, then `handle` where one schema said `target` —
+ * so the names are a contract with the agent and drift in them is a bug.
+ * Activating with a stub `pi` is safe because the poll timer is armed from
+ * the `session_start` listener, which a captured-but-never-fired `on` never
+ * runs.
+ */
+describe("registered tool schemas", () => {
+  const params = new Map<string, string[]>();
+  let priorHerdrEnv: string | undefined;
+
+  beforeAll(() => {
+    priorHerdrEnv = process.env.HERDR_ENV;
+    // The extension registers nothing outside herdr, on purpose.
+    process.env.HERDR_ENV = "1";
+
+    // Only the shape matters here, so every zod node is the same chainable
+    // sink. This keeps the test independent of which zod omp injects.
+    const node: Record<string, unknown> = {};
+    for (const method of ["describe", "optional", "int", "positive", "min", "max", "default"]) {
+      node[method] = () => node;
+    }
+    const sink = () => node;
+    const zod = {
+      object: (shape: Record<string, unknown>) => ({ shape }),
+      string: sink,
+      boolean: sink,
+      number: sink,
+      array: sink,
+      enum: sink,
+    };
+
+    const pi = {
+      zod,
+      registerTool: (config: { name: string; parameters: { shape: Record<string, unknown> } }) => {
+        params.set(config.name, Object.keys(config.parameters.shape));
+      },
+      on: () => {},
+      registerCommand: () => {},
+    };
+    foremanExtension(pi as unknown as Parameters<typeof foremanExtension>[0]);
+  });
+
+  afterAll(() => {
+    if (priorHerdrEnv === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = priorHerdrEnv;
+  });
+
+  test("activating registers the whole tool surface", () => {
+    expect(params.size).toBeGreaterThan(0);
+    expect([...params.keys()]).toContain("foreman_msg");
+  });
+
+  test("no tool names its recipient anything but handle", () => {
+    const synonyms = ["target", "to", "worker", "recipient", "member", "name"];
+    const violations: string[] = [];
+    for (const [tool, keys] of params) {
+      for (const synonym of synonyms) {
+        if (keys.includes(synonym)) violations.push(`${tool}.${synonym}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test("foreman_msg takes the handle its prose examples all pass", () => {
+    expect(params.get("foreman_msg")).toContain("handle");
+  });
+
+  test("both message-sending tools accept either body name", () => {
+    for (const tool of ["foreman_send", "foreman_msg"]) {
+      expect(params.get(tool)).toContain("task");
+      expect(params.get(tool)).toContain("text");
+    }
   });
 });

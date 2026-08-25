@@ -325,7 +325,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }
     // note() (herdr/bin/foreman:63) routes every human-facing diagnostic —
     // including the first-dispatch pickup warning foreman_spawn depends on —
-    // to stderr, and send/keys/dm/reap write nothing to stdout at all.
+    // to stderr, and send/keys/msg/reap write nothing to stdout at all.
     // Returning stdout alone silently discarded those on every success.
     return [result.stdout, result.stderr].filter((s) => s.trim()).join("\n");
   }
@@ -574,7 +574,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
     description:
       "Claim (or query) this pane's boss handle. Workers address their questions and reports to whichever handle this pane holds at spawn time, so claim it before spawning anything.",
     parameters: z.object({
-      name: z.string().optional().describe("Handle to claim; defaults to the repo root's name"),
+      // `handle` and not `name`, though this one names *this* pane rather than
+      // addressing another: one invariant an agent can generalize — a handle
+      // parameter is always `handle` — beats a correct distinction it has to
+      // remember an exception for.
+      handle: z.string().optional().describe("Handle to claim; defaults to the repo root's name"),
       steal: z
         .boolean()
         .optional()
@@ -582,11 +586,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     args: (params) => {
       const args = ["boss"];
-      if (params.name) args.push(params.name);
+      if (params.handle) args.push(params.handle);
       if (params.steal) args.push("--steal");
       return args;
     },
-    details: (params) => ({ name: params.name ?? null }),
+    details: (params) => ({ handle: params.handle ?? null }),
   });
 
   pi.registerTool({
@@ -687,12 +691,17 @@ export default function foremanExtension(pi: ExtensionAPI) {
     description:
       "Send an untracked message to one foreman member's handle, or the literal all for every live worker in this repo — the way to answer a worker's blocked question or push a wave-wide notice. Not dispatch: no counter bump, no report expected. Lands at the target's next turn boundary. Pass the body as task or text; either name works.",
     parameters: z.object({
-      target: z.string().describe("A foreman member's handle, or the literal 'all' for every live worker"),
+      // Named `handle` and not `target`, even though `all` is also accepted:
+      // every other foreman_* tool calls its recipient `handle`, and a live run
+      // reached for `handle` here on the strength of that family resemblance,
+      // burning a call on a schema error. Cross-tool consistency is what an
+      // agent actually predicts from; precision about `all` is not worth it.
+      handle: z.string().describe("A foreman member's handle, or the literal 'all' for every live worker"),
       task: z.string().optional().describe("The message to send; interchangeable with text"),
       text: z.string().optional().describe("The message to send; interchangeable with task"),
     }),
-    args: (params) => ["msg", params.target, taskText(params, "foreman_msg")],
-    details: (params) => ({ target: params.target }),
+    args: (params) => ["msg", params.handle, taskText(params, "foreman_msg")],
+    details: (params) => ({ handle: params.handle }),
   });
 
   pi.registerTool({

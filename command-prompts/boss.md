@@ -15,7 +15,7 @@ Call `foreman_boss({})`.
 
 It defaults to the repo root's name, so it only collides if another pane is
 already bossing this same checkout — claim a distinct one with
-`foreman_boss({ name: "<name>" })` rather than stealing it.
+`foreman_boss({ handle: "<handle>" })` rather than stealing it.
 
 ## Your job
 

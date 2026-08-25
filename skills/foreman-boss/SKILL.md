@@ -66,6 +66,19 @@ long turn. `foreman_join` is the correct way to wait — see
 [Collecting](#collecting). See [README.md](../../README.md#install) for how
 the delivery channel is wired up.
 
+**Your own turn is what releases a queued report, and nothing tells you one
+is waiting.** A queued delivery lands when the turn you are in ends, so a
+boss that chains tool calls without stopping holds its own reports hostage
+for as long as it keeps going. A shipped run did exactly this: both workers
+pushed successfully, the boss kept working for two minutes and forty-five
+seconds, and both reports arrived together the moment it finally stopped —
+it had by then lost track of them and went digging through worker panes with
+`foreman_read`. There is no pending-delivery indicator to check, and a
+successful push looks identical from your side whether it landed or is
+waiting behind you. The rule that follows: when the next thing you need is a
+worker's report, end the turn or call `foreman_join` — do not fill the wait
+with unrelated tool calls, because the filling is what postpones the report.
+
 Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
 takes the whole brief as its `task` string and writes the temp file and
 passes `--task-file` itself, so no shell quoting can mangle a multi-line
@@ -102,20 +115,20 @@ one and changes nothing.
 
 Nothing limits how many bosses exist; each just needs a handle no live
 agent is using. The repo-root default is only a default — it stops one
-checkout from monopolizing a shared name, and `foreman_boss(name: "lead2")`
+checkout from monopolizing a shared name, and `foreman_boss(handle: "lead2")`
 in the same checkout is a second, equally valid boss. Two unrelated
 checkouts with the same directory name derive the same default, and the
 second one has to name itself. Claiming a taken handle fails and names the
 pane holding it:
 
 ```
-foreman_boss(name: "lead2")                    # any [a-z][a-z0-9_-]{0,31} name
-foreman_boss(name: "webapp", steal: true)      # take it over; the holder is renamed aside, not unnamed
+foreman_boss(handle: "lead2")                  # any [a-z][a-z0-9_-]{0,31} name
+foreman_boss(handle: "webapp", steal: true)    # take it over; the holder is renamed aside, not unnamed
 ```
 
 Claim the handle **before** spawning. Whichever handle this pane holds at spawn
 time is stamped into each worker, and that is where its `foreman_reply` goes.
-Renaming a boss afterwards is safe — `foreman_boss(name: "newname")` repoints
+Renaming a boss afterwards is safe — `foreman_boss(handle: "newname")` repoints
 every worker that reported to the old handle, and `steal: true` does the same for
 the foreman of whoever it displaces.
 

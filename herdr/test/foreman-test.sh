@@ -649,25 +649,52 @@ fi
 # `foreman ask`, `foreman broadcast`, `foreman dm`, and `send --raw` are gone
 # — `msg` replaced all three. A removed verb left in prose sends a future
 # agent (or this plugin's own skills) at a command that no longer exists;
-# swept across the CLI, the dashboard, both READMEs, every skill, and every
-# command prompt so the cutover cannot rot back in through a doc nobody
-# re-read.
+# swept across the CLI, the dashboard, both READMEs, every skill, every
+# command prompt, and the extension's own sources — the cutover left a stale
+# `send/keys/dm/reap` in an index.ts comment, so a doc nobody re-read is not
+# the only place this rots back in.
 
 printf '\nremoved-verb prose sweep\n'
 if [ -n "$plugin_dir" ]; then
   offenders=""
   for f in "$plugin_dir/herdr/bin/foreman" "$plugin_dir/herdr/bin/foreman-dashboard" \
            "$plugin_dir/README.md" "$plugin_dir/herdr/README.md" \
-           "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/command-prompts/*.md; do
+           "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/command-prompts/*.md \
+           "$plugin_dir/extension/index.ts" "$plugin_dir/extension/index.test.ts"; do
     [ -f "$f" ] || continue
     if [ -n "$(sed -n -E '/foreman[[:space:]]+ask([^a-zA-Z_-]|$)|foreman[[:space:]]+broadcast|foreman[[:space:]]+dm([^a-zA-Z_-]|$)|send[[:space:]]+--raw/p' "$f")" ]; then
       offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
     fi
   done
-  is 'no removed verb (ask/broadcast/dm/send --raw) survives in CLI, dashboard, README, or skill prose' \
+  is 'no removed verb (ask/broadcast/dm/send --raw) survives in CLI, dashboard, README, skill, or extension prose' \
     "${offenders# }" ''
 else
   printf '  skip  removed-verb prose sweep (plugin tree not beside this checkout)\n'
+fi
+
+# ── handle parameter-name sweep ──────────────────────────────────────────────
+#
+# v0.7.0 shipped `foreman_msg` declaring `target` while every prose example
+# passed `handle`, and a live boss burned a call on
+# `target must be A foreman member's handle ... (was missing)` before
+# retrying. The schema side is pinned in extension/index.test.ts; this is the
+# prose side of the same contract. A handle argument is spelled `handle`
+# everywhere — a doc that reaches for a synonym is documenting a schema error.
+
+printf '\nhandle parameter-name sweep\n'
+if [ -n "$plugin_dir" ]; then
+  offenders=""
+  for f in "$plugin_dir/README.md" "$plugin_dir/herdr/README.md" \
+           "$plugin_dir"/skills/*/SKILL.md "$plugin_dir"/command-prompts/*.md; do
+    [ -f "$f" ] || continue
+    if [ -n "$(sed -n -E '/foreman_[a-z_]+\(\{?[[:space:]]*(target|name|to|worker|recipient|member):/p' "$f")" ]; then
+      offenders="$offenders $(basename "$(dirname "$f")")/$(basename "$f")"
+    fi
+  done
+  is 'no foreman_* prose example passes a handle under a synonym' \
+    "${offenders# }" ''
+else
+  printf '  skip  handle parameter-name sweep (plugin tree not beside this checkout)\n'
 fi
 
 # ── reap argument handling ───────────────────────────────────────────────────
