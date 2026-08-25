@@ -17,5 +17,13 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["extension/**/*.ts"]
+  "include": ["extension/**/*.ts"],
+  // extension/index.test.ts runs under `bun test`, which transpiles TS
+  // without a full typecheck — it exercises real `bun:test`/`node:fs`
+  // APIs this repo's zero-dependency ambient d.ts deliberately doesn't
+  // model (see extension/pi-coding-agent.d.ts), so folding it into this
+  // gate would require installing @types/bun/@types/node, which would in
+  // turn collide with that ambient d.ts's own hand-written node:fs/Bun
+  // augmentations for the production file.
+  "exclude": ["extension/**/*.test.ts"]
 }

@@ -1,18 +1,31 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionToolContext,
+  ExtensionToolUpdate,
+  InferShape,
+  ZodObject,
+  ZodRawShape,
+} from "@oh-my-pi/pi-coding-agent";
 import { readFileSync, readdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
 /**
- * Minimal local shapes for what this extension actually touches on the
- * `ExtensionContext` passed to handlers/tools. `@oh-my-pi/pi-coding-agent`
- * is not an installed dependency of this plugin (it is provided by the omp
- * runtime that loads and executes this module), so the real `ExtensionAPI`/
- * `ExtensionContext` types are not resolvable here. `import type` above is
- * erased before execution and never attempts module resolution at runtime,
- * so it is safe to keep for documentation/IDE purposes; everything this
- * file actually relies on for type-checking is declared below instead.
+ * `@oh-my-pi/pi-coding-agent` is not an installed dependency of this plugin
+ * (it is provided by the omp runtime that loads and executes this module),
+ * so the real `ExtensionAPI`/`ExtensionToolContext` types are not
+ * resolvable by `tsc` without a local ambient declaration — see
+ * `extension/pi-coding-agent.d.ts`, which types the slice this file
+ * actually calls and which this file imports its context/update/shape
+ * types from directly rather than re-declaring structurally-identical
+ * local copies. `import type` above is erased before execution and never
+ * attempts module resolution at runtime, so it is safe to keep for
+ * documentation/IDE purposes. `ForemanExecResult` below is the one
+ * exception: `ExtensionAPI.exec` deliberately types its result as
+ * `unknown` (the real return shape isn't resolvable here either), so every
+ * call site casts through this local shape instead of the ambient module
+ * declaring one for it.
  */
 interface ForemanExecResult {
   code: number;
@@ -20,27 +33,6 @@ interface ForemanExecResult {
   stderr: string;
   killed?: boolean;
 }
-
-interface ForemanToolCtx {
-  cwd: string;
-  // Managed timer handles — see `omp://extensions.md` "Background work". Used
-  // by `ensureJoinPoller` below; isolated from the callback's own throws and
-  // auto-cleared on session shutdown, unlike a raw `setInterval`.
-  setInterval: (fn: () => void | Promise<void>, ms: number) => unknown;
-  clearTimer: (handle: unknown) => void;
-  [key: string]: unknown;
-}
-
-/** The slice of Bun's `Subprocess` this extension actually relies on. */
-interface ForemanSubprocess {
-  kill: () => void;
-  exited: Promise<number>;
-  stdout: ReadableStream<Uint8Array> | number | null;
-  stderr: ReadableStream<Uint8Array> | number | null;
-}
-
-type ToolUpdate = (update: { content: Array<{ type: "text"; text: string }> }) => void;
-
 
 function isMissingBinaryError(err: unknown): boolean {
   const code = (err as { code?: unknown } | undefined)?.code;
@@ -65,9 +57,11 @@ interface CommandPrompt {
  * invisibly unscoped and one collision away from any other installed
  * plugin's same-named command. Loading them here and registering under
  * `foreman:<name>` keeps the namespace under every install mechanism.
+ *
+ * Exported for `bun test` coverage of the frontmatter parsing below — the
+ * only pure logic in this file complex enough to break silently.
  */
-function loadCommandPrompts(): CommandPrompt[] {
-  const dir = path.join(import.meta.dir, "..", "command-prompts");
+export function loadCommandPrompts(dir: string = path.join(import.meta.dir, "..", "command-prompts")): CommandPrompt[] {
   let files: string[];
   try {
     files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
@@ -104,6 +98,91 @@ function loadCommandPrompts(): CommandPrompt[] {
   });
 }
 
+export type DeliverOutcome = "delivered" | "empty" | "missing-binary" | "error";
+
+/**
+ * What a `pickup` attempt found, already classified — the caller (real
+ * `pi.exec`, or a test's stub) does the try/catch and exit-code reading;
+ * `createDeliverer` below only ever sees this shape. Keeping the
+ * subprocess boundary here, rather than inside the state machine, is what
+ * lets the coalescing logic below be tested without mocking `pi.exec`.
+ */
+export type PickupResult =
+  | { kind: "delivered"; text: string }
+  | { kind: "empty" }
+  | { kind: "missing-binary" }
+  | { kind: "error" };
+
+export interface Deliverer {
+  deliverOnce(cwd: string): Promise<DeliverOutcome>;
+  deliverInbound(cwd: string): Promise<DeliverOutcome>;
+}
+
+/**
+ * Builds the `deliverOnce`/`deliverInbound` pair around an injected
+ * `pickup`/`publish`, so the coalescing state machine — the part that can
+ * silently double-inject or drop a report — is testable without a real
+ * `foreman` binary or a mock of the whole `pi` object. Exported for
+ * `bun test`; `foremanExtension` below is the only non-test caller.
+ */
+export function createDeliverer(
+  pickup: (cwd: string) => Promise<PickupResult>,
+  publish: (text: string) => Promise<void>,
+): Deliverer {
+  let deliverInFlight = false;
+  let deliverPending = false;
+
+  /**
+   * One `pickup` pass — a single, non-blocking check of this pane's own
+   * inbound state, never the deadline/`sleep_ms` loop `foreman join` uses
+   * — injecting its stdout as a `followUp` custom message if it printed
+   * anything: queued behind whatever the agent is doing rather than
+   * interrupting it, and starting a turn on its own if the agent is idle.
+   */
+  async function deliverOnce(cwd: string): Promise<DeliverOutcome> {
+    const result = await pickup(cwd);
+    if (result.kind !== "delivered") return result.kind;
+    await publish(result.text);
+    return "delivered";
+  }
+
+  /**
+   * Serialises `deliverOnce` across its two callers, the push listener and
+   * the timer tick. Concurrency has to be excluded: a hung pickup has no
+   * timeout of its own, so a second overlapping call would pile another
+   * stuck child on top of the first.
+   *
+   * A wake arriving mid-pickup is coalesced rather than dropped. Dropping it
+   * loses the delivery outright whenever the in-flight pass had already read
+   * state before the counter it would have been told about changed, leaving
+   * the payload to sit until the 60s anomaly sweep — the exact wait the bus
+   * exists to remove. One re-run covers any number of queued wakes, because
+   * a single pickup drains everything pending in one pass.
+   */
+  async function deliverInbound(cwd: string): Promise<DeliverOutcome> {
+    if (deliverInFlight) {
+      deliverPending = true;
+      return "empty";
+    }
+    deliverInFlight = true;
+    try {
+      let outcome: DeliverOutcome;
+      do {
+        deliverPending = false;
+        outcome = await deliverOnce(cwd);
+        // A missing binary or a hard error will not resolve on an immediate
+        // retry; re-run only where new state could genuinely be waiting.
+      } while (deliverPending && (outcome === "delivered" || outcome === "empty"));
+      return outcome;
+    } finally {
+      deliverInFlight = false;
+      deliverPending = false;
+    }
+  }
+
+  return { deliverOnce, deliverInbound };
+}
+
 export default function foremanExtension(pi: ExtensionAPI) {
   // Sessions outside herdr have nothing to talk to: foreman's state, worktrees,
   // and worker panes are all herdr concepts. Register nothing there.
@@ -116,13 +195,14 @@ export default function foremanExtension(pi: ExtensionAPI) {
    * Runs `foreman <args>` to completion via `pi.exec` and returns both
    * streams joined. Every tool except `foreman_join`/`foreman_ask` uses this:
    * a non-zero exit is always a real failure here, so it throws with the
-   * subcommand and exit code. Those two stream instead, via
-   * `runForemanStreaming` below, so a settling report prints as it lands.
+   * subcommand and exit code — unless `allowNonZero` is set, for the one
+   * subcommand (`doctor`) whose non-zero exit is itself the useful result.
    */
   async function runForeman(
     args: string[],
-    ctx: ForemanToolCtx,
+    ctx: ExtensionToolContext,
     signal: AbortSignal | undefined,
+    options?: { allowNonZero?: boolean },
   ): Promise<string> {
     let result: ForemanExecResult;
     try {
@@ -135,7 +215,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       }
       throw err;
     }
-    if (result.code !== 0) {
+    if (result.code !== 0 && !options?.allowNonZero) {
       // Cancellation kills the child leaving stderr/stdout empty — throwing
       // "" would surface as a blank, unactionable tool error instead of the
       // abort the caller already knows about via `signal`.
@@ -161,17 +241,17 @@ export default function foremanExtension(pi: ExtensionAPI) {
    */
   async function runForemanStreaming(
     args: string[],
-    ctx: ForemanToolCtx,
+    ctx: ExtensionToolContext,
     signal: AbortSignal | undefined,
-    onUpdate: ToolUpdate | undefined,
+    onUpdate: ExtensionToolUpdate | undefined,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    let child: ForemanSubprocess;
+    let child: Bun.Subprocess;
     try {
       child = Bun.spawn([foremanBin, ...args], {
         cwd: ctx.cwd,
         stdout: "pipe",
         stderr: "pipe",
-      }) as unknown as ForemanSubprocess;
+      });
     } catch (err) {
       if (isMissingBinaryError(err)) {
         throw new Error(
@@ -239,106 +319,67 @@ export default function foremanExtension(pi: ExtensionAPI) {
   }
 
   // ---------------------------------------------------------------------
-  // Inbound delivery — an MCP push (`notifications/foreman/wake`, armed
-  // below) is the delivery path; a worker's own `foreman report`/`reply`
-  // (and a boss's `dispatch_to`) fires it the moment state changes, so the
-  // happy path is sub-second, not polled. `deliverInbound` is the single
-  // function both the push handler and the timer call, sharing one
-  // in-flight guard, so a wake that lands mid-tick (or vice versa) can
-  // never inject the same `foreman pickup` output twice. The timer below
-  // survives only as the anomaly net a push cannot express: a worker that
-  // died without ever bumping a counter, or a push that failed because the
-  // boss wasn't live to receive it.
+  // Inbound delivery — the sidecar (`foreman bus`) only exists when this
+  // plugin is loaded: it is registered as this plugin's own MCP server in
+  // `.omp-plugin/plugin.json`, not user-global, so sidecar-present implies
+  // this handler-present by construction, with no separate arming
+  // handshake to keep in sync. The sidecar publishes its pid and blocks on
+  // a pipe read; a writer (a worker's `foreman report`/`reply`, or a
+  // boss's `dispatch_to`) resolves this pane's pid via herdr and sends it
+  // `SIGUSR1` directly — the signal *is* the liveness check. The sidecar's
+  // USR1 trap then emits `notifications/foreman/wake` on stdout, which the
+  // `mcp_notification` listener below turns into a `deliverInbound` call:
+  // the happy path is a direct signal, not a poll. `deliverInbound` also
+  // backs the `session_start` timer (`ensureJoinPoller`), sharing one
+  // in-flight guard so a wake landing mid-tick (or vice versa) can never
+  // inject the same `foreman pickup` output twice. The timer survives only
+  // as the anomaly net a signal cannot express: a worker that died without
+  // ever reporting, or a signal sent to a pid that's since gone.
   // ---------------------------------------------------------------------
+
+  const deliverer = createDeliverer(
+    async (cwd) => {
+      let result: ForemanExecResult;
+      try {
+        result = (await pi.exec(foremanBin, ["pickup"], { cwd })) as ForemanExecResult;
+      } catch (err) {
+        return isMissingBinaryError(err) ? { kind: "missing-binary" } : { kind: "error" };
+      }
+      // Exit 3 means nothing to deliver — not a failure, just nothing to do.
+      if (result.code === 3) return { kind: "empty" };
+      if (result.code !== 0) return { kind: "error" };
+      const text = result.stdout.trim();
+      return text ? { kind: "delivered", text } : { kind: "empty" };
+    },
+    async (text) => {
+      await pi.sendMessage(
+        {
+          customType: "Foreman Update",
+          content: text,
+          display: true,
+          attribution: "user",
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    },
+  );
 
   let joinPollTimer: unknown = null;
   let joinPollFailures = 0;
-  let deliverInFlight = false;
-  let deliverPending = false;
   const joinPollMs = Number(process.env.FOREMAN_ASIDE_POLL_MS) || 60000;
 
-  type DeliverOutcome = "delivered" | "empty" | "missing-binary" | "error";
-
   /**
-   * One `foreman pickup` pass — a single, non-blocking check of this pane's
-   * own inbound state, never the deadline/`sleep_ms` loop `foreman join` uses
-   * — injecting its stdout as a `followUp` custom message if it printed
-   * anything: queued behind whatever the agent is doing rather than
-   * interrupting it, and starting a turn on its own if the agent is idle.
+   * Starts (once per session, from `session_start` below) a
+   * `ctx.setInterval` tick that calls `deliverInbound`. A missing binary or
+   * five consecutive real errors stops the *timer* (polling itself is
+   * broken, or will never work); a push-triggered `deliverInbound` call
+   * must never be able to trip this — the listener below stays armed for
+   * the life of the session regardless of any one pickup's outcome.
    */
-  async function deliverOnce(ctx: ForemanToolCtx): Promise<DeliverOutcome> {
-    let result: ForemanExecResult;
-    try {
-      result = (await pi.exec(foremanBin, ["pickup"], { cwd: ctx.cwd })) as ForemanExecResult;
-    } catch (err) {
-      return isMissingBinaryError(err) ? "missing-binary" : "error";
-    }
-
-    // Exit 3 means nothing to deliver — not a failure, just nothing to do.
-    if (result.code === 3) return "empty";
-    if (result.code !== 0) return "error";
-
-    const text = result.stdout.trim();
-    if (!text) return "empty";
-    await pi.sendMessage(
-      {
-        customType: "Foreman Update",
-        content: text,
-        display: true,
-        attribution: "user",
-      },
-      { deliverAs: "followUp", triggerTurn: true },
-    );
-    return "delivered";
-  }
-
-  /**
-   * Serialises `deliverOnce` across its two callers, the push listener and
-   * the timer tick. Concurrency has to be excluded: a hung `pi.exec` has no
-   * timeout of its own, so a second overlapping call would pile another
-   * stuck child on top of the first.
-   *
-   * A wake arriving mid-pickup is coalesced rather than dropped. Dropping it
-   * loses the delivery outright whenever the in-flight pass had already read
-   * state before the counter it would have been told about changed, leaving
-   * the payload to sit until the 60s anomaly sweep — the exact wait the bus
-   * exists to remove. One re-run covers any number of queued wakes, because
-   * a single pickup drains everything pending in one pass.
-   */
-  async function deliverInbound(ctx: ForemanToolCtx): Promise<DeliverOutcome> {
-    if (deliverInFlight) {
-      deliverPending = true;
-      return "empty";
-    }
-    deliverInFlight = true;
-    try {
-      let outcome: DeliverOutcome;
-      do {
-        deliverPending = false;
-        outcome = await deliverOnce(ctx);
-        // A missing binary or a hard error will not resolve on an immediate
-        // retry; re-run only where new state could genuinely be waiting.
-      } while (deliverPending && (outcome === "delivered" || outcome === "empty"));
-      return outcome;
-    } finally {
-      deliverInFlight = false;
-      deliverPending = false;
-    }
-  }
-
-  /**
-   * Starts (once per session) a `ctx.setInterval` tick that calls
-   * `deliverInbound`. A missing binary or five consecutive real errors
-   * stops the *timer* (polling itself is broken, or will never work); a
-   * push-triggered `deliverInbound` call must never be able to trip this —
-   * the listener below stays armed for the life of the session regardless
-   * of any one pickup's outcome. Idempotent, so every boss-side tool can
-   * call it unconditionally.
-   */
-  function ensureJoinPoller(ctx: ForemanToolCtx) {
+  function ensureJoinPoller(ctx: ExtensionToolContext) {
     if (joinPollTimer) return;
     joinPollTimer = ctx.setInterval(async () => {
-      const outcome = await deliverInbound(ctx);
+      const outcome = await deliverer.deliverInbound(ctx.cwd);
       if (outcome === "missing-binary") {
         // A transient herdr hiccup shouldn't kill the poller, but a missing
         // binary never recovers on its own — stop instead of erroring on
@@ -352,7 +393,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       if (outcome === "empty") {
         // Nothing to deliver right now. Not a failure — park the timer so
         // an idle repo doesn't spend a subprocess every tick forever; the
-        // next `foreman_spawn`/`foreman_send`/etc. calls `ensureJoinPoller`
+        // next `session_start` (a new pane/session) calls `ensureJoinPoller`
         // again and restarts it. Parking is safe because a push already
         // delivered anything that mattered — nothing is lost while this
         // loop is stopped.
@@ -363,10 +404,13 @@ export default function foremanExtension(pi: ExtensionAPI) {
         return;
       }
       if (outcome === "error") {
-        // Most commonly "not in a git repo" if the boss's cwd changed out
-        // from under it. Five in a row means polling itself is broken, not
-        // that nothing happened — stop rather than repeat the same
-        // unactionable failure as a steer message forever.
+        // Most commonly "not in a git repo" if the pane's cwd changed out
+        // from under it — a registered worker pane's own `pickup` now exits
+        // 3 ("empty"), not an error, so this branch no longer accumulates
+        // on the single most common poller tick. Five in a row still means
+        // polling itself is broken, not that nothing happened — stop rather
+        // than repeat the same unactionable failure as a steer message
+        // forever.
         joinPollFailures += 1;
         if (joinPollFailures >= 5 && joinPollTimer) {
           ctx.clearTimer(joinPollTimer);
@@ -378,7 +422,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }, joinPollMs);
   }
 
-  // Armed unconditionally at load, not lazily from a tool handler: a worker
+  // Armed from `session_start`, not lazily from a tool handler: a worker
   // session never calls a boss-side tool, so a lazily-armed listener would
   // leave every worker deaf to its own dispatches. `mcp_notification` fires
   // for every server this session has wired up, so the `server`/`method`
@@ -386,90 +430,55 @@ export default function foremanExtension(pi: ExtensionAPI) {
   // this extension's concern.
   pi.on("mcp_notification", (event, ctx) => {
     if (event.server !== "foreman" || event.method !== "notifications/foreman/wake") return;
-    void deliverInbound(ctx);
+    void deliverer.deliverInbound(ctx.cwd);
   });
 
-  // Publishes the fact that a listener now exists in this session. The sidecar
-  // is registered in user-level mcp.json, so it runs in *every* omp session —
-  // including one that never loaded this plugin. A boss's `dispatch_to` cannot
-  // tell those apart from the sidecar's own liveness marker, and when it
-  // assumed a wake would become an aside it skipped the herdr prompt and the
-  // task reached nobody at all. Fire-and-forget, after the handler above is
-  // registered so the marker never claims more than is already true: the
-  // subcommand is itself fail-open, so the only failure that reaches the catch
-  // is a missing binary, which costs exactly the prompt fallback.
-  void (async () => {
-    try {
-      await pi.exec(foremanBin, ["bus", "--arm", String(process.pid)], {
-        cwd: process.cwd(),
-      });
-    } catch {
-      // Arming is an optimisation; never let it take the session down.
-    }
-  })();
+  pi.on("session_start", (_event, ctx) => {
+    ensureJoinPoller(ctx);
+  });
 
   function cancelled() {
     return { content: [{ type: "text" as const, text: "Cancelled" }] };
   }
 
-  // A single anchored regex, not a substring/`.includes` check: it must
-  // reject `foreman_spawn` (the tool name itself appearing in a `grep`/echo
-  // in a worker's own bash command) and a different word merely ending in
-  // "foreman" (e.g. `xforeman spawn`), while still finding a real
-  // invocation after a leading path (`/usr/local/bin/foreman`), an env
-  // assignment (`FOREMAN_BIN=... foreman join`), or a preceding
-  // `&&`/`;`/`|`/newline in a multi-command bash string. Precision here is
-  // best-effort by design — a false positive only costs a poller tick that
-  // finds nothing and prints nothing (see `ensureJoinPoller` above), so
-  // erring toward matching realistic shapes is the right tradeoff, not a
-  // correctness requirement.
-  const FOREMAN_BOSS_SUBCOMMAND =
-    /(?:^|&&|[;&|\n])\s*(?:[A-Za-z_]\w*=\S+\s+)*(?:\S*\/)?foreman\s+(?:boss|spawn|send|ask|join|reap|broadcast|keys|read)\b/;
-
-  // Arms the sweeper for a boss that only ever shells out. Delivery itself no
-  // longer depends on this handler: a worker's `foreman report`/`foreman reply`
-  // pushes over herdr's agent surface from the CLI exactly as it does from the
-  // tool (`cmd_report` in `herdr/bin/foreman`), so the happy path lands either
-  // way. What still depends on it is everything a push cannot carry — a worker
-  // that ended its turn without reporting, one whose agent died, a push that
-  // found no live boss — since only `ensureJoinPoller` above surfaces those,
-  // and a boss that never calls a `foreman_*` tool never runs the `execute`
-  // bodies below that arm it. Those would wait until the boss thought to run
-  // `foreman join` by hand: the failure this handler exists to prevent.
-  // `ls` and `dm` are deliberately
-  // excluded even though they are boss-reachable subcommands: they are also
-  // documented worker operations (`skills/foreman-worker/SKILL.md`), and a
-  // poller armed from a worker's own session would run `join --once`
-  // scoped by `repo_key()` (`herdr/bin/foreman:195-202`, which groups a
-  // worktree with the repo it came from, not with who dispatched it) —
-  // i.e. it would poll that worker's siblings, not its own workers, and
-  // could steal their settle-count credit from the real boss's next join.
-  // A boss reaches `ls`/`dm` only after `boss`/`spawn` already armed the
-  // poller in this session, so leaving them out costs the boss nothing.
-  // `report`/`reply`/`roles`/`doctor`/`version`/`init`/`dashboard` are
-  // excluded for the same reason as `ls`/`dm` (worker-side or informational,
-  // never the sole boss action in a session) or because they have no
-  // tool-registered boss-side equivalent to imitate.
-  pi.on("tool_call", (event, ctx) => {
-    // `omp://extensions.md` documents `tool_call` errors as fail-closed —
-    // a throw here would block every subsequent bash call in the session,
-    // not just this best-effort detection, so nothing may escape.
-    try {
-      if (event.toolName !== "bash") return;
-      const command = event.input.command;
-      if (typeof command === "string" && FOREMAN_BOSS_SUBCOMMAND.test(command)) {
-        ensureJoinPoller(ctx);
-      }
-    } catch {
-      // Best-effort detection; never let it take the session down.
-    }
-  });
+  /**
+   * Every tool whose `execute` is exactly: check `signal.aborted`, build an
+   * argv from `params`, run it through `runForeman`, wrap the stdout as a
+   * text result. `args`/`details` stay adjacent to the `description`/`zod`
+   * schema they correspond to, unlike a data table of entries, because
+   * those are the model-facing API and need to stay legible next to the
+   * tool they describe. Tools whose body isn't this shape (a `finally`, a
+   * stream, a branch on which of two mutually-exclusive params was given)
+   * are left as explicit `pi.registerTool` calls below instead of being
+   * contorted through extra flags here — a helper that needs escape
+   * hatches for every outlier is worse than the duplication it removes.
+   */
+  function registerForemanTool<Shape extends ZodRawShape>(config: {
+    name: string;
+    label: string;
+    description: string;
+    parameters: ZodObject<Shape>;
+    args: (params: InferShape<Shape>) => string[];
+    details?: (params: InferShape<Shape>) => Record<string, unknown>;
+  }) {
+    pi.registerTool({
+      name: config.name,
+      label: config.label,
+      description: config.description,
+      parameters: config.parameters,
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        if (signal?.aborted) return cancelled();
+        const stdout = await runForeman(config.args(params), ctx, signal);
+        return { content: [{ type: "text", text: stdout }], details: config.details?.(params) ?? {} };
+      },
+    });
+  }
 
   // ---------------------------------------------------------------------
   // Boss-side tools
   // ---------------------------------------------------------------------
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_boss",
     label: "Foreman Boss",
     description:
@@ -481,15 +490,13 @@ export default function foremanExtension(pi: ExtensionAPI) {
         .optional()
         .describe("Take over an already-claimed handle; the holder is renamed aside, not unnamed"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
+    args: (params) => {
       const args = ["boss"];
       if (params.name) args.push(params.name);
       if (params.steal) args.push("--steal");
-      const stdout = await runForeman(args, ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: { name: params.name ?? null } };
+      return args;
     },
+    details: (params) => ({ name: params.name ?? null }),
   });
 
   pi.registerTool({
@@ -536,7 +543,6 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
       const args = ["spawn", params.branch];
       let taskFile: string | undefined;
       if (params.task) {
@@ -571,7 +577,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_send",
     label: "Foreman Send",
     description:
@@ -585,18 +591,13 @@ export default function foremanExtension(pi: ExtensionAPI) {
         .default(false)
         .describe("Send as untracked raw steering instead of a tracked follow-up dispatch"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
+    args: (params) => {
       const args = ["send"];
       if (params.raw) args.push("--raw");
       args.push(params.handle, params.text);
-      const stdout = await runForeman(args, ctx, signal);
-      return {
-        content: [{ type: "text", text: stdout }],
-        details: { handle: params.handle, raw: !!params.raw },
-      };
+      return args;
     },
+    details: (params) => ({ handle: params.handle, raw: !!params.raw }),
   });
 
   pi.registerTool({
@@ -611,7 +612,6 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
       const args = ["ask"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       args.push(params.handle, params.text);
@@ -643,7 +643,6 @@ export default function foremanExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
       const args = ["join"];
       if (params.timeout_s != null) args.push("--timeout", String(params.timeout_s));
       if (params.handles?.length) args.push(...params.handles);
@@ -664,24 +663,21 @@ export default function foremanExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_ls",
     label: "Foreman List",
     description: "List known foreman workers, their states, kinds, branches, and paths.",
     parameters: z.object({
       all_repos: z.boolean().optional().describe("List workers across every repo, not just this one"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
+    args: (params) => {
       const args = ["ls"];
       if (params.all_repos) args.push("--all-repos");
-      const stdout = await runForeman(args, ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: {} };
+      return args;
     },
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_read",
     label: "Foreman Read",
     description:
@@ -690,17 +686,15 @@ export default function foremanExtension(pi: ExtensionAPI) {
       handle: z.string(),
       lines: z.number().int().positive().optional().describe("Number of trailing lines to show"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
+    args: (params) => {
       const args = ["read", params.handle];
       if (params.lines != null) args.push("-n", String(params.lines));
-      const stdout = await runForeman(args, ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: { handle: params.handle } };
+      return args;
     },
+    details: (params) => ({ handle: params.handle }),
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_reap",
     label: "Foreman Reap",
     description:
@@ -711,9 +705,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
       force: z.boolean().optional().describe("Reap even with uncommitted changes"),
       forget: z.boolean().optional().describe("Drop the record without touching the worktree"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
+    args: (params) => {
       if (!params.all && (!params.handles || params.handles.length === 0)) {
         throw new Error("foreman_reap requires either a non-empty handles array or all: true");
       }
@@ -722,15 +714,12 @@ export default function foremanExtension(pi: ExtensionAPI) {
       else args.push(...(params.handles ?? []));
       if (params.force) args.push("--force");
       if (params.forget) args.push("--forget");
-      const stdout = await runForeman(args, ctx, signal);
-      return {
-        content: [{ type: "text", text: stdout }],
-        details: { handles: params.handles ?? [], all: !!params.all },
-      };
+      return args;
     },
+    details: (params) => ({ handles: params.handles ?? [], all: !!params.all }),
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_broadcast",
     label: "Foreman Broadcast",
     description:
@@ -738,15 +727,10 @@ export default function foremanExtension(pi: ExtensionAPI) {
     parameters: z.object({
       text: z.string(),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
-      const stdout = await runForeman(["broadcast", params.text], ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: {} };
-    },
+    args: (params) => ["broadcast", params.text],
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_dm",
     label: "Foreman DM",
     description: "Send untracked raw steering text directly to one other foreman member.",
@@ -754,15 +738,11 @@ export default function foremanExtension(pi: ExtensionAPI) {
       handle: z.string(),
       text: z.string(),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
-      const stdout = await runForeman(["dm", params.handle, params.text], ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: { handle: params.handle } };
-    },
+    args: (params) => ["dm", params.handle, params.text],
+    details: (params) => ({ handle: params.handle }),
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_keys",
     label: "Foreman Keys",
     description:
@@ -771,15 +751,8 @@ export default function foremanExtension(pi: ExtensionAPI) {
       handle: z.string(),
       keys: z.array(z.string()).min(1).describe("Key names, passed through to herdr agent send-keys"),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      ensureJoinPoller(ctx);
-      const stdout = await runForeman(["keys", params.handle, ...params.keys], ctx, signal);
-      return {
-        content: [{ type: "text", text: stdout }],
-        details: { handle: params.handle, keys: params.keys },
-      };
-    },
+    args: (params) => ["keys", params.handle, ...params.keys],
+    details: (params) => ({ handle: params.handle, keys: params.keys }),
   });
 
   pi.registerTool({
@@ -790,37 +763,21 @@ export default function foremanExtension(pi: ExtensionAPI) {
     parameters: z.object({}),
     async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return cancelled();
-      let result: ForemanExecResult;
-      try {
-        result = (await pi.exec(foremanBin, ["doctor"], { signal, cwd: ctx.cwd })) as ForemanExecResult;
-      } catch (err) {
-        if (isMissingBinaryError(err)) {
-          throw new Error(
-            "foreman CLI not found on PATH — is the herdr foreman plugin installed?",
-          );
-        }
-        throw err;
-      }
       // doctor exits nonzero to report a failed check — that is the normal
-      // "here's what's wrong" result callers need to see, not a tool error.
-      return {
-        content: [{ type: "text", text: [result.stdout, result.stderr].filter((s) => s.trim()).join("\n") }],
-        details: { exitCode: result.code },
-      };
+      // "here's what's wrong" result callers need to see, not a tool error,
+      // so this is the one caller that passes allowNonZero.
+      const stdout = await runForeman(["doctor"], ctx, signal, { allowNonZero: true });
+      return { content: [{ type: "text", text: stdout }] };
     },
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_roles",
     label: "Foreman Roles",
     description:
       "List the role names foreman_spawn's role parameter accepts, the skill each resolves to, any model each defaults to, and that skill's own description as a hint for what the role is for.",
     parameters: z.object({}),
-    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      const stdout = await runForeman(["roles"], ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: {} };
-    },
+    args: () => ["roles"],
   });
 
   // ---------------------------------------------------------------------
@@ -851,7 +808,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerForemanTool({
     name: "foreman_reply",
     label: "Foreman Reply",
     description:
@@ -859,11 +816,7 @@ export default function foremanExtension(pi: ExtensionAPI) {
     parameters: z.object({
       text: z.string(),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (signal?.aborted) return cancelled();
-      const stdout = await runForeman(["reply", params.text], ctx, signal);
-      return { content: [{ type: "text", text: stdout }], details: {} };
-    },
+    args: (params) => ["reply", params.text],
   });
 
   // ---------------------------------------------------------------------

@@ -41,14 +41,6 @@ source "$FOREMAN_BIN"
 # would abort the run on the first assertion that is *supposed* to fail.
 set +e
 
-# A test below shadows `need` and `unset -f` would delete the definition
-# sourced above rather than popping the shadow, so it restores by re-eval
-# instead. The failure mode is silent and lands in a later test: the function
-# simply ceases to exist, and the assertion that depended on it passes for the
-# wrong reason while printing "command not found".
-need_definition=$(declare -f need)
-restore_need() { eval "$need_definition"; }
-
 # ── slugify ──────────────────────────────────────────────────────────────────
 #
 # A branch reduces to a herdr agent name: [a-z][a-z0-9_-]{0,31}.
@@ -1193,7 +1185,7 @@ export FOREMAN_STATE="$sandbox/state-reply-append"
 mkdir -p "$FOREMAN_STATE/w1"
 meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
 self_handle() { printf 'w1'; }
-agent_exists() { return 1; }
+agent_field() { printf ''; }
 require_herdr() { :; }
 
 cmd_reply 'first question' >/dev/null 2>&1
@@ -1229,7 +1221,12 @@ meta_set "$h1" "BOSS=boss1" "BRANCH=feat/x" "DIR=/tmp/w1" "REPO_KEY=k1"
 counter_bump "$(dispatch_file "$h1")"
 require_herdr() { :; }
 self_handle() { printf '%s' "$h1"; }
-agent_exists() { [ "$1" = boss1 ]; }
+# Stubbed at the leaf, not at agent_exists: notify_agent resolves the boss's
+# pane with agent_field and reads an empty answer as "not live". A stub on the
+# derived agent_exists would leave that lookup to fall through to the herdr
+# stub below, which answers no pane_id, and every push would report the boss
+# unreachable. Stubbing agent_field drives the real agent_exists too.
+agent_field() { case "$1" in boss1) printf 'boss1-pane' ;; *) printf '' ;; esac; }
 push_target="$sandbox/push-target-report"; push_text="$sandbox/push-text-report"
 herdr() {
   case "$1 $2" in
@@ -1276,7 +1273,7 @@ mkdir -p "$(meta_dir "$h2")"
 meta_set "$h2" "BOSS=deadboss" "BRANCH=feat/y" "DIR=/tmp/w2" "REPO_KEY=k2"
 counter_bump "$(dispatch_file "$h2")"
 self_handle() { printf '%s' "$h2"; }
-agent_exists() { return 1; }
+agent_field() { printf ''; }   # no pane for any name: deadboss is not live
 out=$(printf 'stranded findings' | cmd_report 2>&1)
 assert 'stdout says the report was filed, not delivered' [ "${out#*filed for}" != "$out" ]
 assert 'and stderr warns the boss is unreachable' [ "${out#*not reachable}" != "$out" ]
@@ -1293,7 +1290,7 @@ herdr() {
 out2=$(cmd_join --once 2>&1)
 assert 'a following bare sweep does deliver the filed report' \
   [ "${out2#*stranded findings}" != "$out2" ]
-unset -f herdr self_handle agent_exists require_herdr scoped_key
+unset -f herdr self_handle agent_field require_herdr scoped_key
 
 # ── reply push delivery ──────────────────────────────────────────────────────
 #
@@ -1308,7 +1305,7 @@ mkdir -p "$(meta_dir "$h3")"
 meta_set "$h3" "BOSS=boss3" "BRANCH=feat/z" "DIR=/tmp/w3" "REPO_KEY=k3"
 require_herdr() { :; }
 self_handle() { printf '%s' "$h3"; }
-agent_exists() { [ "$1" = boss3 ]; }
+agent_field() { case "$1" in boss3) printf 'boss3-pane' ;; *) printf '' ;; esac; }
 push_target3="$sandbox/push-target3"; push_text3="$sandbox/push-text3"
 herdr() {
   case "$1 $2" in
@@ -1345,7 +1342,7 @@ herdr() {
 out=$(cmd_join --once 2>&1)
 assert_not 'a bare sweep no longer re-delivers a pushed question' \
   [ "${out#*which branch should I use?}" != "$out" ]
-unset -f herdr self_handle agent_exists require_herdr scoped_key
+unset -f herdr self_handle agent_field require_herdr scoped_key
 
 # ── explicit join on an open question does not block ────────────────────────
 #
@@ -1755,53 +1752,49 @@ is 'missing dispatched and an empty task.seen compare equal' "$pickup_rc" '3'
 is 'so the stale task is not delivered' "$pickup_out" ''
 unset -f cmd_join
 
-# A crashed sidecar can leave its pid file behind. Treating file existence as
-# liveness would suppress the prompt fallback and strand every later task.
-printf '999999999' >"$(bus_pid_file "$bus_worker")"
-assert_not 'bus_live rejects a stale pid' bus_live "$bus_worker"
-rm -f "$(bus_pid_file "$bus_worker")"
+# A worker collects its own tracked task ahead of the join sweep, because the
+# sweep only ever looks at *other* handles.
+worker_pickup=worker-pickup
+mkdir -p "$(meta_dir "$worker_pickup")"
+printf 'BOSS=someone\n' >"$(meta_file "$worker_pickup")"
+self_handle() { printf '%s' "$worker_pickup"; }
+printf 'a tracked task' >"$(task_file "$worker_pickup")"
+counter_bump "$(dispatch_file "$worker_pickup")"
+# Shadowed to prove it is never reached from a worker pane at all.
+cmd_join() { printf 'must not run\n'; return 0; }
+pickup_out=$(cmd_pickup)
+is 'a registered worker collects its own tracked task' "$pickup_out" 'a tracked task'
+# With that acked there is nothing left to collect, and a bare join refuses on a
+# worker pane with a `die` — exit 1. The extension reads that as a real pickup
+# error and parks its sweeper after five consecutive ones, so an idle worker
+# session used to switch its own anomaly net off.
+pickup_out=$(cmd_pickup); pickup_rc=$?
+is 'then returns 3 rather than the join refusal error' "$pickup_rc" '3'
+is 'and prints nothing on that tick' "$pickup_out" ''
+unset -f cmd_join
 
-# The two halves install separately and neither implies the other: the sidecar
-# is registered in user-level mcp.json and runs in every omp session, while the
-# listener ships in the omp plugin and may be absent entirely. Reading the
-# sidecar's marker as proof of a listener is the bug that shipped — dispatch_to
-# skipped the prompt fallback and the task reached nobody at all.
-printf '%s' "$$" >"$(bus_pid_file "$bus_worker")"
-assert_not 'a live sidecar with no listener is not a live bus' bus_live "$bus_worker"
-printf '999999999' >"$(bus_listener_file "$bus_worker")"
-assert_not 'nor is one whose listener pid is stale' bus_live "$bus_worker"
-printf '%s' "$$" >"$(bus_listener_file "$bus_worker")"
-assert 'both halves live is a live bus' bus_live "$bus_worker"
-rm -f "$(bus_pid_file "$bus_worker")"
-assert_not 'a listener whose sidecar died is not' bus_live "$bus_worker"
-rm -f "$(bus_listener_file "$bus_worker")"
+# Nothing published: dispatch has to fall back to an interrupting prompt rather
+# than trust a bus that was never there.
+bus_pane=bus-test-pane
+mkdir -p "$(dirname "$(bus_sidecar_file "$bus_pane")")"
+assert_not 'an unpublished pane has no bus target' bus_target "$bus_pane"
+assert_not 'and signalling it fails, so the caller prompts' bus_signal "$bus_pane"
 
-# The extension runs `bus --arm` at load and waits for it, so arming must
-# short-circuit ahead of the server's prerequisites and its stdin stream: a
-# version that fell through to the JSON-RPC loop would hang session startup.
-need() { printf '%s\n' "$1" >>"$sandbox/arm-need"; }
-cmd_bus --arm "$$" </dev/null
-is 'bus --arm records the listener by pid' \
-  "$(counter_read "$(bus_listener_flag "$$")")" "$$"
-assert_not 'without reaching the server prerequisites' \
-  [ -f "$sandbox/arm-need" ]
-restore_need
-# Keyed by pid precisely so it does not need a handle: a boss arms at session
-# load and only claims one later, so requiring a handle here left every boss
-# pane prompt-only for the life of the session.
-assert 'arming needs no handle at all' \
-  [ -f "$(bus_listener_flag "$$")" ]
-# Fails open instead of erroring: an extension load that reports a broken
-# plugin is worse than an absent optimisation.
-bus_arm 999999999
-assert_not 'a pid that is already gone arms nothing' \
-  [ -f "$(bus_listener_flag 999999999)" ]
-# One flag per omp session would accumulate forever, so arming prunes the dead
-# ones it finds on the way past.
-printf '999999999' >"$(bus_listener_flag 999999999)"
-bus_arm "$$"
-assert_not 'and arming prunes a dead session flag' \
-  [ -f "$(bus_listener_flag 999999999)" ]
+# A crashed sidecar leaves its file behind. Existence is not liveness: reading
+# it as such suppressed the prompt fallback and stranded every later task.
+printf '999999999\n%s\n' "$$" >"$(bus_sidecar_file "$bus_pane")"
+assert_not 'a stale sidecar pid is not a target' bus_target "$bus_pane"
+
+# Both pids have to be live, because what gets sent is SIGUSR1 and its default
+# disposition is *terminate*: firing it at a recycled pid would kill an
+# unrelated process. A sidecar cannot outlive its session, so demanding the
+# pair makes a false positive take two recycles at once.
+printf '%s\n999999999\n' "$$" >"$(bus_sidecar_file "$bus_pane")"
+assert_not 'nor is a live sidecar whose session is gone' bus_target "$bus_pane"
+printf '%s\n' "$$" >"$(bus_sidecar_file "$bus_pane")"
+assert_not 'nor is a file with no session line at all' bus_target "$bus_pane"
+printf '%s\n%s\n' "$$" "$$" >"$(bus_sidecar_file "$bus_pane")"
+is 'both pids live yields the pid to signal' "$(bus_target "$bus_pane")" "$$"
 
 # The task has to be durable before dispatch_to exposes its new generation:
 # otherwise a wake between the counter bump and file write makes pickup read
@@ -1837,67 +1830,91 @@ is 'bus returns -32601 for an unknown request' \
   "$bus_frames" \
   '{"jsonrpc":"2.0","id":41,"error":{"code":-32601,"message":"Method not found: not/a/method"}}'
 
-# A quiet MCP client used to delay the watcher until its next integer
-# `read -t` expiry. Keep stdin open without sending a request, then mutate the
-# dispatched generation: the wake has to appear on the 250ms watcher cadence,
-# not after request traffic eventually arrives.
-bus_fifo="$sandbox/bus-idle-input"
-bus_out="$sandbox/bus-idle-output"
+# ── MCP bus: the doorbell ────────────────────────────────────────────────────
+#
+# The real binary, not a sourced cmd_bus: the trap has to be installed in a
+# process whose `read` is genuinely blocked on a pipe, which is the one
+# condition this whole design depends on.
+
+printf '\nMCP bus: the doorbell\n'
+bus_fifo="$sandbox/bus-input"
+bus_out="$sandbox/bus-output"
 mkfifo "$bus_fifo"
-bus_watch_worker=bus-watch-worker
-mkdir -p "$(meta_dir "$bus_watch_worker")"
-# The real binary, not a sourced cmd_bus, because the two pids it keys its
-# markers off — its own and omp's — are the same value inside this shell. That
-# collapse is what hid a projection that looked up the sidecar's pid instead of
-# the session's, so a fake process boundary cannot test this at all. A PATH
-# stub stands in for herdr, since a real one cannot resolve a sandbox pane.
-mkdir -p "$sandbox/bin"
-cat >"$sandbox/bin/herdr" <<'STUB'
-#!/bin/sh
-case "$*" in
-  'agent list') printf '{"result":{"agents":[{"name":"bus-watch-worker","pane_id":"bus-pane"}]}}' ;;
-  *) printf '{"result":{}}' ;;
-esac
-STUB
-chmod +x "$sandbox/bin/herdr"
-# Armed before the sidecar starts and with no handle in sight, which is the
-# boss's real ordering: the watcher has to project this onto whichever handle
-# the pane turns out to hold. Keyed to this shell because it is the parent of
-# the sidecar below, standing in for the omp session that spawns one.
-bus_arm "$$"
-PATH="$sandbox/bin:$PATH" HERDR_PANE_ID=bus-pane \
-  "$FOREMAN_BIN" bus <"$bus_fifo" >"$bus_out" 2>/dev/null &
-bus_server_pid=$!
-exec 9>"$bus_fifo"
+mkdir -p "$(dirname "$(bus_sidecar_file bus-pane)")"
+# A corpse from a sidecar that was SIGKILLed before its EXIT trap ran, left for
+# the starting one to prune: one file per omp session would otherwise
+# accumulate under $FOREMAN_STATE forever.
+printf '999999999\n999999999\n' >"$(bus_sidecar_file dead-pane)"
+# `<>` never blocks on a FIFO, unlike `>`, which waits for a reader that in
+# this ordering does not exist yet. `9>&-` keeps the sidecar from inheriting
+# the write end, or closing fd 9 below would never reach it as EOF.
+exec 9<>"$bus_fifo"
+HERDR_PANE_ID=bus-pane "$FOREMAN_BIN" bus <"$bus_fifo" >"$bus_out" 2>/dev/null 9>&- &
+bus_pid=$!
 # Plain `sleep` for the test's own waits: assertions here must not depend on a
-# helper the suite deletes and restores around them.
-sleep 0.6
-# The ordering-race test above shadows then removes counter_bump(), so write
-# the next generation directly here; reusing its vanished stub would turn this
-# idle-read regression into a test-order accident rather than a watcher test.
-printf '1' >"$(dispatch_file "$bus_watch_worker")"
-sleep 0.8
-# Two distinct pids, and each marker has to carry the right one: bus.pid names
-# the sidecar omp talks to, bus.listener the session holding the listener.
-is 'the sidecar marker names the server process' \
-  "$(counter_read "$(bus_pid_file "$bus_watch_worker")")" "$bus_server_pid"
-is 'the watcher projects the armed listener onto the resolved handle' \
-  "$(counter_read "$(bus_listener_file "$bus_watch_worker")")" "$$"
-assert 'a watcher wake arrives while the request read is idle' \
-  [ "$(cat "$bus_out")" = '{"jsonrpc":"2.0","method":"notifications/foreman/wake"}' ]
+# helper the suite shadows elsewhere.
+bus_ready=no
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if [ -s "$(bus_sidecar_file bus-pane)" ]; then bus_ready=yes; break; fi
+  sleep 0.2
+done
+is 'the sidecar publishes itself under its pane' "$bus_ready" 'yes'
+is 'naming the process omp talks to' \
+  "$(sed -n 1p "$(bus_sidecar_file bus-pane)")" "$bus_pid"
+is 'and the session that spawned it' \
+  "$(sed -n 2p "$(bus_sidecar_file bus-pane)")" "$$"
+assert_not 'and prunes a dead sidecar file on the way past' \
+  [ -f "$(bus_sidecar_file dead-pane)" ]
+
+# The whole design rests on this: a USR1 arriving while `read` is blocked runs
+# the trap and then *resumes* the read. Verified on macOS bash 3.2.57. A bash
+# where the read returned instead would fall out of the loop and kill the
+# sidecar on the first report of the session.
+assert 'signalling the published pane succeeds' bus_signal bus-pane
+bus_woke=no
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if [ -s "$bus_out" ]; then bus_woke=yes; break; fi
+  sleep 0.2
+done
+is 'an idle sidecar wakes off the signal alone' "$bus_woke" 'yes'
+is 'emitting the parameterless notification' \
+  "$(sed -n 1p "$bus_out")" '{"jsonrpc":"2.0","method":"notifications/foreman/wake"}'
+
+# Proves the read resumed rather than returned. A sidecar that answered one
+# wake and then went deaf still looks healthy to omp, which never reconnects,
+# so the session silently falls back to the sweeper for the rest of its life.
+printf '%s\n' '{"jsonrpc":"2.0","id":7,"method":"ping"}' >&9
+bus_replied=no
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if [ "$(sed -n '$p' "$bus_out")" = '{"jsonrpc":"2.0","id":7,"result":{}}' ]; then
+    bus_replied=yes; break
+  fi
+  sleep 0.2
+done
+is 'and it still serves requests afterwards' "$bus_replied" 'yes'
+
+# Two reports in a row. A trap that exited, or one bash cleared after firing,
+# would drop the second — and a boss would hear about only the first worker of
+# the wave to settle.
+bus_signal bus-pane
+bus_wakes=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  bus_wakes=$(grep -c 'foreman/wake' "$bus_out")
+  [ "$bus_wakes" = 2 ] && break
+  sleep 0.2
+done
+is 'a second signal wakes it again' "$bus_wakes" '2'
+
 exec 9>&-
-wait "$bus_server_pid" 2>/dev/null
-assert_not 'a clean bus exit removes its liveness marker' \
-  [ -f "$(bus_pid_file "$bus_watch_worker")" ]
-assert_not 'and its projected listener marker' \
-  [ -f "$(bus_listener_file "$bus_watch_worker")" ]
-assert 'while the pid flag survives for a reconnecting sidecar' \
-  [ -f "$(bus_listener_flag "$$")" ]
+wait "$bus_pid" 2>/dev/null
+assert_not 'a clean exit removes its published file' \
+  [ -f "$(bus_sidecar_file bus-pane)" ]
 
 # A signal trap that only cleans up leaves bash to resume the interrupted
-# `read`: the server stayed alive with its watcher already reaped, deaf for the
-# rest of the session, while omp saw a healthy transport and never reconnected.
-# Uses the real binary — a sourced cmd_bus would trap in this shell instead.
+# `read`: the server stayed alive with its published file already removed, deaf
+# for the rest of the session, while omp saw a healthy transport and never
+# reconnected. Uses the real binary — a sourced cmd_bus would trap in this
+# shell instead.
 term_fifo="$sandbox/bus-term-input"
 mkfifo "$term_fifo"
 env -u HERDR_PANE_ID "$FOREMAN_BIN" bus <"$term_fifo" >/dev/null 2>&1 &

@@ -166,39 +166,76 @@ mkdir -p "$linkdir"
 assert 'symlink exists in space-containing dir' [ -L "$linkdir/foreman" ]
 is     'resolves to the plugin checkout' "$(readlink "$linkdir/foreman")" "$s/ck/bin/foreman"
 
-# ── omp MCP registration ─────────────────────────────────────────────────────
+# ── omp MCP: the installer registers nothing ─────────────────────────────────
+#
+# The bus is declared by the agent plugin's own `.omp-plugin/plugin.json`, so a
+# sidecar exists exactly where a listener does. This installer used to write
+# `~/.omp/agent/mcp.json` instead, which started a sidecar in *every* omp
+# session on the machine — including sessions that never loaded the plugin and
+# so could never turn a wake into an aside. A boss then read that sidecar's
+# marker as proof of delivery, skipped the herdr prompt, and the task reached
+# nobody at all.
 
-printf '\nomp MCP: fresh install writes config\n'
+printf '\nomp MCP: the installer registers nothing\n'
 s="$sandbox/s11"; mkdir -p "$s"
 make_checkout "$s/ck" foreman.test.s11
 run_link "$s/ck" "$s" >/dev/null
-mcp_file="$s/home/.omp/agent/mcp.json"
-assert     'mcp.json created' [ -f "$mcp_file" ]
-is         'foreman entry command' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" 'foreman'
-is         'foreman entry args' "$(jq -c '.mcpServers.foreman.args' "$mcp_file")" '["bus"]'
+assert_not 'no user-level mcp.json is written' [ -e "$s/home/.omp/agent/mcp.json" ]
+assert_not 'and no .omp tree is created to hold one' [ -e "$s/home/.omp" ]
 
-printf '\nomp MCP: idempotent re-run leaves exactly one entry\n'
-run_link "$s/ck" "$s" >/dev/null
-is 'still exactly one foreman entry' "$(jq -c '.mcpServers | keys | map(select(. == "foreman")) | length' "$mcp_file")" '1'
-
-printf '\nomp MCP: preserves an unrelated pre-existing server entry\n'
+printf '\nomp MCP: an existing user config is left alone\n'
 s="$sandbox/s12"; mkdir -p "$s/home/.omp/agent"
 make_checkout "$s/ck" foreman.test.s12
 printf '{"mcpServers":{"other":{"command":"other-tool","args":[]}}}\n' >"$s/home/.omp/agent/mcp.json"
 run_link "$s/ck" "$s" >/dev/null
-mcp_file="$s/home/.omp/agent/mcp.json"
-is 'unrelated entry untouched' "$(jq -c '.mcpServers.other' "$mcp_file")" '{"command":"other-tool","args":[]}'
-is 'foreman entry added' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" 'foreman'
+is 'unrelated config left byte-for-byte' \
+  "$(cat "$s/home/.omp/agent/mcp.json")" \
+  '{"mcpServers":{"other":{"command":"other-tool","args":[]}}}'
 
-printf '\nomp MCP: leaves a customised foreman entry intact\n'
+# ── omp MCP: the installer removes its own old entry ─────────────────────────
+#
+# Upgrade path. Stopping the write is not enough: an install that already ran
+# the old version still has the entry, so the session would start one sidecar
+# from it and a second from the plugin manifest.
+
+printf '\nomp MCP: the installer removes its own old entry\n'
 s="$sandbox/s13"; mkdir -p "$s/home/.omp/agent"
 make_checkout "$s/ck" foreman.test.s13
-printf '{"mcpServers":{"foreman":{"command":"/custom/foreman","args":["bus","--extra"]}}}\n' >"$s/home/.omp/agent/mcp.json"
+printf '{"mcpServers":{"other":{"command":"other-tool","args":[]},"foreman":{"command":"foreman","args":["bus"]}}}\n' \
+  >"$s/home/.omp/agent/mcp.json"
 out=$(run_link "$s/ck" "$s")
-mcp_file="$s/home/.omp/agent/mcp.json"
-assert 'reports leaving customised entry' [ "${out#*customised foreman entry}" != "$out" ]
-is     'customised command untouched' "$(jq -r '.mcpServers.foreman.command' "$mcp_file")" '/custom/foreman'
-is     'customised args untouched' "$(jq -c '.mcpServers.foreman.args' "$mcp_file")" '["bus","--extra"]'
+is 'the stale foreman entry is gone' \
+  "$(jq -c '.mcpServers.foreman // "absent"' "$s/home/.omp/agent/mcp.json")" '"absent"'
+is 'and every other server survives untouched' \
+  "$(jq -Sc '.mcpServers.other' "$s/home/.omp/agent/mcp.json")" \
+  '{"args":[],"command":"other-tool"}'
+assert 'and it says so, naming the file' [ "${out#*removed the old user-level foreman entry}" != "$out" ]
+
+# A foreman entry pointing at something else was hand-written, so deleting it
+# would silently break a setup the installer never created.
+printf '\nomp MCP: a customised foreman entry is left alone\n'
+s="$sandbox/s14"; mkdir -p "$s/home/.omp/agent"
+make_checkout "$s/ck" foreman.test.s14
+custom='{"mcpServers":{"foreman":{"command":"/opt/mine/foreman","args":["bus","--verbose"]}}}'
+printf '%s\n' "$custom" >"$s/home/.omp/agent/mcp.json"
+out=$(run_link "$s/ck" "$s")
+is 'the customised entry is preserved byte-for-byte' \
+  "$(cat "$s/home/.omp/agent/mcp.json")" "$custom"
+assert 'and the installer says it left it alone' \
+  [ "${out#*leaving customised foreman entry}" != "$out" ]
+
+# A config that does not parse is not ours to rewrite, and must not abort the
+# link that is this script's actual job.
+printf '\nomp MCP: an unparseable config is left for the user\n'
+s="$sandbox/s15"; mkdir -p "$s/home/.omp/agent"
+make_checkout "$s/ck" foreman.test.s15
+printf 'not json at all\n' >"$s/home/.omp/agent/mcp.json"
+run_link "$s/ck" "$s" >/dev/null 2>&1
+is 'the broken config is untouched' \
+  "$(cat "$s/home/.omp/agent/mcp.json")" 'not json at all'
+assert 'and the symlink was still created' [ -L "$s/bin/foreman" ]
+assert 'leaving no temp file behind' \
+  [ -z "$(find "$s/home/.omp/agent" -name 'mcp.json.tmp.*' 2>/dev/null)" ]
 
 
 # ── foreman-ls: parse guard against malformed JSON ───────────────────────────────

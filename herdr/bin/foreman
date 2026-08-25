@@ -58,11 +58,6 @@ LAYOUT_START_TIMEOUT_MS="${FOREMAN_LAYOUT_START_TIMEOUT_MS:-15000}"
 # covers the whole wave per tick, so this is cheap; it only bounds how quickly
 # a settled worker or a filed question is noticed.
 JOIN_POLL_MS="${FOREMAN_JOIN_POLL_MS:-2000}"
-# How often `foreman bus` re-checks its own handle's deliverable counters. Must
-# stay well under DISPATCH_SETTLE_MS (15000): dispatch_to's settle loop only
-# confirms pickup by watching state_change_seq for up to that long, and a
-# `triggerTurn` aside injected off this wake is what has to land inside it.
-FOREMAN_BUS_POLL_MS="${FOREMAN_BUS_POLL_MS:-250}"
 
 die() { printf 'foreman: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
@@ -97,15 +92,19 @@ h() {
 # is not live and a payload herdr rejects both degrade to that same fallback —
 # and callers stamp their acknowledgement counter only when this returns 0.
 notify_agent() {
-  local handle=$1 text=$2
-  agent_exists "$handle" || return 1
-  # A live bus delivers via a wake instead: prompting on top of it would
-  # double-inject the same text once as a herdr prompt and once as the aside
-  # the extension sends after `foreman pickup`. Returning 0 here keeps the
-  # same trust level as the prompt path — accepted is not the same fact as
-  # read — which is exactly what the boss-side sweep and the un-stamped
-  # `joined` counter already exist to cover.
-  if bus_live "$handle"; then return 0; fi
+  local handle=$1 text=$2 pane
+  # The pane doubles as the existence check: agent_exists() is this same
+  # lookup, so resolving it here instead of calling both keeps a push at the
+  # one herdr round trip it cost before the bus existed.
+  pane=$(agent_field "$handle" pane_id)
+  [ -n "$pane" ] || return 1
+  # A delivered wake means the extension will inject this via `foreman pickup`
+  # instead: prompting on top of it would double-inject the same text, once as
+  # a herdr prompt and once as the aside. Returning 0 here keeps the same trust
+  # level as the prompt path — accepted is not the same fact as read — which is
+  # exactly what the boss-side sweep and the un-stamped `joined` counter
+  # already exist to cover.
+  if bus_signal "$pane"; then return 0; fi
   herdr agent prompt "$handle" "$text" >/dev/null 2>&1
 }
 
@@ -379,39 +378,44 @@ task_file() { printf '%s/task.md' "$(meta_dir "$1")"; }
 # tell dispatch 2 (queued while pickup was mid-read of dispatch 1) apart from
 # a redelivery of dispatch 1, so pickup acks the generation it actually read.
 task_token_file() { printf '%s/task.seen' "$(meta_dir "$1")"; }
-# The sidecar's own pid, removed by its EXIT trap. One half of the liveness
-# test below.
-bus_pid_file() { printf '%s/bus.pid' "$(meta_dir "$1")"; }
-# The pid of the omp session whose extension armed a wake listener, written by
-# `foreman bus --arm`. The other half.
-bus_listener_file() { printf '%s/bus.listener' "$(meta_dir "$1")"; }
-# A listener declares itself by omp pid, not by handle: the extension arms at
-# session load, and for a boss that is *before* `foreman boss` claims a handle,
-# so there is frequently no handle to key it to yet. Dot-prefixed because
+# Where a sidecar publishes itself, keyed by pane rather than by handle: it
+# starts with its omp session, which is before `foreman boss` claims a handle
+# at all, and `foreman boss --steal` can later move a handle to another pane.
+# The pane is fixed for the life of the session and handle -> pane is herdr's
+# own live answer, so nothing here can go stale. Dot-prefixed because
 # known_workers() reads every directory under $FOREMAN_STATE as a worker
-# handle, and `*/` does not match a leading dot — a plain `listeners/` would
-# show up as a phantom worker in `foreman ls --all-repos`.
-bus_listener_flag() { printf '%s/.listeners/%s' "$FOREMAN_STATE" "$1"; }
+# handle and `*/` does not match a leading dot — a plain `sidecars/` would show
+# up as a phantom worker in `foreman ls --all-repos`.
+bus_sidecar_file() { printf '%s/.sidecars/%s' "$FOREMAN_STATE" "$1"; }
 
-# True only when both halves of the bus delivery path are present and live.
-# Neither implies the other, because they install separately: the sidecar is
-# registered in user-level mcp.json and so runs in *every* omp session, while
-# the listener that turns a wake into an aside ships in the omp plugin, which
-# a worker's session may not have loaded at all. Trusting the sidecar alone
-# made dispatch_to skip the herdr prompt for a session that could never
-# receive the wake, and the task was swallowed without a trace.
+# The sidecar pid to ring for pane $1, or nothing.
 #
-# Existence is never enough on either side: a sidecar killed before its EXIT
-# trap ran, or a listener whose omp is gone, both leave the file behind. The
-# paired pid check also disposes of stale-pid reuse, since the sidecar is a
-# child of the listener's omp and cannot outlive it — for both files to name
-# live processes again, two pids would have to be recycled at once.
-bus_live() {
-  local sidecar listener
-  sidecar=$(counter_read "$(bus_pid_file "$1")")
-  listener=$(counter_read "$(bus_listener_file "$1")")
-  [ -n "$sidecar" ] && [ -n "$listener" ] &&
-    kill -0 "$sidecar" 2>/dev/null && kill -0 "$listener" 2>/dev/null
+# Both pids in the file must name live processes. Existence is never enough: a
+# sidecar SIGKILLed before its EXIT trap ran leaves the file behind, and what
+# gets sent below is SIGUSR1, whose default disposition is *terminate* — firing
+# it at a recycled pid would kill an unrelated process. A sidecar is a child of
+# its omp session and cannot outlive it, so for both lines to name live
+# processes again two pids would have to be recycled at once.
+bus_target() {
+  local f pid="" session=""
+  f=$(bus_sidecar_file "$1")
+  [ -f "$f" ] || return 1
+  # Read, not `sed -n 1p` twice: this is on the delivery path of every report.
+  { IFS= read -r pid; IFS= read -r session; } <"$f" || :
+  [ -n "$pid" ] && [ -n "$session" ] || return 1
+  kill -0 "$pid" 2>/dev/null && kill -0 "$session" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+# Rings the doorbell for pane $1, true only if the signal was actually
+# delivered. Liveness and delivery are deliberately the same act: a caller that
+# checked first and signalled after would have a window in which the sidecar
+# dies between the two, having already decided to skip the prompt fallback —
+# which is exactly how a task used to reach nobody at all.
+bus_signal() {
+  local pid
+  pid=$(bus_target "$1") || return 1
+  kill -USR1 "$pid" 2>/dev/null
 }
 
 # Counters are compared as strings, never coerced to a number: "never
@@ -1534,9 +1538,13 @@ report_is_fresh() {
 # own call. See the working|blocked branch below.
 dispatch_to() {
   local handle=$1 text=$2
-  local before_status before_seq prior
+  local before_status before_seq prior pane
   before_status=$(agent_field "$handle" agent_status)
   before_seq=$(agent_field "$handle" state_change_seq)
+  # Which pane to ring, if this worker's session has a sidecar. Looked up per
+  # dispatch rather than recorded once, for the same reason bus_sidecar_file is
+  # keyed by pane: a handle can move between panes mid-wave.
+  pane=$(agent_field "$handle" pane_id)
   # Whether this worker has ever been dispatched to. The identity hazard below
   # needs an *earlier* report to steal the label of, so an empty counter means
   # there is nothing to protect.
@@ -1567,7 +1575,7 @@ dispatch_to() {
       # the normal branch below for why the other order is unsafe.
       printf '%s' "$text" >"$(task_file "$handle")"
       counter_bump "$(dispatch_file "$handle")"
-      if bus_live "$handle"; then
+      if bus_signal "$pane"; then
         note "foreman: $handle was $before_status at its first dispatch; queued for bus pickup instead of a prompt (check it with: foreman read $handle)"
       else
         h agent prompt "$handle" "$text" >/dev/null
@@ -1587,10 +1595,10 @@ dispatch_to() {
   # task is ready and hand it an empty (or stale, pre-this-dispatch) file.
   printf '%s' "$text" >"$(task_file "$handle")"
   counter_bump "$(dispatch_file "$handle")"
-  # A live bus already owns delivery: prompting on top of it would inject the
-  # task twice, once as a herdr prompt and once as the aside `foreman pickup`
-  # produces off the wake.
-  if ! bus_live "$handle"; then
+  # A delivered wake already owns delivery: prompting on top of it would inject
+  # the task twice, once as a herdr prompt and once as the aside `foreman
+  # pickup` produces off the wake.
+  if ! bus_signal "$pane"; then
     h agent prompt "$handle" "$text" >/dev/null
     # As on the first-dispatch branch: the prompt consumed this generation, so
     # ack it rather than leaving a task for a later listener to replay.
@@ -2213,9 +2221,16 @@ cmd_pickup() {
     fi
   fi
 
-  # Falls through to exactly the tick `foreman join --once` already runs —
-  # same report/question formatting, same worker-pane refusal (see :1932) —
-  # so this can never drift from what a human running `foreman join` sees.
+  # A registered worker has nothing further to collect, so stop here rather
+  # than falling into the join below: it refuses on a worker pane by design
+  # (:2012) and that refusal would surface as a pickup *error*, which the
+  # extension counts toward the five consecutive failures that park its
+  # sweeper for the rest of the session.
+  if [ -f "$(meta_file "$handle")" ]; then return 3; fi
+
+  # Falls through to exactly the tick `foreman join --once` already runs — same
+  # report and question formatting, same acking — so a boss's pickup can never
+  # drift from what a human running `foreman join` sees.
   local out rc=0
   out=$(cmd_join --once) || rc=$?
   [ "$rc" = 3 ] && return 3
@@ -2225,51 +2240,10 @@ cmd_pickup() {
   return 0
 }
 
-# This pane's handle without self_handle()'s die() on a missing pane or a
-# failed herdr call — the bus must fail *open* (serve the protocol, never
-# wake) rather than exit, or a plain omp session outside herdr would trip
-# omp's own reconnect circuit breaker (>5 failed attempts in 30s disables
-# auto-reconnect until a human runs /mcp reconnect).
-bus_current_handle() {
-  [ -n "${HERDR_PANE_ID:-}" ] || return 0
-  local out; out=$(herdr agent list 2>/dev/null) || return 0
-  printf '%s' "$out" | jq -r --arg p "$HERDR_PANE_ID" \
-    '(.result.agents[]? | select(.pane_id == $p) | .name) // empty' 2>/dev/null
-}
-
-# A string that changes exactly when this handle's next `foreman pickup`
-# would find something new. The bus only ever wakes off this — it never
-# calls join or acks anything itself — which is what keeps it from ever
-# collecting a report out from under the agent meant to read it.
-bus_fingerprint() {
-  local h=$1 own
-  own="$(counter_read "$(dispatch_file "$h")")|$(counter_read "$(task_token_file "$h")")"
-  # A registered worker's bare join always refuses (cmd_join, :1932) and
-  # cmd_pickup keeps that guard intact, so nothing beyond its own task ever
-  # reaches a worker through pickup — fingerprinting the rest of the repo for
-  # a worker handle would wake it for changes it can never actually collect.
-  if [ -f "$(meta_file "$h")" ]; then
-    printf '%s' "$own"
-    return 0
-  fi
-  local scope w
-  scope=$(repo_key)
-  printf '%s|' "$own"
-  for w in $(known_workers "$scope"); do
-    printf '%s:%s:%s:%s:%s:%s;' "$w" \
-      "$(counter_read "$(question_seq_file "$w")")" \
-      "$(counter_read "$(question_seen_file "$w")")" \
-      "$(counter_read "$(question_answered_file "$w")")" \
-      "$(counter_read "$(dispatch_file "$w")")" \
-      "$(counter_read "$(report_token_file "$w")")"
-  done
-}
-
-# Both the read loop and the watcher write this inherited stdout. A frame is
+# Both the read loop and the USR1 trap write this inherited stdout. A frame is
 # well below PIPE_BUF and this one printf writes its one newline-delimited line
-# atomically, which rejects a mutex/queue sidecar: concurrent reply and wake
-# writes cannot tear JSON framing (verified with 800 interleaved writes), while
-# serializing them would reintroduce the delivery latency this bus removes.
+# atomically; bash also runs a trap only between commands, so a wake can never
+# tear the JSON framing of a reply mid-write.
 bus_emit() { printf '%s\n' "$1"; }
 
 bus_reply_initialize() {
@@ -2304,11 +2278,10 @@ bus_reply_no_method() {
   bus_emit "$frame"
 }
 
-bus_notify_wake() {
-  local frame
-  frame=$(jq -cn '{jsonrpc:"2.0", method:"notifications/foreman/wake"}')
-  bus_emit "$frame"
-}
+# A constant frame, so no jq: this runs from a signal handler, where forking a
+# subprocess to produce a fixed string is both waste and one more thing that
+# can fail while a report is waiting on it.
+bus_notify_wake() { bus_emit '{"jsonrpc":"2.0","method":"notifications/foreman/wake"}'; }
 
 # One JSON-RPC frame in, zero or one out. A notification (no id) gets no
 # reply even when unknown — replying would desync a client that never
@@ -2335,136 +2308,71 @@ bus_handle_frame() {
   return 0
 }
 
-# The watcher owns state observation and only emits a parameterless wake. The
-# read loop below owns requests and responses, rejecting a timed read loop:
-# macOS bash 3.2 rejects fractional `read -t`, so it would either lose the
-# 250ms delivery budget or block wakes behind a quiet client.
-# `server_pid` is this sidecar (the process omp is connected to); `session_pid`
-# is omp itself. They are different processes and the two markers key off
-# different ones, which is the whole reason both are passed in: the extension
-# arms with omp's pid, so a projection that looked up the sidecar's own pid
-# found nothing and never armed a single boss pane.
-bus_watch() {
-  local server_pid=$1 session_pid=$2 handle="" registered=0 last_fp="" cur fp
-  # Handle-scoped only. The pid flag deliberately survives: omp reconnects a
-  # dropped MCP server, and a flag removed here would leave the replacement
-  # sidecar with nothing to project, stranding the session on prompts.
-  bus_watch_cleanup() {
-    if [ "${registered:-0}" = 1 ] && [ -n "${handle:-}" ]; then
-      rm -f "$(bus_pid_file "$handle")" "$(bus_listener_file "$handle")"
-    fi
-    return 0
-  }
-  # A SIGKILL'd parent never runs cmd_bus's EXIT trap. Checking its pid each
-  # tick prevents this background poller from becoming a permanent orphan, and
-  # its own cleanup removes the liveness marker the dead server can no longer
-  # vouch for.
-  trap 'bus_watch_cleanup; exit 0' HUP INT TERM
-  trap 'bus_watch_cleanup' EXIT
-
-  while kill -0 "$server_pid" 2>/dev/null; do
-    # Re-resolved on every real 250ms tick, rather than startup: a late
-    # `foreman boss` claim must wake this already-running sidecar instead of
-    # leaving the newly claimed pane prompt-only until it restarts.
-    cur=$(bus_current_handle)
-    if [ -n "$cur" ]; then
-      if [ "$cur" != "$handle" ] || [ "$registered" = 0 ]; then
-        bus_watch_cleanup
-        handle=$cur
-        mkdir -p "$(meta_dir "$handle")"
-        # The sidecar's own pid, not the watcher's: bus_live() must stay true
-        # for the server omp is connected to, while this watcher separately
-        # notices if that server has died.
-        printf '%s' "$server_pid" >"$(bus_pid_file "$handle")"
-        registered=1
-        last_fp=""
-      fi
-      # Projected every tick rather than at registration, for the same reason
-      # the handle is re-resolved above: the arm that created this flag ran at
-      # session load, before a boss pane had a handle at all. Re-checking is
-      # what lets a late `foreman boss` claim arm within one tick instead of
-      # leaving the session prompt-only until it restarts.
-      if [ ! -f "$(bus_listener_file "$handle")" ] &&
-         [ -f "$(bus_listener_flag "$session_pid")" ]; then
-        printf '%s' "$session_pid" >"$(bus_listener_file "$handle")"
-      fi
-      fp=$(bus_fingerprint "$handle")
-      # The first sample establishes the baseline. Waking for state that
-      # predates this sidecar would fabricate an aside after reconnect, not
-      # report a delivery it observed.
-      if [ -n "$last_fp" ] && [ "$fp" != "$last_fp" ]; then bus_notify_wake; fi
-      last_fp=$fp
-    else
-      bus_watch_cleanup
-      handle=""
-      registered=0
-      last_fp=""
-    fi
-    sleep_ms "$FOREMAN_BUS_POLL_MS"
-  done
-  bus_watch_cleanup
-}
-
-# Called by the omp extension at load to record that this session has a wake
-# listener armed. Keyed by pid and not by handle, so it does not care whether a
-# handle exists yet; the sidecar projects it onto whichever handle this pane
-# holds, re-checked every tick. Prunes dead pids on the way through — one file
-# per omp session would otherwise accumulate forever, and this runs once per
-# session, so it is the cheapest place to do it.
-bus_arm() {
-  local pid=$1 dir f
-  [ -n "$pid" ] || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  dir=$(dirname "$(bus_listener_flag "$pid")")
+# Records this sidecar so a worker can find its pane, and prunes the corpses of
+# sidecars that were SIGKILLed before their EXIT trap ran. Pruning lives here
+# because this runs exactly once per session, which makes it the cheapest place
+# for it; one file per omp session would otherwise accumulate forever.
+#
+# A pane-less session (plain omp outside herdr) publishes nothing and is
+# unreachable by a wake, which is correct rather than an error: no worker can
+# name it as a boss in the first place.
+bus_publish() {
+  local f dir g pid
+  [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  f=$(bus_sidecar_file "$HERDR_PANE_ID")
+  dir=$(dirname "$f")
   mkdir -p "$dir" || return 0
-  for f in "$dir"/*; do
-    [ -f "$f" ] || continue
-    kill -0 "$(basename "$f")" 2>/dev/null || rm -f "$f"
+  for g in "$dir"/*; do
+    [ -f "$g" ] || continue
+    pid=""
+    IFS= read -r pid <"$g" || :
+    # An explicit `if`, not `A && B || C`: the latter reads as if-then-else but
+    # also runs C when A succeeds and B fails, which is the same thing here by
+    # luck rather than by construction.
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then rm -f "$g"; fi
   done
-  printf '%s' "$pid" >"$(bus_listener_flag "$pid")"
+  # `$$` is this sidecar; `$PPID` is the omp session that spawned it as its
+  # stdio MCP server. Both, because bus_target needs a pair to rule out pid
+  # reuse before it fires a SIGUSR1.
+  printf '%s\n%s\n' "$$" "$PPID" >"$f"
+  BUS_SIDECAR_FILE=$f
 }
 
 # The stdio MCP server itself. Machine interface, not for a human to run by
 # hand — its stdin/stdout are the JSON-RPC stream, so a terminal running it
 # directly just sits there.
 cmd_bus() {
-  # Arming is a one-shot write, not a server: the extension runs it at load,
-  # long before anything connects to a sidecar.
-  if [ "${1:-}" = --arm ]; then bus_arm "${2:-}"; return 0; fi
   need jq
-  # Not local: an EXIT trap runs after cmd_bus's frame is gone. Keeping the
-  # child pid process-scoped lets a clean EOF still reap the watcher rather
-  # than leaving a background poller after the server returned.
-  BUS_WATCH_PID=""
-  bus_parent_cleanup() {
-    if [ -n "${BUS_WATCH_PID:-}" ]; then
-      kill "$BUS_WATCH_PID" 2>/dev/null || true
-      wait "$BUS_WATCH_PID" 2>/dev/null || true
-      BUS_WATCH_PID=""
-    fi
+  # Not local: the EXIT trap runs after cmd_bus's frame is gone, so the path it
+  # removes has to outlive the function.
+  BUS_SIDECAR_FILE=""
+  bus_cleanup() {
+    [ -z "${BUS_SIDECAR_FILE:-}" ] || rm -f "$BUS_SIDECAR_FILE"
     return 0
   }
   # A signal trap must exit, not just clean up: bash runs the handler and then
-  # resumes the interrupted `read`, so a bare cleanup left the server alive with
-  # its watcher reaped — a sidecar that answers requests and can never emit a
-  # wake again. omp sees a healthy transport, never reconnects, and the session
-  # silently falls back to the 60s sweeper for the rest of its life.
-  trap 'bus_parent_cleanup; exit 0' HUP INT TERM
-  trap 'bus_parent_cleanup' EXIT
-  # `$$` is this sidecar; `$PPID` is the omp session that spawned it as its
-  # stdio MCP server. The extension arms under omp's pid, so the watcher needs
-  # both to key its two markers correctly.
-  bus_watch "$$" "$PPID" &
-  BUS_WATCH_PID=$!
+  # resumes the interrupted `read`, so a bare cleanup would leave the server
+  # answering requests with its marker gone — omp sees a healthy transport,
+  # never reconnects, and the session silently falls back to the sweeper.
+  trap 'bus_cleanup; exit 0' HUP INT TERM
+  trap 'bus_cleanup' EXIT
+  # The doorbell. That same resume-after-trap behaviour is what makes this one
+  # process sufficient: verified on macOS bash 3.2.57, a USR1 arriving while
+  # `read` is blocked runs the handler and restarts the read rather than
+  # returning, so the loop below neither drops the frame it was waiting on nor
+  # exits. A watcher child polling state for changes — what this replaces —
+  # cost four `herdr agent list` calls a second in every pane to learn what the
+  # writer already knew.
+  trap 'bus_notify_wake' USR1
+  bus_publish
 
-  # This read deliberately has no timeout: a watcher tick writes wakes while
-  # stdin is idle, so polling here would only delay JSON-RPC request handling
-  # and reintroduce the old request-traffic-versus-delivery tradeoff.
+  # This read deliberately has no timeout: a wake is a signal, so there is
+  # nothing for a tick to notice, and polling here would only delay JSON-RPC
+  # request handling.
   local line
   while IFS= read -r line; do
     [ -n "$line" ] && bus_handle_frame "$line"
   done
-  bus_parent_cleanup
   return 0
 }
 

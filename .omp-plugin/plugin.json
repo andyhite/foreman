@@ -6,5 +6,8 @@
     "name": "Andy Hite"
   },
   "homepage": "https://github.com/andyhite/foreman",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "mcpServers": {
+    "foreman": { "command": "foreman", "args": ["bus"] }
+  }
 }

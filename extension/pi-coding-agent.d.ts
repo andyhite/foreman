@@ -21,12 +21,12 @@ declare module "node:path" {
 }
 
 // The only Node process API this plugin touches: `env` reads (HERDR_ENV,
-// FOREMAN_BIN, FOREMAN_ASIDE_POLL_MS), plus `pid`/`cwd()` for the liveness
-// marker `foreman bus --arm` records for this session.
+// FOREMAN_BIN, FOREMAN_ASIDE_POLL_MS). `pid`/`cwd()` used to back the
+// `foreman bus --arm` liveness marker; deleted along with that call (the
+// sidecar's own presence is now proof enough — see extension/index.ts's
+// "Inbound delivery" comment) since neither has a remaining consumer.
 declare const process: {
   env: Record<string, string | undefined>;
-  pid: number;
-  cwd: () => string;
 };
 
 // Ambient shapes for `@oh-my-pi/pi-coding-agent` and the Bun globals this
@@ -59,7 +59,7 @@ declare module "@oh-my-pi/pi-coding-agent" {
   }
   interface ZodEnum<Values extends string> extends ZodType<Values> {}
 
-  type ZodRawShape = Record<string, ZodType<unknown>>;
+  export type ZodRawShape = Record<string, ZodType<unknown>>;
 
   type OptionalShapeKeys<Shape extends ZodRawShape> = {
     [Key in keyof Shape]: undefined extends ZodOutput<Shape[Key]> ? Key : never;
@@ -68,11 +68,11 @@ declare module "@oh-my-pi/pi-coding-agent" {
     [Key in keyof Shape]: undefined extends ZodOutput<Shape[Key]> ? never : Key;
   }[keyof Shape];
 
-  type InferShape<Shape extends ZodRawShape> = { [Key in RequiredShapeKeys<Shape>]: ZodOutput<Shape[Key]> } & {
+  export type InferShape<Shape extends ZodRawShape> = { [Key in RequiredShapeKeys<Shape>]: ZodOutput<Shape[Key]> } & {
     [Key in OptionalShapeKeys<Shape>]?: ZodOutput<Shape[Key]>;
   };
 
-  interface ZodObject<Shape extends ZodRawShape> extends ZodType<InferShape<Shape>> {}
+  export interface ZodObject<Shape extends ZodRawShape> extends ZodType<InferShape<Shape>> {}
 
   // The extension only reaches `pi.zod` for `object`/`string`/`boolean`/
   // `number`/`array`/`enum` — matches the tool-parameter schemas actually
@@ -86,17 +86,19 @@ declare module "@oh-my-pi/pi-coding-agent" {
     enum<Values extends readonly [string, ...string[]]>(values: Values): ZodEnum<Values[number]>;
   }
 
-  // `ctx` as seen by a tool's `execute`. Structurally compatible with the
-  // narrower `ForemanToolCtx` extension/index.ts declares for its own use
-  // (cwd, setInterval, clearTimer) — TS matches them by shape, not name.
-  interface ExtensionToolContext {
+  // `ctx` as seen by a tool's `execute`, and by every event handler below
+  // (`omp://extensions.md` documents every handler sharing one
+  // `ExtensionContext`). extension/index.ts imports this directly instead
+  // of declaring its own structurally-identical copy — nothing left to
+  // duplicate once the import resolves.
+  export interface ExtensionToolContext {
     cwd: string;
     setInterval(fn: () => void | Promise<void>, ms: number): unknown;
     clearTimer(handle: unknown): void;
     [key: string]: unknown;
   }
 
-  type ExtensionToolUpdate = (update: { content: Array<{ type: string; text: string }> }) => void;
+  export type ExtensionToolUpdate = (update: { content: Array<{ type: string; text: string }> }) => void;
 
   interface ExtensionToolResult {
     content: Array<{ type: string; text: string }>;
@@ -139,16 +141,6 @@ declare module "@oh-my-pi/pi-coding-agent" {
     cwd: string;
   }
 
-  // Payload for the `tool_call` pre-exec event (see `omp://extensions.md`
-  // "Tool lifecycle") — only the two fields the boss-side aside-arming
-  // handler below actually reads. The real payload carries more (revised
-  // input, tool-call id, etc.); declaring those would invite drift from a
-  // surface this file otherwise deliberately narrows to actual call sites.
-  interface ToolCallEvent {
-    toolName: string;
-    input: { command?: string; [key: string]: unknown };
-  }
-
   // Payload for the notification bus's `mcp_notification` event — the
   // sidecar's wake ping carries no `params` by design (see
   // `herdr/bin/foreman`'s `bus` subcommand: the receiving extension asks the
@@ -170,14 +162,17 @@ declare module "@oh-my-pi/pi-coding-agent" {
     exec(command: string, args: string[], options: ExecOptions): Promise<unknown>;
     registerTool<Shape extends ZodRawShape>(config: ExtensionToolConfig<Shape>): void;
     registerCommand(name: string, config: ExtensionCommandConfig): void;
-    // `tool_call` and `mcp_notification` are the only events this extension
-    // subscribes to; declaring a generic `on(event: string, ...)` here would
-    // let a typo'd event name type-check silently instead of failing the
-    // build. `ctx` reuses `ExtensionToolContext` (not a third shape) because
-    // `omp://extensions.md` documents every handler receiving the same
-    // `ExtensionContext`, and the extension only ever reads
-    // `setInterval`/`clearTimer`/`cwd` off it, identical to a tool's own ctx.
-    on(event: "tool_call", handler: (event: ToolCallEvent, ctx: ExtensionToolContext) => void): void;
+    // `session_start` and `mcp_notification` are the only events this
+    // extension subscribes to; declaring a generic `on(event: string, ...)`
+    // here would let a typo'd event name type-check silently instead of
+    // failing the build. `ctx` reuses `ExtensionToolContext` (not a third
+    // shape) because `omp://extensions.md` documents every handler
+    // receiving the same `ExtensionContext`, and the extension only ever
+    // reads `setInterval`/`clearTimer`/`cwd` off it, identical to a tool's
+    // own ctx. `session_start`'s payload is typed `unknown`, not a
+    // dedicated interface: extension/index.ts reads nothing off it, only
+    // `ctx.setInterval` via `ensureJoinPoller`.
+    on(event: "session_start", handler: (event: unknown, ctx: ExtensionToolContext) => void): void;
     // Fired for every MCP server's push notifications this session has
     // wired up, not just foreman's — extension/index.ts filters on
     // `server`/`method` itself rather than this file inventing a
@@ -194,10 +189,20 @@ declare module "@oh-my-pi/pi-coding-agent" {
 // `Bun.spawn`/`Bun.write` slice extension/index.ts calls plus the
 // `import.meta.dir` Bun adds to every module.
 declare namespace Bun {
+  // The slice of Bun's `Subprocess` this extension actually relies on —
+  // typing `spawn`'s return as this instead of `unknown` is what lets
+  // `extension/index.ts` drop the `as unknown as ForemanSubprocess` double
+  // cast it used to need to get from an opaque result to a usable shape.
+  interface Subprocess {
+    kill(): void;
+    exited: Promise<number>;
+    stdout: ReadableStream<Uint8Array> | number | null;
+    stderr: ReadableStream<Uint8Array> | number | null;
+  }
   function spawn(
     command: string[],
     options?: { cwd?: string; stdout?: "pipe" | "inherit" | "ignore"; stderr?: "pipe" | "inherit" | "ignore" },
-  ): unknown;
+  ): Subprocess;
   function write(destination: string, data: string): Promise<number>;
 }
 

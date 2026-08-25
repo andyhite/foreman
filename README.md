@@ -54,7 +54,7 @@ graph LR
 ## Install
 
 Both halves are needed: the herdr plugin supplies the mechanism, the agent
-plugin supplies the commands and custom tools.
+plugin supplies the commands, custom tools, and delivery.
 
 ```sh
 herdr plugin install andyhite/foreman/herdr
@@ -71,15 +71,24 @@ herdr plugin link ./herdr
 omp install ./
 ```
 
-Installing the omp plugin registers the `foreman_*` custom tools and the wake
-listener that turns a dispatch, report, or question into an aside. Registering
-the `foreman` MCP server in `~/.omp/agent/mcp.json` is the *herdr* plugin's
-installer, so the sidecar half runs in every omp session — including one with
-no agent plugin at all. Delivery therefore checks for both halves and falls
-back to a `herdr agent prompt` when only the sidecar is present. Restart the
-session after either install. `/mcp reconnect` is not enough: it reconnects
-configured MCP servers, but extension modules load only at startup, so a
-session that reconnects a fresh sidecar still has no listener to wake.
+Installing the omp plugin registers the `foreman_*` custom tools and declares
+the `foreman bus` sidecar as an `mcpServers` entry in this plugin's own
+`.omp-plugin/plugin.json` (`{"command": "foreman", "args": ["bus"]}`). The
+sidecar is therefore plugin-scoped, not machine-global: it exists if and only
+if a session has this plugin loaded, and nothing is written outside the
+session. A worker's `foreman report`/`foreman reply`, and a boss's dispatch,
+signal that sidecar directly with `SIGUSR1`; the sidecar turns the signal into
+an MCP notification the extension delivers as a non-interrupting aside. If the
+signal can't be delivered — no live sidecar, or the target pane sits outside
+herdr — delivery falls back to an interrupting `herdr agent prompt`, so
+nothing is silently lost. A ~60s background sweep in the extension is the
+remaining anomaly net, for a worker that ended its turn without reporting or
+whose agent died. Restart the session after either install; `/mcp reconnect`
+is not enough, since extension modules load only at startup.
+
+`herdr/bin/foreman-link` no longer writes anything to
+`~/.omp/agent/mcp.json`. If an older install left a `mcpServers.foreman`
+entry there, it is redundant now — remove it by hand.
 
 ## Use
 

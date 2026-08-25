@@ -34,6 +34,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Type-check the extension
         run: bunx tsc --noEmit
+      - name: Run the extension test suite
+        run: bun test
       - name: Check version consistency
         run: |
           herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)

@@ -31,43 +31,19 @@ Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
 `foreman_doctor`, `foreman_roles`. Call the tool, not the shell command it
 wraps — the reason is not merely style.
 
-Delivery itself is protocol-level, not harness-level: a worker's
-`foreman_report`/`foreman_reply` — and the bare `foreman report`/`foreman reply`
-CLI they wrap — write to `$FOREMAN_STATE` and then wake this pane. That
-happens whether or not you have ever called a tool here, which is why reports
-arrive on their own; see *How a wave reports back* below.
+Delivery is a real push, not a poll: a worker's `foreman_report`/`foreman_reply`,
+and your own dispatch, signal the other side directly and arrive as a
+non-interrupting aside between tool calls — never a prompt that cuts into
+whatever turn is running. If that signal can't be delivered, it falls back to
+an interrupting `herdr agent prompt`, so nothing is silently lost; it just
+arrives more rudely. Steering is the deliberate exception: `foreman_send(raw:
+true)`, `foreman_broadcast`, `foreman_dm`, and `foreman_keys` interrupt a
+worker's *current* turn on purpose, because unblocking a stuck approval prompt
+only works if it cuts the queue. A tracked task and a report never do that —
+both queue for the worker's next turn. See [README.md](../../README.md#install)
+for how the delivery channel is wired up.
 
-The wake travels over a per-session `foreman bus` sidecar: omp spawns it as a
-stdio MCP server, and it pushes a payload-free `notifications/foreman/wake`
-the moment your counters change — sub-second, and a non-interrupting aside
-rather than a prompt. The extension answers by asking `foreman pickup` what
-changed and injecting that. A dispatch reaching a worker takes the same path
-in the other direction, so a worker no longer receives a boss's task as an
-interrupting fake prompt; it arrives as an aside too. Neither `foreman bus`
-nor `foreman pickup` is meant to be invoked directly — they are session
-plumbing, wired up by install and the extension, not another surface to call.
-The one thing that still interrupts on purpose is steering — `foreman send
---raw`, `foreman broadcast`, `foreman dm`, `foreman keys` — because unblocking
-a stuck approval prompt only works if it cuts the queue.
-
-Delivery requires both halves of the bus: the sidecar, and a session that
-loaded this plugin and armed a listener. The sidecar comes from the herdr
-plugin's installer and so runs in every omp session, which is why the check is
-for both and not just the sidecar. If either is missing — the bus is down, the
-pane sits outside herdr, or the session has no agent plugin — delivery falls
-back to `herdr agent prompt`. What a boss-side tool call arms in that
-case is the extension's background sweeper — a slower net, on
-`FOREMAN_ASIDE_POLL_MS` (60s by default), that catches only what a wake
-cannot: a worker that ended its turn without reporting, one whose agent
-died, and a wake that fired with no live listener. It parks itself when
-there is nothing left to sweep and re-arms on the next boss-side tool call. A
-bash invocation of a boss-side `foreman` subcommand is intercepted and arms the
-same sweeper, so the shell form is not a dead end — this skill still shows it
-for the handful of operations that have no tool wrapper. Outside an omp session
-with this extension loaded — a bare terminal, another harness — nothing sweeps
-at all, and `foreman join` is the only way to pick up an anomaly.
-
-Three reasons beyond the sweeper to prefer the tool: `foreman_spawn`
+Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
 takes the whole brief as its `task` string and writes the temp file and
 passes `--task-file` itself, so no shell quoting can mangle a multi-line
 brief; `foreman_join` and `foreman_ask` stream each report as its worker

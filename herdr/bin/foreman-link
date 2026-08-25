@@ -165,72 +165,53 @@ else
   exit 0
 fi
 
-# Registers `foreman bus` as an omp MCP server in the user-level config so
-# every omp session spawns it as a stdio child (never project-level: the
-# hard rule is nothing ever gets written into a repo a worker operates on,
-# and user-level is the only source `mcp.enableProjectConfig: false` cannot
-# suppress).
-mcp_config_file() {
-  printf '%s/.omp/agent/mcp.json\n' "$HOME"
-}
+# Migration, not registration. Earlier versions of this installer wrote a
+# `foreman` stdio server into the user-level omp config, which started a
+# `foreman bus` in every omp session on the machine — including sessions that
+# never loaded the plugin. The bus is now declared by .omp-plugin/plugin.json,
+# so an upgraded install that kept the old entry would run two sidecars per
+# session. Removing it belongs here because this script is what created it;
+# nothing else knows the entry was ours.
+unregister_stale_mcp() {
+  file="$HOME/.omp/agent/mcp.json"
+  # Byte-for-byte what register_mcp used to write. A foreman entry pointing
+  # anywhere else was hand-written by the user and is theirs, not ours.
+  ours='{"command":"foreman","args":["bus"]}'
 
-register_mcp() {
-  file=$(mcp_config_file)
-  dir=$(dirname "$file")
-  wanted='{"command":"foreman","args":["bus"]}'
+  [ -f "$file" ] || return 0
 
   if ! command -v jq >/dev/null 2>&1; then
-    printf 'foreman-link: warning: jq not found; skipping omp MCP registration for foreman bus (add manually to %s: {"mcpServers":{"foreman":%s}})\n' \
-      "$file" "$wanted" >&2
+    printf 'foreman-link: warning: jq not found; the old foreman entry in %s is left in place and will start a second bus in every omp session (remove .mcpServers.foreman by hand)\n' \
+      "$file" >&2
     return 0
   fi
 
-  mkdir -p "$dir" || {
-    printf 'foreman-link: warning: could not create %s; skipping omp MCP registration\n' "$dir" >&2
+  # Not our file to repair: a config we cannot parse is one we must not
+  # rewrite, and the stale entry is wasteful rather than harmful.
+  jq -e . "$file" >/dev/null 2>&1 || return 0
+
+  existing=$(jq -Sc '.mcpServers.foreman // empty' "$file" 2>/dev/null)
+  [ -n "$existing" ] || return 0
+  if [ "$existing" != "$(printf '%s' "$ours" | jq -Sc .)" ]; then
+    $quiet || printf 'omp MCP: leaving customised foreman entry in %s untouched (found: %s)\n' "$file" "$existing"
     return 0
-  }
-
-  if [ -f "$file" ] && ! jq -e . "$file" >/dev/null 2>&1; then
-    printf 'foreman-link: warning: %s is not valid JSON; skipping omp MCP registration\n' "$file" >&2
-    return 0
   fi
 
-  if [ -f "$file" ]; then
-    existing=$(jq -c '.mcpServers.foreman // empty' "$file" 2>/dev/null)
-    if [ -n "$existing" ]; then
-      if [ "$(printf '%s' "$existing" | jq -Sc .)" = "$(printf '%s' "$wanted" | jq -Sc .)" ]; then
-        $quiet || printf 'omp MCP: foreman bus already registered in %s\n' "$file"
-      else
-        $quiet || printf 'omp MCP: leaving existing customised foreman entry in %s untouched (found: %s)\n' "$file" "$existing"
-      fi
-      return 0
-    fi
-  fi
-
-  # Never write a partially-serialised file over a good one: build the merged
-  # document in a temp file in the same directory, then rename — an interrupted
-  # write leaves the temp file orphaned, not a truncated config in its place.
-  tmp="$dir/mcp.json.tmp.$$"
-  if [ -f "$file" ]; then
-    jq --argjson entry "$wanted" '.mcpServers = ((.mcpServers // {}) + {foreman: $entry})' "$file" >"$tmp" 2>/dev/null
-  else
-    printf '{}\n' | jq --argjson entry "$wanted" '.mcpServers = ((.mcpServers // {}) + {foreman: $entry})' >"$tmp" 2>/dev/null
-  fi
-  if [ ! -s "$tmp" ]; then
-    printf 'foreman-link: warning: failed to build %s; skipping omp MCP registration\n' "$file" >&2
+  # Same temp-then-rename discipline the old writer used: a config this script
+  # does not own must never be left truncated by an interrupted write.
+  tmp="$file.tmp.$$"
+  if ! jq 'del(.mcpServers.foreman)' "$file" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ] \
+    || ! mv "$tmp" "$file" 2>/dev/null; then
     rm -f "$tmp"
+    printf 'foreman-link: warning: could not rewrite %s; remove .mcpServers.foreman by hand to stop a second bus per omp session\n' \
+      "$file" >&2
     return 0
   fi
-  if ! mv "$tmp" "$file" 2>/dev/null; then
-    printf 'foreman-link: warning: could not write %s; skipping omp MCP registration\n' "$file" >&2
-    rm -f "$tmp"
-    return 0
-  fi
-  $quiet || printf 'omp MCP: registered foreman bus (command: foreman bus) in %s — restart existing omp sessions, or run /mcp reconnect, to pick it up\n' "$file"
-  return 0
+  $quiet || printf 'omp MCP: removed the old user-level foreman entry from %s; the bus now comes from the plugin manifest — restart existing omp sessions to drop their extra sidecar\n' \
+    "$file"
 }
 
-register_mcp
+unregister_stale_mcp
 
 case ":${PATH-}:" in
   *":$target_dir:"*) ;;

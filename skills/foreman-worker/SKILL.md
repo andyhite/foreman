@@ -8,21 +8,19 @@ user-invocable: false
 
 You are a foreman worker: a separate agent process running in its own herdr
 pane, in its own git worktree, on its own branch, dispatched there by a
-boss. Every dispatched task already carries a protocol block with
-everything below in it — this skill exists for the cases that block doesn't
-cover: the `foreman_*` tools are not registered (a shell without the extension
-installed, so you need the CLI form) or you want more context than the
-block's summary gives.
+boss. Your task carries its own protocol block covering the basics — stay in
+this worktree, commit before you're done, report last, ask when blocked,
+message peers, delegate substantial slices — so this skill does not repeat
+them. Read it here only for what the block's summary leaves out: exact
+fallback CLI forms for when the `foreman_*` tools are not registered, and
+behavior the block doesn't spell out.
 
-Your task, and everything you send with `foreman_report`/`foreman_reply`,
-arrives as a non-interrupting aside — sub-second, over the same channel in
-both directions. `foreman send --raw`, `foreman broadcast`, and `foreman
-keys` are the exception: that is steering, and it is meant to interrupt.
+Everything you send with `foreman_report`/`foreman_reply` arrives at the boss
+as a non-interrupting aside, over the same channel the block's other
+instructions use. `foreman send --raw`, `foreman broadcast`, and `foreman
+keys` are the exception: that is steering, and it interrupts on purpose.
 
 ## Reporting
-
-When your work is done, write your report **last** — after everything else
-is committed:
 
 ```
 foreman_report({ text: "<summary>" })
@@ -30,14 +28,11 @@ foreman_report({ file: "<path>" })
 ```
 
 Fall back to the CLI form — `foreman report "<summary>"` / `foreman report -f
-<file>` — only when `foreman_*` tools are not registered (a shell without
-the extension loaded). Either way this pushes the report straight to the
-boss's pane, tagged `[foreman:<handle>]`, and writes it to disk as the
-durable record. Terminal output alone never reaches the boss — only the
-pushed message and the file do. If the push can't reach the boss (its pane
-isn't live right then), the report still lands on disk and surfaces on the
-boss's next sweep. A report is overwritten only by your own later one, so
-nothing you filed earlier is lost by filing another.
+<file>` — only when `foreman_*` tools are not registered. Either way this
+pushes the report straight to the boss's pane and writes it to disk as the
+durable record; terminal output alone never reaches the boss. If the push
+can't reach the boss right then, the report still lands on disk and surfaces
+on the boss's next sweep. A report is overwritten only by your own later one.
 
 ## Asking a blocked question
 
@@ -46,24 +41,11 @@ foreman_reply({ text: "<question>" })
 ```
 
 Fall back to `foreman reply "<question>"` on the CLI when the tools are not
-registered. This pushes the question straight to the boss's pane, tagged
-`[foreman:<handle>]`, and files it to disk as the durable record. The file is
-the half that reaches a boss *inside* a blocking `foreman join`/`foreman ask`:
-a pushed message only lands between its tool calls, so the file is what makes
-that wait return early instead of running out its full timeout. Use it for a
-decision only the boss can make — not for progress updates, which belong in
-the eventual report.
-
-## Conventions
-
-- Stay inside this worktree. Do not touch other checkouts of this repo.
-- Commit your work on this branch when it is done. Do not push and do not
-  open a PR unless the task said to.
-- Delegate substantial independent slices of your own task to your own
-  subagents instead of working serially.
-- Never run a bare `foreman join` from a worker. Its scope is that worker's
-  siblings, not workers of its own — it would collect reports the boss is
-  waiting for.
+registered. The file half is what reaches a boss *inside* a blocking
+`foreman join`/`foreman ask`: a pushed message only lands between its tool
+calls, so the file is what makes that wait return early instead of running
+out its full timeout. Use it for a decision only the boss can make, not for
+progress updates — those belong in the eventual report.
 
 ## Peers
 
@@ -73,10 +55,13 @@ foreman_dm({ handle: "<handle>", text: "<text>" })
 ```
 
 Fall back to `foreman ls` / `foreman dm <handle> "<text>"` on the CLI when
-the tools are not registered. `foreman_ls`/`foreman ls` lists the other
-workers and the boss. `foreman_dm`/`foreman dm` reaches one directly — any
-member, worker or boss, can message any other by handle — for coordinating
-over a shared seam you both touch, not for status updates.
+the tools are not registered. `foreman_dm`/`foreman dm` reaches one peer
+directly — any member, worker or boss, can message any other by handle — for
+coordinating over a shared seam you both touch, not for status updates.
+
+Never run a bare `foreman join` from a worker: its scope is *your* siblings,
+not workers of your own, so it would collect reports your boss is waiting
+for.
 
 You may also be on the receiving end of `foreman send --raw` (a one-line steer
 from the boss that does not bump your dispatch counter or touch your
