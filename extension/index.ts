@@ -6,7 +6,17 @@
 // `deliveryOptions` below is the one function that encodes which delivery
 // shape each kind gets — change it there, not at each call site.
 import type { ExtensionAPI, ExtensionSendOptions, ExtensionToolContext } from "@oh-my-pi/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  watch,
+  writeFileSync,
+  type FSWatcher,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -332,6 +342,17 @@ export async function drainOnce(deps: DrainDeps): Promise<void> {
   }
 }
 
+// Armed after the first drain rather than inside `session_start`, because the
+// mailbox path isn't known until two git calls and a roster read resolve it.
+async function armMailWatcher(pi: ExtensionAPI, cwd: string, drain: () => void): Promise<FSWatcher> {
+  const { root, self } = await requireSelf(pi, cwd);
+  const mailDir = join(root, "mail", self.handle);
+  // `fs.watch` throws on a missing directory, and a worker's own mailbox does
+  // not exist until someone first writes to it.
+  mkdirSync(mailDir, { recursive: true });
+  return watch(mailDir, drain);
+}
+
 // ---------------------------------------------------------------------
 // Tool-shared helpers
 // ---------------------------------------------------------------------
@@ -432,16 +453,37 @@ function pendingCount(root: string, handle: string): number {
 export default function foremanExtension(pi: ExtensionAPI): void {
   const z = pi.zod;
   let timer: unknown;
+  let watcher: FSWatcher | undefined;
 
-  // `ctx.setInterval`, never bare `setInterval`: a throw from a bare timer
-  // reaches `uncaughtException` and kills the whole session, while
-  // `ctx.setInterval` contains throws and auto-clears on shutdown.
   pi.on("session_start", (_event, ctx) => {
     if (timer !== undefined) ctx.clearTimer(timer);
-    const pollMs = Number(process.env.FOREMAN_POLL_MS) || 250;
-    timer = ctx.setInterval(() => {
-      void drainOnce({ pi, cwd: ctx.cwd });
-    }, pollMs);
+    watcher?.close();
+    watcher = undefined;
+
+    // `drainOnce` is async, so it never throws synchronously — it rejects, and
+    // an unhandled rejection is fatal in Bun. Swallowing is safe because a
+    // failed drain leaves its mail in `mail/`, so the next trigger retries it.
+    const drain = () => void drainOnce({ pi, cwd: ctx.cwd }).catch(() => {});
+
+    // The interval is now a backstop, not the delivery path: `fs.watch` fires
+    // in single-digit milliseconds, where a 250 ms poll added 125 ms of
+    // latency to the average message. It cannot be the only trigger, because
+    // `foreman_reap` deletes mailbox directories and a deleted directory kills
+    // its watcher for good, and because the watcher can only be armed once two
+    // git calls have resolved the mailbox path.
+    timer = ctx.setInterval(drain, Number(process.env.FOREMAN_BACKSTOP_MS) || 5000);
+
+    // Covers mail that arrived while the process was down, and mail that
+    // arrives before the watcher is armed.
+    drain();
+
+    void armMailWatcher(pi, ctx.cwd, drain)
+      .then((armed) => {
+        watcher = armed;
+      })
+      // Arming needs git and a writable state dir; if either is missing the
+      // backstop interval is still a correct, slower drain.
+      .catch(() => {});
   });
 
   pi.registerTool({

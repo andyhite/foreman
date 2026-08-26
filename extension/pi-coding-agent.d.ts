@@ -11,6 +11,12 @@ declare module "node:fs" {
   export function renameSync(from: string, to: string): void;
   export function existsSync(path: string): boolean;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  // Only `close` is declared: the listener's `(eventType, filename)` arguments
+  // are ignored because any event on the mailbox means "drain it and see".
+  export interface FSWatcher {
+    close(): void;
+  }
+  export function watch(path: string, listener: () => void): FSWatcher;
 }
 
 declare module "node:os" {
@@ -24,7 +30,7 @@ declare module "node:path" {
 }
 
 // The only Node process API this plugin touches: `env` reads (HERDR_ENV,
-// FOREMAN_STATE, FOREMAN_POLL_MS, FOREMAN_SPAWN_TIMEOUT_MS).
+// FOREMAN_STATE, FOREMAN_BACKSTOP_MS, FOREMAN_SPAWN_TIMEOUT_MS).
 declare const process: {
   env: Record<string, string | undefined>;
 };

@@ -134,17 +134,22 @@ Send: serialise the message, write to `mail/<recipient>/.tmp-<n>`, `rename()`
 into place. Rename is atomic on every filesystem that matters, so a reader
 never observes a partial message.
 
-Receive: the extension's `ctx.setInterval` (250 ms) reads its own mailbox,
+Receive: an `fs.watch` on the session's own mailbox directory reads it,
 **coalesces everything pending into one rendered message**, calls
-`pi.sendMessage` once, then moves the files to `done/`.
+`pi.sendMessage` once, then moves the files to `done/`. A 5 s `ctx.setInterval`
+backstop drains too, because FSEvents coalesces under load and a deleted
+directory kills its watcher outright — `foreman_reap` deletes mailboxes.
 
 Coalescing matters: omp's `followUpMode` defaults to `one-at-a-time`, so three
 separate injections would arrive across three turns. Batching sidesteps the
 queue mode instead of fighting it.
 
-Cost: a `readdir` on a small directory four times a second. No daemon, no
-socket, no MCP sidecar, no broker, no port. Survives a worker restart because
-undelivered mail is still on disk.
+Cost: nothing while idle. The watcher replaced a 250 ms poll, and the poll's
+real expense was never the `readdir` — each drain calls `gitFacts`, which
+shells out to `git rev-parse` twice, so an idle worker was spawning **eight git
+subprocesses per second, forever**. Now that only happens when mail actually
+arrives. No daemon, no socket, no MCP sidecar, no broker, no port. Survives a
+worker restart because undelivered mail is still on disk.
 
 Rejected alternatives, and why:
 
@@ -290,7 +295,7 @@ layer is the only part that was ever hard.
 
 | Risk | Mitigation |
 | --- | --- |
-| 250 ms poll adds latency | Bounded and small relative to a turn. A watcher can replace the poll later without changing the contract. |
+| A watcher can miss events | The 5 s `ctx.setInterval` backstop drains unconditionally, so a missed event costs latency, never delivery. `FOREMAN_BACKSTOP_MS` tunes it. |
 | `steer` mid-text-stream waits for the turn | Accepted. The only `steer` sender is `foreman_ask`, so the sender is already stalled; a few seconds is irrelevant. |
 | At-least-once could double-deliver | Move to `done/` after injection and key on sequence number; a duplicate is visible in the audit trail. |
 | omp caches transpiled extensions by path | Development-time only: bump the path or reinstall. Cost us two misleading runs during research. |
@@ -314,3 +319,6 @@ injection 4 s into a 20 s `sleep` and logs the event timeline.
 | Injection works from a detached `ctx.setInterval` | ~12 runs, zero `extension_error` frames. |
 | It works in interactive TUI mode | Real `omp` under a PTY: injected at 807.22, `agent_start` at 807.25 (30 ms), and the session transcript contains the injected `user` message followed by the assistant's `ACK-TUI`. |
 | Worktrees share one git identity | `--path-format=absolute --git-common-dir` returns `/private/tmp/fmgit/main/.git` from both the main checkout and its linked worktree. |
+| `fs.watch` beats the poll by ~5× | Mailbox write → `agent_start`, backstop pinned to 60 s so only the watcher could fire: 24, 78, 20, 25 ms across four seeds. The 250 ms poll it replaced averaged 125 ms. Most of the residual is `gitFacts`' two `git rev-parse` calls, not the watcher. |
+| Worktrees do *not* share a broker scope | Same repo, identical `--git-common-dir` from both, but `hub` process ops landed in `~/.omp/run/daemons/5c4c249b77c3672d/` from the main checkout and `e8ff34fb34698007/` from a linked worktree. The scope key is cwd-derived, so cross-process `hub` messaging would still not reach a sibling worker. |
+| An async job settling wakes an idle session | Backgrounded `sleep 12 && echo …` returned at 2.52 s, session went idle at 4.69 s, and the job's output arrived as a `custom` message that started a turn at 14.57 s. Delivery of a blocking CLI's result therefore needs no new omp surface. |
