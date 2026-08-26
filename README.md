@@ -1,6 +1,6 @@
 # Foreman
 
-[![version](https://img.shields.io/badge/version-0.8.0-blue)](./package.json)
+[![version](https://img.shields.io/badge/version-0.9.0-blue)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![runtime](https://img.shields.io/badge/runtime-omp-orange)](https://github.com/andyhite/herdr)
 
@@ -80,10 +80,10 @@ context. `base` is optional and defaults to the parent's current HEAD.
 
 Beyond the table above:
 
-- `foreman_send` may interrupt a busy worker — delivery is not gated on the
-  receiver being idle.
-- `foreman_ask` interrupts your parent's in-flight tool call — call it only
-  once you've actually stalled.
+- `foreman_send` never interrupts: a busy worker finishes its current run
+  first, an idle one wakes within milliseconds.
+- `foreman_ask` does interrupt your parent's in-flight tool call — call it
+  only once you've actually stalled.
 - `foreman_reap` refuses dirty or unmerged work unless forced.
 
 State — the roster and per-handle mailboxes — lives under `$FOREMAN_STATE`

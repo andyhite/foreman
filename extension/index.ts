@@ -2,11 +2,9 @@
 // and a branch, and carry their reports and questions back. Five tools,
 // identical in every session — no roles, no claiming step, no bash CLI.
 //
-// Delivery: `pi.sendMessage` was measured (see docs/ARCHITECTURE.md and the
-// rewrite plan) to silently drop `{ deliverAs: "followUp", triggerTurn: true
-// }` — never use it. Everything here goes through `pi.sendUserMessage`
-// instead: a real user turn injected from a background timer. `deliveryOptions`
-// below is the one function that encodes the branch this repo measured.
+// Delivery: every message goes through `pi.sendMessage` as a custom message.
+// `deliveryOptions` below is the one function that encodes which delivery
+// shape each kind gets — change it there, not at each call site.
 import type { ExtensionAPI, ExtensionSendOptions, ExtensionToolContext } from "@oh-my-pi/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -223,17 +221,20 @@ export function canSend(self: RosterEntry, to: string, roster: RosterEntry[]): b
 // Step 4 — Drain loop
 // ---------------------------------------------------------------------
 
-// Branch B (measured in this repo, see docs/ARCHITECTURE.md): `followUp`
-// while the receiver is idle never delivers — confirmed with a 20s-idle
-// probe, no session turn ever arrived. Only the no-options call is known to
-// deliver while idle (30-650ms, per the same measurement). Omitting
-// `deliverAs` for non-ask kinds means the SDK queues it as `steer` while the
-// receiver is mid-turn, so a dispatch can interrupt a working worker — a
-// known limitation surfaced in foreman_send's tool description, not solved
-// with a busy-detection mechanism here.
-export function deliveryOptions(kind: MessageKind): ExtensionSendOptions | undefined {
+// omp namespaces `customType` globally, so it must be reverse-domain qualified.
+const INBOX_CUSTOM_TYPE = "dev.foreman.inbox";
+
+// Measured on omp v18.0.5 (see docs/ARCHITECTURE.md §8): one probe per shape,
+// fired 4s into a 20s tool call and again into a 12s-idle session.
+export function deliveryOptions(kind: MessageKind): ExtensionSendOptions {
+  // An ask means the sender has already stopped and is waiting for an answer,
+  // so it may abort the receiver's in-flight tool call.
   if (kind === "ask") return { deliverAs: "steer", triggerTurn: true };
-  return undefined;
+  // Everything else must not: `followUp` let the 20s tool call run to
+  // completion and delivered at the end of the run instead. `nextTurn`
+  // measured identically, but degrades to silent loss if `triggerTurn` is
+  // ever dropped — a worker pane has no human to type the next prompt.
+  return { deliverAs: "followUp", triggerTurn: true };
 }
 
 function renderMessage(msg: Message, self: RosterEntry): string {
@@ -267,12 +268,12 @@ export function urgencyKind(msgs: Message[]): MessageKind {
 }
 
 export interface DrainDeps {
-  pi: Pick<ExtensionAPI, "exec" | "sendUserMessage">;
+  pi: Pick<ExtensionAPI, "exec" | "sendMessage">;
   cwd: string;
 }
 
-// A `sendUserMessage` slower than the tick interval must never double-
-// deliver — guarded by this module-level flag, set in a try/finally.
+// A `sendMessage` slower than the tick interval must never double-deliver —
+// guarded by this module-level flag, set in a try/finally.
 let draining = false;
 
 export async function drainOnce(deps: DrainDeps): Promise<void> {
@@ -312,7 +313,15 @@ export async function drainOnce(deps: DrainDeps): Promise<void> {
     }
     if (msgs.length === 0) return;
 
-    await deps.pi.sendUserMessage(renderInbox(msgs, self), deliveryOptions(urgencyKind(msgs)));
+    await deps.pi.sendMessage(
+      {
+        customType: INBOX_CUSTOM_TYPE,
+        content: renderInbox(msgs, self),
+        display: true,
+        attribution: "user",
+      },
+      deliveryOptions(urgencyKind(msgs)),
+    );
     // Only after the send resolves. If it throws, the files stay in mail/
     // for the next tick to retry — at-least-once, visible in done/.
     for (const file of goodFiles) {
@@ -568,7 +577,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
     name: "foreman_send",
     label: "Foreman Send",
     description:
-      "Send a message to your parent (whoever spawned you) or a worker you spawned. Used for dispatching new tasks, follow-ups, and reports. May interrupt a busy worker: delivery is not gated on the receiver being idle.",
+      "Send a message to your parent (whoever spawned you) or a worker you spawned. Used for dispatching new tasks, follow-ups, and reports. Never interrupts: a busy receiver finishes its current run first, an idle one wakes immediately.",
     parameters: z.object({
       to: z.string().optional().describe("Handle to send to: a worker you spawned, or omit to send to whoever spawned you."),
       text: z.string().describe("The message. A task, an answer, or a report."),

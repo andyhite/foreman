@@ -26,28 +26,34 @@ The fix is not to harden that path. It is to stop using it.
 
 ## 2. The primitive: in-process delivery via the omp extension API
 
-An omp extension loaded in a session can inject a real user turn into that
-session at any time, from a background timer, with a choice of urgency:
+An omp extension loaded in a session can inject a message into that session at
+any time, from a background timer, with a choice of urgency:
 
 ```ts
-pi.sendUserMessage(text, { deliverAs: "steer" | "followUp" });
+pi.sendMessage(
+  { customType: "dev.foreman.inbox", content: text, display: true, attribution: "user" },
+  { deliverAs: "steer" | "followUp", triggerTurn: true },
+);
 ```
 
-Measured behaviour (see §8 for the runs):
+Measured behaviour on omp v18.0.5 (see §8 for the runs):
 
 | Situation | `steer` | `followUp` |
 | --- | --- | --- |
-| Agent mid tool call | **Aborts the in-flight tool**, drops the rest of the turn's planned calls, delivers ~0.14 s later | Lets the whole run finish, then delivers as a new turn |
+| Agent mid tool call | **Aborts the in-flight tool** within a millisecond, drops the rest of the turn's planned calls | Lets the whole run finish, then delivers as a new turn ~18 s later |
 | Agent mid text stream | Waits for the turn to end (no checkpoint exists mid-text) | Waits for the turn to end |
-| Agent idle | Delivers and starts a turn in 30–650 ms | Same |
+| Agent idle | Delivers and starts a turn in 1–30 ms | Same |
 
 That is exactly the two-level urgency the domain needs, and it is enforced by
 the runtime rather than requested in prose.
 
 Two rules fall out of the measurements and are non-negotiable:
 
-1. **Use `pi.sendUserMessage`, never `pi.sendMessage`.** A custom message with
-   `deliverAs: "followUp"` is accepted without error and never delivered.
+1. **Always pass `triggerTurn: true`.** It is the flag that wakes an idle
+   receiver; `deliverAs` only chooses what happens to a *busy* one. Omit it
+   and the message is stored for a next user prompt that never arrives in a
+   worker pane. This is also why `pi.sendUserMessage` is unusable here: it
+   accepts no `triggerTurn`.
 2. **Arm the drain with `ctx.setInterval`, never bare `setInterval`.** A throw
    from a bare timer reaches `uncaughtException` and kills the session; the
    `ctx.` variants contain throws and auto-clear on `session_shutdown`.
@@ -130,7 +136,7 @@ never observes a partial message.
 
 Receive: the extension's `ctx.setInterval` (250 ms) reads its own mailbox,
 **coalesces everything pending into one rendered message**, calls
-`pi.sendUserMessage` once, then moves the files to `done/`.
+`pi.sendMessage` once, then moves the files to `done/`.
 
 Coalescing matters: omp's `followUpMode` defaults to `one-at-a-time`, so three
 separate injections would arrive across three turns. Batching sidesteps the
@@ -291,16 +297,20 @@ layer is the only part that was ever hard.
 
 ## 8. Evidence
 
-Measured against omp with a purpose-built probe extension driven over RPC, and
-confirmed in interactive TUI mode.
+Measured against omp v18.0.5 with a purpose-built probe extension, driven both
+over RPC and in interactive TUI mode. The delivery rows were re-measured after
+the `pi.sendUserMessage` → `pi.sendMessage` cutover; the probe fires one
+injection 4 s into a 20 s `sleep` and logs the event timeline.
 
 | Claim | How it was shown |
 | --- | --- |
-| `steer` aborts an in-flight tool call | Injected during the 2nd of 3 sequential `sleep 3` bash calls. The tool result jumped to 143 chars (abort notice) from 27, the remaining calls were dropped, and a real `user` message landed 0.14 s later. |
+| `steer` aborts an in-flight tool call | Fired 4.0 s into a 20 s `sleep`: `tool_execution_end` followed 1 ms later, the remaining calls were dropped, and the message landed 33 ms after that. Identical under `sendUserMessage` (5 ms). |
 | `steer` does not abort a text-only turn | Injected 3.35 s into a 60-number count. The turn ran to `stop=stop` at 16.73 s; the message landed at 16.78 s. `interruptMode: immediate` only checks between tool calls. |
-| `followUp` waits for the whole run | Injected during tool 2 of 3. All three calls plus the final summary completed, then the message was delivered as a new `user` turn at 18.49 s and answered at 23.74 s. |
-| Idle injection starts a turn | Inject at 0.96 s → `agent_start` 1.61 s → delivered 1.65 s → reply 3.37 s. |
-| `pi.sendMessage` + `followUp` is silently dropped | Accepted with no error, never delivered across a 75 s window including 25 s past a terminal `agent_end`. Reproduced twice. |
+| `followUp` waits for the whole run | Fired 4.0 s into a 20 s `sleep`: the tool ran its full 20.0 s, the turn completed, then the message was delivered on its own turn 17.7 s after firing. |
+| `followUp` + `triggerTurn` wakes an idle agent | Session idle from 4.06 s, fired at 16.06 s → `agent_start` 1 ms later, delivered at 16.09 s. `nextTurn` behaves identically (idle 3.10 s, fired 15.10 s, `agent_start` +13 ms). |
+| `triggerTurn` is the load-bearing flag | `{ deliverAs: "nextTurn" }` without `triggerTurn` was accepted, never delivered, and the session exited with the message still queued for a user prompt that never came. |
+| `pi.sendMessage` is not dropped on v18.0.5 | The earlier "accepted without error, never delivered" result does not reproduce: `{ followUp, triggerTurn: true }` delivered in both the mid-run and idle probes above. The original failure was `sendUserMessage`-shaped — that API has no `triggerTurn` — not a `sendMessage` bug. |
+| `pi.sendMessage` returns no receipt | Returns `undefined`, not a promise, in every run. The drain's retry path can therefore only fire on a synchronous throw. |
 | Injection works from a detached `ctx.setInterval` | ~12 runs, zero `extension_error` frames. |
 | It works in interactive TUI mode | Real `omp` under a PTY: injected at 807.22, `agent_start` at 807.25 (30 ms), and the session transcript contains the injected `user` message followed by the assistant's `ACK-TUI`. |
 | Worktrees share one git identity | `--path-format=absolute --git-common-dir` returns `/private/tmp/fmgit/main/.git` from both the main checkout and its linked worktree. |

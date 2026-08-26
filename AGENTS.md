@@ -23,18 +23,20 @@ CI runs exactly this, plus a check that `.omp-plugin/plugin.json` and
 
 ## Delivery rules
 
-- **Never use `pi.sendMessage`.** It was measured to silently drop
-  `{ deliverAs: "followUp", triggerTurn: true }` — the tool call resolves
-  without error and the message never arrives. Every delivery in this repo
-  goes through `pi.sendUserMessage`, a real user turn. `deliveryOptions` in
-  `extension/index.ts` is the one function that encodes which delivery shape
-  is used per message kind — change it there, not at each call site.
+- **Every delivery goes through `pi.sendMessage`, always with
+  `triggerTurn: true`.** `triggerTurn` is the load-bearing flag, not
+  `deliverAs`: without it a queued message waits for a next *user* prompt,
+  which never comes in a worker pane, and is silently lost. `sendUserMessage`
+  is not an option — it takes no `triggerTurn`, which is why it could not
+  reach an idle receiver. `deliveryOptions` in `extension/index.ts` is the one
+  function that encodes which delivery shape each message kind gets — change
+  it there, not at each call site.
 - **Always arm timers with `ctx.setInterval`, never bare `setInterval`.** A
   throw from a bare timer reaches `uncaughtException` and kills the whole
   session; `ctx.setInterval` contains throws and auto-clears on session
   shutdown.
 - The drain loop's re-entrancy guard (`draining`, in `drainOnce`) exists
-  because a `sendUserMessage` slower than the poll interval would otherwise
+  because a `sendMessage` slower than the poll interval would otherwise
   double-deliver — do not remove it to "simplify" the loop.
 
 ## House conventions
@@ -43,8 +45,9 @@ CI runs exactly this, plus a check that `.omp-plugin/plugin.json` and
   alternative it rejects, not what the line does. Match this in every edit.
 - Skills are referenced as `skill://<name>` everywhere, never `foreman
   skill ...` — there is no CLI left to invoke that way.
-- One version string, two files: `.omp-plugin/plugin.json` and
-  `package.json` must agree (CI enforces).
+- One version string, three files: `.omp-plugin/plugin.json` and
+  `package.json` must agree (CI enforces), and the README's version badge
+  must be bumped with them (CI does *not* catch that one).
 - `extension/pi-coding-agent.d.ts` declares only the slice of
   `@oh-my-pi/pi-coding-agent` and Node built-ins that `extension/index.ts`
   actually calls — extend it if that file starts touching more of the real

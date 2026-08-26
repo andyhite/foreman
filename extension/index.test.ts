@@ -9,6 +9,7 @@ import {
   messageFilename,
   renderInbox,
   stateSlug,
+  deliveryOptions,
   urgencyKind,
   validHandle,
   type DrainDeps,
@@ -88,7 +89,7 @@ describe("messageFilename", () => {
 });
 
 // ---------------------------------------------------------------------
-// 5. urgencyKind
+// 5. urgencyKind + deliveryOptions
 // ---------------------------------------------------------------------
 
 function msg(kind: Message["kind"], overrides: Partial<Message> = {}): Message {
@@ -102,6 +103,22 @@ describe("urgencyKind", () => {
 
   test("any ask promotes the whole batch to ask", () => {
     expect(urgencyKind([msg("send"), msg("ask")])).toBe("ask");
+  });
+});
+
+describe("deliveryOptions", () => {
+  // Dropping `triggerTurn` is the silent-loss bug: an idle worker pane never
+  // gets a next user prompt to flush the queued message.
+  test("every kind sets triggerTurn", () => {
+    for (const kind of ["brief", "send", "ask"] as const) {
+      expect(deliveryOptions(kind).triggerTurn).toBe(true);
+    }
+  });
+
+  test("only ask is allowed to interrupt", () => {
+    expect(deliveryOptions("ask").deliverAs).toBe("steer");
+    expect(deliveryOptions("send").deliverAs).toBe("followUp");
+    expect(deliveryOptions("brief").deliverAs).toBe("followUp");
   });
 });
 
@@ -181,31 +198,31 @@ describe("drainOnce", () => {
   test("delivers once, moves files from mail/ to done/", async () => {
     seedMail(stateDir, handle, "1-boss-000.json", JSON.stringify(msg("send", { to: handle, text: "hello" })));
     let calls = 0;
-    let lastText = "";
+    let lastContent = "";
     const deps: DrainDeps = {
       pi: {
         exec: makeExec(repoRoot),
-        sendUserMessage: async (text) => {
+        sendMessage: async (message) => {
           calls++;
-          lastText = text;
+          lastContent = message.content;
         },
       },
       cwd: repoRoot,
     };
     await drainOnce(deps);
     expect(calls).toBe(1);
-    expect(lastText).toContain("hello");
+    expect(lastContent).toContain("hello");
     expect(readdirSync(join(stateDir, "mail", handle))).toEqual([]);
     expect(readdirSync(join(stateDir, "done", handle))).toEqual(["1-boss-000.json"]);
   });
 
-  test("sendUserMessage rejecting leaves files in mail/ for the next tick to retry", async () => {
+  test("sendMessage rejecting leaves files in mail/ for the next tick to retry", async () => {
     seedMail(stateDir, handle, "1-boss-000.json", JSON.stringify(msg("send", { to: handle, text: "hello" })));
     let calls = 0;
     const failingDeps: DrainDeps = {
       pi: {
         exec: makeExec(repoRoot),
-        sendUserMessage: async () => {
+        sendMessage: async () => {
           calls++;
           throw new Error("delivery failed");
         },
@@ -216,7 +233,7 @@ describe("drainOnce", () => {
     expect(readdirSync(join(stateDir, "mail", handle))).toEqual(["1-boss-000.json"]);
 
     const succeedingDeps: DrainDeps = {
-      pi: { exec: makeExec(repoRoot), sendUserMessage: async () => {} },
+      pi: { exec: makeExec(repoRoot), sendMessage: async () => {} },
       cwd: repoRoot,
     };
     await drainOnce(succeedingDeps);
@@ -229,20 +246,20 @@ describe("drainOnce", () => {
     seedMail(stateDir, handle, "1-boss-000.json", "not json");
     seedMail(stateDir, handle, "2-boss-001.json", JSON.stringify(msg("send", { to: handle, text: "still arrives" })));
     let calls = 0;
-    let lastText = "";
+    let lastContent = "";
     const deps: DrainDeps = {
       pi: {
         exec: makeExec(repoRoot),
-        sendUserMessage: async (text) => {
+        sendMessage: async (message) => {
           calls++;
-          lastText = text;
+          lastContent = message.content;
         },
       },
       cwd: repoRoot,
     };
     await drainOnce(deps);
     expect(calls).toBe(1);
-    expect(lastText).toContain("still arrives");
+    expect(lastContent).toContain("still arrives");
     expect(readdirSync(join(stateDir, "mail", handle))).toEqual([]);
     const done = readdirSync(join(stateDir, "done", handle)).sort();
     expect(done).toEqual(["1-boss-000.json.bad", "2-boss-001.json"]);
@@ -258,7 +275,7 @@ describe("drainOnce", () => {
     const deps: DrainDeps = {
       pi: {
         exec: makeExec(repoRoot),
-        sendUserMessage: async () => {
+        sendMessage: async () => {
           calls++;
           notifySent();
           // Deliberately never resolved: `first` must still be in flight
@@ -271,7 +288,7 @@ describe("drainOnce", () => {
     const first = drainOnce(deps);
     const second = drainOnce(deps);
     await second; // returns immediately: the module-level `draining` flag was already set synchronously by `first`
-    await sent; // await the real signal that `first` reached sendUserMessage, not a guessed duration
+    await sent; // await the real signal that `first` reached sendMessage, not a guessed duration
     expect(calls).toBe(1);
     void first; // intentionally left unresolved
   });

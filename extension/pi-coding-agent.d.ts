@@ -123,6 +123,15 @@ declare module "@oh-my-pi/pi-coding-agent" {
     triggerTurn?: boolean;
   }
 
+  // The envelope `pi.sendMessage` takes. Only the four fields foreman sets are
+  // declared; the real API also accepts `details`.
+  export interface ExtensionCustomMessage {
+    customType: string;
+    content: string;
+    display: boolean;
+    attribution: "user";
+  }
+
   export interface ExtensionAPI {
     zod: ZodStatic;
     // Result is `unknown`, never a concrete shape: every call site in
@@ -134,6 +143,12 @@ declare module "@oh-my-pi/pi-coding-agent" {
     // declaring a generic `on(event: string, ...)` here would let a typo'd
     // event name type-check silently instead of failing the build.
     on(event: "session_start", handler: (event: unknown, ctx: ExtensionToolContext) => void): void;
-    sendUserMessage(text: string, options?: ExtensionSendOptions): Promise<void>;
+    // Declared as returning a promise so `DrainDeps` can be faked with an
+    // async stub, but the runtime call returns `undefined` and yields no
+    // delivery receipt: the drain's retry path fires on a synchronous throw,
+    // never on a rejection. `sendUserMessage` is deliberately absent — it
+    // takes no `triggerTurn`, and `triggerTurn` is what wakes an idle
+    // receiver, so its `followUp` was measured never to arrive at all.
+    sendMessage(message: ExtensionCustomMessage, options?: ExtensionSendOptions): Promise<void>;
   }
 }
