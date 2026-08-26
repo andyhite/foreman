@@ -50,6 +50,15 @@ design rationale.
 
 ## Install
 
+Via the marketplace (recommended — enables `/marketplace upgrade`):
+
+```
+/marketplace add andyhite/foreman
+/marketplace install foreman@foreman
+```
+
+Direct git install:
+
 ```sh
 omp install github:andyhite/foreman
 ```

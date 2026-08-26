@@ -1,0 +1,16 @@
+{
+  "name": "foreman",
+  "owner": { "name": "Andy Hite" },
+  "metadata": {
+    "description": "Dispatch work to peer coding agents in git worktrees."
+  },
+  "plugins": [
+    {
+      "name": "foreman",
+      "description": "Dispatch work to peer coding agents in git worktrees, and carry their reports and questions back.",
+      "source": "./",
+      "homepage": "https://github.com/andyhite/foreman",
+      "license": "MIT"
+    }
+  ]
+}
