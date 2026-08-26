@@ -289,10 +289,22 @@ export function deliveryOptions(kind: MessageKind): ExtensionSendOptions {
 // sender is self's own parent, self is acting as the child on this edge —
 // worker or expert, depending on how it was spawned; otherwise the sender
 // can only be a child self spawned, so self is acting as the spawner.
+//
+// The child-side branch adds a second, unconditional line beyond "re-read
+// the skill": the observed failure mode is a worker or expert finishing its
+// work, writing the result as plain assistant text, and ending its turn —
+// which looks like a report but never reaches the parent, because only a
+// `foreman_send`/`foreman_ask` call enqueues mail. That is exactly the
+// mistake the skill's "Reporting back" section already covers, but a skill
+// read once early in a long session is easy to lose track of by the time
+// the actual report is due; restating it, every message, at the point the
+// mistake happens is cheaper than trusting recall.
 function skillReminder(msg: Message, self: RosterEntry): string {
   const childSkill = self.kind === "expert" ? "foreman-expert" : "foreman-worker";
-  const skill = msg.from === self.parent ? childSkill : "foreman-spawner";
-  return `[foreman] Re-read skill://${skill} now if it's not fresh in this context — it covers judgement these tool parameters don't encode.`;
+  const isChildSide = msg.from === self.parent;
+  const reread = `[foreman] Re-read skill://${isChildSide ? childSkill : "foreman-spawner"} now if it's not fresh in this context — it covers judgement these tool parameters don't encode.`;
+  if (!isChildSide) return reread;
+  return `${reread}\n[foreman] Before you end this turn: call foreman_send to report back. Plain text in your reply is never seen by @${self.parent} — only a foreman_send or foreman_ask call reaches them.`;
 }
 
 function renderMessage(msg: Message, self: RosterEntry): string {
@@ -722,6 +734,48 @@ export function resolveBrief(request: BriefRequest, roles: Record<string, RoleDe
 }
 
 // ---------------------------------------------------------------------
+// Setup/teardown config. `.foreman/setup.json` in the repo (committed) lists
+// project-specific commands — installing deps, seeding a database, starting
+// local services — that a fresh worktree needs before it's truly ready to
+// work in, plus the mirror commands to run before that worktree is
+// discarded. `herdr worktree create`'s own `tdi.worktree-setup` step already
+// gives every worktree a generic env-file copy and mise trust; this config
+// is for the project-specific extras that step cannot know about. Running
+// them in a sibling pane rather than the worker's own means a slow `npm ci`
+// never delays the brief landing, and a human can watch it scroll by without
+// it competing with the agent's turn for the same pane.
+// ---------------------------------------------------------------------
+
+export interface SetupConfig {
+  setup: string[];
+  teardown: string[];
+}
+
+export function loadSetupConfig(repoRoot: string): SetupConfig {
+  const path = process.env.FOREMAN_SETUP_FILE || join(repoRoot, ".foreman", "setup.json");
+  if (!existsSync(path)) return { setup: [], teardown: [] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`foreman: ${path} is not valid JSON: ${message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`foreman: ${path} must be a JSON object with "setup" and/or "teardown" command arrays`);
+  }
+  const readCommands = (key: "setup" | "teardown"): string[] => {
+    if (!(key in parsed)) return [];
+    const value = (parsed as Record<string, unknown>)[key];
+    if (!Array.isArray(value) || value.some((c) => typeof c !== "string")) {
+      throw new Error(`foreman: ${path} "${key}" must be an array of command strings`);
+    }
+    return value as string[];
+  };
+  return { setup: readCommands("setup"), teardown: readCommands("teardown") };
+}
+
+// ---------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------
 
@@ -841,6 +895,26 @@ export default function foremanExtension(pi: ExtensionAPI): void {
       const { workspaceId, paneId, worktreeCwd } = readWorktreeCreateResult(created);
       const childRoot = (await run(pi, "git", ["rev-parse", "--show-toplevel"], worktreeCwd)).stdout.trim();
 
+      // Setup is a convenience pane, not a precondition: a failure here must
+      // never leave a worktree and branch behind for foreman_reap to clean
+      // up over something the agent itself never needed to start working.
+      const setupConfig = loadSetupConfig(facts.repoRoot);
+      let setupNote = "";
+      if (setupConfig.setup.length > 0) {
+        try {
+          const split = await herdrJson(
+            pi,
+            ["pane", "split", paneId, "--direction", "down", "--cwd", childRoot, "--no-focus"],
+            facts.repoRoot,
+          );
+          const setupPaneId = readPaneSplitResult(split);
+          await run(pi, "herdr", ["pane", "run", setupPaneId, setupConfig.setup.join(" && ")], facts.repoRoot);
+          setupNote = ` Setup commands running in pane ${setupPaneId}.`;
+        } catch (err) {
+          setupNote = ` (setup pane failed: ${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+
       writeRosterEntry(root, {
         handle: params.handle,
         parent: self.handle,
@@ -869,7 +943,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
         content: [
           {
             type: "text",
-            text: `Spawned @${params.handle} on ${params.branch} at ${childRoot} (pane ${paneId}). Brief queued; it will arrive on the worker's first turn.`,
+            text: `Spawned @${params.handle} on ${params.branch} at ${childRoot} (pane ${paneId}). Brief queued; it will arrive on the worker's first turn.${setupNote}`,
           },
         ],
         details: { handle: params.handle, branch: params.branch, path: childRoot, paneId, workspaceId, spawnSha },
@@ -1078,6 +1152,32 @@ export default function foremanExtension(pi: ExtensionAPI): void {
             throw new Error(
               `foreman: ${params.handle} has ${aheadCount} commit(s) not in ${child.spawnSha}. Merge the branch, or pass force=true to discard them.`,
             );
+          }
+        }
+        // Teardown runs in a pane split off the worker's own, while the
+        // worktree still exists, and is given a bounded wait via a sentinel
+        // echoed after the chain — `pane run` only sends keystrokes and
+        // never reports completion on its own. Best-effort: a failed,
+        // timed-out, or unavailable teardown pane must never block reaping
+        // the worktree it was meant to clean up after.
+        const teardownConfig = loadSetupConfig(repoRoot);
+        if (teardownConfig.teardown.length > 0 && child.paneId) {
+          try {
+            const sentinel = `__foreman_teardown_${params.handle}_done__`;
+            const split = await herdrJson(
+              pi,
+              ["pane", "split", child.paneId, "--direction", "down", "--cwd", child.cwd, "--no-focus"],
+              repoRoot,
+            );
+            const teardownPaneId = readPaneSplitResult(split);
+            await run(pi, "herdr", ["pane", "run", teardownPaneId, `${teardownConfig.teardown.join(" && ")}; echo ${sentinel}`], repoRoot);
+            const timeoutMs = Number(process.env.FOREMAN_TEARDOWN_TIMEOUT_MS) || 60000;
+            await run(pi, "herdr", ["pane", "wait-output", teardownPaneId, "--match", sentinel, "--timeout", String(timeoutMs)], repoRoot, {
+              allowNonZero: true,
+            });
+            await run(pi, "herdr", ["pane", "close", teardownPaneId], repoRoot, { allowNonZero: true });
+          } catch {
+            // leave the worktree removal to proceed regardless
           }
         }
         // Removal must go through herdr because creation did: `git worktree

@@ -8,6 +8,7 @@ import {
   deriveHandle,
   drainOnce,
   loadRoleConfig,
+  loadSetupConfig,
   messageFilename,
   renderInbox,
   resolveBrief,
@@ -163,6 +164,16 @@ describe("renderInbox", () => {
     expect(text).toContain("skill://foreman-worker");
   });
 
+  test("a message from self's parent also carries the explicit foreman_send reminder", () => {
+    const text = renderInbox([msg("send", { from: "plotroom" })], self);
+    expect(text).toContain("call foreman_send to report back");
+  });
+
+  test("a message from a spawned child does not carry the foreman_send reminder", () => {
+    const text = renderInbox([msg("send", { from: "auth-sub", to: "auth" })], self);
+    expect(text).not.toContain("call foreman_send to report back");
+  });
+
   test("a message from a spawned child carries the spawner-skill reminder", () => {
     const text = renderInbox([msg("send", { from: "auth-sub", to: "auth" })], self);
     expect(text).toContain("skill://foreman-spawner");
@@ -186,6 +197,7 @@ describe("renderInbox", () => {
   test("a message from a convened expert's parent carries the expert-skill reminder", () => {
     const text = renderInbox([msg("send", { from: "plotroom", to: "pm" })], expertSelf);
     expect(text).toContain("skill://foreman-expert");
+    expect(text).toContain("call foreman_send to report back");
   });
 });
 
@@ -643,5 +655,61 @@ describe("resolveBrief", () => {
     const result = resolveBrief(request({ handle: "webhooks", role: "pm", skills: ["skill://webhooks"] }), roles);
     expect(result.text).toBe("Load these skills, in order: skill://sprint-planning, skill://webhooks\n\nPlan sprints.");
     expect(result.model).toBe("opus");
+  });
+});
+
+// ---------------------------------------------------------------------
+// 16. loadSetupConfig
+// ---------------------------------------------------------------------
+
+describe("loadSetupConfig", () => {
+  let setupFile: string;
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "foreman-test-"));
+    setupFile = join(dir, "setup.json");
+    savedEnv = process.env.FOREMAN_SETUP_FILE;
+    process.env.FOREMAN_SETUP_FILE = setupFile;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.FOREMAN_SETUP_FILE;
+    else process.env.FOREMAN_SETUP_FILE = savedEnv;
+    rmSync(join(setupFile, ".."), { recursive: true, force: true });
+  });
+
+  test("returns empty setup and teardown when the file doesn't exist", () => {
+    expect(loadSetupConfig("/unused")).toEqual({ setup: [], teardown: [] });
+  });
+
+  test("parses both setup and teardown command arrays", () => {
+    writeFileSync(setupFile, JSON.stringify({ setup: ["npm ci", "mise trust"], teardown: ["docker compose down"] }));
+    expect(loadSetupConfig("/unused")).toEqual({ setup: ["npm ci", "mise trust"], teardown: ["docker compose down"] });
+  });
+
+  test("defaults a missing key to an empty array", () => {
+    writeFileSync(setupFile, JSON.stringify({ setup: ["npm ci"] }));
+    expect(loadSetupConfig("/unused")).toEqual({ setup: ["npm ci"], teardown: [] });
+  });
+
+  test("throws on invalid JSON", () => {
+    writeFileSync(setupFile, "{not json");
+    expect(() => loadSetupConfig("/unused")).toThrow(/not valid JSON/);
+  });
+
+  test("throws when the root isn't a JSON object", () => {
+    writeFileSync(setupFile, JSON.stringify(["npm ci"]));
+    expect(() => loadSetupConfig("/unused")).toThrow(/must be a JSON object/);
+  });
+
+  test("throws when setup isn't an array of command strings", () => {
+    writeFileSync(setupFile, JSON.stringify({ setup: [1, 2] }));
+    expect(() => loadSetupConfig("/unused")).toThrow(/"setup" must be an array of command strings/);
+  });
+
+  test("throws when teardown isn't an array of command strings", () => {
+    writeFileSync(setupFile, JSON.stringify({ teardown: "docker compose down" }));
+    expect(() => loadSetupConfig("/unused")).toThrow(/"teardown" must be an array of command strings/);
   });
 });

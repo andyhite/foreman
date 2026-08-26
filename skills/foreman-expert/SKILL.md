@@ -33,10 +33,37 @@ of isolated code work — but it means the usual worktree isolation is gone:
 
 A worker's task ends when its branch is ready to merge, and `foreman_reap`
 follows. You have no branch and no such finish line: your role is standing.
-After you finish answering a request, end your turn and wait for the next one
-with `foreman_wait` rather than treating the reply as your last act. Your
-parent calls `foreman_reap` on you explicitly when the cluster is done, not
-because you signaled completion.
+After you finish answering a request, end your turn and call `foreman_wait`
+exactly once rather than treating the reply as your last act. Your parent
+calls `foreman_reap` on you explicitly when the cluster is done, not because
+you signaled completion.
+
+`foreman_wait` is a separate mail queue from the generic `hub` tool's jobs
+and inbox — foreman mail never flows through `hub`, so polling `hub`'s
+`jobs`/`inbox`/`wait` ops before or instead of calling `foreman_wait` will
+always come back empty and burns turns for nothing. Call `foreman_wait`
+once; it already blocks until mail arrives (or up to five minutes), so
+there's nothing to poll around it.
+
+## The operator may talk to you directly
+
+Nothing stops the operator from typing straight into your pane instead of
+routing through your parent. A message with no `[foreman:<handle>]` prefix is
+the operator talking to you directly, not mail — work with them the same way
+you would any direct request.
+
+Your parent has no visibility into that conversation: it isn't mail, so it
+never reaches their inbox, and they cannot read your pane's scrollback either
+(same "no shared scrollback" rule as "Reporting back" below). When a direct
+exchange with the operator reaches a natural stopping point, decide whether
+your parent needs to know what happened — a decision that changes their
+plan, a conclusion that affects work they dispatched, new information
+they'd otherwise be missing. If so, call `foreman_send` unprompted before
+you go back to `foreman_wait`: relay the substance of the exchange and its
+conclusion, not "operator and I talked." If the exchange was genuinely local
+to your role and changes nothing your parent is tracking, it's fine to let
+it end without a report — use the same judgement as any other non-blocking
+observation.
 
 ## When to ask versus decide
 
@@ -60,8 +87,9 @@ way a worker loads whatever the spawner names.
 
 ## Reporting back
 
-Your parent only sees what you send it — there's no shared scrollback. Use
-`foreman_send` when you finish a request or have a non-blocking observation.
-State the concrete result (ticket ids, a tag name, a file list) rather than
-"done" — your parent has no diff to re-derive it from, since you didn't leave
-one on a branch.
+Your parent only sees what you send it — there's no shared scrollback,
+whether the conversation that produced the result was with your parent or
+with the operator directly. Use `foreman_send` when you finish a request or
+have a non-blocking observation. State the concrete result (ticket ids, a
+tag name, a file list) rather than "done" — your parent has no diff to
+re-derive it from, since you didn't leave one on a branch.

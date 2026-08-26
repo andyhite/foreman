@@ -1,6 +1,6 @@
 # Foreman
 
-[![version](https://img.shields.io/badge/version-0.14.1-blue)](./package.json)
+[![version](https://img.shields.io/badge/version-0.14.2-blue)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![runtime](https://img.shields.io/badge/runtime-omp-orange)](https://github.com/andyhite/herdr)
 
