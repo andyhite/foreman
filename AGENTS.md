@@ -19,7 +19,13 @@ bun test
 ```
 
 CI runs exactly this, plus a check that `.omp-plugin/plugin.json` and
-`package.json` carry the same `version`.
+`package.json` carry the same `version`. On every push to `main`, CI also
+tags the commit `vX.Y.Z` from `package.json#version` if that tag doesn't
+already exist yet — bumping the version is the entire release trigger, no
+manual `git tag` step. `omp install`/`omp plugin install` git specs and the
+marketplace `"./"` source both float to `main` HEAD unless a caller pins
+`#vX.Y.Z`, so an untagged bump is installable immediately and a tagged one
+stays reproducible.
 
 ## Delivery rules
 
