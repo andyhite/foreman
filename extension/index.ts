@@ -1,6 +1,8 @@
 // Foreman: dispatch work to peer coding agents that each own a git worktree
-// and a branch, and carry their reports and questions back. Five tools,
-// identical in every session — no roles, no claiming step, no bash CLI.
+// and a branch, and carry their reports and questions back — plus standing
+// "expert" agents convened into a shared checkout for advisory/coordination
+// roles that never own a branch. Seven tools, identical in every session —
+// no roles, no claiming step, no bash CLI.
 //
 // Delivery: every message goes through `pi.sendMessage` as a custom message.
 // `deliveryOptions` below is the one function that encodes which delivery
@@ -26,6 +28,12 @@ import { basename, dirname, join } from "node:path";
 
 export type MessageKind = "brief" | "send" | "ask";
 
+// "worker" owns a worktree and branch for its whole life (`foreman_spawn`).
+// "expert" is a standing, branchless role convened into the spawner's own
+// checkout (`foreman_convene`) — no worktree to be dirty or merge, so it
+// skips every git-based lifecycle check a worker gets.
+export type RosterKind = "worker" | "expert";
+
 export interface RepoFacts {
   repoKey: string;
   repoRoot: string;
@@ -39,6 +47,7 @@ export interface RosterEntry {
   spawnSha: string | null;
   workspaceId: string | null;
   paneId: string | null;
+  kind: RosterKind;
   createdAt: string;
 }
 
@@ -161,10 +170,13 @@ function isRosterEntry(value: unknown): value is RosterEntry {
   return "parent" in value && "branch" in value && "spawnSha" in value && "workspaceId" in value && "paneId" in value;
 }
 
+// `kind` is read as `RosterEntry` before validation, so an old roster file
+// written before "expert" existed reads back as `undefined`, not a runtime
+// error — default it to "worker" so pre-convene rosters keep working.
 function readRosterEntry(path: string): RosterEntry {
   const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (!isRosterEntry(parsed)) throw new Error(`foreman: corrupt roster entry at ${path}`);
-  return parsed;
+  return { ...parsed, kind: parsed.kind === "expert" ? "expert" : "worker" };
 }
 
 function writeRosterEntry(root: string, entry: RosterEntry): void {
@@ -182,9 +194,18 @@ function loadRoster(root: string): RosterEntry[] {
 
 // Used by every tool and by the drain loop. No handle-claiming step: the
 // first call from a given repoRoot registers it permanently.
-export function resolveSelf(root: string, repoRoot: string): RosterEntry {
+//
+// `paneId` disambiguates: one worker per worktree makes `cwd` a unique key
+// by construction, but `foreman_convene` puts several experts in the same
+// shared checkout, so two roster entries can share a `cwd`. Every herdr-
+// managed pane gets its own `HERDR_PANE_ID` from herdr itself, so it is the
+// tiebreaker; with a single candidate for `cwd` (the pre-convene case, and
+// the one session nobody spawned) `paneId` is irrelevant and matching falls
+// back to `cwd` alone, unchanged from before experts existed.
+export function resolveSelf(root: string, repoRoot: string, paneId: string | null): RosterEntry {
   const roster = loadRoster(root);
-  const existing = roster.find((r) => r.cwd === repoRoot);
+  const candidates = roster.filter((r) => r.cwd === repoRoot);
+  const existing = (paneId ? candidates.find((r) => r.paneId === paneId) : undefined) ?? (candidates.length === 1 ? candidates[0] : undefined);
   if (existing) return existing;
   const entry: RosterEntry = {
     handle: deriveHandle(
@@ -196,7 +217,8 @@ export function resolveSelf(root: string, repoRoot: string): RosterEntry {
     branch: null,
     spawnSha: null,
     workspaceId: null,
-    paneId: null,
+    paneId,
+    kind: "worker",
     createdAt: new Date().toISOString(),
   };
   writeRosterEntry(root, entry);
@@ -264,20 +286,26 @@ export function deliveryOptions(kind: MessageKind): ExtensionSendOptions {
 // turns in may no longer have `skill://foreman-worker` in context at all.
 // Direction is derived structurally from `self.parent`, not from message
 // kind, because `canSend` only ever allows parent<->child edges: if the
-// sender is self's own parent, self is acting as the worker on this edge;
-// otherwise the sender can only be a child self spawned, so self is acting
-// as the spawner.
+// sender is self's own parent, self is acting as the child on this edge —
+// worker or expert, depending on how it was spawned; otherwise the sender
+// can only be a child self spawned, so self is acting as the spawner.
 function skillReminder(msg: Message, self: RosterEntry): string {
-  const skill = msg.from === self.parent ? "foreman-worker" : "foreman-spawner";
+  const childSkill = self.kind === "expert" ? "foreman-expert" : "foreman-worker";
+  const skill = msg.from === self.parent ? childSkill : "foreman-spawner";
   return `[foreman] Re-read skill://${skill} now if it's not fresh in this context — it covers judgement these tool parameters don't encode.`;
 }
 
 function renderMessage(msg: Message, self: RosterEntry): string {
   const reminder = skillReminder(msg, self);
   if (msg.kind === "brief") {
-    return `[foreman:${msg.from}] You are worker @${self.handle}.
-Branch: ${self.branch}
-Worktree: ${self.cwd}
+    // An expert owns no branch or worktree — it shares the spawner's own
+    // checkout — so "Branch: null" would read as a broken worker rather
+    // than the intended standing role.
+    const identity =
+      self.kind === "expert"
+        ? `You are @${self.handle}, a standing expert with no branch of your own. Working directory: ${self.cwd}.`
+        : `You are worker @${self.handle}.\nBranch: ${self.branch}\nWorktree: ${self.cwd}`;
+    return `[foreman:${msg.from}] ${identity}
 
 ${msg.text}
 
@@ -330,7 +358,7 @@ export async function drainOnce(deps: DrainDeps): Promise<void> {
     const facts = await gitFacts(deps.pi, deps.cwd);
     if (!facts) return;
     const root = stateRoot(facts.repoKey);
-    const self = resolveSelf(root, facts.repoRoot);
+    const self = resolveSelf(root, facts.repoRoot, process.env.HERDR_PANE_ID ?? null);
     const mailDir = join(root, "mail", self.handle);
     mkdirSync(mailDir, { recursive: true });
     const files = readdirSync(mailDir)
@@ -409,7 +437,7 @@ async function requireSelf(pi: ExtensionAPI, cwd: string): Promise<{ root: strin
   const facts = await gitFacts(pi, cwd);
   if (!facts) throw new Error("foreman: not inside a git repository");
   const root = stateRoot(facts.repoKey);
-  return { root, repoRoot: facts.repoRoot, self: resolveSelf(root, facts.repoRoot) };
+  return { root, repoRoot: facts.repoRoot, self: resolveSelf(root, facts.repoRoot, process.env.HERDR_PANE_ID ?? null) };
 }
 
 // Blocks the calling tool until mail lands, so a peer's reply can come back as
@@ -482,6 +510,41 @@ function readWorktreeCreateResult(value: unknown): { workspaceId: string; paneId
   throw new Error("foreman: herdr worktree create returned an unexpected shape");
 }
 
+function readTabCreateResult(value: unknown): { tabId: string; rootPaneId: string } {
+  if (
+    value &&
+    typeof value === "object" &&
+    "tab" in value &&
+    value.tab &&
+    typeof value.tab === "object" &&
+    "tab_id" in value.tab &&
+    typeof value.tab.tab_id === "string" &&
+    "root_pane" in value &&
+    value.root_pane &&
+    typeof value.root_pane === "object" &&
+    "pane_id" in value.root_pane &&
+    typeof value.root_pane.pane_id === "string"
+  ) {
+    return { tabId: value.tab.tab_id, rootPaneId: value.root_pane.pane_id };
+  }
+  throw new Error("foreman: herdr tab create returned an unexpected shape");
+}
+
+function readPaneSplitResult(value: unknown): string {
+  if (
+    value &&
+    typeof value === "object" &&
+    "pane" in value &&
+    value.pane &&
+    typeof value.pane === "object" &&
+    "pane_id" in value.pane &&
+    typeof value.pane.pane_id === "string"
+  ) {
+    return value.pane.pane_id;
+  }
+  throw new Error("foreman: herdr pane split returned an unexpected shape");
+}
+
 function readAgentList(value: unknown): Array<{ cwd: string; status: string; paneId: string | undefined }> {
   if (!value || typeof value !== "object" || !("agents" in value) || !Array.isArray(value.agents)) return [];
   const agents: Array<{ cwd: string; status: string; paneId: string | undefined }> = [];
@@ -514,6 +577,49 @@ async function agentLiveOnPane(pi: Pick<ExtensionAPI, "exec">, repoRoot: string,
   } catch {
     return false;
   }
+}
+
+// Shared by `foreman_spawn` (one pane, no model override) and
+// `foreman_convene` (N panes, one optional model override each) — the
+// pane-not-ready-yet retry dance is identical either way, only the target
+// pane and native args differ.
+async function startAgentOnPane(
+  pi: ExtensionAPI,
+  ctx: ExtensionToolContext,
+  repoRoot: string,
+  handle: string,
+  paneId: string,
+  timeoutMs: number,
+  model: string | undefined,
+): Promise<{ ok: boolean; error?: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+  const nativeArgs = model ? ["--", `--model=${model}`] : [];
+  // `agent start` needs the pane at an interactive shell prompt, and a
+  // brand-new pane is not — zsh, mise and direnv take seconds — so early
+  // attempts fail fast. Retry against an absolute deadline, never
+  // accumulated sleeps.
+  while (Date.now() < deadline) {
+    try {
+      await run(
+        pi,
+        "herdr",
+        ["agent", "start", handle, "--kind", "omp", "--pane", paneId, "--timeout", String(Math.max(0, deadline - Date.now())), ...nativeArgs],
+        repoRoot,
+      );
+      return { ok: true };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      // `start` reported failure, but it may have lost the race against its
+      // own readiness poll rather than actually failed to launch — check
+      // ground truth before sleeping and retrying, or we risk running
+      // `agent start` a second time against an already-live pane.
+      if (await agentLiveOnPane(pi, repoRoot, paneId)) return { ok: true };
+      await sleep(ctx, 1000);
+    }
+  }
+  if (await agentLiveOnPane(pi, repoRoot, paneId)) return { ok: true };
+  return { ok: false, error: lastError };
 }
 
 function formatTable(headers: string[], rows: string[][]): string {
@@ -605,7 +711,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
         throw new Error("foreman: requires herdr — worktree panes are how workers get a terminal. Start a herdr session first.");
       }
 
-      const self = resolveSelf(root, facts.repoRoot);
+      const self = resolveSelf(root, facts.repoRoot, process.env.HERDR_PANE_ID ?? null);
       const base = params.base ?? (await run(pi, "git", ["rev-parse", "HEAD"], facts.repoRoot)).stdout.trim();
       const spawnSha = (await run(pi, "git", ["rev-parse", base], facts.repoRoot)).stdout.trim();
       const worktreePath = join(dirname(facts.repoRoot), `${basename(facts.repoRoot)}-${params.handle}`);
@@ -638,6 +744,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
         spawnSha,
         workspaceId,
         paneId,
+        kind: "worker",
         createdAt: new Date().toISOString(),
       });
 
@@ -645,43 +752,11 @@ export default function foremanExtension(pi: ExtensionAPI): void {
       enqueue(root, { from: self.handle, to: params.handle, kind: "brief", text: params.brief, sentAt: new Date().toISOString() });
 
       const timeoutMs = Number(process.env.FOREMAN_SPAWN_TIMEOUT_MS) || 60000;
-      const deadline = Date.now() + timeoutMs;
-      let lastError = "";
-      let started = false;
-      // `agent start` needs the pane at an interactive shell prompt, and a
-      // brand-new worktree pane is not — zsh, mise and direnv take seconds —
-      // so early attempts fail fast. Retry against an absolute deadline,
-      // never accumulated sleeps.
-      while (Date.now() < deadline) {
-        try {
-          await run(
-            pi,
-            "herdr",
-            ["agent", "start", params.handle, "--kind", "omp", "--pane", paneId, "--timeout", String(Math.max(0, deadline - Date.now()))],
-            facts.repoRoot,
-          );
-          started = true;
-          break;
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : String(err);
-          // `start` reported failure, but it may have lost the race against
-          // its own readiness poll rather than actually failed to launch —
-          // check ground truth before sleeping and retrying, or we risk
-          // running `agent start` a second time against an already-live pane.
-          if (await agentLiveOnPane(pi, facts.repoRoot, paneId)) {
-            started = true;
-            break;
-          }
-          await sleep(ctx, 1000);
-        }
-      }
-      if (!started && (await agentLiveOnPane(pi, facts.repoRoot, paneId))) {
-        started = true;
-      }
-      if (!started) {
+      const result = await startAgentOnPane(pi, ctx, facts.repoRoot, params.handle, paneId, timeoutMs, undefined);
+      if (!result.ok) {
         const seconds = Math.round(timeoutMs / 1000);
         throw new Error(
-          `foreman: worktree and branch exist but no agent started within ${seconds}s. Last error: ${lastError}. Clean up with foreman_reap ${params.handle} force=true.`,
+          `foreman: worktree and branch exist but no agent started within ${seconds}s. Last error: ${result.error}. Clean up with foreman_reap ${params.handle} force=true.`,
         );
       }
 
