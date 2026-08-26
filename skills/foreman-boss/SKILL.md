@@ -314,6 +314,12 @@ stale. It also does not interrupt — like a tracked task, it queues behind the
 worker's current turn and lands at the next boundary, so it does not wait for
 a lifecycle transition of its own either way.
 
+What it does do is start the recipient's next turn, and that closes the gate
+described below. A `foreman_msg` puts its target back to `working` — a
+`foreman_msg(handle: "all")` does it to every live worker at once — so a
+tracked `foreman_send` issued straight afterwards is refused for a worker that
+was `idle` a moment earlier. Answer first, collect, then dispatch.
+
 A *follow-up* tracked task is accepted only from `idle` or `done`. Foreman
 refuses one while the worker is `working` or `blocked`, because herdr exposes
 no turn id: queueing dispatch 2 behind dispatch 1 would let dispatch 1's

@@ -1084,7 +1084,13 @@ Your boss is the agent \`$boss\`.
   \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell.
   Filing it delivers it to the boss; terminal output does not reach it.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
-  \`foreman reply "<question>"\`.
+  \`foreman reply "<question>"\`. It returns as soon as the question is filed
+  and never blocks for the answer, which arrives later as a message tagged
+  \`[foreman msg from $boss]\`. Two things that do not work, both tried: your
+  own session's peer-messaging or inbox tools, which address your subagents
+  and never foreman; and polling \`foreman pickup\`, which is the boss's
+  delivery command, not yours. Keep working if you can, otherwise end your
+  turn — an idle worker is woken by the answer.
 - A question interrupts the boss, so the answer comes back even if it was
   mid-task; a report queues for the end of the boss's current turn. That
   asymmetry is the cost of each: file one report when you are done, and ask a
@@ -1712,6 +1718,20 @@ with_protocol() {
 read_message() {
   local what=$1; shift
   local text="$*"
+  # A lone `--help` here is a usage request, not a message. `foreman msg
+  # <handle> --help` and `foreman send <handle> --help` reach this with the
+  # handle already shifted off, so the dispatcher's guard below cannot see the
+  # flag — and taking it as the body dispatched a task saying "--help".
+  # Piping it on stdin still sends the literal text.
+  #
+  # Both `die`s here fire inside a command substitution, so they abort the
+  # caller only through the `set -e` at the top of this file. Keep every call
+  # site a bare `local text; text=$(read_message ...)`: folding it into one
+  # `local text=$(...)` makes `local` supply the exit status, `set -e` sees a
+  # success, and both guards degrade into an empty message.
+  case "$text" in
+    -h|--help) die "usage: foreman $what   (or pipe the text on stdin)" ;;
+  esac
   if [ -z "$text" ]; then
     if [ -t 0 ]; then
       die "usage: foreman $what   (or pipe the text on stdin)"
@@ -2158,6 +2178,12 @@ cmd_read() {
 # ── Worker side ──────────────────────────────────────────────────────────────
 
 cmd_report() {
+  # Guarded here as well as in main(), and ahead of every other check, because
+  # this is the one path where taking the flag as content also consumed the
+  # dispatch token — the worker's real report then read as stale. `report` also
+  # cannot route through `read_message`, which guards the other verbs: it
+  # writes a file, and supports `-f` and stdin, rather than returning a string.
+  case "${1:-}" in -h|--help) usage ;; esac
   require_herdr
   local me; me=$(self_handle)
   [ -n "$me" ] || die "this pane is not a named foreman worker"
@@ -2732,10 +2758,21 @@ EOF
 main() {
   [ $# -gt 0 ] || usage
   local cmd=$1; shift
+  # A usage request must never become a delivery. On a text-taking verb the
+  # flag was taken as the message: `foreman reply --help` filed a question
+  # saying "--help" and rang the boss, and `foreman report --help` filed it as
+  # the deliverable *and* consumed the dispatch token, so the real report that
+  # followed read as stale. Scoped to those verbs deliberately — `spawn` and
+  # `dashboard` parse `--help` into their own usage text, and a blanket guard
+  # here replaced theirs with the general one.
+  case "$cmd" in
+    send|msg|reply|report|keys)
+      case "${1:-}" in -h|--help) usage ;; esac ;;
+  esac
   case "$cmd" in
     boss)    cmd_boss "$@" ;;
     whoami)  cmd_whoami "$@" ;;
-    spawn)   [ "${1:-}" = "--help" ] && usage_spawn; cmd_spawn "$@" ;;
+    spawn)   cmd_spawn "$@" ;;
     send)    cmd_send "$@" ;;
     msg)     cmd_msg "$@" ;;
     join)    cmd_join "$@" ;;

@@ -71,6 +71,15 @@ belong in the file: `foreman_spawn` prepends them deterministically.
 <checkable criteria — a passing test, a file that exists, a behaviour observed>
 ```
 
+**Name the artefact, never the answer.** A brief that asks a worker to "reply
+with X" or "answer A or B" gets a worker that answers — in its own terminal,
+where nothing reaches you — and then settles to `done` having filed nothing.
+Two runs lost their answer exactly that way. Write the criterion as the thing
+that gets filed instead: "file a report containing only X". The failure is
+quiet on your side: `foreman_join` says "nothing reported since the last
+dispatch" and re-prints the previous report, which reads like a stale
+duplicate rather than a miss.
+
 **A role or skill puts a procedure in front of the worker.** A role selects
 one skill through foreman's config; every literal skill is included as named.
 Foreman prepends one `skill://<name>` instruction for each, so the worker reads

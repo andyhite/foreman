@@ -1357,6 +1357,55 @@ assert     'question.md contains first question' [ -n "$(grep -F 'first question
 assert     'question.md contains second question' [ -n "$(grep -F 'second question' "$qf")" ]
 assert     'question.md contains separator' [ -n "$(grep -F -- '---' "$qf")" ]
 is         'question.seq reads 2' "$(counter_read "$FOREMAN_STATE/w1/question.seq")" '2'
+
+# ── a usage request is never a delivery ─────────────────────────────────────
+
+printf '\na usage request is never a delivery\n'
+export FOREMAN_STATE="$sandbox/state-help-guard"
+mkdir -p "$FOREMAN_STATE/w1"
+meta_set w1 "BOSS=me" "BRANCH=b" "DIR=/tmp/x"
+counter_bump "$(dispatch_file w1)"
+
+# Only `spawn` intercepted `--help`, so every text-taking verb took it as the
+# message. `report` was the destructive one: it filed "--help" as the
+# deliverable *and* stamped the dispatch token, so the real report that
+# followed read as stale.
+out=$( (cmd_report --help) 2>&1 ); rc=$?
+is         'report --help exits 2, the usage code' "$rc" '2'
+assert_not 'and files no report' [ -f "$(report_file w1)" ]
+is         'and leaves the dispatch unanswered' \
+  "$(counter_read "$(report_token_file w1)")" ''
+
+# `foreman reply --help` is caught by main() before any dispatch, so it needs
+# no stubs at all — and no state directory is touched on the way out.
+out=$( (main reply --help) 2>&1 ); rc=$?
+is         'reply --help exits 2 as well' "$rc" '2'
+assert_not 'and files no question' [ -f "$(question_file w1)" ]
+
+# `<verb> <handle> --help` is the case main() cannot see: the handle is shifted
+# off before `read_message` runs. Its guard `die`s from inside a command
+# substitution, so it stops the caller only under the `set -e` the binary sets
+# at line 27 — this suite runs `set +e` so a failing assertion does not abort
+# the run, which would make the guard look broken. Re-arm it here rather than
+# testing a condition production never has. Anyone rewriting the call site as
+# a one-line `local text=$(read_message ...)` silently disarms this: `local`
+# masks the status, and `set -e` then has nothing to trip on.
+out=$( (set -e; x=$(read_message 'msg <handle> <text...>' --help); printf 'REACHED[%s]' "$x") 2>&1 )
+assert 'a lone --help never reaches the caller' [ "${out#*REACHED}" = "$out" ]
+assert 'and it fails with that verb'"'"'s own usage line' \
+  [ "${out#*usage: foreman msg <handle> <text...>}" != "$out" ]
+
+# Both guards degrade silently if a call site folds into `local text=$(...)`,
+# and nothing else in the file would notice — so pin the call form itself.
+offenders=$(grep -c 'local [a-z_]*=\$(read_message' "$FOREMAN_BIN" || true)
+is 'every read_message call site keeps local off the assignment' "$offenders" '0'
+
+# The flag is a usage request only when it is the whole message: a real message
+# may quote it, and stdin stays the escape hatch for a literal lone flag.
+is 'a longer message containing --help still passes through' \
+  "$(read_message 'reply <text...>' 'pass --help to it')" 'pass --help to it'
+is 'and a piped lone --help is literal text' \
+  "$(printf -- '--help' | read_message 'reply <text...>')" '--help'
 # Only the stubs above, and never a function foreman itself defines: this file
 # sources the CLI exactly once, so `unset -f boss_handle` would delete the real
 # implementation for every later section too. That is what made the report-push
