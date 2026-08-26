@@ -370,9 +370,9 @@ function readWorktreeCreateResult(value: unknown): { workspaceId: string; paneId
   throw new Error("foreman: herdr worktree create returned an unexpected shape");
 }
 
-function readAgentList(value: unknown): Array<{ cwd: string; status: string }> {
+function readAgentList(value: unknown): Array<{ cwd: string; status: string; paneId: string | undefined }> {
   if (!value || typeof value !== "object" || !("agents" in value) || !Array.isArray(value.agents)) return [];
-  const agents: Array<{ cwd: string; status: string }> = [];
+  const agents: Array<{ cwd: string; status: string; paneId: string | undefined }> = [];
   for (const item of value.agents) {
     if (
       item &&
@@ -382,10 +382,26 @@ function readAgentList(value: unknown): Array<{ cwd: string; status: string }> {
       "agent_status" in item &&
       typeof item.agent_status === "string"
     ) {
-      agents.push({ cwd: item.cwd, status: item.agent_status });
+      const paneId = "pane_id" in item && typeof item.pane_id === "string" ? item.pane_id : undefined;
+      agents.push({ cwd: item.cwd, status: item.agent_status, paneId });
     }
   }
   return agents;
+}
+
+// `herdr agent start` exits 1 on its own internal readiness-detection
+// timeout, but the agent can still have finished starting a moment later —
+// the CLI's poll and the pane's actual boot time race. Trusting that exit
+// code alone produces false "no agent started" failures for agents that are
+// in fact live. `herdr agent list` reports ground truth: an entry for our
+// pane means the agent was detected, whatever `start` returned.
+async function agentLiveOnPane(pi: Pick<ExtensionAPI, "exec">, repoRoot: string, paneId: string): Promise<boolean> {
+  try {
+    const agents = readAgentList(await herdrJson(pi, ["agent", "list"], repoRoot));
+    return agents.some((a) => a.paneId === paneId);
+  } catch {
+    return false;
+  }
 }
 
 function formatTable(headers: string[], rows: string[][]): string {
@@ -515,8 +531,19 @@ export default function foremanExtension(pi: ExtensionAPI): void {
           break;
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err);
+          // `start` reported failure, but it may have lost the race against
+          // its own readiness poll rather than actually failed to launch —
+          // check ground truth before sleeping and retrying, or we risk
+          // running `agent start` a second time against an already-live pane.
+          if (await agentLiveOnPane(pi, facts.repoRoot, paneId)) {
+            started = true;
+            break;
+          }
           await sleep(ctx, 1000);
         }
+      }
+      if (!started && (await agentLiveOnPane(pi, facts.repoRoot, paneId))) {
+        started = true;
       }
       if (!started) {
         const seconds = Math.round(timeoutMs / 1000);

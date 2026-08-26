@@ -88,8 +88,9 @@ context. `base` is optional and defaults to the parent's current HEAD.
   its branch is merged. Refuses dirty or unmerged work unless forced.
 
 State — the roster and per-handle mailboxes — lives under `$FOREMAN_STATE`
-(default `~/.foreman/<repo-hash>/`), keyed by handle; nothing is written into
-a repo a worker operates on.
+(default `~/.foreman/<slug>/`, where `<slug>` is the repo's `--git-common-dir`
+sanitized into a filesystem-safe name), keyed by handle; nothing is written
+into a repo a worker operates on.
 
 ## Skill
 
