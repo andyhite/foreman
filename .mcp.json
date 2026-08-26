@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "foreman": {
-      "command": "foreman",
-      "args": ["bus"]
-    }
-  }
-}

@@ -6,31 +6,10 @@ on:
   pull_request:
 
 jobs:
-  test-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run foreman test suite
-        run: /bin/bash herdr/test/foreman-test.sh
-      - name: Run foreman-link test suite
-        run: /bin/bash herdr/test/foreman-link-test.sh
-      - name: Run foreman dashboard test suite
-        run: /bin/bash herdr/test/foreman-dashboard-test.sh
-
-  lint:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check bash syntax and run tests with modern bash
-        run: |
-          bash -n herdr/bin/foreman
-          bash -n herdr/bin/foreman-dashboard
-          bash herdr/test/foreman-test.sh
-          bash herdr/test/foreman-dashboard-test.sh
-      - name: Lint bash scripts
-        run: shellcheck --severity=warning -s bash herdr/bin/foreman herdr/bin/foreman-dashboard herdr/test/foreman-test.sh herdr/test/foreman-link-test.sh herdr/test/foreman-dashboard-test.sh
-      - name: Lint POSIX shell scripts
-        run: shellcheck --severity=warning -s sh herdr/bin/foreman-link herdr/bin/foreman-ls herdr/bin/foreman-dashboard-open herdr/install.sh
       - uses: oven-sh/setup-bun@v2
       - name: Type-check the extension
         run: bunx tsc --noEmit
@@ -38,13 +17,11 @@ jobs:
         run: bun test
       - name: Check version consistency
         run: |
-          herdr_version=$(awk -F'"' '/^version = / {print $2; exit}' herdr/herdr-plugin.toml)
           plugin_json_version=$(jq -r '.version' .omp-plugin/plugin.json)
           package_json_version=$(jq -r '.version' package.json)
 
-          if [ "$herdr_version" != "$plugin_json_version" ] || [ "$herdr_version" != "$package_json_version" ]; then
+          if [ "$plugin_json_version" != "$package_json_version" ]; then
             echo "Version mismatch:"
-            echo "herdr/herdr-plugin.toml: $herdr_version"
             echo ".omp-plugin/plugin.json: $plugin_json_version"
             echo "package.json: $package_json_version"
             exit 1
