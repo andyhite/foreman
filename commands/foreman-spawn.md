@@ -18,8 +18,9 @@ Decompose the goal into independent, self-contained slices of work — one per
 worker, each on its own branch. For each slice, write a brief per the skill
 (exact files/scope, observable acceptance criteria, any shared interface
 decided up front); pass `role: "<name>"` too when a configured role fits the
-kind of work (its `skills`/`model` still apply even though the task-specific
-`brief` overrides the role's own), then dispatch with `foreman_spawn`. Only
+kind of work — its `skills`/`model` still apply, and the task-specific
+`brief` you write is appended after the role's own charter rather than
+replacing it, then dispatch with `foreman_spawn`. Only
 slices that are genuinely independent should run concurrently; a slice that
 strictly depends on another's output should wait for that worker's report
 instead of being spawned early. If `$ARGUMENTS` is empty, ask the user what

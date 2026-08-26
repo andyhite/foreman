@@ -19,9 +19,11 @@ Call `foreman_roles` first to see what this repo already has configured.
 Work out the distinct standing roles this calls for (product manager,
 project manager, release engineer, integration engineer, etc.) — one expert
 per role, not one per task. For each role that matches a configured entry,
-convene it with `role: "<name>"` and only the overrides that genuinely
-differ; for any role with no configured match, pick a short handle and write
-an ad hoc brief per the skill (the role's charter, what it owns, any
+convene it with `role: "<name>"` and only the per-call additions that
+genuinely apply — remember a per-call `brief` is appended after the role's
+own charter, not a replacement for it, so keep it to the amendment, not a
+restatement; for any role with no configured match, pick a short handle and
+write an ad hoc brief per the skill (the role's charter, what it owns, any
 skill:// the expert should load for its domain). Dispatch the whole cluster
 in a single `foreman_convene` call so they land in one new tab together. If
 `$ARGUMENTS` is empty, ask the user what roles they want convened before

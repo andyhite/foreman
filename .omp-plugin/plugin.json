@@ -1,6 +1,6 @@
 {
   "name": "foreman",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Dispatch work to peer coding agents in git worktrees, or convene standing experts, both driven by a configurable role library, and carry their reports and questions back.",
   "author": {
     "name": "Andy Hite"

@@ -1,6 +1,6 @@
 # Foreman
 
-[![version](https://img.shields.io/badge/version-0.14.0-blue)](./package.json)
+[![version](https://img.shields.io/badge/version-0.14.1-blue)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![runtime](https://img.shields.io/badge/runtime-omp-orange)](https://github.com/andyhite/herdr)
 
@@ -153,11 +153,12 @@ retyping the same brief and skills every time:
 `description` is never sent to the worker or expert — `foreman_roles` shows
 it to the orchestrating agent so it can decide whether an incoming request
 belongs to a standing role instead of being handled inline. `brief` and
-`skills` seed the child's initial message; per-call `brief`/`skills`/`model`
-(`role` on `foreman_spawn`, `experts[].role` on `foreman_convene`) override
-(`brief`, `model`) or extend (`skills`) the role's own. `skills` accepts any
-number of `skill://` URIs, loaded in order. A role is optional on both
-tools — pass an ad hoc `brief` instead when no configured role fits.
+`skills` seed the child's initial message; per-call `brief`/`skills`
+(`role` on `foreman_spawn`, `experts[].role` on `foreman_convene`) append
+after the role's own instead of replacing it, and `model` overrides the
+role's own. `skills` accepts any number of `skill://` URIs, loaded in
+order. A role is optional on both tools — pass an ad hoc `brief` instead
+when no configured role fits.
 
 ## Skills
 

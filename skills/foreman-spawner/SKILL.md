@@ -32,10 +32,10 @@ brief someone joining mid-project with no chat log to scroll:
   it to, or what it infers from the repo.
 - If a configured role fits the kind of worker you're spawning (see "Check
   `foreman_roles`" below), pass `role: "<name>"` to inherit its `skills` and
-  `model` — but usually still pass a task-specific `brief` alongside it,
-  since `brief` replaces the role's entirely rather than merging with it,
-  and a worker's task is rarely identical to another worker's from the same
-  role.
+  `model` — its `brief` becomes the worker's charter, and any `brief` you
+  also pass is appended after it as the task-specific addendum, not a
+  replacement, so you should still spell out the concrete task even when a
+  role applies.
 
 ## Judging an incoming `foreman_ask`
 
@@ -120,11 +120,13 @@ or force through, unlike a worker's worktree removal.
 Call `foreman_roles` before hand-writing a `foreman_spawn` or
 `foreman_convene` brief — it lists every role configured in
 `.foreman/roles.json` along with the `description` that says when to defer
-to it. Pass `role: "<name>"` and only the per-call overrides that genuinely
-differ (a one-off `skills` addition, a different `model`, and — for a
-worker — almost always a task-specific `brief`); don't retype a brief a
-role already fully supplies. If no configured role fits, write the ad hoc
-brief as before — `role` is optional on both tools, not required.
+to it. Pass `role: "<name>"` and keep your per-call `brief` to the
+amendment (the concrete task, or what differs from the role's standing
+charter) — it's appended after the role's own `brief`, not a replacement,
+so don't retype what the role already says. A per-call `skills` addition
+or `model` override composes the same way `skills` does elsewhere: extend,
+don't restate. If no configured role fits, write the ad hoc brief as
+before — `role` is optional on both tools, not required.
 
 If a request keeps recurring with no matching role, that's a signal to
 propose one rather than keep rewriting the same brief: recommend the user

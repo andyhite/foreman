@@ -323,16 +323,20 @@ before writing an ad hoc brief, without needing to remember one from a prior
 session or read the JSON file directly.
 
 `resolveBrief` composes a role and a per-call `foreman_spawn` or
-`foreman_convene` entry with override-vs-extend semantics chosen per field:
-`brief` and `model` are scalars, so a per-call value simply replaces the
-role's own; `skills` is a list two call sites might both want to contribute
-to, so it concatenates role skills first, then per-call skills, and the
-composed brief text is prefixed with a "Load these skills, in order: ..."
-line only when the resulting list is non-empty. The function has no notion
-of `RosterKind` — a worker and an expert resolve identically, since a role
-only ever supplies brief/skills/model, never a branch or worktree. Resolution
-happens for every entry in the call *before* any herdr worktree, tab, or
-pane is created — an unknown `role` name or a handle with neither `brief`
+`foreman_convene` entry with per-field semantics chosen for what each field
+is: `model` is a scalar override, so a per-call value simply replaces the
+role's own. `skills` and `brief` are both things a call site might want to
+*add to* rather than replace outright, so both compose instead — `skills`
+concatenates role skills first, then per-call skills, and `brief`
+concatenates the role's charter first, then the per-call brief, joined by a
+blank line, the same way a spawner amends a standing charter with a
+task-specific addendum rather than overwriting it. The composed brief text
+is prefixed with a "Load these skills, in order: ..." line only when the
+skills list is non-empty. The function has no notion of `RosterKind` — a
+worker and an expert resolve identically, since a role only ever supplies
+brief/skills/model, never a branch or worktree. Resolution happens for
+every entry in the call *before* any herdr worktree, tab, or pane is
+created — an unknown `role` name or a handle with neither `brief`
 nor a role that supplies one fails the whole call up front, rather than
 leaving a partial worktree or tab behind for `foreman_reap` to clean up.
 

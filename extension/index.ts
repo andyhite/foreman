@@ -696,12 +696,14 @@ export interface BriefRequest {
 }
 
 // Resolves one `foreman_spawn` or `foreman_convene` entry against the loaded
-// role config: role fields are the default, a per-call `brief`/`model`
-// overrides them and per-call `skills` are appended after the role's own.
-// The output text is the actual initial brief enqueued for the child —
-// skills are threaded through as an explicit "load these" line so a role's
-// whole skill set travels with it, rather than relying on prose in `brief`
-// to name them.
+// role config: `model` is a scalar override, `skills` and `brief` both
+// compose instead — a per-call `skills` list is appended after the role's
+// own, and a per-call `brief` is appended after the role's own rather than
+// replacing it, the same way a spawner amends a standing charter with a
+// task-specific addendum instead of overwriting it. The output text is the
+// actual initial brief enqueued for the child — skills are threaded through
+// as an explicit "load these" line so a role's whole skill set travels with
+// it, rather than relying on prose in `brief` to name them.
 export function resolveBrief(request: BriefRequest, roles: Record<string, RoleDefinition>): { text: string; model?: string } {
   const role = request.role ? roles[request.role] : undefined;
   if (request.role && !role) {
@@ -711,7 +713,7 @@ export function resolveBrief(request: BriefRequest, roles: Record<string, RoleDe
         (known.length > 0 ? ` — known roles: ${known.join(", ")}` : " — .foreman/roles.json has no roles"),
     );
   }
-  const brief = request.brief ?? role?.brief;
+  const brief = [role?.brief, request.brief].filter((b): b is string => Boolean(b)).join("\n\n");
   if (!brief) throw new Error(`foreman: "${request.handle}" needs a "brief", or a "role" that has one`);
   const skills = [...(role?.skills ?? []), ...(request.skills ?? [])];
   const model = request.model ?? role?.model ?? undefined;

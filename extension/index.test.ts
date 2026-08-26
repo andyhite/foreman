@@ -597,9 +597,9 @@ describe("resolveBrief", () => {
     expect(result).toEqual({ text: "Load these skills, in order: skill://sprint-planning\n\nPlan sprints.", model: "opus" });
   });
 
-  test("per-call brief overrides the role's brief", () => {
-    const result = resolveBrief(request({ handle: "pm", role: "pm", brief: "Plan this quarter." }), roles);
-    expect(result.text).toBe("Load these skills, in order: skill://sprint-planning\n\nPlan this quarter.");
+  test("per-call brief is appended after the role's brief", () => {
+    const result = resolveBrief(request({ handle: "pm", role: "pm", brief: "Plan this quarter specifically." }), roles);
+    expect(result.text).toBe("Load these skills, in order: skill://sprint-planning\n\nPlan sprints.\n\nPlan this quarter specifically.");
   });
 
   test("per-call model overrides the role's model", () => {

@@ -5,7 +5,7 @@ argument-hint: [optional notes on the team/roles this project needs]
 
 Read `skill://foreman-spawner` now if you haven't already this session — it
 covers what a role's `description` and `brief` are each for, and the
-override/extend rules `foreman_spawn` and `foreman_convene` apply on top of
+append/extend rules `foreman_spawn` and `foreman_convene` apply on top of
 a role.
 
 Then set up `.foreman/roles.json` for this repo, together with the user:
@@ -49,8 +49,8 @@ for a repo with no versioned releases):
   team that spawns the same kind of bug-fix or dependency-bump worker
   often enough that its `skills`/`model` are worth naming once. These are
   `foreman_spawn`-only roles: still ask the user for a task-specific
-  `brief` per spawn, since a role's `brief` is replaced wholesale rather
-  than merged.
+  `brief` per spawn — it's appended after the role's own charter, not a
+  replacement for it.
 
 Present the shortlist with a one-line rationale each, and explicitly invite
 the user to add a role you didn't think of, drop one that doesn't fit, or
@@ -64,8 +64,8 @@ merge two into one — this is a conversation, not a form to fill in silently.
   releases." Strong: "Owns tagging and publishing. Defer here for release
   cuts, changelogs, and version bumps."
 - **`brief`** — child-facing, second person, the role's charter as its
-  cold-start context. For a `foreman_spawn`-only role, note that this is
-  usually overridden per spawn by a task-specific brief.
+  cold-start context. For a `foreman_spawn`-only role, note that the
+  per-spawn task brief is appended after this, not a replacement for it.
 - **`skills`** — zero or more `skill://` URIs from step 1, in the order they
   should load. Don't force a skill on a role that doesn't need one.
 - **`model`** — optional; only ask if the user cares about overriding the
