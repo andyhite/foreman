@@ -7,8 +7,7 @@
 Foreman lets one agent act as a project manager and hand engineering work to
 peer agents, each running on its own git worktree and branch. It is a single
 omp-native agent plugin — one extension (`extension/index.ts`) exposing five
-tools — identical in every session. There is no bash CLI, no MCP sidecar, and
-no slash commands; the tools are the whole interface.
+tools, identical in every session.
 
 | Tool | Purpose |
 | --- | --- |
