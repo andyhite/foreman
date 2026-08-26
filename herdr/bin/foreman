@@ -1086,11 +1086,12 @@ Your boss is the agent \`$boss\`.
 - If you are blocked or need a decision, use the \`foreman_reply\` tool, or
   \`foreman reply "<question>"\`. It returns as soon as the question is filed
   and never blocks for the answer, which arrives later as a message tagged
-  \`[foreman msg from $boss]\`. Two things that do not work, both tried: your
-  own session's peer-messaging or inbox tools, which address your subagents
-  and never foreman; and polling \`foreman pickup\`, which is the boss's
-  delivery command, not yours. Keep working if you can, otherwise end your
-  turn — an idle worker is woken by the answer.
+  \`[foreman msg from $boss]\`. Two things that do not work, both tried:
+  \`hub\` in every form — \`hub wait\`, \`hub inbox\`, \`hub send\` reach the
+  subagents inside your own process, never your boss — and polling
+  \`foreman pickup\`, which is the boss's delivery command, not yours. Keep
+  working if you can, otherwise end your turn — an idle worker is woken by
+  the answer.
 - A question interrupts the boss, so the answer comes back even if it was
   mid-task; a report queues for the end of the boss's current turn. That
   asymmetry is the cost of each: file one report when you are done, and ask a

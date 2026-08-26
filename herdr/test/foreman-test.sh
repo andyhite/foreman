@@ -672,6 +672,24 @@ else
   printf '  skip  removed-verb prose sweep (plugin tree not beside this checkout)\n'
 fi
 
+# ── protocol block names tools, never categories ─────────────────────────────
+#
+# v0.7.3 warned a worker off two wrong ways to wait for an answer. It named
+# `foreman pickup` literally and described the other as "your own session's
+# peer-messaging or inbox tools". The next live worker filed its question,
+# then called `hub wait`, `hub wait --from foreman` (a 120s blocking wait that
+# only escaped because hub errors fast), and `hub inbox` — never touching the
+# verb that was named. Same bullet, one literal name, one category: only the
+# category failed. The boss skill had named `hub wait`/`hub inbox` outright
+# since the run before, which is the precedent this matched.
+
+printf '\nprotocol block names tools literally\n'
+block=$(protocol_block w1 boss1 feat/x /tmp/x)
+for tool in 'hub' 'foreman pickup' 'foreman_report' 'foreman_reply'; do
+  assert "the protocol block names \`$tool\` literally" \
+    [ -n "$(printf '%s' "$block" | grep -F -- "$tool")" ]
+done
+
 # ── handle parameter-name sweep ──────────────────────────────────────────────
 #
 # v0.7.0 shipped `foreman_msg` declaring `target` while every prose example
