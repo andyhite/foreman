@@ -80,7 +80,8 @@ context. `base` is optional and defaults to the parent's current HEAD.
 
 Beyond the table above:
 
-- `foreman_send` delivery waits for the receiver's current run to finish.
+- `foreman_send` may interrupt a busy worker — delivery is not gated on the
+  receiver being idle.
 - `foreman_ask` interrupts your parent's in-flight tool call — call it only
   once you've actually stalled.
 - `foreman_reap` refuses dirty or unmerged work unless forced.
