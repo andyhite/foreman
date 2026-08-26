@@ -326,4 +326,4 @@ herdr/test/foreman-dashboard-test.sh   # the dashboard
 
 For the agent-facing orchestration commands — the `/foreman:*` slash commands that
 dispatch work to these workers — see the companion agent plugin at
-[the repo root](../). It is harness-portable (omp, Claude Code, Codex; Cursor untested).
+[the repo root](../).

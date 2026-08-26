@@ -1064,9 +1064,13 @@ EOF
 
 # ── Spawning ─────────────────────────────────────────────────────────────────
 
-# The protocol block appended to every dispatched task. Workers are blank agent
-# sessions with no orchestration instructions of their own, so the contract has
-# to travel with the work.
+# The reinforcement appended to every dispatched task. The actual contract —
+# reporting, asking a blocked question, messaging peers — lives in
+# `skill://foreman-worker`, read via the mandatory skill instruction below;
+# workers are blank agent sessions with no orchestration instructions of
+# their own, so even that pointer has to travel with the work, not rely on
+# being fetched. This block only restates the literal tool names so a worker
+# that skips the skill still cannot miss them.
 protocol_block() {
   local handle=$1 boss=$2 branch=$3 dir=$4
   cat <<EOF
@@ -1075,30 +1079,18 @@ protocol_block() {
 ## Foreman protocol
 
 You are foreman worker \`$handle\`, working in \`$dir\` on branch \`$branch\`.
-Your boss is the agent \`$boss\`.
+Your boss is the agent \`$boss\`. Read \`skill://foreman-worker\` and follow
+it — this block only reinforces what it says:
 
 - Stay inside this worktree. Do not touch other checkouts of this repo.
 - Commit your work on this branch when it is done. Do not push and do not open
   a PR unless the task above says to.
-- When finished, write your report last: the \`foreman_report\` tool, or
-  \`foreman report -f <file>\` / \`foreman report "<summary>"\` from a shell.
-  Filing it delivers it to the boss; terminal output does not reach it.
-- If you are blocked or need a decision, use the \`foreman_reply\` tool, or
-  \`foreman reply "<question>"\`. It returns as soon as the question is filed
-  and never blocks for the answer, which arrives later as a message tagged
-  \`[foreman msg from $boss]\`. Two things that do not work, both tried:
-  \`hub\` in every form — \`hub wait\`, \`hub inbox\`, \`hub send\` reach the
-  subagents inside your own process, never your boss — and polling
-  \`foreman pickup\`, which is the boss's delivery command, not yours. Keep
-  working if you can, otherwise end your turn — an idle worker is woken by
-  the answer.
-- A question interrupts the boss, so the answer comes back even if it was
-  mid-task; a report queues for the end of the boss's current turn. That
-  asymmetry is the cost of each: file one report when you are done, and ask a
-  question only when you are genuinely blocked, never for a progress update.
-- Peers: \`foreman ls\` lists the other workers; \`foreman msg <handle> "<text>"\`
-  messages one directly. Use it to coordinate on a shared seam, not for status
-  updates.
+- Report with the \`foreman_report\` tool when finished; terminal output alone
+  never reaches the boss. Ask with the \`foreman_reply\` tool only when you
+  are genuinely blocked, never for a progress update — it interrupts the
+  boss, a report does not. \`hub\` in any form does not reach your boss.
+- Reach a peer with the \`foreman_ls\`/\`foreman_msg\` tools, for a shared
+  seam you both touch, never a status update.
 - Delegate substantial independent slices of your task to your own subagents
   instead of working serially.
 EOF

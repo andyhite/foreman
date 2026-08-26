@@ -16,19 +16,17 @@ its output is a branch rather than a message.
 
 That independence is also the cost. Harness-local channels such as omp's `hub`,
 `history://`, and `agent://` do not reach a separate process. Every message in
-both directions goes through herdr's agent surface, which the `foreman_*` tools
-and the `foreman` CLI both wrap.
+both directions goes through the `foreman_*` tools instead.
 
 This skill is the boss-side contract. For *what to put in a worker's brief* —
 the boss's actual job — read `skill://foreman-dispatch`. For what a worker
 itself can do once dispatched, read `skill://foreman-worker` instead — you
-should not need it here; every dispatched task already carries its own
-protocol block.
+should not need it here; `foreman` points every dispatched worker at that
+skill automatically, and its own protocol block only reinforces it.
 
 Each boss-side operation is a `foreman_*` tool: `foreman_boss`, `foreman_spawn`,
 `foreman_send`, `foreman_msg`, `foreman_join`, `foreman_ls`, `foreman_read`,
-`foreman_reap`, `foreman_keys`, `foreman_doctor`, `foreman_roles`. Call the
-tool, not the shell command it wraps — the reason is not merely style.
+`foreman_reap`, `foreman_keys`, `foreman_doctor`, `foreman_roles`.
 
 Delivery is a real push, not a poll, and the receiver's urgency is declared by
 the sender rather than guessed from the payload. **Interrupt** is a narrower
@@ -62,14 +60,11 @@ you were holding — see [Handling an interruption](#handling-an-interruption)
 and [Collecting](#collecting). See [README.md](../../README.md#install) for
 how the delivery channel is wired up.
 
-Three reasons to prefer the tool over the shell command it wraps: `foreman_spawn`
-takes the whole brief as its `task` string and writes the temp file and
-passes `--task-file` itself, so no shell quoting can mangle a multi-line
-brief; `foreman_join` streams each report as its worker
-settles rather than returning one blob at the end of the wave; and the
-wrappers return stderr as well as stdout, so a `note()` diagnostic —
-including the first-dispatch pickup warning — is not silently dropped the
-way it is from a bash call that only captures stdout.
+`foreman_spawn` takes the whole brief as its `task` string and writes the
+temp file itself, so no shell quoting can mangle a multi-line brief.
+`foreman_join` streams each report as its worker settles rather than
+returning one blob at the end of the wave. Every `foreman_*` tool surfaces a
+`note()` diagnostic — including the first-dispatch pickup warning.
 
 ## Requirements
 
@@ -163,10 +158,8 @@ roles:
 
 Long tasks read better from a file, and a brief worth dispatching is almost
 always long. With `foreman_spawn` you are spared the file dance entirely: pass
-the whole brief as `task` and the wrapper writes it to a temp file and passes
-`--task-file` itself. `--task-file` on the raw CLI is only the shape that
-fallback takes when no tool is loaded — there is no `task_file` parameter on
-the tool; `task` is always the full text.
+the whole brief as `task` — it handles writing that out itself. `task` is
+always the full text; there is no separate file parameter.
 
 `tier: "standard" | "deep"` selects a worker model band; `model` is the escape
 hatch that passes an omp model selector straight through. The two are
@@ -213,12 +206,13 @@ means every worker's own push already landed. A slow background sweep covers
 only what a push cannot: a worker that ended its turn without reporting, one
 whose agent died, and a push that found no live boss.
 
-Do not go looking in your session's own peer-messaging tools. `hub wait`,
-`hub inbox` and friends cover subagents inside your process; a foreman worker
-is a separate agent reached over the herdr bus and never appears there. One
-shipped run polled `hub wait`, then `hub inbox`, got `Inbox empty`, and
-reported delivery as broken — while the report was in flight, and it arrived
-on its own a minute later. An empty inbox there is evidence of nothing. If you
+Use `hub wait`/`hub inbox` and friends for your own subagents exactly as you
+normally would — nothing about this changes. The one thing they cannot do is
+see a foreman worker: it is a separate agent reached over the herdr bus,
+never a subagent inside your process, so it never appears there. One shipped
+run polled `hub wait`, then `hub inbox`, got `Inbox empty`, and reported
+delivery as broken — while the report was in flight, and it arrived on its
+own a minute later. An empty inbox there is evidence of nothing. If you
 genuinely want to block, block with `foreman_join`.
 
 **A deliberate blocking wait.** Sometimes waiting is still the right call: a

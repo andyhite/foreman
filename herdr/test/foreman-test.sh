@@ -433,7 +433,9 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   assert 'the brief follows the instruction' \
     [ "${prompt#*Add exponential backoff to the dispatcher.}" != "$prompt" ]
   assert "foreman's own protocol block is still appended" \
-    [ "${prompt#*foreman report}" != "$prompt" ]
+    [ "${prompt#*foreman_report}" != "$prompt" ]
+  assert 'the protocol block points the worker at the worker skill' \
+    [ "${prompt#*skill://foreman-worker}" != "$prompt" ]
   started_cmd=$(cat "$start_args" 2>/dev/null || true)
   assert 'every worker starts as omp' \
     [ "${started_cmd#*--kind omp}" != "$started_cmd" ]
@@ -682,10 +684,17 @@ fi
 # verb that was named. Same bullet, one literal name, one category: only the
 # category failed. The boss skill had named `hub wait`/`hub inbox` outright
 # since the run before, which is the precedent this matched.
+#
+# `foreman pickup` itself later dropped out of worker-facing prose entirely:
+# it is boss/sidecar plumbing with no `foreman_*` tool wrapper, and a worker
+# has no legitimate reason to know it exists at all, so naming it as a wrong
+# path taught the CLI surface it should never touch. `hub`, unlike it, is a
+# real tool the worker's own session exposes, so it still earns a literal
+# warning here.
 
 printf '\nprotocol block names tools literally\n'
 block=$(protocol_block w1 boss1 feat/x /tmp/x)
-for tool in 'hub' 'foreman pickup' 'foreman_report' 'foreman_reply'; do
+for tool in 'skill://foreman-worker' 'hub' 'foreman_report' 'foreman_reply' 'foreman_ls' 'foreman_msg'; do
   assert "the protocol block names \`$tool\` literally" \
     [ -n "$(printf '%s' "$block" | grep -F -- "$tool")" ]
 done

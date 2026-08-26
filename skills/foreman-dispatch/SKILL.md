@@ -94,12 +94,13 @@ cover.
 
 **Do not include:** where to commit, whether to push, how to report back, a
 reminder to stay in the worktree, that other workers exist, or a nudge to
-delegate independent work. `foreman` appends its own protocol block covering
-all of that — including that `foreman_ls`/`foreman ls` lists the other workers
-and `foreman_msg`/`foreman msg` reaches one directly over a declared shared
-seam (never for status updates), and that substantial independent slices of
-the worker's own task should go to its own subagents instead of running
-serially. Repeating any of it wastes context and invites contradictions.
+delegate independent work. `foreman` points every dispatched worker at
+`skill://foreman-worker` and appends its own protocol block on top, covering
+all of that — including that `foreman_ls` lists the other workers,
+`foreman_msg` reaches one directly over a declared shared seam (never for
+status updates), and that substantial independent slices of the worker's own
+task should go to its own subagents instead of running serially. Repeating
+any of it wastes context and invites contradictions.
 
 **Do not include** a summary of this conversation either. Include the
 conclusions, not the deliberation.
