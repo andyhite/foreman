@@ -340,20 +340,69 @@ created — an unknown `role` name or a handle with neither `brief`
 nor a role that supplies one fails the whole call up front, rather than
 leaving a partial worktree or tab behind for `foreman_reap` to clean up.
 
+### 3.10 Configurable setup/teardown — `.foreman/setup.json`
+
+herdr's own `tdi.worktree-setup` (§3.6) is generic — env file copying, mise
+trust — and knows nothing about a given project's own bootstrap, such as
+`npm ci` or a database migration a fresh worktree needs before a worker can
+usefully start. `.foreman/setup.json`, committed in the repo, supplies that
+project-specific layer:
+
+```ts
+interface SetupConfig {
+  setup: string[];      // commands run after a worker's worktree is created
+  teardown: string[];   // commands run before foreman_reap removes it
+}
+```
+
+Each array is a list of separate command strings, not one script, joined
+with `&&` only at the point they're sent to a pane — keeping them as an
+array in the config lets `foreman_roles`-style tooling or a future dry-run
+inspect individual steps rather than parsing a shell one-liner back apart.
+
+`foreman_spawn` splits a second pane below the worker's own (`herdr pane
+split --direction down --cwd <worktree>`) and fires `herdr pane run` with
+the joined `setup` commands, immediately after the worktree exists and
+before `writeRosterEntry`/`startAgentOnPane`. It does not block on the
+result: `pane run` only types the command into the pane's shell and returns,
+so a slow `npm ci` runs concurrently with the worker's own agent starting
+rather than delaying the brief. A missing or empty `setup` array skips the
+split entirely — no pane appears when there's nothing to run — and a split
+or `pane run` failure is caught and folded into the spawn result's text
+rather than failing the whole spawn, because setup is a convenience, not a
+precondition: a worker whose setup pane failed to open still has a working
+worktree and pane, and failing the tool call here would leave that behind
+for `foreman_reap` to clean up over something the agent itself never needed
+to start working.
+
+`foreman_reap` is the one place that *should* block, briefly: a worktree
+removed while `docker compose down` is still queued in a pane never runs
+that teardown at all, since the pane and its shell go away with the
+worktree. It splits a pane the same way, sends the joined `teardown`
+commands followed by `; echo <sentinel>`, and waits on `herdr pane
+wait-output --match <sentinel>` (default 60 s, `FOREMAN_TEARDOWN_TIMEOUT_MS`)
+before proceeding to `herdr worktree remove`. The sentinel — a handle-scoped
+marker, not just watching for the shell prompt to return — is the only way
+to observe completion, because `pane run` itself is fire-and-forget. Like
+setup, teardown is best-effort: a missing config, a failed split, or a
+timed-out wait is caught and swallowed, and the worktree removal proceeds
+regardless, because a stuck or misconfigured teardown command must never
+strand a worker's worktree for `foreman_reap` to fail on forever.
+
 ## 4. Contract surface
 
 Eight tools, identical in every session.
 
 | Tool | Contract |
 | --- | --- |
-| `foreman_spawn` | handle, branch, base, role?, brief?, skills?, model? → worktree + pane + agent; records you as parent and delivers the resolved brief. One worker per branch. `brief` required unless `role` supplies one. |
+| `foreman_spawn` | handle, branch, base, role?, brief?, skills?, model? → worktree + pane + agent; records you as parent and delivers the resolved brief. One worker per branch. `brief` required unless `role` supplies one. If `.foreman/setup.json` configures `setup` commands, also opens a non-blocking sibling pane running them (§3.10). |
 | `foreman_convene` | experts (handle, role?, brief?, skills?, model?), label? → new herdr tab, one pane and agent per expert, sharing your own checkout. For standing advisory roles, not branch-owned code work. |
 | `foreman_roles` | → table of configured role name, description, skills, model from `.foreman/roles.json`. Read before foreman_spawn or foreman_convene to decide whether a request belongs to a standing role instead of being handled inline. |
 | `foreman_send` | to, text → `followUp` to a handle on one of your edges. Covers dispatch, answer, and report — they differ only in direction. |
 | `foreman_ask` | text → `steer` to your parent, then block until the answer lands and return it as this call's result. |
 | `foreman_wait` | block until the next mail on any of your edges arrives, sending nothing. For when you have dispatched everything and have nothing to do until a worker reports. |
 | `foreman_ls` | the children you spawned or convened: kind, state, branch (workers only), ahead/behind the spawn point, last message. |
-| `foreman_reap` | handle → for a worker, refuses dirty or unmerged unless forced then removes the worktree; for an expert, closes its pane unconditionally. Either way, deletes the roster entry. |
+| `foreman_reap` | handle → for a worker, refuses dirty or unmerged unless forced, runs any `.foreman/setup.json` `teardown` commands to completion in a sibling pane (§3.10), then removes the worktree; for an expert, closes its pane unconditionally. Either way, deletes the roster entry. |
 
 Sending returns a **tool result**. Receiving arrives as a real user turn, or —
 if the receiver is blocked in `foreman_ask`/`foreman_wait` — as that call's

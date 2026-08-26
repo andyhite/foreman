@@ -121,7 +121,9 @@ Beyond the table above:
   ordinary way instead.
 - `foreman_reap` refuses dirty or unmerged work unless forced — for a
   worker. An expert has no branch to guard, so reaping one just closes its
-  pane.
+  pane. If `.foreman/setup.json` configures `teardown` commands, they run
+  to completion first, bounded by `FOREMAN_TEARDOWN_TIMEOUT_MS` (default
+  60s).
 
 State — the roster and per-handle mailboxes — lives under `$FOREMAN_STATE`
 (default `~/.foreman/<slug>/`, where `<slug>` is the repo's `--git-common-dir`
@@ -160,6 +162,30 @@ role's own. `skills` accepts any number of `skill://` URIs, loaded in
 order. A role is optional on both tools — pass an ad hoc `brief` instead
 when no configured role fits.
 
+## Setup
+
+`.foreman/setup.json`, committed in the repo, configures commands to run
+around a worker's worktree lifecycle — project bootstrap `foreman_spawn`
+can't infer (herdr's own worktree creation only copies env files and trusts
+`mise`), and cleanup `foreman_reap` should run before the worktree is gone:
+
+```json
+{
+  "setup": ["npm ci", "mise trust"],
+  "teardown": ["docker compose down"]
+}
+```
+
+`foreman_spawn` opens a sibling pane next to the worker's own and runs
+`setup` there as soon as the worktree exists, in parallel with the worker
+starting — a slow install never delays the brief landing. `foreman_reap`
+opens the same kind of pane and waits for `teardown` to finish before
+removing the worktree, since a pane closed with the worktree never gets to
+run anything queued in it. Both are optional and best-effort: a missing
+`.foreman/setup.json`, an empty array, or a failed pane never blocks
+spawning or reaping — spawn reports it in the result text and moves on;
+reap proceeds to remove the worktree regardless.
+
 ## Skills
 
 - `skill://foreman-spawner` — the parent-seat judgement `foreman_spawn`,
@@ -188,4 +214,6 @@ in case the original read has since scrolled out of context.
   `skill://foreman-expert`, then works out the standing roles `<roles>`
   calls for and dispatches the whole cluster with one `foreman_convene` call.
 - `/foreman-init [notes]` — interviews the user, proposes common roles that
-  fit the repo, and writes `.foreman/roles.json`.
+  fit the repo, and writes `.foreman/roles.json`; also detects the
+  project's own bootstrap (lockfiles, toolchain pins, compose files) and
+  writes `.foreman/setup.json` for `foreman_spawn`/`foreman_reap`.

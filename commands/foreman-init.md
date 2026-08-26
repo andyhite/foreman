@@ -1,6 +1,6 @@
 ---
-description: Interview the user and write .foreman/roles.json for this repo
-argument-hint: [optional notes on the team/roles this project needs]
+description: Interview the user and write .foreman/roles.json and .foreman/setup.json for this repo
+argument-hint: [optional notes on the team/roles/setup this project needs]
 ---
 
 Read `skill://foreman-spawner` now if you haven't already this session — it
@@ -8,9 +8,15 @@ covers what a role's `description` and `brief` are each for, and the
 append/extend rules `foreman_spawn` and `foreman_convene` apply on top of
 a role.
 
-Then set up `.foreman/roles.json` for this repo, together with the user:
+Set up two files for this repo, together with the user: `.foreman/roles.json`
+(standing roles, part A) and `.foreman/setup.json` (per-worktree
+setup/teardown commands, part B). Do both — a project worth configuring
+roles for is also worth wiring bootstrap commands for, and both live in the
+same interview.
 
 $ARGUMENTS
+
+# Part A — Roles
 
 ## 1. Look at what's already there
 
@@ -90,3 +96,76 @@ Remind the user that `.foreman/roles.json` is meant to be committed — it's
 shared team config, not local state — and that `foreman_convene` will pick
 up new roles immediately with no restart needed. Don't commit it yourself;
 that's the user's call.
+
+# Part B — Setup/teardown
+
+`.foreman/setup.json` configures commands `foreman_spawn` runs in a sibling
+pane right after a worker's worktree is created (`setup`), and commands
+`foreman_reap` runs to completion in a sibling pane before removing it
+(`teardown`). See `skill://foreman-spawner` and `docs/ARCHITECTURE.md` §3.10
+if present in this repo for the exact mechanics; you don't need them to do
+this part, only the shape: `{ "setup": string[], "teardown": string[] }`.
+
+## 6. Look at what's already there, and what the project needs to boot
+
+- If `.foreman/setup.json` exists, read it and show the user the current
+  `setup`/`teardown` arrays before changing anything. Ask whether this run
+  is adding commands, editing existing ones, or starting over.
+- Detect the project's own bootstrap by what's actually in the repo — don't
+  guess from the language alone:
+  - **Lockfile → install command**: `package-lock.json` → `npm ci`;
+    `pnpm-lock.yaml` → `pnpm install`; `yarn.lock` → `yarn install
+    --frozen-lockfile`; `bun.lockb`/`bun.lock` → `bun install`;
+    `Gemfile.lock` → `bundle install`; `poetry.lock` → `poetry install`;
+    `uv.lock` → `uv sync`; `requirements.txt` (no poetry/uv lock) → `pip
+    install -r requirements.txt`; `Cargo.lock` → `cargo build`; `go.sum` →
+    `go mod download`.
+  - **Toolchain pin → trust/install**: `.mise.toml` or `.tool-versions` →
+    `mise install` (herdr's own worktree creation already runs `mise
+    trust`, so don't duplicate that step here).
+  - **Env template**: `.env.example` or `.env.sample` with no `.env` already
+    git-ignored-and-copied by tooling → propose `cp .env.example .env` only
+    if the project doesn't already handle this itself (check for a
+    postinstall script or setup doc saying otherwise first).
+  - **Local services**: `docker-compose.yml`/`compose.yaml` → `docker
+    compose up -d` as a `setup` candidate, `docker compose down` as the
+    matching `teardown` — propose these as a pair or not at all, never one
+    without the other.
+  - **Database migrations**: a `migrate`/`db:setup` script in `package.json`
+    or a `Makefile`/`justfile` target with a name like that → propose it as
+    a `setup` command after the install step.
+  - Skim `package.json` scripts, `Makefile`, and `justfile` for anything
+    named `setup`, `bootstrap`, `dev:setup`, or similar — a project that
+    already has one command for this is a stronger signal than composing
+    several yourself; propose that single command instead of the pieces it
+    wraps.
+- If nothing in the repo needs setup beyond what herdr's own worktree
+  creation already does (env file copying, `mise trust`), say so plainly
+  and propose an empty `.foreman/setup.json` — or none at all — rather than
+  inventing commands the project doesn't need.
+
+## 7. Propose, don't just write
+
+Present the detected `setup` and `teardown` commands as a shortlist with a
+one-line reason each (what file or script triggered the suggestion), and
+ask the user to confirm, drop, reorder, or add to it — the same
+conversational posture as the roles shortlist in Part A. Commands run in
+the order given, joined with `&&`, so ask about ordering when it matters
+(e.g. install before migrate).
+
+## 8. Write the file
+
+Write `.foreman/setup.json` as `{ "setup": [...], "teardown": [...] }`,
+omitting a key only if the user wants no commands for that phase (prefer
+`[]` over omitting it, matching the shape `loadSetupConfig` expects).
+Preserve any existing commands the user didn't ask to change.
+
+## 9. Close the loop
+
+Remind the user that both `.foreman/roles.json` and `.foreman/setup.json`
+are meant to be committed — shared team config, not local state — and that
+`foreman_spawn`/`foreman_reap`/`foreman_convene` pick up changes to either
+immediately, no restart needed. Mention that `setup` runs in a pane
+alongside the worker rather than blocking it, and a failed or slow `setup`
+never blocks the spawn — it only shows up in the spawn result text and the
+pane itself. Don't commit either file yourself; that's the user's call.
