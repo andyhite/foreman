@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionToolContext } from "@oh-my-pi/pi-coding-agent";
 import {
   canSend,
   deriveHandle,
@@ -12,6 +13,7 @@ import {
   deliveryOptions,
   urgencyKind,
   validHandle,
+  waitForMail,
   type DrainDeps,
   type Message,
   type RosterEntry,
@@ -150,6 +152,16 @@ describe("renderInbox", () => {
     expect(text).toContain("[foreman:plotroom]");
   });
 
+  test("a message from self's parent carries the worker-skill reminder", () => {
+    const text = renderInbox([msg("send", { from: "plotroom" })], self);
+    expect(text).toContain("skill://foreman-worker");
+  });
+
+  test("a message from a spawned child carries the spawner-skill reminder", () => {
+    const text = renderInbox([msg("send", { from: "auth-sub", to: "auth" })], self);
+    expect(text).toContain("skill://foreman-spawner");
+  });
+
   test("a 3-message batch is prefixed and separated correctly", () => {
     const text = renderInbox([msg("send"), msg("send"), msg("send")], self);
     expect(text.startsWith("[foreman] 3 queued messages")).toBe(true);
@@ -265,32 +277,32 @@ describe("drainOnce", () => {
     expect(done).toEqual(["1-boss-000.json.bad", "2-boss-001.json"]);
   });
 
-  // Kept last among drainOnce tests: it leaves an unresolved drainOnce call
-  // in flight, which would permanently stick the module-level `draining`
-  // flag for any later test in this file that also calls drainOnce.
   test("re-entrancy: a second concurrent call is a no-op while the first is in flight", async () => {
     seedMail(stateDir, handle, "1-boss-000.json", JSON.stringify(msg("send", { to: handle, text: "hello" })));
     let calls = 0;
     const { promise: sent, resolve: notifySent } = Promise.withResolvers<void>();
+    const { promise: held, resolve: releaseSend } = Promise.withResolvers<void>();
     const deps: DrainDeps = {
       pi: {
         exec: makeExec(repoRoot),
         sendMessage: async () => {
           calls++;
           notifySent();
-          // Deliberately never resolved: `first` must still be in flight
-          // when `second`'s early return is observed.
-          return Promise.withResolvers<void>().promise;
+          // Held open so `first` is provably still in flight when `second`
+          // returns early, then released below — leaving it pending would
+          // stick the module-level `draining` flag for every later test.
+          return held;
         },
       },
       cwd: repoRoot,
     };
     const first = drainOnce(deps);
     const second = drainOnce(deps);
-    await second; // returns immediately: the module-level `draining` flag was already set synchronously by `first`
-    await sent; // await the real signal that `first` reached sendMessage, not a guessed duration
+    await second; // returns immediately: `first` set `draining` synchronously
+    await sent; // the real signal that `first` reached sendMessage, not a guessed duration
     expect(calls).toBe(1);
-    void first; // intentionally left unresolved
+    releaseSend();
+    await first;
   });
 });
 
@@ -327,5 +339,95 @@ describe("canSend", () => {
 
   test("rejects an unknown handle", () => {
     expect(canSend(self, "nobody", roster)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// 12. waitForMail — mail must reach exactly one of the two delivery paths
+// ---------------------------------------------------------------------
+
+describe("waitForMail", () => {
+  let stateDir: string;
+  let calls: number;
+  let deps: DrainDeps;
+  let tick: (() => void | Promise<void>) | null;
+  let ctx: ExtensionToolContext;
+  const repoRoot = "/synthetic/plotroom";
+  const handle = "plotroom";
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), "foreman-wait-"));
+    process.env.FOREMAN_STATE = stateDir;
+    mkdirSync(join(stateDir, "mail", handle), { recursive: true });
+    calls = 0;
+    deps = {
+      pi: {
+        exec: makeExec(repoRoot),
+        sendMessage: async () => {
+          calls++;
+        },
+      },
+      cwd: repoRoot,
+    };
+    // Driving the interval by hand rather than with real timers: Bun's
+    // `setInterval` returns a Timer, not the `number` the DOM lib promises,
+    // so a fake that actually armed one could not clear it without a cast.
+    tick = null;
+    ctx = {
+      cwd: repoRoot,
+      setInterval: (fn) => {
+        tick = fn;
+        return 1;
+      },
+      clearTimer: () => {
+        tick = null;
+      },
+    };
+  });
+
+  afterEach(() => {
+    delete process.env.FOREMAN_STATE;
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  // Every test drives the timeout check by hand, so nothing here waits on the
+  // wall clock. The "mail arrives while blocked" case is deliberately absent:
+  // it enters `drainOnce` on the same `takeDelivery` branch the first test
+  // already covers, and reaching it from outside would mean racing the drain
+  // `waitForMail` fires on arming.
+
+  test("mail already pending is handed to the waiter, not injected", async () => {
+    seedMail(stateDir, handle, "1-boss-000.json", JSON.stringify(msg("send", { to: handle, text: "hello" })));
+    expect(await waitForMail(deps, ctx, undefined, 60_000)).toContain("hello");
+    // The whole point: no second copy went out as an injected turn.
+    expect(calls).toBe(0);
+    expect(readdirSync(join(stateDir, "done", handle))).toEqual(["1-boss-000.json"]);
+  });
+
+  test("a wait with nothing to deliver resolves null", async () => {
+    const pending = waitForMail(deps, ctx, undefined, 0);
+    tick?.();
+    expect(await pending).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+
+  test("an aborted wait resolves null and releases the slot", async () => {
+    const controller = new AbortController();
+    const pending = waitForMail(deps, ctx, controller.signal, 60_000);
+    controller.abort();
+    tick?.();
+    expect(await pending).toBeNull();
+    // Slot released, so a fresh wait is accepted rather than refused.
+    const second = waitForMail(deps, ctx, undefined, 0);
+    tick?.();
+    expect(await second).toBeNull();
+  });
+
+  test("a second wait is refused while one is blocked", async () => {
+    const first = waitForMail(deps, ctx, undefined, 0);
+    await expect(waitForMail(deps, ctx, undefined, 0)).rejects.toThrow("already blocked");
+    tick?.();
+    expect(await first).toBeNull();
   });
 });

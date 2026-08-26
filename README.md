@@ -1,19 +1,20 @@
 # Foreman
 
-[![version](https://img.shields.io/badge/version-0.9.0-blue)](./package.json)
+[![version](https://img.shields.io/badge/version-0.10.0-blue)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![runtime](https://img.shields.io/badge/runtime-omp-orange)](https://github.com/andyhite/herdr)
 
 Foreman lets one agent act as a project manager and hand engineering work to
 peer agents, each running on its own git worktree and branch. It is a single
-omp-native agent plugin — one extension (`extension/index.ts`) exposing five
+omp-native agent plugin — one extension (`extension/index.ts`) exposing six
 tools, identical in every session.
 
 | Tool | Purpose |
 | --- | --- |
 | `foreman_spawn` | Create a worker: new worktree, branch, and first task |
 | `foreman_send` | Message a handle on one of your edges — new task, follow-up, or report |
-| `foreman_ask` | Ask your parent a question you're blocked on, then stop |
+| `foreman_ask` | Ask your parent a question you're blocked on, and block until they answer |
+| `foreman_wait` | Block until mail arrives, when you have nothing to do until it does |
 | `foreman_ls` | List workers you've spawned: state, branch position, pending mail |
 | `foreman_reap` | Remove a worker's worktree, pane, and roster entry after merge |
 
@@ -91,8 +92,14 @@ Beyond the table above:
 
 - `foreman_send` never interrupts: a busy worker finishes its current run
   first, an idle one wakes within milliseconds.
-- `foreman_ask` does interrupt your parent's in-flight tool call — call it
-  only once you've actually stalled.
+- `foreman_ask` does interrupt your parent's in-flight tool call, then blocks
+  until they answer — the answer comes back as the tool's own result, so you
+  carry straight on instead of ending your turn. Call it only once you've
+  actually stalled.
+- `foreman_wait` blocks without sending anything, for when you have nothing
+  useful to do until a worker reports. Both bound at 5 minutes by default,
+  after which they tell you to end your turn and the message arrives the
+  ordinary way instead.
 - `foreman_reap` refuses dirty or unmerged work unless forced.
 
 State — the roster and per-handle mailboxes — lives under `$FOREMAN_STATE`
@@ -100,8 +107,21 @@ State — the roster and per-handle mailboxes — lives under `$FOREMAN_STATE`
 sanitized into a filesystem-safe name), keyed by handle; nothing is written
 into a repo a worker operates on.
 
-## Skill
+## Skills
 
-- `skill://foreman` — the judgement the tool parameters don't encode:
-  writing a brief a worker can act on, when to ask versus decide, one worker
+- `skill://foreman-spawner` — the parent-seat judgement `foreman_spawn`,
+  `foreman_send`, `foreman_ls`, and `foreman_reap` don't encode: writing a
+  brief a worker can act on, judging an incoming `foreman_ask`, one worker
   per branch, and reaping only after merging.
+- `skill://foreman-worker` — the child-seat judgement: staying on your own
+  branch, when to ask versus decide, and reporting back to your parent.
+
+A session on both ends of foreman (a worker that has spawned children of its
+own) can load both. Every message a session receives through foreman carries
+a reminder pointing back at the right one, in case the original read has
+since scrolled out of context.
+
+## Commands
+
+- `/foreman-spawn <goal>` — reads `skill://foreman-spawner`, then decomposes
+  `<goal>` into independent slices and dispatches one worker per slice.

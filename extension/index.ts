@@ -93,11 +93,23 @@ async function herdrJson(pi: Pick<ExtensionAPI, "exec">, args: string[], cwd: st
 // raw comparison would fail to match a worker to its own entry.
 // ---------------------------------------------------------------------
 
+// A session's git common dir and toplevel cannot change while the process
+// lives, so this resolves once rather than on every drain and every tool
+// call — feeding the old 250 ms poll cost eight `git rev-parse` subprocesses
+// a second per worker, mail or no mail. Keyed by cwd because `ctx.cwd` is
+// supplied per call; only successes are cached, so a `git init` mid-session
+// still takes effect.
+const factsCache = new Map<string, RepoFacts>();
+
 export async function gitFacts(pi: Pick<ExtensionAPI, "exec">, cwd: string): Promise<RepoFacts | null> {
+  const cached = factsCache.get(cwd);
+  if (cached) return cached;
   try {
     const key = await run(pi, "git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
     const root = await run(pi, "git", ["rev-parse", "--show-toplevel"], cwd);
-    return { repoKey: key.stdout.trim(), repoRoot: root.stdout.trim() };
+    const facts: RepoFacts = { repoKey: key.stdout.trim(), repoRoot: root.stdout.trim() };
+    factsCache.set(cwd, facts);
+    return facts;
   } catch {
     return null;
   }
@@ -247,22 +259,42 @@ export function deliveryOptions(kind: MessageKind): ExtensionSendOptions {
   return { deliverAs: "followUp", triggerTurn: true };
 }
 
+// Reminder appended to every rendered message, not just the initial brief:
+// briefs are common casualties of context compaction, so a worker several
+// turns in may no longer have `skill://foreman-worker` in context at all.
+// Direction is derived structurally from `self.parent`, not from message
+// kind, because `canSend` only ever allows parent<->child edges: if the
+// sender is self's own parent, self is acting as the worker on this edge;
+// otherwise the sender can only be a child self spawned, so self is acting
+// as the spawner.
+function skillReminder(msg: Message, self: RosterEntry): string {
+  const skill = msg.from === self.parent ? "foreman-worker" : "foreman-spawner";
+  return `[foreman] Re-read skill://${skill} now if it's not fresh in this context — it covers judgement these tool parameters don't encode.`;
+}
+
 function renderMessage(msg: Message, self: RosterEntry): string {
+  const reminder = skillReminder(msg, self);
   if (msg.kind === "brief") {
     return `[foreman:${msg.from}] You are worker @${self.handle}.
 Branch: ${self.branch}
 Worktree: ${self.cwd}
 
-${msg.text}`;
+${msg.text}
+
+${reminder}`;
   }
   if (msg.kind === "ask") {
     return `[foreman:${msg.from}] BLOCKED
 
-${msg.text}`;
+${msg.text}
+
+${reminder}`;
   }
   return `[foreman:${msg.from}]
 
-${msg.text}`;
+${msg.text}
+
+${reminder}`;
 }
 
 export function renderInbox(msgs: Message[], self: RosterEntry): string {
@@ -285,6 +317,11 @@ export interface DrainDeps {
 // A `sendMessage` slower than the tick interval must never double-deliver —
 // guarded by this module-level flag, set in a try/finally.
 let draining = false;
+
+// One slot, because two blocked waiters would split a single batch of mail
+// between them. Held by `waitForMail`, cleared by whichever of mail, timeout,
+// or abort arrives first.
+let waiter: ((rendered: string) => void) | null = null;
 
 export async function drainOnce(deps: DrainDeps): Promise<void> {
   if (draining) return;
@@ -323,15 +360,26 @@ export async function drainOnce(deps: DrainDeps): Promise<void> {
     }
     if (msgs.length === 0) return;
 
-    await deps.pi.sendMessage(
-      {
-        customType: INBOX_CUSTOM_TYPE,
-        content: renderInbox(msgs, self),
-        display: true,
-        attribution: "user",
-      },
-      deliveryOptions(urgencyKind(msgs)),
-    );
+    const rendered = renderInbox(msgs, self);
+    // A blocked `foreman_wait`/`foreman_ask` takes delivery instead of the
+    // injection path: that caller has already stopped and is about to read
+    // this batch as its tool result, so injecting a turn as well would
+    // deliver the same messages twice.
+    const takeDelivery = waiter;
+    if (takeDelivery) {
+      waiter = null;
+      takeDelivery(rendered);
+    } else {
+      await deps.pi.sendMessage(
+        {
+          customType: INBOX_CUSTOM_TYPE,
+          content: rendered,
+          display: true,
+          attribution: "user",
+        },
+        deliveryOptions(urgencyKind(msgs)),
+      );
+    }
     // Only after the send resolves. If it throws, the files stay in mail/
     // for the next tick to retry — at-least-once, visible in done/.
     for (const file of goodFiles) {
@@ -364,15 +412,49 @@ async function requireSelf(pi: ExtensionAPI, cwd: string): Promise<{ root: strin
   return { root, repoRoot: facts.repoRoot, self: resolveSelf(root, facts.repoRoot) };
 }
 
-function sleep(ctx: ExtensionToolContext, ms: number): Promise<void> {
-  // Promise.withResolvers needs an ES2024 lib target; tsconfig.json target
-  // is ES2022 and out of scope for this rewrite (plan keeps it unchanged).
-  return new Promise((resolve) => {
-    const timer = ctx.setInterval(() => {
+// Blocks the calling tool until mail lands, so a peer's reply can come back as
+// a tool result instead of "end your turn and hope". Measured: an extension
+// tool can hold a turn for 300 s without the harness cancelling it
+// (docs/ARCHITECTURE.md §8), so the bound below is a domain choice, not a
+// runtime limit.
+export const DEFAULT_WAIT_MS = 300_000;
+
+export async function waitForMail(
+  deps: DrainDeps,
+  ctx: ExtensionToolContext,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<string | null> {
+  if (waiter) throw new Error("foreman: this session is already blocked waiting for mail");
+  const { promise: arrived, resolve } = Promise.withResolvers<string | null>();
+  const deadline = Date.now() + timeoutMs;
+  waiter = resolve;
+  // Timeout and abort have to vacate the slot themselves, or the next batch of
+  // mail would resolve a promise nobody awaits and never be injected.
+  const timer = ctx.setInterval(() => {
+    if (waiter !== resolve) {
       ctx.clearTimer(timer);
-      resolve();
-    }, ms);
-  });
+      return;
+    }
+    if (signal?.aborted || Date.now() >= deadline) {
+      ctx.clearTimer(timer);
+      waiter = null;
+      resolve(null);
+    }
+  }, 250);
+  // Mail that landed before this armed would otherwise sit until the next
+  // watcher event, which may never come.
+  void drainOnce(deps).catch(() => undefined);
+  return arrived;
+}
+
+function sleep(ctx: ExtensionToolContext, ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const timer = ctx.setInterval(() => {
+    ctx.clearTimer(timer);
+    resolve();
+  }, ms);
+  return promise;
 }
 
 function readWorktreeCreateResult(value: unknown): { workspaceId: string; paneId: string; worktreeCwd: string } {
@@ -650,18 +732,63 @@ export default function foremanExtension(pi: ExtensionAPI): void {
     name: "foreman_ask",
     label: "Foreman Ask",
     description:
-      "Ask your parent a question you cannot decide yourself. Call this and stop — do not keep working until the answer arrives as a new message.",
+      "Ask your parent a question you cannot decide yourself, and block until they answer. The answer comes back as this tool's result, so you can carry straight on. Only worth spending an interrupt on a decision you genuinely cannot infer.",
     parameters: z.object({
-      text: z.string().describe("The decision you need. You will stop after this, so include everything needed to answer."),
+      text: z.string().describe("The decision you need. Include everything needed to answer it without a follow-up."),
+      timeoutMs: z
+        .number()
+        .optional()
+        .describe("How long to block before giving up, in milliseconds. Defaults to 300000 (5 minutes)."),
     }),
-    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const { root, self } = await requireSelf(pi, ctx.cwd);
       if (!self.parent) throw new Error("foreman: you have no parent to ask — nobody spawned this session");
       enqueue(root, { from: self.handle, to: self.parent, kind: "ask", text: params.text, sentAt: new Date().toISOString() });
-      return {
-        content: [{ type: "text", text: `Question sent to @${self.parent}. Stop here and end your turn — their answer will arrive as a new message.` }],
-        details: {},
-      };
+      const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_MS;
+      const rendered = await waitForMail({ pi, cwd: ctx.cwd }, ctx, signal, timeoutMs);
+      if (rendered === null) {
+        // Degrades to the old contract rather than failing: the question is
+        // still queued, so ending the turn still gets an answer eventually.
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Question sent to @${self.parent}, but no answer within ${Math.round(timeoutMs / 1000)}s. End your turn — their answer will wake you as a new message when it comes.`,
+            },
+          ],
+          details: { answered: false },
+        };
+      }
+      return { content: [{ type: "text", text: rendered }], details: { answered: true } };
+    },
+  });
+
+  pi.registerTool({
+    name: "foreman_wait",
+    label: "Foreman Wait",
+    description:
+      "Block until mail arrives and return it as this tool's result. Use it when you have nothing useful to do until a worker reports. Returns the next batch that lands, whoever sent it — check the sender and call again if it wasn't what you were waiting for.",
+    parameters: z.object({
+      timeoutMs: z
+        .number()
+        .optional()
+        .describe("How long to block before giving up, in milliseconds. Defaults to 300000 (5 minutes)."),
+    }),
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_MS;
+      const rendered = await waitForMail({ pi, cwd: ctx.cwd }, ctx, signal, timeoutMs);
+      if (rendered === null) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No mail within ${Math.round(timeoutMs / 1000)}s. End your turn — anything that lands later will wake you as a new message.`,
+            },
+          ],
+          details: { delivered: false },
+        };
+      }
+      return { content: [{ type: "text", text: rendered }], details: { delivered: true } };
     },
   });
 

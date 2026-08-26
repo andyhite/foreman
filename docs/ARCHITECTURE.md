@@ -63,15 +63,15 @@ Two rules fall out of the measurements and are non-negotiable:
 ```mermaid
 graph TB
   subgraph a["Session (main checkout)"]
-    AT["tools: spawn, send, ask, ls, reap"]
+    AT["tools: spawn, send, ask, wait, ls, reap"]
     AD["drain timer"]
   end
   subgraph bus["~/.foreman/&lt;repo-hash&gt;/"]
     M["mail/&lt;handle&gt;/*.json"]
     R["roster: cwd -&gt; handle, parent, branch, spawn SHA"]
   end
-  subgraph b["Session (worktree A) — same five tools"]
-    CT["tools: spawn, send, ask, ls, reap"]
+  subgraph b["Session (worktree A) — same six tools"]
+    CT["tools: spawn, send, ask, wait, ls, reap"]
     CD["drain timer"]
   end
   subgraph herdr["herdr"]
@@ -175,8 +175,25 @@ Urgency is not a parameter. It is the difference between two tools:
 | `foreman_send` | `followUp` | Waits for the receiver's current run to finish, then delivers as a new turn. |
 
 One rule, memorable: **only a stalled agent may interrupt.** `foreman_ask`
-ends the asking session's turn, so by construction the sender has already
-stopped working before it interrupts anyone.
+blocks the asking session until the answer lands, so by construction the
+sender has already stopped working before it interrupts anyone.
+
+A message can reach a session two ways, and the drain picks between them:
+
+| Receiver's state | Path | Cost to the receiver |
+| --- | --- | --- |
+| Blocked in `foreman_ask` or `foreman_wait` | Resolves that tool call — the mail *is* the tool result | None: it resumes mid-turn, holding its plan |
+| Anything else | `pi.sendMessage`, as a new turn | A turn boundary, and whatever context the model chooses to re-establish |
+
+The invariant that makes this safe is **exactly one path per message**: the
+drain checks for a blocked waiter before it sends, and either way the file
+moves to `done/` once. There is one waiter slot per session, not a queue,
+because two blocked waiters would split a single batch of mail between them.
+
+That upgrade is why blocking beats ending the turn. The old contract spent a
+turn boundary on every question; now a worker that asks and gets a prompt
+answer never leaves its turn, and the five-minute timeout degrades to exactly
+the old behaviour — the question stays queued and arrives the ordinary way.
 
 Everything else — dispatching a task, answering a question, filing a report,
 broadcasting a notice — is `foreman_send`, and therefore cannot interrupt a
@@ -186,7 +203,7 @@ stopped is a lifecycle problem (`foreman_reap`), not a message.
 
 ### 3.5 One uniform surface — no roles
 
-Every session registers the same five tools. There is no boss mode, no worker
+Every session registers the same six tools. There is no boss mode, no worker
 mode, no role field, and no capability split.
 
 "Boss" and "worker" survive only as names for the two ends of a **spawn edge**:
@@ -196,6 +213,9 @@ the system needs:
 
 - `foreman_ask` takes no `to` — it goes to your parent, the one agent waiting
   on you.
+- `foreman_wait` takes no `to` either — it blocks for the next mail on any of
+  your edges, without filtering, because a filter would have to either swallow
+  non-matching mail or deliver it twice.
 - `foreman_ls` shows the children you spawned.
 - `foreman_reap` accepts only a handle you are the parent of.
 - The session nobody spawned cannot `foreman_ask`; the tool reports that there
@@ -238,17 +258,20 @@ than a dependency.
 
 ## 4. Contract surface
 
-Five tools, identical in every session.
+Six tools, identical in every session.
 
 | Tool | Contract |
 | --- | --- |
 | `foreman_spawn` | handle, branch, base, brief → worktree + pane + agent; records you as parent and delivers the brief. One worker per branch. |
 | `foreman_send` | to, text → `followUp` to a handle on one of your edges. Covers dispatch, answer, and report — they differ only in direction. |
-| `foreman_ask` | text → `steer` to your parent, then end your turn and wait. |
+| `foreman_ask` | text → `steer` to your parent, then block until the answer lands and return it as this call's result. |
+| `foreman_wait` | block until the next mail on any of your edges arrives, sending nothing. For when you have dispatched everything and have nothing to do until a worker reports. |
 | `foreman_ls` | the children you spawned: state, branch, ahead/behind the spawn point, last message. |
 | `foreman_reap` | handle → refuses dirty or unmerged unless forced; otherwise removes the worktree and roster entry. |
 
-Sending returns a **tool result**, and receiving arrives as a real user turn.
+Sending returns a **tool result**. Receiving arrives as a real user turn, or —
+if the receiver is blocked in `foreman_ask`/`foreman_wait` — as that call's
+own result.
 Neither end ever parses a pane's scrollback.
 
 ## 5. What this deletes
@@ -299,6 +322,8 @@ layer is the only part that was ever hard.
 | `steer` mid-text-stream waits for the turn | Accepted. The only `steer` sender is `foreman_ask`, so the sender is already stalled; a few seconds is irrelevant. |
 | At-least-once could double-deliver | Move to `done/` after injection and key on sequence number; a duplicate is visible in the audit trail. |
 | omp caches transpiled extensions by path | Development-time only: bump the path or reinstall. Cost us two misleading runs during research. |
+| A blocked wait could strand mail | The waiter slot is cleared by whichever of mail, timeout, or abort fires first; a stale slot would resolve a promise nobody awaits and drop a batch. One slot only, and `waitForMail` refuses a second concurrent wait. |
+| A blocking tool could hit a harness deadline | Measured: none exists. A 300 s extension tool call returned `aborted=false` and the turn resumed, so the 5 min default is bounded by choice, not by the runtime. |
 
 ## 8. Evidence
 
@@ -322,3 +347,6 @@ injection 4 s into a 20 s `sleep` and logs the event timeline.
 | `fs.watch` beats the poll by ~5× | Mailbox write → `agent_start`, backstop pinned to 60 s so only the watcher could fire: 24, 78, 20, 25 ms across four seeds. The 250 ms poll it replaced averaged 125 ms. Most of the residual is `gitFacts`' two `git rev-parse` calls, not the watcher. |
 | Worktrees do *not* share a broker scope | Same repo, identical `--git-common-dir` from both, but `hub` process ops landed in `~/.omp/run/daemons/5c4c249b77c3672d/` from the main checkout and `e8ff34fb34698007/` from a linked worktree. The scope key is cwd-derived, so cross-process `hub` messaging would still not reach a sibling worker. |
 | An async job settling wakes an idle session | Backgrounded `sleep 12 && echo …` returned at 2.52 s, session went idle at 4.69 s, and the job's output arrived as a `custom` message that started a turn at 14.57 s. Delivery of a blocking CLI's result therefore needs no new omp surface. |
+| omp does not time out a long extension tool call | A probe tool that simply held returned `held=120180ms aborted=false` and `held=300124ms aborted=false`; both times `tool_execution_end` fired, the turn resumed, and the agent answered normally. This is what makes a blocking `foreman_wait` viable at all. |
+| Blocking delivery bypasses the turn boundary entirely | Real `omp` in a scratch repo: the agent called `foreman_wait`, mail was seeded 9 s later, and the run finished at 11.5 s having printed the message body. The transcript contains **zero** `dev.foreman.inbox` messages — delivery came solely through the tool result — and the mail file had moved to `done/`. |
+| An async job cannot serve as the message router | A job printing at 0/5/10/15 s produced exactly one `agent_start`, at job exit (+17.7 s); all four lines arrived buffered in a single `custom_message`. Async jobs deliver once, at settle, so intermediate mail would sit invisible until the job ended. |

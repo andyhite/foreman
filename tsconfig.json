@@ -11,7 +11,10 @@
     // ambient package to be installed.
     "skipLibCheck": true,
     "types": [],
-    "target": "ES2022",
+    // ES2024 for `Promise.withResolvers`, which the delivery paths in
+    // extension/index.ts use and Bun has shipped since 1.0. Nothing is
+    // emitted, so this only governs which lib the gate knows about.
+    "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "esModuleInterop": true,

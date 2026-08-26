@@ -2,12 +2,12 @@
 
 Foreman dispatches work to peer coding agents that each own a git worktree and
 a branch, then carries their reports and questions back. It is a single
-omp-native agent plugin: one extension (`extension/index.ts`) exposing five
-tools — `foreman_spawn`, `foreman_send`, `foreman_ask`, `foreman_ls`,
-`foreman_reap` — identical in every session. No roles, no claiming step, no
-bash CLI, no MCP sidecar, no slash commands. State lives under
-`$FOREMAN_STATE` (default `~/.foreman/<slug>/`), keyed by handle; nothing is
-written into a repo a worker operates on.
+omp-native agent plugin: one extension (`extension/index.ts`) exposing six
+tools — `foreman_spawn`, `foreman_send`, `foreman_ask`, `foreman_wait`,
+`foreman_ls`, `foreman_reap` — identical in every session. No roles, no
+claiming step, no bash CLI, no MCP sidecar, no slash commands. State lives
+under `$FOREMAN_STATE` (default `~/.foreman/<slug>/`), keyed by handle;
+nothing is written into a repo a worker operates on.
 
 The design rationale lives in `docs/ARCHITECTURE.md`.
 
@@ -41,9 +41,17 @@ stays reproducible.
   throw from a bare timer reaches `uncaughtException` and kills the whole
   session; `ctx.setInterval` contains throws and auto-clears on session
   shutdown.
-- The drain loop's re-entrancy guard (`draining`, in `drainOnce`) exists
-  because a `sendMessage` slower than the poll interval would otherwise
-  double-deliver — do not remove it to "simplify" the loop.
+- **Mail must reach exactly one delivery path.** A blocked `foreman_wait` or
+  `foreman_ask` parks a resolver in `waiter`, and `drainOnce` hands the batch
+  to it *instead of* calling `pi.sendMessage` — that caller has already
+  stopped and is about to read the same messages as its tool result, so
+  injecting a turn too would deliver them twice. Whichever of mail, timeout,
+  or abort arrives first must clear the slot, or the next batch resolves a
+  promise nobody awaits and is never injected.
+- The drain's re-entrancy guard (`draining`, in `drainOnce`) exists because a
+  `sendMessage` slower than the next watcher event would otherwise
+  double-deliver — do not remove it to "simplify" the loop. It also means a
+  drain you call yourself can be a no-op while another is still in flight.
 
 ## House conventions
 
