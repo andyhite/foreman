@@ -1,8 +1,8 @@
 // Foreman: dispatch work to peer coding agents that each own a git worktree
 // and a branch, and carry their reports and questions back — plus standing
 // "expert" agents convened into a shared checkout for advisory/coordination
-// roles that never own a branch. Seven tools, identical in every session —
-// no roles, no claiming step, no bash CLI.
+// roles that never own a branch, configurable per repo. Eight tools,
+// identical in every session — no roles, no claiming step, no bash CLI.
 //
 // Delivery: every message goes through `pi.sendMessage` as a custom message.
 // `deliveryOptions` below is the one function that encodes which delivery
@@ -635,6 +635,91 @@ function pendingCount(root: string, handle: string): number {
 }
 
 // ---------------------------------------------------------------------
+// Role config. `.foreman/roles.json` in the repo (committed, shared by the
+// team) maps a short role name to a reusable definition, so a `foreman_spawn`
+// or `foreman_convene` call can say `role: "pm"` instead of retyping the same
+// brief and skill list every time. `description` is never sent to the
+// spawned worker or expert — it exists purely for `foreman_roles` to show
+// the orchestrating agent, which never sees the child's own brief, when a
+// request should defer to that role instead of being handled inline.
+// ---------------------------------------------------------------------
+
+export interface RoleDefinition {
+  description: string;
+  brief: string;
+  skills: string[];
+  model: string | null;
+}
+
+export function loadRoleConfig(repoRoot: string): Record<string, RoleDefinition> {
+  const path = process.env.FOREMAN_ROLES_FILE || join(repoRoot, ".foreman", "roles.json");
+  if (!existsSync(path)) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`foreman: ${path} is not valid JSON: ${message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`foreman: ${path} must be a JSON object mapping role name to definition`);
+  }
+  const roles: Record<string, RoleDefinition> = {};
+  for (const [name, raw] of Object.entries(parsed)) {
+    if (!raw || typeof raw !== "object") {
+      throw new Error(`foreman: role "${name}" in ${path} must be an object`);
+    }
+    const description = "description" in raw ? raw.description : undefined;
+    const brief = "brief" in raw ? raw.brief : undefined;
+    const skills = "skills" in raw ? raw.skills : undefined;
+    const model = "model" in raw ? raw.model : undefined;
+    if (typeof description !== "string" || typeof brief !== "string") {
+      throw new Error(`foreman: role "${name}" in ${path} needs a "description" and "brief" string`);
+    }
+    if (skills !== undefined && (!Array.isArray(skills) || skills.some((s) => typeof s !== "string"))) {
+      throw new Error(`foreman: role "${name}" in ${path} has a non-string "skills" array`);
+    }
+    if (model !== undefined && model !== null && typeof model !== "string") {
+      throw new Error(`foreman: role "${name}" in ${path} has a non-string "model"`);
+    }
+    roles[name] = { description, brief, skills: (skills as string[] | undefined) ?? [], model: (model as string | null | undefined) ?? null };
+  }
+  return roles;
+}
+
+export interface BriefRequest {
+  handle: string;
+  role?: string;
+  brief?: string;
+  skills?: string[];
+  model?: string;
+}
+
+// Resolves one `foreman_spawn` or `foreman_convene` entry against the loaded
+// role config: role fields are the default, a per-call `brief`/`model`
+// overrides them and per-call `skills` are appended after the role's own.
+// The output text is the actual initial brief enqueued for the child —
+// skills are threaded through as an explicit "load these" line so a role's
+// whole skill set travels with it, rather than relying on prose in `brief`
+// to name them.
+export function resolveBrief(request: BriefRequest, roles: Record<string, RoleDefinition>): { text: string; model?: string } {
+  const role = request.role ? roles[request.role] : undefined;
+  if (request.role && !role) {
+    const known = Object.keys(roles);
+    throw new Error(
+      `foreman: role "${request.role}" is not configured` +
+        (known.length > 0 ? ` — known roles: ${known.join(", ")}` : " — .foreman/roles.json has no roles"),
+    );
+  }
+  const brief = request.brief ?? role?.brief;
+  if (!brief) throw new Error(`foreman: "${request.handle}" needs a "brief", or a "role" that has one`);
+  const skills = [...(role?.skills ?? []), ...(request.skills ?? [])];
+  const model = request.model ?? role?.model ?? undefined;
+  const text = skills.length > 0 ? `Load these skills, in order: ${skills.join(", ")}\n\n${brief}` : brief;
+  return model ? { text, model } : { text };
+}
+
+// ---------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------
 
@@ -678,7 +763,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
     name: "foreman_spawn",
     label: "Foreman Spawn",
     description:
-      "Spawn a peer coding agent into a fresh git worktree and branch, and dispatch its first task. Requires herdr.",
+      "Spawn a peer coding agent into a fresh git worktree and branch, and dispatch its first task. Requires herdr. See foreman_roles for roles this repo has pre-configured.",
     parameters: z.object({
       handle: z
         .string()
@@ -687,11 +772,24 @@ export default function foremanExtension(pi: ExtensionAPI): void {
         ),
       branch: z.string().describe("Branch the worker will own. Created fresh from base."),
       base: z.string().optional().describe("Ref the branch starts from. Defaults to your checkout's current HEAD."),
+      role: z
+        .string()
+        .optional()
+        .describe("Name of a role from .foreman/roles.json (see foreman_roles). Supplies brief, skills, and model unless overridden below."),
       brief: z
         .string()
+        .optional()
         .describe(
-          "The complete task. The worker starts with no conversation history, so state the goal, the files, and what done looks like.",
+          "The complete task. The worker starts with no conversation history, so state the goal, the files, and what done looks like. Required unless `role` supplies one.",
         ),
+      skills: z
+        .array(z.string())
+        .optional()
+        .describe("skill:// URIs to load, in order. Appended after the role's own skills, if `role` is set."),
+      model: z
+        .string()
+        .optional()
+        .describe("Model override for this worker, fuzzy-matched by the omp CLI (e.g. \"opus\", \"gpt-5.2\"). Overrides the role's model."),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       if (!validHandle(params.handle)) {
@@ -701,6 +799,11 @@ export default function foremanExtension(pi: ExtensionAPI): void {
       }
       const facts = await gitFacts(pi, ctx.cwd);
       if (!facts) throw new Error("foreman: not inside a git repository");
+      const roles = loadRoleConfig(facts.repoRoot);
+      // Resolved up front, before any herdr call, so an unknown role or a
+      // missing brief fails before a worktree and branch are created for
+      // foreman_reap to clean up.
+      const resolved = resolveBrief(params, roles);
       const root = stateRoot(facts.repoKey);
       const rosterPath = join(root, "roster", `${params.handle}.json`);
       if (existsSync(rosterPath)) {
@@ -749,10 +852,10 @@ export default function foremanExtension(pi: ExtensionAPI): void {
       });
 
       // Before starting the agent, so the worker's first drain finds it.
-      enqueue(root, { from: self.handle, to: params.handle, kind: "brief", text: params.brief, sentAt: new Date().toISOString() });
+      enqueue(root, { from: self.handle, to: params.handle, kind: "brief", text: resolved.text, sentAt: new Date().toISOString() });
 
       const timeoutMs = Number(process.env.FOREMAN_SPAWN_TIMEOUT_MS) || 60000;
-      const result = await startAgentOnPane(pi, ctx, facts.repoRoot, params.handle, paneId, timeoutMs, undefined);
+      const result = await startAgentOnPane(pi, ctx, facts.repoRoot, params.handle, paneId, timeoutMs, resolved.model);
       if (!result.ok) {
         const seconds = Math.round(timeoutMs / 1000);
         throw new Error(
@@ -870,7 +973,7 @@ export default function foremanExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "foreman_ls",
     label: "Foreman List",
-    description: "List the workers you spawned, their live status, branch position, and pending mail.",
+    description: "List the workers and experts you spawned or convened, their live status, branch position (workers) or pane (experts), and pending mail.",
     parameters: z.object({}),
     execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
       const { root, repoRoot, self } = await requireSelf(pi, ctx.cwd);
@@ -893,32 +996,44 @@ export default function foremanExtension(pi: ExtensionAPI): void {
       const details: Array<Record<string, unknown>> = [];
       for (const child of children) {
         const status = process.env.HERDR_ENV ? agents.find((a) => a.cwd === child.cwd)?.status ?? "unknown" : "-";
-        let ahead = "?";
-        let behind = "?";
-        // A git failure in one child's worktree renders that row's numbers
-        // as "?" rather than failing the whole call.
-        try {
-          const counts = await run(pi, "git", ["rev-list", "--left-right", "--count", `${child.spawnSha}...HEAD`], child.cwd);
-          const [behindOut, aheadOut] = counts.stdout.trim().split(/\s+/);
-          behind = behindOut ?? "?";
-          ahead = aheadOut ?? "?";
-        } catch {
-          // leave as "?"
-        }
-        let dirty = "?";
-        try {
-          const status2 = await run(pi, "git", ["status", "--porcelain"], child.cwd);
-          dirty = String(status2.stdout.split("\n").filter((l) => l.trim().length > 0).length);
-        } catch {
-          // leave as "?"
+        let ahead = "-";
+        let behind = "-";
+        let dirty = "-";
+        // An expert shares the spawner's own checkout rather than owning a
+        // worktree, so running git rev-list/status against child.cwd would
+        // report the WHOLE repo's state under that one expert's row — wrong
+        // attribution, not just noise. Skip the git calls entirely for
+        // experts instead of coercing them into "?".
+        if (child.kind === "worker") {
+          ahead = "?";
+          behind = "?";
+          // A git failure in one child's worktree renders that row's numbers
+          // as "?" rather than failing the whole call.
+          try {
+            const counts = await run(pi, "git", ["rev-list", "--left-right", "--count", `${child.spawnSha}...HEAD`], child.cwd);
+            const [behindOut, aheadOut] = counts.stdout.trim().split(/\s+/);
+            behind = behindOut ?? "?";
+            ahead = aheadOut ?? "?";
+          } catch {
+            // leave as "?"
+          }
+          dirty = "?";
+          try {
+            const status2 = await run(pi, "git", ["status", "--porcelain"], child.cwd);
+            dirty = String(status2.stdout.split("\n").filter((l) => l.trim().length > 0).length);
+          } catch {
+            // leave as "?"
+          }
         }
         const pending = pendingCount(root, child.handle);
-        rows.push([child.handle, status, child.branch ?? "-", ahead, behind, dirty, String(pending)]);
-        details.push({ handle: child.handle, status, branch: child.branch, ahead, behind, dirty, pending });
+        rows.push([child.handle, child.kind, status, child.branch ?? "-", ahead, behind, dirty, String(pending)]);
+        details.push({ handle: child.handle, kind: child.kind, status, branch: child.branch, ahead, behind, dirty, pending });
       }
 
       return {
-        content: [{ type: "text", text: formatTable(["HANDLE", "STATUS", "BRANCH", "AHEAD", "BEHIND", "DIRTY", "PENDING"], rows) }],
+        content: [
+          { type: "text", text: formatTable(["HANDLE", "KIND", "STATUS", "BRANCH", "AHEAD", "BEHIND", "DIRTY", "PENDING"], rows) },
+        ],
         details: { children: details },
       };
     },
@@ -927,42 +1042,208 @@ export default function foremanExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "foreman_reap",
     label: "Foreman Reap",
-    description: "Remove a worker's worktree, branch pane, and roster entry. Refuses if it has uncommitted or unmerged work unless forced.",
+    description:
+      "Remove a worker's worktree, branch pane, and roster entry, or an expert's pane and roster entry. Refuses a worker with uncommitted or unmerged work unless forced.",
     parameters: z.object({
-      handle: z.string().describe("Worker to remove."),
-      force: z.boolean().optional().describe("Remove even with uncommitted changes or unmerged commits. Destroys work."),
+      handle: z.string().describe("Worker or expert to remove."),
+      force: z.boolean().optional().describe("Remove even with uncommitted changes or unmerged commits. Destroys work. Ignored for experts."),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const { root, repoRoot, self } = await requireSelf(pi, ctx.cwd);
       const roster = loadRoster(root);
       const child = roster.find((r) => r.handle === params.handle);
       if (!child || child.parent !== self.handle) {
-        throw new Error(`foreman: ${params.handle} is not a worker you spawned`);
+        throw new Error(`foreman: ${params.handle} is not a worker or expert you spawned`);
       }
-      if (!params.force) {
-        const status = await run(pi, "git", ["status", "--porcelain"], child.cwd);
-        const dirtyCount = status.stdout.split("\n").filter((l) => l.trim().length > 0).length;
-        if (dirtyCount > 0) {
-          throw new Error(`foreman: ${params.handle} has ${dirtyCount} uncommitted change(s). Commit them, or pass force=true to destroy them.`);
+
+      let resultText: string;
+      if (child.kind === "expert") {
+        // An expert owns no branch or worktree — it shares the spawner's
+        // checkout — so there is nothing to guard against losing: closing
+        // its pane discards no commits, unlike a worker's worktree removal.
+        await run(pi, "herdr", ["pane", "close", child.paneId ?? ""], repoRoot);
+        resultText = `Reaped @${params.handle}: pane closed, roster entry deleted.`;
+      } else {
+        if (!params.force) {
+          const status = await run(pi, "git", ["status", "--porcelain"], child.cwd);
+          const dirtyCount = status.stdout.split("\n").filter((l) => l.trim().length > 0).length;
+          if (dirtyCount > 0) {
+            throw new Error(`foreman: ${params.handle} has ${dirtyCount} uncommitted change(s). Commit them, or pass force=true to destroy them.`);
+          }
+          const ahead = await run(pi, "git", ["rev-list", `${child.spawnSha}..HEAD`, "--count"], child.cwd);
+          const aheadCount = Number(ahead.stdout.trim());
+          if (aheadCount > 0) {
+            throw new Error(
+              `foreman: ${params.handle} has ${aheadCount} commit(s) not in ${child.spawnSha}. Merge the branch, or pass force=true to discard them.`,
+            );
+          }
         }
-        const ahead = await run(pi, "git", ["rev-list", `${child.spawnSha}..HEAD`, "--count"], child.cwd);
-        const aheadCount = Number(ahead.stdout.trim());
-        if (aheadCount > 0) {
-          throw new Error(
-            `foreman: ${params.handle} has ${aheadCount} commit(s) not in ${child.spawnSha}. Merge the branch, or pass force=true to discard them.`,
-          );
-        }
+        // Removal must go through herdr because creation did: `git worktree
+        // remove` would delete the checkout and orphan the workspace, leaving
+        // a sidebar entry pointing at nothing.
+        const removeArgs = ["worktree", "remove", "--workspace", child.workspaceId ?? ""];
+        if (params.force) removeArgs.push("--force");
+        await run(pi, "herdr", removeArgs, repoRoot);
+        resultText = `Reaped @${params.handle}: worktree removed, roster entry deleted.`;
       }
-      // Removal must go through herdr because creation did: `git worktree
-      // remove` would delete the checkout and orphan the workspace, leaving
-      // a sidebar entry pointing at nothing.
-      const removeArgs = ["worktree", "remove", "--workspace", child.workspaceId ?? ""];
-      if (params.force) removeArgs.push("--force");
-      await run(pi, "herdr", removeArgs, repoRoot);
+
       rmSync(join(root, "roster", `${params.handle}.json`), { force: true });
       rmSync(join(root, "mail", params.handle), { recursive: true, force: true });
       rmSync(join(root, "done", params.handle), { recursive: true, force: true });
-      return { content: [{ type: "text", text: `Reaped @${params.handle}: worktree removed, roster entry deleted.` }], details: {} };
+      return { content: [{ type: "text", text: resultText }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "foreman_roles",
+    label: "Foreman Roles",
+    description:
+      "List the roles configured in .foreman/roles.json for this repo, each with the description that says when to defer to it. Read this before foreman_spawn or foreman_convene, or whenever deciding whether a request belongs to a standing role instead of being handled inline.",
+    parameters: z.object({}),
+    execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+      const facts = await gitFacts(pi, ctx.cwd);
+      if (!facts) throw new Error("foreman: not inside a git repository");
+      const roles = loadRoleConfig(facts.repoRoot);
+      const names = Object.keys(roles);
+      if (names.length === 0) {
+        return {
+          content: [{ type: "text", text: "No roles configured. Add .foreman/roles.json to define reusable roles for foreman_spawn and foreman_convene." }],
+          details: { roles: {} },
+        };
+      }
+      const rows = names.map((name) => [name, roles[name].description, roles[name].skills.join(", ") || "-", roles[name].model ?? "-"]);
+      const table = formatTable(["ROLE", "DESCRIPTION", "SKILLS", "MODEL"], rows);
+      return { content: [{ type: "text", text: table }], details: { roles } };
+    },
+  });
+
+  pi.registerTool({
+    name: "foreman_convene",
+    label: "Foreman Convene",
+    description:
+      "Convene a cluster of standing expert agents into a fresh herdr tab, one pane each, sharing your own checkout. Unlike foreman_spawn, experts own no branch or worktree — use this for advisory/coordination roles (product manager, release engineer, ...) you'll send repeated requests to, not one-shot units of code work. See foreman_roles for roles this repo has pre-configured.",
+    parameters: z.object({
+      label: z.string().optional().describe("Tab label. Defaults to \"foreman experts\"."),
+      experts: z
+        .array(
+          z.object({
+            handle: z
+              .string()
+              .describe(
+                "Short name for the expert: lowercase letters, digits, hyphens, underscores; must start with a letter. This is how you address it later.",
+              ),
+            role: z
+              .string()
+              .optional()
+              .describe("Name of a role from .foreman/roles.json (see foreman_roles). Supplies brief, skills, and model unless overridden below."),
+            brief: z
+              .string()
+              .optional()
+              .describe(
+                "The expert's standing role: the domain it owns and how it should report back. It starts with no conversation history and stays available after replying, so this is the only briefing it gets. Required unless `role` supplies one.",
+              ),
+            skills: z
+              .array(z.string())
+              .optional()
+              .describe("skill:// URIs to load, in order. Appended after the role's own skills, if `role` is set."),
+            model: z
+              .string()
+              .optional()
+              .describe("Model override for this expert, fuzzy-matched by the omp CLI (e.g. \"opus\", \"gpt-5.2\"). Overrides the role's model."),
+          }),
+        )
+        .min(1)
+        .describe("One entry per expert pane, created left-to-right/top-to-bottom in array order."),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const seen = new Set<string>();
+      for (const expert of params.experts) {
+        if (!validHandle(expert.handle)) {
+          throw new Error(
+            `foreman: invalid handle "${expert.handle}" — use lowercase letters, digits, - or _, starting with a letter, max 32 chars`,
+          );
+        }
+        if (seen.has(expert.handle)) throw new Error(`foreman: duplicate handle "${expert.handle}" in this convene call`);
+        seen.add(expert.handle);
+      }
+      const facts = await gitFacts(pi, ctx.cwd);
+      if (!facts) throw new Error("foreman: not inside a git repository");
+      const roles = loadRoleConfig(facts.repoRoot);
+      // Resolved up front, before any herdr call, so an unknown role or a
+      // missing brief fails the whole convene instead of leaving a partial
+      // tab of panes behind for foreman_reap to clean up.
+      const resolved = params.experts.map((expert) => resolveBrief(expert, roles));
+      const root = stateRoot(facts.repoKey);
+      for (const expert of params.experts) {
+        const rosterPath = join(root, "roster", `${expert.handle}.json`);
+        if (existsSync(rosterPath)) {
+          const existing = readRosterEntry(rosterPath);
+          throw new Error(`foreman: handle ${expert.handle} is already taken by the ${existing.kind} at ${existing.cwd}`);
+        }
+      }
+      if (process.env.HERDR_ENV !== "1") {
+        throw new Error("foreman: requires herdr — expert panes are how experts get a terminal. Start a herdr session first.");
+      }
+      const workspaceId = process.env.HERDR_WORKSPACE_ID;
+      if (!workspaceId) throw new Error("foreman: HERDR_WORKSPACE_ID is not set — run inside a herdr workspace.");
+
+      const self = resolveSelf(root, facts.repoRoot, process.env.HERDR_PANE_ID ?? null);
+
+      const tabCreated = await herdrJson(
+        pi,
+        ["tab", "create", "--workspace", workspaceId, "--cwd", facts.repoRoot, "--label", params.label ?? "foreman experts", "--no-focus"],
+        facts.repoRoot,
+      );
+      const { tabId, rootPaneId } = readTabCreateResult(tabCreated);
+
+      // Alternate split direction rather than always splitting the same way,
+      // or N panes collapse into one unusably thin row (always-right) or
+      // column (always-down).
+      const paneIds: string[] = [rootPaneId];
+      for (let i = 1; i < params.experts.length; i++) {
+        const direction = i % 2 === 1 ? "right" : "down";
+        const split = await herdrJson(
+          pi,
+          ["pane", "split", paneIds[paneIds.length - 1], "--direction", direction, "--cwd", facts.repoRoot, "--no-focus"],
+          facts.repoRoot,
+        );
+        paneIds.push(readPaneSplitResult(split));
+      }
+
+      const timeoutMs = Number(process.env.FOREMAN_SPAWN_TIMEOUT_MS) || 60000;
+      const results: Array<{ handle: string; paneId: string; started: boolean; error?: string }> = [];
+      for (let i = 0; i < params.experts.length; i++) {
+        const expert = params.experts[i];
+        const paneId = paneIds[i];
+        writeRosterEntry(root, {
+          handle: expert.handle,
+          parent: self.handle,
+          // An expert shares the spawner's own checkout rather than a
+          // dedicated worktree — there is no isolated unit of code work to
+          // give it a branch for, only a standing advisory role.
+          cwd: facts.repoRoot,
+          branch: null,
+          spawnSha: null,
+          workspaceId,
+          paneId,
+          kind: "expert",
+          createdAt: new Date().toISOString(),
+        });
+        // Before starting the agent, so the expert's first drain finds it.
+        enqueue(root, { from: self.handle, to: expert.handle, kind: "brief", text: resolved[i].text, sentAt: new Date().toISOString() });
+        const result = await startAgentOnPane(pi, ctx, facts.repoRoot, expert.handle, paneId, timeoutMs, resolved[i].model);
+        results.push({ handle: expert.handle, paneId, started: result.ok, error: result.error });
+      }
+
+      const lines = results.map((r) =>
+        r.started
+          ? `@${r.handle} ready on pane ${r.paneId}`
+          : `@${r.handle} FAILED to start on pane ${r.paneId} (${r.error}) — clean up with foreman_reap ${r.handle} force=true`,
+      );
+      return {
+        content: [{ type: "text", text: `Convened tab ${tabId} with ${params.experts.length} expert(s):\n${lines.join("\n")}` }],
+        details: { tabId, experts: results },
+      };
     },
   });
 }

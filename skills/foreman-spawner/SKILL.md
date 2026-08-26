@@ -1,6 +1,6 @@
 ---
 name: foreman-spawner
-description: Use when dispatching work through foreman as the spawner/parent — calling foreman_spawn to create a peer coding agent in a fresh git worktree and branch, foreman_send to give a spawned worker a new task or follow-up, foreman_wait to block until a worker reports, foreman_ls to check on workers, or foreman_reap to remove one after its branch merges. Also use when a spawned worker interrupts you with foreman_ask and you need to judge whether to answer now. Trigger phrases: "split this across workers", "spawn an agent for X", "dispatch to a worktree", "act as foreman/dispatcher/boss".
+description: Use when dispatching work through foreman as the spawner/parent — calling foreman_spawn to create a peer coding agent in a fresh git worktree and branch (by role or ad hoc), foreman_roles to check whether a request already has a configured standing role, foreman_convene to stand up a cluster of branchless expert agents (by role or ad hoc) in a new herdr tab, foreman_send to give a spawned worker or convened expert a new task or follow-up, foreman_wait to block until one reports, foreman_ls to check on them, or foreman_reap to remove one after its branch merges (worker) or when the cluster is done (expert). Also use when a spawned worker or convened expert interrupts you with foreman_ask and you need to judge whether to answer now. Trigger phrases: "split this acr…
 ---
 
 Foreman spans two seats on one spawn edge: whoever calls `foreman_spawn` is
@@ -30,6 +30,12 @@ brief someone joining mid-project with no chat log to scroll:
 - Name any skill or procedure the worker needs by its `skill://` URL. Foreman
   ships no execution skills of its own — a worker only reads what you tell
   it to, or what it infers from the repo.
+- If a configured role fits the kind of worker you're spawning (see "Check
+  `foreman_roles`" below), pass `role: "<name>"` to inherit its `skills` and
+  `model` — but usually still pass a task-specific `brief` alongside it,
+  since `brief` replaces the role's entirely rather than merging with it,
+  and a worker's task is rarely identical to another worker's from the same
+  role.
 
 ## Judging an incoming `foreman_ask`
 
@@ -83,3 +89,47 @@ pane and sidebar entry in sync. A bare `git worktree remove` deletes the
 checkout but orphans the herdr workspace; a bare `git worktree add` skips
 setup entirely. Use `foreman_spawn`/`foreman_reap`, which already call
 herdr for you — see `rule://herdr-worktrees`.
+
+## Convene vs. spawn
+
+`foreman_spawn` and `foreman_convene` both dispatch to a peer session, but
+they fit opposite shapes of work:
+
+- **Spawn** for an isolated, finishable unit of code work that lands as a
+  branch — a bug fix, a feature slice, a refactor. The worker gets its own
+  worktree and is reaped once its branch merges.
+- **Convene** for a standing advisory or coordination role you'll come back
+  to more than once in a session — a product manager, a release engineer, an
+  integration engineer running smoke tests after workers merge. Experts share
+  your own checkout, own no branch, and stay convened across many requests
+  instead of finishing once.
+
+Convened experts share your checkout, which is real isolation lost, not just
+a shortcut: never assume an expert can safely mutate git state (`checkout`,
+`merge`, `reset`) without you authorizing it first, since a sibling expert or
+a worker's own drain could be touching the same checkout concurrently. Brief
+experts accordingly, and see `skill://foreman-expert` for the judgement they
+carry on their side.
+
+`foreman_reap` also diverges by kind: an expert has no branch to guard, so
+reaping one just closes its pane — there is no dirty/unmerged check to pass
+or force through, unlike a worker's worktree removal.
+
+## Check `foreman_roles` before writing an ad hoc brief
+
+Call `foreman_roles` before hand-writing a `foreman_spawn` or
+`foreman_convene` brief — it lists every role configured in
+`.foreman/roles.json` along with the `description` that says when to defer
+to it. Pass `role: "<name>"` and only the per-call overrides that genuinely
+differ (a one-off `skills` addition, a different `model`, and — for a
+worker — almost always a task-specific `brief`); don't retype a brief a
+role already fully supplies. If no configured role fits, write the ad hoc
+brief as before — `role` is optional on both tools, not required.
+
+If a request keeps recurring with no matching role, that's a signal to
+propose one rather than keep rewriting the same brief: recommend the user
+add an entry to `.foreman/roles.json`, and write its `description` sharp
+enough that a future `foreman_roles` call lets you (or another spawner
+session) tell from that line alone whether a new request belongs to it —
+skills can't write repo files unattended, so surface the suggestion in your
+report instead of inventing the file yourself.

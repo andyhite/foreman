@@ -63,15 +63,15 @@ Two rules fall out of the measurements and are non-negotiable:
 ```mermaid
 graph TB
   subgraph a["Session (main checkout)"]
-    AT["tools: spawn, send, ask, wait, ls, reap"]
+    AT["tools: spawn, convene, roles, send, ask, wait, ls, reap"]
     AD["drain timer"]
   end
   subgraph bus["~/.foreman/&lt;repo-hash&gt;/"]
     M["mail/&lt;handle&gt;/*.json"]
     R["roster: cwd -&gt; handle, parent, branch, spawn SHA"]
   end
-  subgraph b["Session (worktree A) — same six tools"]
-    CT["tools: spawn, send, ask, wait, ls, reap"]
+  subgraph b["Session (worktree A) — same eight tools"]
+    CT["tools: spawn, convene, roles, send, ask, wait, ls, reap"]
     CD["drain timer"]
   end
   subgraph herdr["herdr"]
@@ -113,13 +113,16 @@ Rejected alternative: keying on cwd. omp's own broker scopes by working
 directory, which puts each worktree in a different scope — precisely the wrong
 split for a system whose whole job is to span worktrees.
 
-### 3.2 Self-identification — by cwd, no env, no claiming step
+### 3.2 Self-identification — by cwd, disambiguated by pane when shared
 
-One worker per worktree, one worktree per branch, so `ctx.cwd` is a unique key
-by construction. A session resolves its own identity by matching its cwd
-against the roster, and self-registers if no entry exists yet. Nothing has to
-survive `herdr agent start`, no environment variable is plumbed anywhere, and a
-session that is restarted or reattached re-identifies itself for free.
+One worker per worktree, one worktree per branch, so `ctx.cwd` was a unique
+key by construction for the worker-only design. `foreman_convene` (§3.8)
+breaks that: every expert in a cluster shares the spawner's own cwd. A
+session resolves its own identity by matching cwd against the roster, and
+where more than one roster entry shares that cwd, breaks the tie with
+`HERDR_PANE_ID` — the one thing that *is* unique per convened expert, since
+each gets its own pane. A session that is restarted or reattached
+re-identifies itself for free either way.
 
 There is no separate step where an agent claims a handle. `foreman_spawn`
 writes the child's roster entry before starting it, and the one session nobody
@@ -203,7 +206,7 @@ stopped is a lifecycle problem (`foreman_reap`), not a message.
 
 ### 3.5 One uniform surface — no roles
 
-Every session registers the same six tools. There is no boss mode, no worker
+Every session registers the same eight tools. There is no boss mode, no worker
 mode, no role field, and no capability split.
 
 "Boss" and "worker" survive only as names for the two ends of a **spawn edge**:
@@ -256,18 +259,97 @@ the boss notice a dead worker without polling. Worth adding, but the mailbox
 already tolerates a slow or restarted worker, so this is an enhancement rather
 than a dependency.
 
+### 3.8 Standing experts — `foreman_convene`
+
+The worker model assumes every unit of dispatched work ends in a branch. Not
+every use case does: a product manager planning a sprint, a release engineer
+tagging and pushing, an integration engineer smoke-testing after workers
+merge — these are roles you consult repeatedly within a session, not
+one-shot code changes. `foreman_convene` creates a cluster of these as
+**experts**: a `RosterKind` distinct from `worker`, sharing the spawner's own
+checkout instead of a dedicated worktree.
+
+Mechanically, one call: `herdr tab create` opens a fresh tab (never the
+caller's own, so the cluster doesn't disturb the spawner's pane layout), then
+`herdr pane split` N-1 times, alternating `--direction right`/`down` so N
+panes tile instead of collapsing into one unusably thin row or column. Each
+pane gets `herdr agent start` and a roster entry with `branch: null`,
+`spawnSha: null`, `cwd` equal to the spawner's `repoRoot`.
+
+Two lifecycle rules invert relative to a worker, both because there is no
+branch:
+
+- `foreman_ls` skips the git rev-list/status calls for an expert row
+  entirely, rather than trying and rendering "?" on failure — running them
+  against a *shared* cwd would attribute the whole repo's ahead/behind/dirty
+  state to each expert individually, which is actively wrong, not merely
+  unavailable.
+- `foreman_reap` drops the dirty/unmerged guard for an expert — there is
+  nothing to lose by closing its pane, unlike discarding a worker's
+  uncommitted branch — and calls `herdr pane close` instead of
+  `herdr worktree remove`.
+
+The shared checkout is a real cost, not just a simplification: two sessions
+(a worker's own drain, a sibling expert, the spawner itself) can be inside
+the same working tree at once. Nothing in the transport enforces mutual
+exclusion for it, unlike a worker's dedicated worktree — `skill://
+foreman-expert` asks experts to treat git mutation in that shared checkout as
+something to confirm with the spawner first, the same posture a worker owes
+a *sibling's* worktree it doesn't own.
+
+### 3.9 Configurable roles — `.foreman/roles.json`
+
+A worker or expert's brief and skills are often the same handful of
+sentences every time a team spawns its bug-fix worker or convenes its
+release engineer. `.foreman/roles.json`, committed in the repo, lets that be
+written once and reused from either `foreman_spawn` or `foreman_convene`:
+
+```ts
+interface RoleDefinition {
+  description: string;   // spawner-facing only — never sent to the child
+  brief: string;          // becomes the child's initial message
+  skills: string[];       // skill:// URIs, defaults to []
+  model: string | null;   // defaults to null
+}
+```
+
+`description` and `brief` are deliberately two fields, not one, because they
+have different readers: `brief` is written for the spawned worker or expert,
+in second person, as its cold-start context. `description` is written for
+the *spawner*, in third person, as the criterion for deferring to this role
+at all — the `foreman_roles` tool renders it as a table so the orchestrating
+agent can decide whether an incoming request belongs to a standing role
+before writing an ad hoc brief, without needing to remember one from a prior
+session or read the JSON file directly.
+
+`resolveBrief` composes a role and a per-call `foreman_spawn` or
+`foreman_convene` entry with override-vs-extend semantics chosen per field:
+`brief` and `model` are scalars, so a per-call value simply replaces the
+role's own; `skills` is a list two call sites might both want to contribute
+to, so it concatenates role skills first, then per-call skills, and the
+composed brief text is prefixed with a "Load these skills, in order: ..."
+line only when the resulting list is non-empty. The function has no notion
+of `RosterKind` — a worker and an expert resolve identically, since a role
+only ever supplies brief/skills/model, never a branch or worktree. Resolution
+happens for every entry in the call *before* any herdr worktree, tab, or
+pane is created — an unknown `role` name or a handle with neither `brief`
+nor a role that supplies one fails the whole call up front, rather than
+leaving a partial worktree or tab behind for `foreman_reap` to clean up.
+
 ## 4. Contract surface
 
-Six tools, identical in every session.
+Eight tools, identical in every session.
 
 | Tool | Contract |
 | --- | --- |
-| `foreman_spawn` | handle, branch, base, brief → worktree + pane + agent; records you as parent and delivers the brief. One worker per branch. |
+| `foreman_spawn` | handle, branch, base, role?, brief?, skills?, model? → worktree + pane + agent; records you as parent and delivers the resolved brief. One worker per branch. `brief` required unless `role` supplies one. |
+| `foreman_convene` | experts (handle, role?, brief?, skills?, model?), label? → new herdr tab, one pane and agent per expert, sharing your own checkout. For standing advisory roles, not branch-owned code work. |
+| `foreman_roles` | → table of configured role name, description, skills, model from `.foreman/roles.json`. Read before foreman_spawn or foreman_convene to decide whether a request belongs to a standing role instead of being handled inline. |
 | `foreman_send` | to, text → `followUp` to a handle on one of your edges. Covers dispatch, answer, and report — they differ only in direction. |
 | `foreman_ask` | text → `steer` to your parent, then block until the answer lands and return it as this call's result. |
 | `foreman_wait` | block until the next mail on any of your edges arrives, sending nothing. For when you have dispatched everything and have nothing to do until a worker reports. |
-| `foreman_ls` | the children you spawned: state, branch, ahead/behind the spawn point, last message. |
-| `foreman_reap` | handle → refuses dirty or unmerged unless forced; otherwise removes the worktree and roster entry. |
+| `foreman_ls` | the children you spawned or convened: kind, state, branch (workers only), ahead/behind the spawn point, last message. |
+| `foreman_reap` | handle → for a worker, refuses dirty or unmerged unless forced then removes the worktree; for an expert, closes its pane unconditionally. Either way, deletes the roster entry. |
 
 Sending returns a **tool result**. Receiving arrives as a real user turn, or —
 if the receiver is blocked in `foreman_ask`/`foreman_wait` — as that call's

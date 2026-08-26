@@ -7,15 +7,20 @@ import {
   canSend,
   deriveHandle,
   drainOnce,
+  loadRoleConfig,
   messageFilename,
   renderInbox,
+  resolveBrief,
+  resolveSelf,
   stateSlug,
   deliveryOptions,
   urgencyKind,
   validHandle,
   waitForMail,
   type DrainDeps,
+  type BriefRequest,
   type Message,
+  type RoleDefinition,
   type RosterEntry,
 } from "./index";
 
@@ -137,6 +142,7 @@ describe("renderInbox", () => {
     spawnSha: "abc123",
     workspaceId: "wA5",
     paneId: "wA5:p1",
+    kind: "worker",
     createdAt: new Date().toISOString(),
   };
 
@@ -167,10 +173,83 @@ describe("renderInbox", () => {
     expect(text.startsWith("[foreman] 3 queued messages")).toBe(true);
     expect(text.split("\n\n---\n\n").length - 1).toBe(2);
   });
+
+  const expertSelf: RosterEntry = { ...self, handle: "pm", branch: null, spawnSha: null, kind: "expert" };
+
+  test("a convened expert's brief has no branch/worktree, names itself standing", () => {
+    const text = renderInbox([msg("brief", { from: "plotroom", to: "pm", text: "plan the sprint" })], expertSelf);
+    expect(text).not.toContain("Branch:");
+    expect(text).toContain("standing expert");
+    expect(text).toContain(expertSelf.cwd);
+  });
+
+  test("a message from a convened expert's parent carries the expert-skill reminder", () => {
+    const text = renderInbox([msg("send", { from: "plotroom", to: "pm" })], expertSelf);
+    expect(text).toContain("skill://foreman-expert");
+  });
 });
 
 // ---------------------------------------------------------------------
-// 7-10. drainOnce
+// 7. resolveSelf
+// ---------------------------------------------------------------------
+
+function seedRoster(root: string, entry: Partial<RosterEntry> & { handle: string }): void {
+  const dir = join(root, "roster");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${entry.handle}.json`), JSON.stringify(entry));
+}
+
+describe("resolveSelf", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "foreman-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("disambiguates two roster entries sharing a cwd by pane id", () => {
+    const base = {
+      parent: "plotroom",
+      cwd: "/x/shared",
+      branch: null,
+      spawnSha: null,
+      workspaceId: "wA5",
+      kind: "expert",
+      createdAt: new Date().toISOString(),
+    };
+    seedRoster(root, { ...base, handle: "pm", paneId: "wA5:pB" });
+    seedRoster(root, { ...base, handle: "release", paneId: "wA5:pC" });
+    const self = resolveSelf(root, "/x/shared", "wA5:pC");
+    expect(self.handle).toBe("release");
+  });
+
+  test("defaults a roster entry with no kind field to worker", () => {
+    seedRoster(root, {
+      handle: "auth",
+      parent: "plotroom",
+      cwd: "/x/plotroom-auth",
+      branch: "andy/auth",
+      spawnSha: "abc123",
+      workspaceId: "wA5",
+      paneId: "wA5:p1",
+      createdAt: new Date().toISOString(),
+    });
+    const self = resolveSelf(root, "/x/plotroom-auth", "wA5:p1");
+    expect(self.kind).toBe("worker");
+  });
+
+  test("registers a brand-new handle for an unknown cwd", () => {
+    const self = resolveSelf(root, "/x/plotroom-new", null);
+    expect(self.kind).toBe("worker");
+    expect(self.cwd).toBe("/x/plotroom-new");
+  });
+});
+
+// ---------------------------------------------------------------------
+// 8-11. drainOnce
 // ---------------------------------------------------------------------
 
 function makeExec(repoRoot: string) {
@@ -307,7 +386,7 @@ describe("drainOnce", () => {
 });
 
 // ---------------------------------------------------------------------
-// 11. canSend
+// 12. canSend
 // ---------------------------------------------------------------------
 
 describe("canSend", () => {
@@ -319,6 +398,7 @@ describe("canSend", () => {
     spawnSha: "abc123",
     workspaceId: "wA5",
     paneId: "wA5:p1",
+    kind: "worker",
     createdAt: new Date().toISOString(),
   };
   const sibling: RosterEntry = { ...self, handle: "billing", cwd: "/x/plotroom-billing" };
@@ -343,7 +423,7 @@ describe("canSend", () => {
 });
 
 // ---------------------------------------------------------------------
-// 12. waitForMail — mail must reach exactly one of the two delivery paths
+// 13. waitForMail — mail must reach exactly one of the two delivery paths
 // ---------------------------------------------------------------------
 
 describe("waitForMail", () => {
@@ -429,5 +509,139 @@ describe("waitForMail", () => {
     await expect(waitForMail(deps, ctx, undefined, 0)).rejects.toThrow("already blocked");
     tick?.();
     expect(await first).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// 14. loadRoleConfig
+// ---------------------------------------------------------------------
+
+describe("loadRoleConfig", () => {
+  let rolesFile: string;
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "foreman-test-"));
+    rolesFile = join(dir, "roles.json");
+    savedEnv = process.env.FOREMAN_ROLES_FILE;
+    process.env.FOREMAN_ROLES_FILE = rolesFile;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.FOREMAN_ROLES_FILE;
+    else process.env.FOREMAN_ROLES_FILE = savedEnv;
+    rmSync(join(rolesFile, ".."), { recursive: true, force: true });
+  });
+
+  test("returns no roles when the file doesn't exist", () => {
+    expect(loadRoleConfig("/unused")).toEqual({});
+  });
+
+  test("parses a role, defaulting missing skills and model", () => {
+    writeFileSync(rolesFile, JSON.stringify({ pm: { description: "Owns scope.", brief: "Plan sprints." } }));
+    expect(loadRoleConfig("/unused")).toEqual({
+      pm: { description: "Owns scope.", brief: "Plan sprints.", skills: [], model: null },
+    });
+  });
+
+  test("parses skills and model when present", () => {
+    writeFileSync(
+      rolesFile,
+      JSON.stringify({ release: { description: "Ships.", brief: "Tag releases.", skills: ["skill://release-process"], model: "opus" } }),
+    );
+    expect(loadRoleConfig("/unused").release).toEqual({
+      description: "Ships.",
+      brief: "Tag releases.",
+      skills: ["skill://release-process"],
+      model: "opus",
+    });
+  });
+
+  test("throws on invalid JSON", () => {
+    writeFileSync(rolesFile, "{not json");
+    expect(() => loadRoleConfig("/unused")).toThrow(/not valid JSON/);
+  });
+
+  test("throws when a role is missing description or brief", () => {
+    writeFileSync(rolesFile, JSON.stringify({ pm: { brief: "Plan sprints." } }));
+    expect(() => loadRoleConfig("/unused")).toThrow(/needs a "description" and "brief"/);
+  });
+
+  test("throws when skills isn't a string array", () => {
+    writeFileSync(rolesFile, JSON.stringify({ pm: { description: "d", brief: "b", skills: [1, 2] } }));
+    expect(() => loadRoleConfig("/unused")).toThrow(/non-string "skills"/);
+  });
+
+  test("throws when model isn't a string or null", () => {
+    writeFileSync(rolesFile, JSON.stringify({ pm: { description: "d", brief: "b", model: 7 } }));
+    expect(() => loadRoleConfig("/unused")).toThrow(/non-string "model"/);
+  });
+});
+
+// ---------------------------------------------------------------------
+// 15. resolveBrief — shared by foreman_spawn and foreman_convene
+// ---------------------------------------------------------------------
+
+describe("resolveBrief", () => {
+  const roles: Record<string, RoleDefinition> = {
+    pm: { description: "Owns scope.", brief: "Plan sprints.", skills: ["skill://sprint-planning"], model: "opus" },
+    empty: { description: "No extras.", brief: "Do the thing.", skills: [], model: null },
+  };
+
+  function request(overrides: Partial<BriefRequest> & { handle: string }): BriefRequest {
+    return { ...overrides };
+  }
+
+  test("sources brief, skills, and model from the role alone", () => {
+    const result = resolveBrief(request({ handle: "pm", role: "pm" }), roles);
+    expect(result).toEqual({ text: "Load these skills, in order: skill://sprint-planning\n\nPlan sprints.", model: "opus" });
+  });
+
+  test("per-call brief overrides the role's brief", () => {
+    const result = resolveBrief(request({ handle: "pm", role: "pm", brief: "Plan this quarter." }), roles);
+    expect(result.text).toBe("Load these skills, in order: skill://sprint-planning\n\nPlan this quarter.");
+  });
+
+  test("per-call model overrides the role's model", () => {
+    const result = resolveBrief(request({ handle: "pm", role: "pm", model: "sonnet" }), roles);
+    expect(result.model).toBe("sonnet");
+  });
+
+  test("per-call skills are appended after the role's own", () => {
+    const result = resolveBrief(request({ handle: "pm", role: "pm", skills: ["skill://extra"] }), roles);
+    expect(result.text.startsWith("Load these skills, in order: skill://sprint-planning, skill://extra\n\n")).toBe(true);
+  });
+
+  test("throws naming known roles when an unconfigured role is requested", () => {
+    expect(() => resolveBrief(request({ handle: "x", role: "ghost" }), roles)).toThrow(/known roles: pm, empty/);
+  });
+
+  test("throws saying no roles exist when the role map is empty", () => {
+    expect(() => resolveBrief(request({ handle: "x", role: "ghost" }), {})).toThrow(/has no roles/);
+  });
+
+  test("throws when neither brief nor a role supplying one is given", () => {
+    expect(() => resolveBrief(request({ handle: "x" }), roles)).toThrow(/needs a "brief"/);
+  });
+
+  test("text equals the brief verbatim when there are no skills", () => {
+    const result = resolveBrief(request({ handle: "e", role: "empty" }), roles);
+    expect(result.text).toBe("Do the thing.");
+  });
+
+  test("omits the model key entirely when no model resolves", () => {
+    const result = resolveBrief(request({ handle: "e", role: "empty" }), roles);
+    expect("model" in result).toBe(false);
+  });
+
+  test("ad hoc brief with no role works without any role map entry — the foreman_spawn case with no roles configured", () => {
+    const result = resolveBrief(request({ handle: "x", brief: "Just do it." }), {});
+    expect(result).toEqual({ text: "Just do it." });
+  });
+
+  test("a worker handle resolves the same way an expert handle does — no kind-specific branching", () => {
+    const result = resolveBrief(request({ handle: "webhooks", role: "pm", skills: ["skill://webhooks"] }), roles);
+    expect(result.text).toBe("Load these skills, in order: skill://sprint-planning, skill://webhooks\n\nPlan sprints.");
+    expect(result.model).toBe("opus");
   });
 });
