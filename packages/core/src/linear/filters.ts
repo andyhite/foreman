@@ -5,7 +5,7 @@
  */
 
 import type { IssueFilter } from "./api.ts";
-import { AGENT_LABEL, LABEL_GROUP } from "../domain/labels.ts";
+import { AGENT_LABEL, groupDisplayName, labelDisplayName, LABEL_GROUP } from "../domain/labels.ts";
 import { PRIORITY } from "../domain/priority.ts";
 
 export function inState(name: string): IssueFilter {
@@ -16,20 +16,34 @@ export function inStateType(type: string): IssueFilter {
   return { state: { type: { eq: type } } };
 }
 
-export function hasLabelNamed(name: string): IssueFilter {
-  return { labels: { some: { name: { eq: name } } } };
+/**
+ * Linear's actual label `name` is the nested child's own display name (e.g.
+ * "Ready"), never our canonical colon-form id — so a grouped id filters on
+ * both the child name and its parent group's name (SPEC §4.5).
+ */
+function labelMatch(id: string): Record<string, unknown> {
+  const colon = id.indexOf(":");
+  if (colon === -1) return { name: { eq: labelDisplayName(id) } };
+  return {
+    name: { eq: labelDisplayName(id.slice(colon + 1)) },
+    parent: { name: { eq: groupDisplayName(id.slice(0, colon)) } },
+  };
 }
 
-export function lacksLabelNamed(name: string): IssueFilter {
-  return { labels: { none: { name: { eq: name } } } };
+export function hasLabelNamed(id: string): IssueFilter {
+  return { labels: { some: labelMatch(id) } };
+}
+
+export function lacksLabelNamed(id: string): IssueFilter {
+  return { labels: { none: labelMatch(id) } };
 }
 
 export function lacksLabelPrefixed(prefix: string): IssueFilter {
-  return { labels: { none: { name: { startsWith: prefix } } } };
+  return { labels: { none: { parent: { name: { eq: groupDisplayName(prefix) } } } } };
 }
 
 export function hasAnyLabelPrefixed(prefix: string): IssueFilter {
-  return { labels: { some: { name: { startsWith: prefix } } } };
+  return { labels: { some: { parent: { name: { eq: groupDisplayName(prefix) } } } } };
 }
 
 export function prioritized(): IssueFilter {

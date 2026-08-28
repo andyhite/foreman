@@ -391,8 +391,8 @@ describe("LinearClient ensureLabel", () => {
     const label = await client.ensureLabel("type:bug", "team-1");
 
     expect(createdLabels).toHaveLength(2);
-    expect(createdLabels[0]).toMatchObject({ name: "type", isGroup: true });
-    expect(createdLabels[1]).toMatchObject({ name: "type:bug", parentId: "label-1" });
+    expect(createdLabels[0]).toMatchObject({ name: "Type", isGroup: true });
+    expect(createdLabels[1]).toMatchObject({ name: "Bug", parentId: "label-1" });
     expect(label.name).toBe("type:bug");
 
     const cachedCallsBefore = labelQueryCalls;

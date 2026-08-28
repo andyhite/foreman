@@ -54,7 +54,7 @@ import {
   WORKFLOW_STATES_QUERY,
   WORKSPACE_LABELS_QUERY,
 } from "./queries.ts";
-import { MANAGED_LABEL_GROUPS } from "../domain/labels.ts";
+import { groupDisplayName, labelDisplayName, labelIdFromParts, MANAGED_LABEL_GROUPS } from "../domain/labels.ts";
 
 const DEFAULT_ENDPOINT = "https://api.linear.app/graphql";
 
@@ -73,7 +73,8 @@ interface WireIssueRef {
 interface WireLabel {
   id: string;
   name: string;
-  parent: { id: string } | null;
+  isGroup?: boolean;
+  parent: { id: string; name: string } | null;
 }
 interface WireRelation {
   id: string;
@@ -282,7 +283,7 @@ export class LinearClient implements LinearWriter {
       },
       labels: wire.labels.nodes.map((label) => ({
         id: label.id,
-        name: label.name,
+        name: labelIdFromParts(label.name, label.parent?.name ?? null),
         parentId: label.parent?.id ?? null,
       })),
       team: { id: wire.team.id, key: wire.team.key, name: wire.team.name },
@@ -529,19 +530,36 @@ export class LinearClient implements LinearWriter {
   }
 
   /**
+   * Raw workspace labels, unmapped — both parent groups (`isGroup: true`)
+   * and their members, straight off the wire. `labels()` and `ensureLabel`
+   * both need this; `labels()` reconstructs canonical ids from it, and
+   * `ensureLabel`/`ensureLabelGroup` match Linear's actual (display-name)
+   * labels against it directly.
+   *
    * Linear's `issueLabels` query has no verified team-filter argument, so
    * team scoping happens client-side; team-scoped labels are a subset of
    * the workspace result. `teamId` is accepted for API symmetry with
    * `LinearReader` and reserved for a server-side filter once verified.
    */
-  async labels(_teamId?: string): Promise<IssueLabel[]> {
+  private async fetchRawLabels(_teamId?: string): Promise<WireLabel[]> {
     const data = await this.request<{ issueLabels: { nodes: WireLabel[] } }>(
       WORKSPACE_LABELS_QUERY,
       {},
     );
-    return data.issueLabels.nodes.map((label) => ({
+    return data.issueLabels.nodes;
+  }
+
+  /**
+   * Every label in the workspace, with each nested label's canonical
+   * colon-form id (SPEC §4.5) reconstructed from its Linear group + own name
+   * (e.g. parent "Type", label "Bug" -> `"type:bug"`) so the rest of the
+   * codebase never has to know Linear's native label-group display names.
+   */
+  async labels(teamId?: string): Promise<IssueLabel[]> {
+    const raw = await this.fetchRawLabels(teamId);
+    return raw.map((label) => ({
       id: label.id,
-      name: label.name,
+      name: labelIdFromParts(label.name, label.parent?.name ?? null),
       parentId: label.parent?.id ?? null,
     }));
   }
@@ -665,6 +683,12 @@ export class LinearClient implements LinearWriter {
     return { id: label.id, name: label.name, parentId: label.parent?.id ?? null };
   }
 
+  /**
+   * Resolves a canonical colon-form label id (e.g. `"agent:ready"`) to its
+   * Linear label, creating the label — and its nested parent group, e.g.
+   * "Agent" -> "Ready" (SPEC §4.5) — if either is absent. Ungrouped ids
+   * (no colon, e.g. `legacy`) are created flat, unchanged.
+   */
   async ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel> {
     const cacheKey = `${teamId}:${name}`;
     const cached = this.labelIdCache.get(cacheKey);
@@ -678,26 +702,30 @@ export class LinearClient implements LinearWriter {
 
     const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
     const parentId = group ? await this.ensureLabelGroup(group.prefix, teamId) : undefined;
+    const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
 
-    const created = await this.createLabel({ name, teamId, parentId });
+    const created = await this.createLabel({ name: childName, teamId, parentId });
+    const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
     this.labelIdCache.set(cacheKey, created.id);
-    return created;
+    return label;
   }
 
-  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix. */
+  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix, e.g. `"agent:"` -> "Agent". */
   private async ensureLabelGroup(prefix: string, teamId: LinearId): Promise<LinearId> {
     const cacheKey = `${teamId}:${prefix}`;
     const cached = this.labelGroupIdCache.get(cacheKey);
     if (cached) return cached;
 
-    const groupName = prefix.endsWith(":") ? prefix.slice(0, -1) : prefix;
-    const existing = (await this.labels(teamId)).find((label) => label.name === groupName);
+    const displayName = groupDisplayName(prefix);
+    const existing = (await this.fetchRawLabels(teamId)).find(
+      (label) => label.isGroup === true && label.name === displayName,
+    );
     if (existing) {
       this.labelGroupIdCache.set(cacheKey, existing.id);
       return existing.id;
     }
 
-    const created = await this.createLabel({ name: groupName, teamId, isGroup: true });
+    const created = await this.createLabel({ name: displayName, teamId, isGroup: true });
     this.labelGroupIdCache.set(cacheKey, created.id);
     return created.id;
   }

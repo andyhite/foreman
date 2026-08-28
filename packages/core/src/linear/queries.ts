@@ -19,7 +19,7 @@ const ISSUE_FIELDS = `
   createdAt
   updatedAt
   state { id name type }
-  labels { nodes { id name parent { id } } }
+  labels { nodes { id name isGroup parent { id name } } }
   project { id name }
   team { id key name }
   assignee { id name displayName }
@@ -156,7 +156,7 @@ export const WORKFLOW_STATES_QUERY = `
 export const LABELS_QUERY = `
   query TeamLabels($teamId: String) {
     issueLabels(filter: { team: { id: { eq: $teamId } } }) {
-      nodes { id name parent { id } }
+      nodes { id name isGroup parent { id name } }
     }
   }
 `;
@@ -164,7 +164,7 @@ export const LABELS_QUERY = `
 export const WORKSPACE_LABELS_QUERY = `
   query WorkspaceLabels {
     issueLabels {
-      nodes { id name parent { id } }
+      nodes { id name isGroup parent { id name } }
     }
   }
 `;
