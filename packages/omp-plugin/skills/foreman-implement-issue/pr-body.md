@@ -25,7 +25,7 @@ integration, smoke)>
 
 - [x] Tests written and passing
 - [x] Lint and typecheck clean
-- [x] No new <whatever the Context doc's Definition of Done actually names>
+- [x] No new <whatever the product Context doc's Definition of Done actually names>
 
 ## Discovered work
 
@@ -71,4 +71,4 @@ fail if the similarity pass were reverted.
   hardening its config.
 ```
 
-Fill the Definition of Done checklist with the actual items from the project's `Context` doc, not the generic placeholders above — those vary per project.
+Fill the Definition of Done checklist with the actual items from the product's `Context` doc, not the generic placeholders above — those vary per product.

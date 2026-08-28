@@ -19,7 +19,7 @@ estimation of another issue during refine (§7.2 step 7), and carries a native
 
 - The spike issue: its stated question and stated budget.
 - The issue(s) it `blocks`, for context on what the answer needs to support.
-- The project `Context` doc, for constraints the investigation must respect.
+- The product `Context` doc and the project brief, for constraints the investigation must respect.
 
 ## Procedure
 

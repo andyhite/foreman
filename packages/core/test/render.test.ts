@@ -180,6 +180,7 @@ describe("renderProposalComment", () => {
     reproConfidence: "confirmed",
     missingInfo: [],
     triageLabel: null,
+    destinationProject: "Maintenance",
   };
 
   it("contains both the approve and reject instructions", () => {
@@ -194,6 +195,22 @@ describe("renderProposalComment", () => {
     expect(output).toContain("High");
     expect(output).toContain("Affects login for all users.");
     expect(output).toContain("ENG-3");
+  });
+
+  it("renders the type label once and names the proposed project", () => {
+    /*
+     * `type` already carries the `type:` prefix, so the renderer must not add a
+     * second one — this pins the exact string an operator reads.
+     */
+    const output = renderProposalComment(item);
+    expect(output).toContain("`type:bug`");
+    expect(output).not.toContain("type:type:");
+    expect(output).toContain("**Project:** Maintenance");
+  });
+
+  it("says why an unassigned project matters rather than printing nothing", () => {
+    const output = renderProposalComment({ ...item, destinationProject: null });
+    expect(output).toContain("refinement gate");
   });
 });
 

@@ -72,7 +72,7 @@ async function findApprovedUnapplied(linear: LinearWriter): Promise<Array<{ issu
   return candidates;
 }
 
-/** SPEC §7.1: destination, type label, priority, duplicate relation, proposed blockers, then the applied marker. */
+/** SPEC §7.1: destination, type label, priority, project, duplicate relation, proposed blockers, then the applied marker. */
 async function applyProposalItem(linear: LinearWriter, issue: Issue, item: TriageItem, dispatchMarkerCreatedAt: string): Promise<void> {
   const destinationKey = item.destination === "Backlog" ? "backlog" : item.destination === "Canceled" ? "canceled" : "duplicate";
   const teamStates = await linear.workflowStates(issue.team.id);
@@ -86,11 +86,29 @@ async function applyProposalItem(linear: LinearWriter, issue: Issue, item: Triag
     addedLabelIds.push(triageLabel.id);
   }
 
-  await linear.updateIssue(issue.id, {
+  const mutation: Parameters<LinearWriter["updateIssue"]>[1] = {
     stateId: targetState.id,
     priority: item.proposedPriority,
     addedLabelIds,
-  });
+  };
+
+  // `destinationProject` names a project, never a UUID (SPEC §7.1); an
+  // unmatched name must not silently drop the rest of the mutation, so it is
+  // folded into the same applied-marker note the file already uses to
+  // report what happened, rather than failing the whole apply.
+  let projectNote = "";
+  if (item.destinationProject) {
+    const projects = await linear.projects();
+    const destinationProject = item.destinationProject;
+    const match = projects.find((candidate) => candidate.name.toLowerCase() === destinationProject.toLowerCase());
+    if (match) {
+      mutation.projectId = match.id;
+    } else {
+      projectNote = ` Proposed project "${destinationProject}" not found; project left unset.`;
+    }
+  }
+
+  await linear.updateIssue(issue.id, mutation);
 
   if (item.duplicateOf) {
     const duplicate = await linear.issue(item.duplicateOf);
@@ -109,7 +127,7 @@ async function applyProposalItem(linear: LinearWriter, issue: Issue, item: Triag
   const body = encodeMarker(
     MARKER_KIND.applied,
     { issueId: issue.identifier, appliedProposalAt: dispatchMarkerCreatedAt },
-    `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.`,
+    `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.${projectNote}`,
   );
   await linear.createComment({ issueId: issue.id, body });
 }

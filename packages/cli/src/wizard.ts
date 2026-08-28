@@ -8,7 +8,7 @@
  * usable config.
  */
 
-import { LinearApiError, LinearClient, type ProjectRef, type TeamRef } from "@foreman/core";
+import { LinearApiError, LinearClient, type InitiativeRef, type TeamRef } from "@foreman/core";
 import { join } from "node:path";
 import type { Runner } from "./exec.ts";
 import { readGlobalConfig, writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
@@ -115,76 +115,79 @@ async function resolveLinearApiKey(
   return { apiKey, apiKeyFile };
 }
 
-interface ProjectSelection {
-  projects: Record<string, string>;
+interface InitiativeSelection {
+  repos: Record<string, string>;
   teamKeys: string[];
 }
 
 /**
- * Fetches every project in the workspace and lets the operator check the
- * ones Foreman should manage, pre-checking projects already mapped in
- * `existingProjects` and pre-filling each repo path from `guessRepoPath` —
- * the operator confirms or edits rather than typing every path by hand.
- * Returns null on any API failure or an empty workspace so the caller can
- * fall back to manual entry instead of dead-ending the wizard.
+ * Fetches every initiative (product) in the workspace and lets the operator
+ * check the ones Foreman should manage, pre-checking initiatives already
+ * mapped in `existingRepos` and pre-filling each repo path from
+ * `guessRepoPath` — the operator confirms or edits rather than typing every
+ * path by hand. Returns null on any API failure or an empty workspace so the
+ * caller can fall back to manual entry instead of dead-ending the wizard.
  */
-async function pickProjectsFromLinear(
+async function pickInitiativesFromLinear(
   prompter: Prompter,
   log: (message: string) => void,
   apiKey: string,
   repoRoot: string,
-  existingProjects: Record<string, string>,
-): Promise<ProjectSelection | null> {
+  existingRepos: Record<string, string>,
+): Promise<InitiativeSelection | null> {
   const client = new LinearClient({ apiKey });
-  let projects: ProjectRef[];
+  let initiatives: InitiativeRef[];
   let teams: TeamRef[];
   try {
-    [projects, teams] = await Promise.all([client.projects(), client.teams()]);
+    [initiatives, teams] = await Promise.all([client.initiatives(), client.teams()]);
   } catch (error) {
     const message = error instanceof LinearApiError ? error.message : String(error);
     log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}) — falling back to manual entry.`);
     return null;
   }
-  if (projects.length === 0) {
-    log(`  ${style("yellow", "!")} no projects found in this Linear workspace — falling back to manual entry.`);
+  if (initiatives.length === 0) {
+    log(`  ${style("yellow", "!")} no initiatives found in this Linear workspace — falling back to manual entry.`);
     return null;
   }
 
-  const sorted = [...projects].sort((a, b) => a.name.localeCompare(b.name));
-  const choices: Array<CheckboxChoice<string>> = sorted.map((project) => {
-    const mappedPath = existingProjects[project.id];
+  const sorted = [...initiatives].sort((a, b) => a.name.localeCompare(b.name));
+  const choices: Array<CheckboxChoice<string>> = sorted.map((initiative) => {
+    const mappedPath = existingRepos[initiative.id];
     return {
-      value: project.id,
-      label: project.name,
+      value: initiative.id,
+      label: initiative.name,
       checked: mappedPath !== undefined,
       hint: mappedPath ? `already mapped → ${mappedPath}` : undefined,
     };
   });
 
-  const selectedIds = await prompter.multiSelect("Which Linear projects should Foreman manage?", choices);
-  const projectsById = new Map(sorted.map((project) => [project.id, project] as const));
+  const selectedIds = await prompter.multiSelect(
+    "Which Linear initiatives (products) should Foreman manage?",
+    choices,
+  );
+  const initiativesById = new Map(sorted.map((initiative) => [initiative.id, initiative] as const));
   const mapped: Record<string, string> = {};
   for (const id of selectedIds) {
-    const project = projectsById.get(id);
-    if (!project) continue;
-    const suggestion = existingProjects[id] ?? guessRepoPath(project.name, repoRoot) ?? "";
-    const repoPath = await prompter.text(`Repo path for "${project.name}"`, suggestion);
+    const initiative = initiativesById.get(id);
+    if (!initiative) continue;
+    const suggestion = existingRepos[id] ?? guessRepoPath(initiative.name, repoRoot) ?? "";
+    const repoPath = await prompter.text(`Repo path for "${initiative.name}"`, suggestion);
     if (repoPath.length > 0) mapped[id] = repoPath;
   }
 
-  return { projects: mapped, teamKeys: teams.map((team) => team.key) };
+  return { repos: mapped, teamKeys: teams.map((team) => team.key) };
 }
 
-/** The pre-API fallback: a project-id/repo-path loop, team keys are prompted separately. */
-async function pickProjectsManually(prompter: Prompter): Promise<Record<string, string>> {
+/** The pre-API fallback: an initiative-id/repo-path loop, team keys are prompted separately. */
+async function pickInitiativesManually(prompter: Prompter): Promise<Record<string, string>> {
   const mapped: Record<string, string> = {};
-  if (await prompter.confirm("Map a Linear project id to a repo path now?", false)) {
+  if (await prompter.confirm("Map a Linear initiative id to a repo path now?", false)) {
     for (;;) {
-      const projectId = await prompter.text("Linear project id (blank to stop)", "");
-      if (projectId.length === 0) break;
-      const repoPath = await prompter.text(`Repo path for project ${projectId}`, "");
-      if (repoPath.length > 0) mapped[projectId] = repoPath;
-      if (!(await prompter.confirm("Map another project?", false))) break;
+      const initiativeId = await prompter.text("Linear initiative id (blank to stop)", "");
+      if (initiativeId.length === 0) break;
+      const repoPath = await prompter.text(`Repo path for initiative ${initiativeId}`, "");
+      if (repoPath.length > 0) mapped[initiativeId] = repoPath;
+      if (!(await prompter.confirm("Map another initiative?", false))) break;
     }
   }
   return mapped;
@@ -202,9 +205,11 @@ async function configureGlobalConfig(
   const { apiKey, apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
   const existing = readGlobalConfig(home);
 
-  const picked = apiKey ? await pickProjectsFromLinear(prompter, log, apiKey, repoRoot, existing.projects) : null;
-  const manuallyMapped = picked ? {} : await pickProjectsManually(prompter);
-  const projects = { ...existing.projects, ...(picked?.projects ?? manuallyMapped) };
+  const picked = apiKey
+    ? await pickInitiativesFromLinear(prompter, log, apiKey, repoRoot, existing.repos)
+    : null;
+  const manuallyMapped = picked ? {} : await pickInitiativesManually(prompter);
+  const repos = { ...existing.repos, ...(picked?.repos ?? manuallyMapped) };
 
   const suggestedTeamKeys = existing.teamKeys.length > 0 ? existing.teamKeys : (picked?.teamKeys ?? []);
   const teamKeysRaw = await prompter.text(
@@ -216,13 +221,13 @@ async function configureGlobalConfig(
     .map((key) => key.trim())
     .filter((key) => key.length > 0);
 
-  const configPath = writeGlobalConfig({ projects, linear: { teamKeys, apiKeyFile } }, home);
+  const configPath = writeGlobalConfig({ repos, linear: { teamKeys, apiKeyFile } }, home);
   log(`  wrote ${configPath}`);
-  const projectCount = Object.keys(projects).length;
-  if (projectCount === 0) {
-    log('  no projects mapped yet — add them under "projects" before the loop can dispatch anything.');
+  const initiativeCount = Object.keys(repos).length;
+  if (initiativeCount === 0) {
+    log('  no initiatives mapped yet — add them under "repos" before the loop can dispatch anything.');
   } else {
-    log(`  ${style("green", "✓")} ${projectCount} project(s) mapped to a repo.`);
+    log(`  ${style("green", "✓")} ${initiativeCount} initiative(s)/product(s) mapped to a repo.`);
   }
 }
 
@@ -338,6 +343,6 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   await setupHerdrPlugin(deps, options, herdrMode);
 
   printSection(deps.log, "Done");
-  deps.log(`  ${style("green", "✓")} Edit ~/.foreman/config.json to map more Linear projects to repos.`);
+  deps.log(`  ${style("green", "✓")} Edit ~/.foreman/config.json to map more Linear initiatives to repos.`);
   deps.log(`  ${style("cyan", "→")} Then: foreman loop --dry-run --once --verbose`);
 }

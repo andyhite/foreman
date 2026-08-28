@@ -7,7 +7,7 @@ import {
   expandHome,
   loadGlobalConfig,
   lockTtlMs,
-  repoForProject,
+  repoForInitiative,
   resolveLinearApiKey,
   resolveRepoConfig,
 } from "../src/config/index.ts";
@@ -109,12 +109,12 @@ describe("loadGlobalConfig", () => {
     }
   });
 
-  it("warns but does not throw when projects is empty", () => {
+  it("warns but does not throw when repos is empty", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { projects: {} });
+      writeGlobalConfig(home, { repos: {} });
       const { warnings } = loadGlobalConfig({ home });
-      expect(warnings.some((w) => w.toLowerCase().includes("project"))).toBe(true);
+      expect(warnings.some((w) => w.toLowerCase().includes("repo"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -155,23 +155,23 @@ describe("resolveRepoConfig", () => {
   });
 });
 
-describe("repoForProject", () => {
+describe("repoForInitiative", () => {
   it("expands a leading ~ using the given home", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { projects: { "proj-1": "~/code/plotroom" } });
+      writeGlobalConfig(home, { repos: { "init-1": "~/code/plotroom" } });
       const { config } = loadGlobalConfig({ home });
-      expect(repoForProject(config, "proj-1", home)).toBe(join(home, "code", "plotroom"));
+      expect(repoForInitiative(config, "init-1", home)).toBe(join(home, "code", "plotroom"));
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("throws ConfigError naming the project id for an unmapped project", () => {
+  it("throws ConfigError naming the initiative id for an unmapped initiative", () => {
     const home = makeHome();
     try {
       const { config } = loadGlobalConfig({ home });
-      expect(() => repoForProject(config, "unmapped-project")).toThrow(ConfigError);
+      expect(() => repoForInitiative(config, "unmapped-initiative")).toThrow(ConfigError);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

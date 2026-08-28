@@ -50,7 +50,7 @@ class FakeDispatcher implements Dispatcher {
 
 function makeConfig(dispatcher: GlobalConfig["loop"]["dispatcher"]): GlobalConfig {
   return {
-    projects: {},
+    repos: {},
     loop: {
       wipGlobal: 3,
       wip: { triage: 1, refine: 2, implement: 3, review: 2 },

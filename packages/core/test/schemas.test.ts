@@ -14,6 +14,7 @@ const validTriageResult = {
       severityReasoning: "Breaks login for all users.",
       duplicateOf: null,
       proposedBlockedBy: [],
+      destinationProject: "Maintenance",
       destination: "Backlog",
       reproConfidence: "confirmed",
       missingInfo: [],
@@ -156,6 +157,17 @@ describe("parseAgentOutput", () => {
     if (parsed.kind === "invalid") {
       expect(parsed.problems.some((problem) => problem.includes("/result/summary"))).toBe(true);
     }
+  });
+
+  it("rejects a triage item missing destinationProject", () => {
+    const { destinationProject: _destinationProject, ...itemWithoutDestinationProject } =
+      validTriageResult.items[0]!;
+    const parsed = parseAgentOutput("foreman-triage", {
+      blocked: false,
+      result: { ...validTriageResult, items: [itemWithoutDestinationProject] },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
   });
 });
 

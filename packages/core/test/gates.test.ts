@@ -42,7 +42,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     state: STATE_TODO,
     labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
-    project: null,
+    project: { id: "project-1", name: "Milestone" },
     parent: null,
     children: [],
     assignee: null,
@@ -109,6 +109,34 @@ describe("refinementGate", () => {
       makeIssue({ labels: [label(TYPE_LABEL.feature), label(BLOCKED_LABEL.needsInput)] }),
     );
     expect(result.failures.map((f) => f.code)).toContain("blocked-label-present");
+  });
+
+  it("fails missing-project when the issue has no project", () => {
+    const result = refinementGate(makeIssue({ project: null }));
+    expect(result.failures.map((f) => f.code)).toContain("missing-project");
+  });
+
+  it("fails missing-initiative when the project has no initiative", () => {
+    const result = refinementGate(makeIssue(), { initiativeCount: 0 });
+    expect(result.failures.map((f) => f.code)).toContain("missing-initiative");
+  });
+
+  it("fails ambiguous-initiative when the project has more than one initiative", () => {
+    const result = refinementGate(makeIssue(), { initiativeCount: 2 });
+    expect(result.failures.map((f) => f.code)).toContain("ambiguous-initiative");
+  });
+
+  it("passes with exactly one initiative", () => {
+    const result = refinementGate(makeIssue(), { initiativeCount: 1 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("reports neither initiative code when membership is omitted", () => {
+    const result = refinementGate(makeIssue({ priority: PRIORITY.None }));
+    const codes = result.failures.map((f) => f.code);
+    expect(codes).not.toContain("missing-initiative");
+    expect(codes).not.toContain("ambiguous-initiative");
+    expect(codes).toContain("priority-none");
   });
 });
 

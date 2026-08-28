@@ -20,5 +20,6 @@ export * from "./linear/index.ts";
 export * from "./lock.ts";
 export * from "./markers.ts";
 export * from "./render/index.ts";
+export * from "./repo.ts";
 export * from "./schemas/index.ts";
 export * from "./schemas/parse.ts";

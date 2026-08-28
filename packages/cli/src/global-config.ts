@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface ConfigPatch {
-  projects: Record<string, string>;
+  repos: Record<string, string>;
   linear: {
     teamKeys: string[];
     apiKeyFile: string | null;
@@ -28,7 +28,7 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
 }
 
 export interface ExistingConfig {
-  projects: Record<string, string>;
+  repos: Record<string, string>;
   teamKeys: string[];
   apiKeyFile: string | null;
 }
@@ -39,7 +39,7 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
   const existing = readExistingConfig(configPath);
   const linear = (existing.linear as Record<string, unknown> | undefined) ?? {};
   return {
-    projects: (existing.projects as Record<string, string> | undefined) ?? {},
+    repos: (existing.repos as Record<string, string> | undefined) ?? {},
     teamKeys: Array.isArray(linear.teamKeys) ? (linear.teamKeys as string[]) : [],
     apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
   };
@@ -49,8 +49,8 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
 function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
   const merged = { ...existing };
 
-  if (Object.keys(patch.projects).length > 0) {
-    merged.projects = { ...(existing.projects as Record<string, string> | undefined), ...patch.projects };
+  if (Object.keys(patch.repos).length > 0) {
+    merged.repos = { ...(existing.repos as Record<string, string> | undefined), ...patch.repos };
   }
 
   const existingLinear = (existing.linear as Record<string, unknown> | undefined) ?? {};

@@ -12,7 +12,7 @@ import {
   GitHubClient,
   branchNameFor,
   inState,
-  repoForProject,
+  repoForIssue,
   resolveRepoConfig,
   resolveState,
 } from "@foreman/core";
@@ -32,7 +32,19 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
 
   for (const issue of inReview) {
     if (!issue.project) continue;
-    const repoPath = repoForProject(ctx.config, issue.project.id);
+    let repoPath: string;
+    try {
+      repoPath = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      skipped.push({
+        stage: "review",
+        issueId: issue.identifier,
+        code: "unresolved-repo",
+        message,
+      });
+      continue;
+    }
     const repoSettings = resolveRepoConfig(ctx.config, repoPath);
     const branch = branchNameFor(repoSettings.branchPattern, issue);
 

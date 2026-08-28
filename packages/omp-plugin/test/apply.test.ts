@@ -25,6 +25,7 @@ const STATE_IN_REVIEW: WorkflowState = {
   type: "started",
   position: 4,
 };
+const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 1 };
 
 function label(name: string): IssueLabel {
   return { id: `label-${name}`, name, parentId: null };
@@ -58,6 +59,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
 class FakeLinear implements LinearWriter {
   issuesById = new Map<string, Issue>();
   labelsById = new Map<string, IssueLabel>();
+  projectsList: { id: string; name: string }[] = [];
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
   commentCalls: Array<{ issueId: string; body: string }> = [];
   createIssueCalls: CreateIssueInput[] = [];
@@ -85,8 +87,20 @@ class FakeLinear implements LinearWriter {
   async project() {
     return null;
   }
+  async projectInitiatives() {
+    return [{ id: "initiative-1", name: "Foreman" }];
+  }
+  async projectInitiative() {
+    return { id: "initiative-1", name: "Foreman" };
+  }
+  async initiative() {
+    return null;
+  }
+  async initiatives() {
+    return [];
+  }
   async workflowStates(): Promise<WorkflowState[]> {
-    return [STATE_TODO, STATE_IN_REVIEW];
+    return [STATE_TODO, STATE_IN_REVIEW, STATE_BACKLOG];
   }
   async labels(): Promise<IssueLabel[]> {
     return [...this.labelsById.values()];
@@ -95,7 +109,7 @@ class FakeLinear implements LinearWriter {
     return [];
   }
   async projects() {
-    return [];
+    return this.projectsList;
   }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
@@ -110,7 +124,7 @@ class FakeLinear implements LinearWriter {
       issue.labels = issue.labels.filter((entry) => !input.removedLabelIds?.includes(entry.id));
     }
     if (input.stateId) {
-      issue.state = [STATE_TODO, STATE_IN_REVIEW].find((state) => state.id === input.stateId) ?? issue.state;
+      issue.state = [STATE_TODO, STATE_IN_REVIEW, STATE_BACKLOG].find((state) => state.id === input.stateId) ?? issue.state;
     }
     return issue;
   }
@@ -156,6 +170,7 @@ function makeTriageProposal(overrides: Partial<TriageProposal["items"][number]> 
         severityReasoning: "Seems fine.",
         duplicateOf: null,
         proposedBlockedBy: [],
+        destinationProject: null,
         destination: "Backlog",
         reproConfidence: "not-attempted",
         missingInfo: [],
@@ -306,6 +321,7 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
     severityReasoning: "Seems fine.",
     duplicateOf: null,
     proposedBlockedBy: [],
+    destinationProject: null,
     destination: "Backlog",
     reproConfidence: "not-attempted",
     missingInfo: [],
@@ -344,6 +360,36 @@ describe("runApplyCommand — --approve", () => {
     expect(result.ok).toBe(false);
     expect(result.mutated).toBe(false);
     expect(result.message).toContain("already");
+  });
+
+  it("resolves destinationProject to a project id, matching case-insensitively", async () => {
+    const item = makeTriageItem({ destinationProject: "roadmap" });
+    const issue = makeIssue({
+      labels: [label(TYPE_LABEL.feature)],
+      comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([issue]);
+    linear.projectsList = [{ id: "project-roadmap", name: "Roadmap" }];
+    const result = await runApplyCommand(linear, ["ENG-1", "--approve"]);
+    expect(result.ok).toBe(true);
+    const mutation = linear.updateCalls.find((call) => call.input.projectId !== undefined);
+    expect(mutation?.input.projectId).toBe("project-roadmap");
+  });
+
+  it("applies everything else and notes an unmatched destinationProject without dropping the rest", async () => {
+    const item = makeTriageItem({ destinationProject: "Nonexistent Project" });
+    const issue = makeIssue({
+      labels: [label(TYPE_LABEL.feature)],
+      comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([issue]);
+    linear.projectsList = [{ id: "project-roadmap", name: "Roadmap" }];
+    const result = await runApplyCommand(linear, ["ENG-1", "--approve"]);
+    expect(result.ok).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.projectId !== undefined)).toBe(false);
+    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(true);
+    const appliedComment = linear.commentCalls.find((call) => call.body.includes("Nonexistent Project"));
+    expect(appliedComment?.body).toContain("not found");
   });
 });
 

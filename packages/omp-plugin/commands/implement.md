@@ -4,7 +4,7 @@ argument-hint: <ISSUE-ID>
 ---
 
 Resolve issue `$1` via `foreman_linear_read`. Assemble the shared `context`
-from the project `Context` doc digest plus this issue's description,
+from the two-layer `Context` digest (§4.7) plus this issue's description,
 acceptance criteria, and estimate.
 
 Gate: the implementation gate must pass (refinement gate satisfied,

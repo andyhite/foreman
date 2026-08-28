@@ -60,7 +60,7 @@ export const ReviewResult = Type.Object(
       description: "One entry per acceptance criterion on the issue.",
     }),
     dodSatisfied: Type.Boolean({
-      description: "The global Definition of Done from the project Context doc.",
+      description: "The per-product Definition of Done from the product `Context` doc.",
     }),
     dodChecklist: Type.Array(DodCheck, {
       description: "Per-item Definition of Done results, for the rendered checklist.",

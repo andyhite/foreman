@@ -39,6 +39,7 @@
                   "severityReasoning",
                   "duplicateOf",
                   "proposedBlockedBy",
+                  "destinationProject",
                   "destination",
                   "reproConfidence",
                   "missingInfo",
@@ -103,6 +104,17 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "destinationProject": {
+                    "description": "Name of the project this issue belongs to once triaged: a milestone project's name, or the product's standing `Maintenance` project (SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely cannot tell.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "destination": {
                     "description": "Where this issue should move once the proposal is approved.",

@@ -13,7 +13,7 @@ import {
   latestMarker,
   newDispatchId,
   nodeRunner,
-  repoForProject,
+  repoForIssue,
   resolveRepoConfig,
 } from "@foreman/core";
 import type { BoardSnapshot, ReviewCandidate } from "../routing.ts";
@@ -23,6 +23,7 @@ import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 async function buildReviewCandidates(
   ctx: WorkerContext,
   github: GitHubClient,
+  skipped: WorkerReport["skipped"],
 ): Promise<ReviewCandidate[]> {
   const inReview = await ctx.linear.issues({
     filter: inState("In Review"),
@@ -33,7 +34,19 @@ async function buildReviewCandidates(
   const candidates: ReviewCandidate[] = [];
   for (const issue of inReview) {
     if (!issue.project) continue;
-    const repoPath = repoForProject(ctx.config, issue.project.id);
+    let repoPath: string;
+    try {
+      repoPath = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      skipped.push({
+        stage: "review",
+        issueId: issue.identifier,
+        code: "unresolved-repo",
+        message,
+      });
+      continue;
+    }
     const repoSettings = resolveRepoConfig(ctx.config, repoPath);
     const branch = branchNameFor(repoSettings.branchPattern, issue);
 
@@ -72,8 +85,9 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const errors: string[] = [];
   const github = new GitHubClient();
 
+  const candidateSkips: WorkerReport["skipped"] = [];
   const [reviewCandidates, blockedHuman] = await Promise.all([
-    buildReviewCandidates(ctx, github),
+    buildReviewCandidates(ctx, github, candidateSkips),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
 
@@ -88,15 +102,31 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping, now);
+  skipped.push(...candidateSkips);
 
   if (!ctx.dryRun) {
     for (const decision of decisions) {
       if (!decision.issueId) continue;
       const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
-      const repoPath = candidate?.issue.project
-        ? repoForProject(ctx.config, candidate.issue.project.id)
-        : null;
-      const cwd = repoPath ?? `${expandHome(ctx.config.loop.stateDir)}/scratch`;
+      if (!candidate) continue;
+      let cwd: string;
+      if (candidate.issue.project === null) {
+        cwd = `${expandHome(ctx.config.loop.stateDir)}/scratch`;
+      } else {
+        try {
+          cwd = await repoForIssue({ linear: ctx.linear, config: ctx.config }, candidate.issue);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          skipped.push({
+            stage: "review",
+            issueId: decision.issueId,
+            code: "unresolved-repo",
+            message,
+          });
+          continue;
+        }
+      }
+
       const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
       try {
         const handle = await ctx.dispatcher.dispatch({

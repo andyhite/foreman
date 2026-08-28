@@ -157,8 +157,8 @@ export type AgentSettings = Static<typeof AgentSettingsSchema>;
 /** `~/.foreman/config.json`. */
 export const GlobalConfigSchema = Type.Object(
   {
-    /** Linear project id → repo path. The only place Foreman learns this (SPEC §3.5). */
-    projects: Type.Record(Type.String(), Type.String({ minLength: 1 }), {
+    /** Linear initiative id → repo path. The only place Foreman learns this (SPEC §3.5). */
+    repos: Type.Record(Type.String(), Type.String({ minLength: 1 }), {
       default: {},
     }),
     loop: LoopSettingsSchema,

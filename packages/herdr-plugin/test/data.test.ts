@@ -87,6 +87,7 @@ const PROPOSAL_ITEM: TriageItem = {
   duplicateOf: null,
   proposedBlockedBy: [],
   destination: "Backlog",
+  destinationProject: "Maintenance",
   reproConfidence: "confirmed",
   missingInfo: [],
   triageLabel: null,

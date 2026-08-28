@@ -15,7 +15,7 @@ implementation gate downstream cares about `type:`, priority, and estimate.
 
 - Each Triage item: title, description, comments, reporter.
 - The existing backlog, for dedupe comparison (`foreman_linear_read`).
-- The repo, read-only, for repro attempts — resolved via the project→repo map.
+- The repo, read-only, for repro attempts — resolved via the repo map (§3.5).
 
 ## Procedure
 
@@ -35,6 +35,12 @@ For each item, in order:
 6. **Propose `blocked by` relations** in `proposedBlockedBy` where a
    dependency is evident.
 7. **Recommend a destination** (`Backlog`, `Canceled`, `Duplicate`).
+8. **Assign a project** in `destinationProject`, by name — never a UUID — for
+   the issue to land in: a milestone project or the product's standing
+   `Maintenance` project. This is a separate axis from `destination` (the
+   workflow state) — writing a state name into `destinationProject` is a
+   conflation bug. Use `null` only when you genuinely cannot tell which
+   project fits.
 
 ## Output
 

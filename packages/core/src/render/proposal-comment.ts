@@ -23,11 +23,12 @@ export function renderProposalComment(item: TriageItem): string {
       : "_none_";
 
   return [
-    `**Classification:** \`type:${item.type}\``,
+    `**Classification:** \`${item.type}\``,
     `**Proposed priority:** ${priorityName(item.proposedPriority)} — ${item.severityReasoning}`,
     `**Dedupe:** ${dedupeLine}`,
     `**Proposed blocked by:** ${blockersLine}`,
     `**Destination:** ${item.destination}`,
+    `**Project:** ${item.destinationProject ?? "_none proposed — the refinement gate fails until one is set_"}`,
     `**Repro confidence:** ${item.reproConfidence}`,
     item.triageLabel !== null ? `**Triage disposition:** \`${item.triageLabel}\`` : null,
     "",

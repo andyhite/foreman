@@ -1,6 +1,6 @@
 # Verified during build
 
-`SPEC.md` §16 lists eight assumptions to verify while building, and §18 assigns
+`SPEC.md` §16 lists nine assumptions to verify while building, and §18 assigns
 them to build steps. This is the answer sheet. Where an answer contradicts the
 spec, the code follows the answer and the discrepancy is called out — the spec
 was written against documentation, and some of it was wrong.
@@ -17,6 +17,7 @@ was written against documentation, and some of it was wrong.
 | 6 | The bundled agent roster | `scout`, `designer`, `reviewer`, `security-reviewer`, `librarian`, `task`, `sonic` | `reviewer` and `designer` are both real, so an agent named `reviewer` would shadow a bundled one globally. Every Foreman agent is prefixed. |
 | 7 | Does Linear's GitHub integration auto-transition to Done on merge? | **Only with setup** | The transition is a team-level workflow automation, not default behavior, and when two or more PRs link to one issue all must merge. Foreman cannot rely on it, so the merge-detection worker is required rather than optional — `loop.mergeDetection` defaults to `true` in both PR and direct-branch mode. |
 | 8 | Frontmatter tool spellings, and `output:` path resolution | **Tools: corrected. Path: never resolves — inline instead** | There is no `search` tool (it is `grep` + `glob`) and no `dap` tool (it is `debug`); `exec` is an expansion alias for `eval` + `bash`, and the agents list those two explicitly. A frontmatter `output:` **string is `JSON.parse`d, not read as a path**: a probe carrying `output: schemas/probe.json` failed preflight with `Invalid strict effective output schema: JSON Parse error: Unexpected identifier "schemas"`. The schema must therefore be **inlined in the frontmatter**, which is what the agents ship — as a YAML block scalar (`output: \|`) holding pretty-printed JSON, generated into the file by `packages/core/scripts/emit-schemas.ts` so the TypeBox definition in `core` stays the single source of truth. Verified end to end: `foreman-triage` with its 11 KB inlined schema passed preflight and a child under `schemaMode: "strict"` returned a valid envelope (`{"blocked": false, "result": {"items": [{"issueId": "ENG-1", "type": "type:bug", …`) with no validation error. The sibling `schemas/*.json` files remain as human reference. |
+| 9 | Do documents attach at the initiative level? | **Yes — the fallback is unnecessary** | `Document` carries `initiative: Initiative` alongside `project: Project` and `issue: Issue`, and `Initiative` carries `documents: DocumentConnection`, `content: String`, and `documentContent: DocumentContent`. Introspected against the live API. §4.7's contingency — pinning the product `Context` doc in the standing `Maintenance` project — is therefore dead weight and is not implemented. |
 
 ## Where the spec is wrong
 
@@ -99,3 +100,13 @@ describes, and the pane label is what the startup guard matches on.
   when written. There is no `blockedBy` relation type — "blocked by" is a
   `blocks` edge seen from the other end, which is why `IssueRelation` carries an
   explicit `direction`.
+- `Project.initiatives` is an `InitiativeConnection`, not a scalar edge: Linear
+  genuinely permits a project under several initiatives, so §4.0's "exactly one
+  initiative per project" is ours to enforce and cannot be delegated to the API.
+  `projectInitiative()` rejects on both 0 and >1, naming the initiatives found.
+- **`IssueFilter` has no initiative field.** Only `project:
+  NullableProjectFilter`; `ProjectFilter.initiatives` exists, but issues cannot
+  be filtered by initiative in one hop. Filtering work by product is therefore
+  two queries — resolve the initiative's projects, then filter issues by that
+  project set — which is why repo resolution caches the project→initiative edge
+  per client rather than re-deriving it per issue.

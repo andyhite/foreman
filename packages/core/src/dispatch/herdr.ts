@@ -2,8 +2,8 @@
  * `HerdrDispatcher` (SPEC §17.2, §17.3).
  *
  * A real terminal pane per agent, live state, and the ability to attach and
- * take over. Layout: one workspace per repo (matching the Linear project via
- * the project→repo map), one tab per in-flight issue named for the issue, one
+ * take over. Layout: one workspace per repo (matching the product initiative
+ * via the repo map), one tab per in-flight issue named for the issue, one
  * pane per agent with `--cwd` set to the issue's worktree, and a `foreman`
  * workspace holding the loop, the board, and a scratch tab for the
  * worktree-less triage/refine/review agents.

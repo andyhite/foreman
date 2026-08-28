@@ -20,12 +20,12 @@ Verbatim, per SPEC §13.1:
 ```
 
 Do not restate the Definition of Done in `## Context` or anywhere else in the
-description — it is global and lives in the `Context` doc.
+description — it is per-product and lives in the product `Context` doc.
 
 `## Open Questions` must be **empty** for a refined issue. Anything written
 there is a signal that refinement isn't finished — resolve it (read more,
-check the `Context` doc, or spin off a spike) before yielding, don't ship an
-issue with an open question attached.
+check the product `Context` doc or project brief, or spin off a spike) before
+yielding, don't ship an issue with an open question attached.
 
 ## Worked example
 

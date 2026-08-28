@@ -15,8 +15,32 @@ import type { GateFailure, GateResult } from "./types.ts";
 /** SPEC §4.6: 5 means "split it", so refinement caps the estimate at 3. */
 const MAX_REFINED_ESTIMATE = 3;
 
-export function refinementGate(issue: Issue): GateResult {
+export function refinementGate(
+  issue: Issue,
+  membership?: { initiativeCount: number },
+): GateResult {
   const failures: GateFailure[] = [];
+
+  if (issue.project === null) {
+    failures.push({
+      code: "missing-project",
+      message: "Issue has no project.",
+    });
+  }
+
+  if (membership !== undefined) {
+    if (membership.initiativeCount === 0) {
+      failures.push({
+        code: "missing-initiative",
+        message: "Project belongs to no initiative (SPEC §4.0).",
+      });
+    } else if (membership.initiativeCount > 1) {
+      failures.push({
+        code: "ambiguous-initiative",
+        message: `Project belongs to ${membership.initiativeCount} initiatives; exactly one is required (SPEC §4.0).`,
+      });
+    }
+  }
 
   if (typeLabel(issue) === null) {
     failures.push({

@@ -70,21 +70,17 @@ bun run packages/cli/dist/main.js setup --yes --omp install --scope user
 `foreman setup` (alias `init`) is the installer: it checks for `bun`/`git`/`gh`/
 `omp`/`herdr`, walks you through `~/.foreman/config.json`, then installs the
 plugin(s) you choose. If `$LINEAR_API_KEY` is already set, setup skips the key
-prompt entirely and uses it straight away to list every project in your Linear
-workspace as a checkbox picker (`↑`/`↓` to move, `space` to toggle, `enter` to
-confirm) — pre-checking any project already mapped in your config, and
-guessing a repo path for each newly-picked project by matching its name
-against git checkouts in nearby directories (a sibling of this checkout,
-`~/Code`, `~/dev`, and similar). You still confirm or edit every guess before
-it's written; without a key (or without network access to Linear), setup
-falls back to typing project ids and paths by hand. `--omp install` (shown
-above) is the production path — it registers the omp plugin from
-`andyhite/foreman` on GitHub rather than linking back to this checkout. Drop
-`--yes` to be walked through the config interactively instead:
-
-```bash
-bun run packages/cli/dist/main.js setup --omp install --scope user
-```
+prompt entirely and uses it straight away to list every product (initiative)
+in your Linear workspace as a checkbox picker (`↑`/`↓` to move, `space` to
+toggle, `enter` to confirm) — pre-checking any product already mapped in your
+config, and guessing a repo path for each newly-picked product by matching
+its name against git checkouts in nearby directories (a sibling of this
+checkout, `~/Code`, `~/dev`, and similar). You still confirm or edit every
+guess before it's written; without a key (or without network access to
+Linear), setup falls back to typing initiative ids and paths by hand.
+`--omp install` (shown above) is the production path — it registers the omp
+plugin from `andyhite/foreman` on GitHub rather than linking back to this
+checkout. Drop `--yes` to be walked through the config interactively instead:
 
 `--scope user` (the default) installs the omp plugin across every repo you
 work in; `--scope project` scopes it to the current repo. The herdr board is
@@ -102,7 +98,7 @@ Point Foreman at Linear and at least one repo in `~/.foreman/config.json` —
 
 ```json
 {
-  "projects": {
+  "repos": {
     "a1b2c3d4-0000-0000-0000-000000000000": "~/Code/my-app"
   },
   "linear": {
@@ -113,9 +109,10 @@ Point Foreman at Linear and at least one repo in `~/.foreman/config.json` —
 
 Foreman reads the Linear personal API key from `$LINEAR_API_KEY`, or from
 `linear.apiKeyFile` when the env var is unset — `foreman setup` writes that file
-for you (mode `0600`) if you paste a key during the prompt. The `projects` map
-is the only place Foreman learns which repo a Linear project belongs to; an
-unmapped project is skipped rather than guessed at.
+for you (mode `0600`) if you paste a key during the prompt. The `repos` map,
+keyed by initiative ID, is the only place Foreman learns which repo a product
+belongs to; an issue whose project has no initiative, or whose initiative
+isn't in the map, is skipped rather than guessed at.
 
 Once installed, day-to-day use is `foreman loop` (below) and the `/foreman:*`
 slash commands inside any omp session. See [Development](#development) below

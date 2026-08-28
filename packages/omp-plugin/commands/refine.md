@@ -4,7 +4,7 @@ argument-hint: <ISSUE-ID>
 ---
 
 Resolve issue `$1` via `foreman_linear_read`. Assemble the shared `context`
-from the project `Context` doc digest plus this issue's current state
+from the two-layer `Context` digest (§4.7) plus this issue's current state
 (description, priority, estimate, labels, relations).
 
 Gate: Priority ≠ `None`. If the issue is unprioritized, do not dispatch — tell

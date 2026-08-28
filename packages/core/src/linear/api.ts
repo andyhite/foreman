@@ -10,6 +10,8 @@
 
 import type {
   Comment,
+  Initiative,
+  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRelationType,
@@ -52,6 +54,17 @@ export interface LinearReader {
   comments(issueId: string): Promise<Comment[]>;
   /** The project and its attached documents, including `Context`. */
   project(projectId: string): Promise<Project | null>;
+  /**
+   * Every initiative a project belongs to, unfiltered. A gate counts these to
+   * report `ambiguous-initiative` instead of throwing (SPEC §10).
+   */
+  projectInitiatives(projectId: string): Promise<InitiativeRef[]>;
+  /** The single initiative a project belongs to. Throws when zero or more than one is found. */
+  projectInitiative(projectId: string): Promise<InitiativeRef>;
+  /** An initiative and its attached documents, by id. Null when absent. */
+  initiative(initiativeId: string): Promise<Initiative | null>;
+  /** Every initiative in the workspace — the setup wizard's picker. */
+  initiatives(): Promise<InitiativeRef[]>;
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;

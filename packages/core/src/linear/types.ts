@@ -119,6 +119,25 @@ export interface LinearDocument {
 export interface Project {
   id: LinearId;
   name: string;
+  /** Linear's one-line summary. Orientation, not the brief. */
   description: string | null;
+  /**
+   * The project's own document body — where Linear's UI puts the overview an
+   * operator actually writes. This is the project brief of SPEC §4.7; measured
+   * against the live workspace, `description` holds one truncated sentence
+   * while `content` holds the real `## Overview` / `## Context` markdown.
+   */
+  content: string | null;
+  documents: LinearDocument[];
+}
+
+export interface InitiativeRef {
+  id: LinearId;
+  name: string;
+}
+
+export interface Initiative {
+  id: LinearId;
+  name: string;
   documents: LinearDocument[];
 }

@@ -9,18 +9,18 @@ function makeHome(): string {
 }
 
 describe("writeGlobalConfig", () => {
-  it("writes projects and linear settings to a fresh config", () => {
+  it("writes repos and linear settings to a fresh config", () => {
     const home = makeHome();
     try {
       const path = writeGlobalConfig(
         {
-          projects: { "proj-1": "~/Code/app" },
+          repos: { "initiative-1": "~/Code/app" },
           linear: { teamKeys: ["ENG"], apiKeyFile: "~/.foreman/linear-api-key" },
         },
         home,
       );
       const written = JSON.parse(readFileSync(path, "utf8"));
-      expect(written.projects).toEqual({ "proj-1": "~/Code/app" });
+      expect(written.repos).toEqual({ "initiative-1": "~/Code/app" });
       expect(written.linear.teamKeys).toEqual(["ENG"]);
       expect(written.linear.apiKeyFile).toBe("~/.foreman/linear-api-key");
     } finally {
@@ -35,13 +35,16 @@ describe("writeGlobalConfig", () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, "config.json"),
-        JSON.stringify({ projects: { existing: "/repo" }, loop: { wipGlobal: 7 } }),
+        JSON.stringify({ repos: { "initiative-existing": "/repo" }, loop: { wipGlobal: 7 } }),
         "utf8",
       );
 
-      const path = writeGlobalConfig({ projects: { added: "/repo2" }, linear: { teamKeys: [], apiKeyFile: null } }, home);
+      const path = writeGlobalConfig(
+        { repos: { "initiative-added": "/repo2" }, linear: { teamKeys: [], apiKeyFile: null } },
+        home,
+      );
       const written = JSON.parse(readFileSync(path, "utf8"));
-      expect(written.projects).toEqual({ existing: "/repo", added: "/repo2" });
+      expect(written.repos).toEqual({ "initiative-existing": "/repo", "initiative-added": "/repo2" });
       expect(written.loop.wipGlobal).toBe(7);
       expect(written.linear).toBeUndefined();
     } finally {
@@ -55,7 +58,7 @@ describe("writeGlobalConfig", () => {
       expect(() =>
         writeGlobalConfig(
           // @ts-expect-error deliberately wrong shape to exercise validation
-          { projects: { p: "/repo" }, linear: { teamKeys: "not-an-array", apiKeyFile: null } },
+          { repos: { "initiative-1": "/repo" }, linear: { teamKeys: "not-an-array", apiKeyFile: null } },
           home,
         ),
       ).toThrow(/Invalid global config/);

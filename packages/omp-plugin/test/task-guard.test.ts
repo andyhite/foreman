@@ -63,6 +63,7 @@ class FakeLinear implements LinearWriter {
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
   createCommentCalls: Array<{ issueId: string; body: string }> = [];
   labelsById = new Map<string, IssueLabel>();
+  initiativesByProject = new Map<string, { id: string; name: string }[]>();
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -79,6 +80,21 @@ class FakeLinear implements LinearWriter {
   }
   async project() {
     return null;
+  }
+  async projectInitiatives(projectId: string) {
+    return this.initiativesByProject.get(projectId) ?? [{ id: "initiative-1", name: "Foreman" }];
+  }
+  async projectInitiative(projectId: string) {
+    const refs = await this.projectInitiatives(projectId);
+    const first = refs[0];
+    if (refs.length !== 1 || !first) throw new Error(`project ${projectId} has ${refs.length} initiatives`);
+    return first;
+  }
+  async initiative() {
+    return null;
+  }
+  async initiatives() {
+    return [];
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_TODO, STATE_IN_PROGRESS];
@@ -133,7 +149,7 @@ class FakeLinear implements LinearWriter {
 
 function makeConfig(): GlobalConfig {
   return {
-    projects: { "project-1": "/repo" },
+    repos: { "initiative-1": "/repo" },
     loop: {
       wipGlobal: 3,
       wip: { triage: 1, refine: 2, implement: 3, review: 2 },
@@ -169,7 +185,6 @@ function makeConfig(): GlobalConfig {
       branchPattern: "<issue-id>-<slug>",
       worktreePattern: "../<repo>-<ISSUE-ID>",
     },
-    repos: {},
   } as GlobalConfig;
 }
 
@@ -274,6 +289,18 @@ describe("prepareTaskCall — refusals", () => {
     expect(decision.block).toBe(true);
     expect(decision.reason).toContain("gate");
     expect(decision.reason).toContain(AGENT_LABEL.ready);
+  });
+
+  it("blocks on ambiguous-initiative when the project belongs to more than one initiative", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    linear.initiativesByProject.set("project-1", [
+      { id: "initiative-1", name: "Foreman" },
+      { id: "initiative-2", name: "Other" },
+    ]);
+    const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
+    expect(decision.block).toBe(true);
+    expect(decision.reason).toContain("belongs to 2 initiatives");
   });
 });
 

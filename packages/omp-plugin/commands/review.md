@@ -10,13 +10,13 @@ no `ReviewResult` exists yet for the current head SHA.
 The agent holds no git or GitHub tool. Before the spawn, the extension fetches
 the diff and head SHA — from the PR via its GitHub read client, or from git
 when `pr.required: false` — and writes them to a file. Put that file's path,
-not the diff text, in the task `context`, alongside the project `Context` doc
-digest and the issue's acceptance criteria. The agent `read`s the file itself.
+not the diff text, in the task `context`, alongside the two-layer `Context`
+digest (§4.7) and the issue's acceptance criteria. The agent `read`s the file itself.
 
 Cold-context warning: review runs in a fresh child session with no memory of
 the implementation conversation. Do not put implementation rationale in
 `context` — that defeats the cold review this dispatch exists to guarantee.
-Give it only the diff file path, the issue, and the `Context` doc.
+Give it only the diff file path, the issue, and the two-layer `Context` digest.
 
 Dispatch `foreman-review` through the `task` tool with `agent: foreman-review`
 and the assembled `context`. The extension revises the call to force

@@ -71,7 +71,7 @@
               }
             },
             "dodSatisfied": {
-              "description": "The global Definition of Done from the project Context doc.",
+              "description": "The per-product Definition of Done from the product `Context` doc.",
               "type": "boolean"
             },
             "dodChecklist": {

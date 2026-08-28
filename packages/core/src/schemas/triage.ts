@@ -35,6 +35,13 @@ export const TriageItem = Type.Object(
         "Human identifiers of issues that block this one. Native Linear relations, " +
         "never labels.",
     }),
+    destinationProject: Type.Union([Type.String(), Type.Null()], {
+      description:
+        "Name of the project this issue belongs to once triaged: a milestone " +
+        "project's name, or the product's standing `Maintenance` project " +
+        "(SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely " +
+        "cannot tell.",
+    }),
     destination: Type.Union(
       [
         Type.Literal("Backlog"),

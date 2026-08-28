@@ -11,7 +11,7 @@
  * load-time crash (SPEC §3.5 item 6).
  */
 
-import type { GlobalConfig, LinearWriter, Project, WorkflowState } from "@foreman/core";
+import type { GlobalConfig, Initiative, LinearWriter, Project, WorkflowState } from "@foreman/core";
 import { GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
 
 /** Thrown by any accessor called before `initRuntime` has run at least once. */
@@ -40,10 +40,22 @@ interface Runtime {
 
 let runtime: Runtime | null = null;
 
-function digestOf(project: Project): string {
-  const contextDoc = project.documents.find((doc) => doc.title.trim().toLowerCase() === "context");
-  const body = contextDoc?.content ?? "";
-  return `## Project Context (${project.name})\n${body.trim().length > 0 ? body.trim() : "_none_"}`;
+function productDigest(initiative: Initiative | null): string {
+  const doc = initiative?.documents.find((entry) => entry.title.trim().toLowerCase() === "context");
+  const body = doc?.content?.trim();
+  return `## Product Context (${initiative?.name ?? "unknown"})\n${body && body.length > 0 ? body : "_none_"}`;
+}
+
+/*
+ * `content` is the project's document body — the `## Overview` an operator
+ * actually writes, and what SPEC §4.7 means by the brief. `description` is
+ * Linear's one-line summary; measured against the live workspace it is a
+ * single truncated sentence, so it serves only as a fallback for a project
+ * whose body is still empty.
+ */
+function projectBriefDigest(project: Project): string {
+  const body = project.content?.trim() || project.description?.trim();
+  return `## Project Brief (${project.name})\n${body && body.length > 0 ? body : "_none_"}`;
 }
 
 /** Rebuilds the runtime. Call from `session_start`; never throws on a missing API key. */
@@ -111,13 +123,39 @@ export async function getTeamStates(teamId: string): Promise<WorkflowState[]> {
   return states;
 }
 
-/** Returns the cached Context-doc digest for `projectId`, fetching and caching it on first ask. */
+/**
+ * Returns the cached two-layer Context digest for `projectId`, fetching and
+ * caching it on first ask (SPEC §4.7): the product `Context` doc on the
+ * project's initiative, concatenated product-first with the project's own
+ * brief. Either layer degrades to a stub rather than throwing — a new
+ * product with a stub `Context` doc, or a project with no brief yet, is a
+ * legitimate state the digest must still render usefully. An unresolvable
+ * initiative (the project belongs to zero or more than one — the gate is
+ * what rejects dispatch for that, not the digest) degrades the product
+ * layer the same way a missing document does.
+ */
 export async function getContextDigest(projectId: string): Promise<string> {
   const rt = requireRuntime();
   const cached = rt.contextDigestCache.get(projectId);
   if (cached) return cached;
-  const project = await getLinear().project(projectId);
-  const digest = project ? digestOf(project) : "## Project Context\n_project not found_";
+
+  const linear = getLinear();
+  const project = await linear.project(projectId);
+  if (!project) {
+    const digest = "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
+    rt.contextDigestCache.set(projectId, digest);
+    return digest;
+  }
+
+  let initiative: Initiative | null = null;
+  try {
+    const ref = await linear.projectInitiative(projectId);
+    initiative = await linear.initiative(ref.id);
+  } catch {
+    initiative = null;
+  }
+
+  const digest = `${productDigest(initiative)}\n\n${projectBriefDigest(project)}`;
   rt.contextDigestCache.set(projectId, digest);
   return digest;
 }

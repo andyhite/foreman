@@ -25,7 +25,8 @@ function renderCriteria(items: string[]): string {
 
 /**
  * SPEC §13.1. Deliberately omits the Definition of Done — that lives in the
- * project Context doc, never restated per-issue (SPEC §13.1 closing line).
+ * product `Context` doc on the initiative, never restated per-issue (SPEC
+ * §13.1 closing line).
  */
 export function renderIssueDescription(input: IssueDescriptionInput): string {
   const openQuestions = input.openQuestions ?? [];

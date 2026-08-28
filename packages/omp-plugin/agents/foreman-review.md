@@ -88,7 +88,7 @@ output: |
                 }
               },
               "dodSatisfied": {
-                "description": "The global Definition of Done from the project Context doc.",
+                "description": "The per-product Definition of Done from the product `Context` doc.",
                 "type": "boolean"
               },
               "dodChecklist": {
@@ -386,14 +386,14 @@ you in `context`.
 You run in a cold context by design — no conversation history from any prior
 pass survives into this session. Treat that as structural, not an
 inconvenience: don't infer implementation rationale that isn't in the diff,
-the issue, or the `Context` doc.
+the issue, or the product `Context` doc / project brief.
 
 ## Procedure
 
 Follow `foreman-review-diff` for the full method. In outline:
 
 1. Read the diff from the path handed to you in `context`, the issue, and
-   the project `Context` doc.
+   the product `Context` doc and project brief.
 2. Check each acceptance criterion against the diff with file:line evidence.
 3. Check the Definition of Done.
 4. Judge test adequacy by inspection, not execution: would these tests fail

@@ -12,7 +12,7 @@ import {
   inState,
   newDispatchId,
   readyFilter,
-  repoForProject,
+  repoForIssue,
 } from "@foreman/core";
 import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
@@ -43,13 +43,29 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping, now);
-
   if (!ctx.dryRun) {
     for (const decision of decisions) {
+
       if (!decision.issueId) continue;
       const issue = backlog.find((candidate) => candidate.identifier === decision.issueId);
-      const repoPath = issue?.project ? repoForProject(ctx.config, issue.project.id) : null;
-      const cwd = repoPath ?? `${expandHome(ctx.config.loop.stateDir)}/scratch`;
+      if (!issue) continue;
+      let cwd: string;
+      if (issue.project === null) {
+        cwd = `${expandHome(ctx.config.loop.stateDir)}/scratch`;
+      } else {
+        try {
+          cwd = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          skipped.push({
+            stage: "refine",
+            issueId: decision.issueId,
+            code: "unresolved-repo",
+            message,
+          });
+          continue;
+        }
+      }
       const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
       try {
         const handle = await ctx.dispatcher.dispatch({

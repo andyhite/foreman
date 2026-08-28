@@ -12,8 +12,11 @@ import { AGENT_LABEL, hasLabel } from "../domain/labels.ts";
 import { refinementGate } from "./refinement.ts";
 import type { GateFailure, GateResult } from "./types.ts";
 
-export function implementationGate(issue: Issue): GateResult {
-  const failures: GateFailure[] = [...refinementGate(issue).failures];
+export function implementationGate(
+  issue: Issue,
+  membership?: { initiativeCount: number },
+): GateResult {
+  const failures: GateFailure[] = [...refinementGate(issue, membership).failures];
 
   if (!hasLabel(issue, AGENT_LABEL.ready)) {
     failures.push({

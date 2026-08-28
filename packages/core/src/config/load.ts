@@ -106,8 +106,8 @@ export function loadGlobalConfig(options?: {
   }
 
   const config = defaultAndValidateGlobalConfig(parsed, path);
-  if (Object.keys(config.projects).length === 0) {
-    warnings.push("No projects mapped in config.projects; no Linear project resolves to a repo yet.");
+  if (Object.keys(config.repos).length === 0) {
+    warnings.push("No repos mapped in config.repos; no Linear initiative resolves to a repo yet.");
   }
 
   return { config, sources, warnings };
@@ -151,16 +151,16 @@ export function resolveRepoConfig(config: GlobalConfig, repoPath: string): Resol
 }
 
 /**
- * Resolves the Linear project id → repo path map (SPEC §3.5). Throws before
- * any spawn if the project is unmapped, and expands a leading `~` in the
+ * Resolves the Linear initiative id → repo path map (SPEC §3.5). Throws before
+ * any spawn if the initiative is unmapped, and expands a leading `~` in the
  * mapped path.
  */
-export function repoForProject(config: GlobalConfig, projectId: string, home?: string): string {
-  const repoPath = config.projects[projectId];
+export function repoForInitiative(config: GlobalConfig, initiativeId: string, home?: string): string {
+  const repoPath = config.repos[initiativeId];
   if (repoPath === undefined) {
     throw new ConfigError(
-      `Linear project "${projectId}" is not mapped to a repo in config.projects`,
-      [`projects.${projectId} is unset`],
+      `Linear initiative "${initiativeId}" is not mapped to a repo in config.repos`,
+      [`repos.${initiativeId} is unset`],
     );
   }
   return expandHome(repoPath, home);

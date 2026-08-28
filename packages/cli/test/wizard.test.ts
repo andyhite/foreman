@@ -145,15 +145,15 @@ describe("runWizard", () => {
     }
   });
 
-  it("uses $LINEAR_API_KEY from the environment without prompting, and maps projects picked via the Linear API", async () => {
+  it("uses $LINEAR_API_KEY from the environment without prompting, and maps initiatives picked via the Linear API", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     const originalFetch = globalThis.fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
     process.env.LINEAR_API_KEY = "lin_api_test";
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       const query = JSON.parse(String(init?.body)).query as string;
-      if (query.includes("query Projects")) {
-        return new Response(JSON.stringify({ data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }] } } }));
+      if (query.includes("query Initiatives")) {
+        return new Response(JSON.stringify({ data: { initiatives: { nodes: [{ id: "i1", name: "Plotroom" }] } } }));
       }
       if (query.includes("query Teams")) {
         return new Response(
@@ -165,7 +165,7 @@ describe("runWizard", () => {
 
     try {
       const prompter = new ScriptedPrompter();
-      prompter.multiSelectResult = ["p1"];
+      prompter.multiSelectResult = ["i1"];
       prompter.textAnswers['Repo path for "Plotroom"'] = "/repos/plotroom";
 
       await runWizard(
@@ -175,7 +175,7 @@ describe("runWizard", () => {
 
       expect(prompter.confirmCalls).not.toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
-      expect(config.projects).toEqual({ p1: "/repos/plotroom" });
+      expect(config.repos).toEqual({ i1: "/repos/plotroom" });
       expect(config.linear.teamKeys).toEqual(["ENG"]);
       expect(config.linear.apiKeyFile ?? null).toBeNull();
     } finally {
@@ -186,7 +186,7 @@ describe("runWizard", () => {
     }
   });
 
-  it("falls back to manual project entry when the Linear API call fails", async () => {
+  it("falls back to manual initiative entry when the Linear API call fails", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     const originalFetch = globalThis.fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
@@ -200,9 +200,9 @@ describe("runWizard", () => {
         { prompter, runner: new RecordingRunner(), log: () => {} },
       );
 
-      expect(prompter.confirmCalls).toContain("Map a Linear project id to a repo path now?");
+      expect(prompter.confirmCalls).toContain("Map a Linear initiative id to a repo path now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
-      expect(config.projects).toBeUndefined();
+      expect(config.repos).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;

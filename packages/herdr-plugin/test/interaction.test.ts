@@ -49,6 +49,7 @@ function proposalEntry(identifier: string): ProposalEntry {
       duplicateOf: null,
       proposedBlockedBy: [],
       destination: "Backlog",
+      destinationProject: "Maintenance",
       reproConfidence: "confirmed",
       missingInfo: [],
       triageLabel: null,

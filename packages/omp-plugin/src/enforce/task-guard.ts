@@ -26,7 +26,7 @@ import {
   readLockComment,
   refinementGate,
   renderLockComment,
-  repoForProject,
+  repoForIssue,
   resolveRepoConfig,
   resolveState,
   worktreePathFor,
@@ -80,7 +80,7 @@ export interface TaskGuardDeps {
   writeDiffFile: (issueId: string, diff: string) => Promise<string>;
   /** Dispatch IDs the extension currently believes are live, for lock-collision checks. */
   liveDispatchIds: () => readonly string[];
-  /** The project `Context` document digest to append to the shared `context` string. */
+  /** The two-layer product/project Context digest (SPEC §4.7) to append to the shared `context` string. */
   contextDigest: (projectId: string | null) => Promise<string>;
 }
 
@@ -97,10 +97,12 @@ function stageFor(agent: string): Stage | null {
   return null;
 }
 
-function evaluateGate(stage: Stage, issue: Issue): GateResult | null {
-  if (stage === "refine") return refinementGate(issue);
-  if (stage === "implement") return implementationGate(issue);
-  return null;
+async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps): Promise<GateResult | null> {
+  if (stage !== "refine" && stage !== "implement") return null;
+  const membership = issue.project
+    ? { initiativeCount: (await deps.linear.projectInitiatives(issue.project.id)).length }
+    : undefined;
+  return stage === "refine" ? refinementGate(issue, membership) : implementationGate(issue, membership);
 }
 
 async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Issue> {
@@ -161,12 +163,6 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
   return `${task}\n\n${lines.join("\n")}\n`;
 }
 
-function projectIdOf(issue: Issue): string {
-  if (!issue.project) {
-    throw new Error(`${issue.identifier} has no project; cannot resolve its repo.`);
-  }
-  return issue.project.id;
-}
 
 interface PreparedItem {
   item: TaskItemInput;
@@ -226,7 +222,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     throw new Error(`${identifier}: ${gateSummary("implementation", lockFree)}`);
   }
 
-  const gate = evaluateGate(stage, issue);
+  const gate = await evaluateGate(stage, issue, deps);
   if (gate && !gate.ok) {
     const gateName = stage === "refine" ? "refinement" : "implementation";
     throw new Error(`${identifier}: ${gateSummary(gateName, gate)}`);
@@ -242,7 +238,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   let diffPath: string | null = null;
 
   if (stage === "implement") {
-    const repoPath = repoForProject(deps.config, projectIdOf(issue));
+    const repoPath = await repoForIssue({ linear: deps.linear, config: deps.config }, issue);
     const repoSettings = resolveRepoConfig(deps.config, repoPath);
     branch = branchNameFor(repoSettings.branchPattern, issue);
     worktreePath = worktreePathFor(repoSettings.worktreePattern, repoPath, issue);
@@ -252,7 +248,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     const inProgress = resolveState("inProgress", teamStates);
     await deps.linear.updateIssue(issue.id, { stateId: inProgress.id });
   } else if (stage === "review") {
-    const repoPath = repoForProject(deps.config, projectIdOf(issue));
+    const repoPath = await repoForIssue({ linear: deps.linear, config: deps.config }, issue);
     const repoSettings = resolveRepoConfig(deps.config, repoPath);
     baseBranch = repoSettings.baseBranch;
     branch = issue.branchName;

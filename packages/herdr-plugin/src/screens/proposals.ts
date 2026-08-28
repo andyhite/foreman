@@ -38,10 +38,11 @@ export async function loadProposalsScreen(client: LinearClient): Promise<Proposa
 function entryToListItem(entry: ProposalEntry): ListItem {
   const item = entry.item;
   return {
-    label: `${entry.issue.identifier}  type:${item.type}  ${entry.issue.title}`,
+    label: `${entry.issue.identifier}  ${item.type}  ${entry.issue.title}`,
     detail: [
       `Proposed priority: ${item.proposedPriority} — ${item.severityReasoning}`,
       `Destination: ${item.destination}`,
+      `Project: ${item.destinationProject ?? "(none proposed)"}`,
       `Duplicate of: ${item.duplicateOf ?? "(none)"}`,
       `Repro confidence: ${item.reproConfidence}`,
       item.missingInfo.length > 0 ? `Missing info: ${item.missingInfo.join("; ")}` : "Missing info: (none)",

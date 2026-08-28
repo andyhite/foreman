@@ -23,7 +23,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
     stateDir: "~/.foreman/state",
   };
   return {
-    projects: {},
+    repos: {},
     loop: { ...defaultLoop, ...overrides },
     triage: { staleLowDays: 90, batchSize: 20 },
     linear: {

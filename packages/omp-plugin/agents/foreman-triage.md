@@ -56,6 +56,7 @@ output: |
                     "severityReasoning",
                     "duplicateOf",
                     "proposedBlockedBy",
+                    "destinationProject",
                     "destination",
                     "reproConfidence",
                     "missingInfo",
@@ -120,6 +121,17 @@ output: |
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "destinationProject": {
+                      "description": "Name of the project this issue belongs to once triaged: a milestone project's name, or the product's standing `Maintenance` project (SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely cannot tell.",
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     },
                     "destination": {
                       "description": "Where this issue should move once the proposal is approved.",
@@ -388,7 +400,11 @@ Follow `foreman-triage-inbox` for the full method. In outline, per item:
    the call after the fact — dedupe against a large backlog is the weakest
    link in this step, and that field is the tuning log for it.
 5. Flag missing information, propose native `blocked by` relations, and
-   recommend a destination.
+   recommend a destination — then, separately, assign a project via
+   `destinationProject` (by name, never a UUID): a milestone project or the
+   product's standing `Maintenance` project, or `null` if you genuinely
+   can't tell. `destination` is workflow state; `destinationProject` is not
+   — don't conflate them.
 
 You may recommend `Canceled` freely. Propose cancellation by default for
 un-actioned `Low` items past the configured staleness threshold.
@@ -399,8 +415,8 @@ Fill `TriageProposal`. You never yield a `BlockRecord` for missing
 information on an item — that is an ordinary triage finding, expressed via
 `missingInfo` and `reproConfidence` on the item itself, not a stop condition.
 Yield `BlockRecord` only when you cannot form a proposal at all: for example
-the project→repo map has no entry for the issue's project, so you cannot even
-attempt repro.
+the issue has no project, its project has no single initiative, or that
+initiative has no entry in the repo map, so you cannot even attempt repro.
 
 ## Non-goals
 

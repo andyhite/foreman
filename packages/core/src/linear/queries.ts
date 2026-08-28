@@ -81,6 +81,7 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
       id
       name
       description
+      content
       documents {
         nodes { id title content updatedAt }
       }
@@ -95,6 +96,46 @@ export const PROJECT_QUERY_OBJECT_CONTENT = `
       id
       name
       description
+      content
+      documents {
+        nodes { id title content { body } updatedAt }
+      }
+    }
+  }
+`;
+
+/** A project's initiatives — used to resolve the single initiative a project must belong to. */
+export const PROJECT_INITIATIVES_QUERY = `
+  query ProjectInitiatives($projectId: String!) {
+    project(id: $projectId) {
+      id
+      name
+      initiatives {
+        nodes { id name }
+      }
+    }
+  }
+`;
+
+/** Initiative documents as a scalar `String`. Tried first; see `client.ts` for the fallback. */
+export const INITIATIVE_QUERY_SCALAR_CONTENT = `
+  query InitiativeDocuments($initiativeId: String!) {
+    initiative(id: $initiativeId) {
+      id
+      name
+      documents {
+        nodes { id title content updatedAt }
+      }
+    }
+  }
+`;
+
+/** Initiative documents as a sub-selection. Used only when the scalar form errors. */
+export const INITIATIVE_QUERY_OBJECT_CONTENT = `
+  query InitiativeDocuments($initiativeId: String!) {
+    initiative(id: $initiativeId) {
+      id
+      name
       documents {
         nodes { id title content { body } updatedAt }
       }
@@ -139,6 +180,14 @@ export const TEAMS_QUERY = `
 export const PROJECTS_QUERY = `
   query Projects {
     projects(first: 250) {
+      nodes { id name }
+    }
+  }
+`;
+
+export const INITIATIVES_QUERY = `
+  query Initiatives {
+    initiatives(first: 250) {
       nodes { id name }
     }
   }

@@ -7,6 +7,8 @@
 
 import type {
   Comment,
+  Initiative,
+  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRef,
@@ -31,6 +33,9 @@ import { LinearApiError } from "./api.ts";
 import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
+  INITIATIVE_QUERY_OBJECT_CONTENT,
+  INITIATIVE_QUERY_SCALAR_CONTENT,
+  INITIATIVES_QUERY,
   ISSUE_BY_ID_QUERY,
   ISSUE_CREATE_MUTATION,
   ISSUE_LABEL_CREATE_MUTATION,
@@ -38,6 +43,7 @@ import {
   ISSUE_RELATION_DELETE_MUTATION,
   ISSUE_UPDATE_MUTATION,
   ISSUES_QUERY,
+  PROJECT_INITIATIVES_QUERY,
   PROJECT_QUERY_OBJECT_CONTENT,
   PROJECT_QUERY_SCALAR_CONTENT,
   PROJECTS_QUERY,
@@ -139,8 +145,11 @@ export class LinearClient implements LinearWriter {
   private readonly teamScope: IssueFilter | null;
   private readonly labelIdCache = new Map<string, LinearId>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
+  private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
   /** Once the working project-document content shape is discovered, reuse it. */
   private projectContentShape: "scalar" | "object" | null = null;
+  /** Once the working initiative-document content shape is discovered, reuse it. */
+  private initiativeContentShape: "scalar" | "object" | null = null;
 
   constructor(options: LinearClientOptions) {
     this.apiKey = options.apiKey;
@@ -366,6 +375,7 @@ export class LinearClient implements LinearWriter {
         id: string;
         name: string;
         description: string | null;
+        content: string | null;
         documents: {
           nodes: Array<{
             id: string;
@@ -382,7 +392,117 @@ export class LinearClient implements LinearWriter {
       id: data.project.id,
       name: data.project.name,
       description: data.project.description,
+      content: data.project.content,
       documents: data.project.documents.nodes.map((doc) => ({
+        id: doc.id,
+        title: doc.title,
+        content:
+          doc.content === null
+            ? null
+            : typeof doc.content === "string"
+              ? doc.content
+              : doc.content.body,
+        updatedAt: doc.updatedAt,
+      })),
+    };
+  }
+
+  /**
+   * The wire row behind both public initiative lookups. Keeping the project's
+   * name here is what lets the exactly-one error name the project the operator
+   * has to go fix, rather than echoing a UUID back at them.
+   */
+  private async fetchProjectInitiatives(
+    projectId: string,
+  ): Promise<{ name: string; initiatives: InitiativeRef[] }> {
+    const data = await this.request<{
+      project: { id: string; name: string; initiatives: { nodes: InitiativeRef[] } } | null;
+    }>(PROJECT_INITIATIVES_QUERY, { projectId });
+    return {
+      name: data.project?.name ?? projectId,
+      initiatives: data.project?.initiatives.nodes ?? [],
+    };
+  }
+
+  /**
+   * Every initiative a project belongs to. Linear permits several (SPEC §4.0);
+   * this reports the raw truth so a gate can count without a rejection, while
+   * `projectInitiative` enforces the exactly-one rule for repo resolution.
+   */
+  async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
+    return (await this.fetchProjectInitiatives(projectId)).initiatives;
+  }
+
+  async projectInitiative(projectId: string): Promise<InitiativeRef> {
+    const cached = this.projectInitiativeCache.get(projectId);
+    if (cached) return cached;
+    const { name, initiatives } = await this.fetchProjectInitiatives(projectId);
+    const first = initiatives[0];
+    if (first === undefined) {
+      throw new LinearApiError(
+        `Project "${name}" has no initiative; a project must belong to exactly one initiative.`,
+        null,
+        null,
+      );
+    }
+    if (initiatives.length > 1) {
+      const names = initiatives.map((node) => node.name).join(", ");
+      throw new LinearApiError(
+        `Project "${name}" belongs to more than one initiative (${names}); a project must belong to exactly one initiative.`,
+        null,
+        null,
+      );
+    }
+    const ref: InitiativeRef = { id: first.id, name: first.name };
+    this.projectInitiativeCache.set(projectId, ref);
+    return ref;
+  }
+
+  /** Every initiative in the workspace — the setup wizard's picker (SPEC §3.10). */
+  async initiatives(): Promise<InitiativeRef[]> {
+    const data = await this.request<{ initiatives: { nodes: InitiativeRef[] } }>(INITIATIVES_QUERY, {});
+    return data.initiatives.nodes;
+  }
+
+  async initiative(initiativeId: string): Promise<Initiative | null> {
+    const shape = this.initiativeContentShape ?? "scalar";
+    try {
+      return await this.fetchInitiative(initiativeId, shape);
+    } catch (error) {
+      if (shape === "object" || !(error instanceof LinearApiError)) throw error;
+      // Scalar `content` selection errored — Linear wants the object
+      // sub-selection instead, mirroring the project-document fallback.
+      const result = await this.fetchInitiative(initiativeId, "object");
+      this.initiativeContentShape = "object";
+      return result;
+    }
+  }
+
+  private async fetchInitiative(
+    initiativeId: string,
+    shape: "scalar" | "object",
+  ): Promise<Initiative | null> {
+    const document = shape === "scalar" ? INITIATIVE_QUERY_SCALAR_CONTENT : INITIATIVE_QUERY_OBJECT_CONTENT;
+    const data = await this.request<{
+      initiative: {
+        id: string;
+        name: string;
+        documents: {
+          nodes: Array<{
+            id: string;
+            title: string;
+            content: string | { body: string } | null;
+            updatedAt: string;
+          }>;
+        };
+      } | null;
+    }>(document, { initiativeId });
+    if (!data.initiative) return null;
+    this.initiativeContentShape = shape;
+    return {
+      id: data.initiative.id,
+      name: data.initiative.name,
+      documents: data.initiative.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
         content:

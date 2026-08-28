@@ -396,7 +396,8 @@ Follow `foreman-refine-issue` for the full method. In outline:
 1. Verify the issue's Priority is not `None`. Refuse and stop if it is
    unprioritized. This is the entire enforcement mechanism for "never
    bulk-refine the backlog" — do not weaken it.
-2. Read the project `Context` doc, Definition of Done included.
+2. Read the product `Context` doc and the project brief, Definition of Done
+   included.
 3. Draft the description as `refinedDescription`. Never write it to Linear
    yourself.
 4. Write acceptance criteria as observable behaviors, verifiable by someone
@@ -411,8 +412,9 @@ Follow `foreman-refine-issue` for the full method. In outline:
 ## Output
 
 Fill `RefineResult`. Yield a `BlockRecord` only when you cannot draft a
-refinement at all — for example the `Context` doc is missing or the issue's
-Priority is `None` and you have no basis to proceed.
+refinement at all — for example the product `Context` doc and project brief
+are missing or the issue's Priority is `None` and you have no basis to
+proceed.
 
 ## Non-goals
 

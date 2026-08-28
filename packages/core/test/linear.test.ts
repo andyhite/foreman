@@ -73,6 +73,67 @@ describe("LinearClient projects", () => {
   });
 });
 
+describe("LinearClient projectInitiative", () => {
+  it("returns the single initiative for a project", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: {
+          project: { id: "proj-1", name: "Project", initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }] } },
+        },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.projectInitiative("proj-1")).toEqual({ id: "init-1", name: "Q3 Push" });
+  });
+
+  it("throws naming the project when it has no initiative", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: { project: { id: "proj-1", name: "Project", initiatives: { nodes: [] } } },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.projectInitiative("proj-1")).rejects.toThrow(/Project "Project"/);
+  });
+
+  it("throws listing every initiative name when a project has more than one", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: {
+          project: {
+            id: "proj-1",
+            name: "Project",
+            initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }] },
+          },
+        },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.projectInitiative("proj-1")).rejects.toThrow(/Q3 Push.*Q4 Push/);
+  });
+
+  it("resolves from cache on a second call for the same project", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(200, {
+        data: {
+          project: { id: "proj-1", name: "Project", initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }] } },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await client.projectInitiative("proj-1");
+    await client.projectInitiative("proj-1");
+    expect(calls).toBe(1);
+  });
+});
+
+describe("LinearClient initiative", () => {
+  it("returns null for an unknown initiative id", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { initiative: null } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.initiative("missing")).toBeNull();
+  });
+});
+
 describe("LinearClient errors", () => {
   it("throws LinearApiError carrying joined GraphQL error messages", async () => {
     const fetchStub: FetchLike = async () =>

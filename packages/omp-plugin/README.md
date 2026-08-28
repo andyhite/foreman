@@ -36,7 +36,7 @@ session.
 
 Foreman reads layered JSON config, repo overrides winning over global:
 
-- `~/.foreman/config.json` — project→repo map, loop tuning, repo defaults.
+- `~/.foreman/config.json` — the repo map (keyed by initiative), loop tuning, repo defaults.
 - `<repo>/.foreman/config.json` — per-repo overrides, versioned with the code.
 
 ## Commands
