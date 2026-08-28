@@ -95,6 +95,12 @@ interface InitiativePick {
 
 /** Manual fallback: a single comma-separated prompt, pre-filled from whatever's already bound. */
 async function pickInitiativeIdsManually(deps: InitDeps, boundIds: Set<string>): Promise<InitiativePick> {
+  deps.log(
+    style(
+      "gray",
+      "  initiative ids are UUIDs, e.g. a1b2c3d4-0000-0000-0000-000000000000 — find one in Linear's URL when viewing the initiative",
+    ),
+  );
   const manualInput = await deps.prompter.text(
     "Linear initiative id(s) this repo hosts (comma-separated)",
     [...boundIds].join(", "),

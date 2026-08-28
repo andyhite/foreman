@@ -44,9 +44,11 @@ type Keypress = { name?: string; ctrl?: boolean } | undefined;
 /** Prompts on a real terminal: default hints in `[brackets]`, secrets masked with `*`. */
 export class InteractivePrompter implements Prompter {
   private readonly rl: readline.Interface;
+  private readonly log: (message: string) => void;
 
-  constructor() {
+  constructor(options?: { log?: (message: string) => void }) {
     this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    this.log = options?.log ?? ((message: string) => console.log(message));
   }
 
   private ask(question: string): Promise<string> {
@@ -71,10 +73,10 @@ export class InteractivePrompter implements Prompter {
   }
 
   async select<T extends string>(question: string, choices: Array<Choice<T>>, defaultValue: T): Promise<T> {
-    console.log(`${style("cyan", "?")} ${style("bold", question)}`);
+    this.log(`${style("cyan", "?")} ${style("bold", question)}`);
     choices.forEach((choice, index) => {
       const marker = choice.value === defaultValue ? style("green", "●") : style("dim", "○");
-      console.log(`  ${marker} ${index + 1}) ${choice.label}`);
+      this.log(`  ${marker} ${index + 1}) ${choice.label}`);
     });
     const defaultIndex = choices.findIndex((choice) => choice.value === defaultValue) + 1;
     const answer = (await this.ask(`${style("dim", `Choice [${defaultIndex}]`)}: `)).trim();

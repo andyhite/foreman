@@ -281,10 +281,18 @@ describe("renderStatusConsole", () => {
     backpressure: { tripped: true, reason: "Blocked (human) queue exceeds threshold of 5" },
   };
 
-  it("puts the blocked queue first", () => {
+  it("leads with a bold summary line before every section", () => {
+    const output = renderStatusConsole(state);
+    expect(output.startsWith("**1 blocked · 2 proposals awaiting · 1 locks (1 past TTL) · stage implement**")).toBe(
+      true,
+    );
+  });
+
+  it("puts the blocked queue first among the ## sections", () => {
     const output = renderStatusConsole(state);
     const blockedIndex = output.indexOf("## Blocked");
-    expect(blockedIndex).toBe(0);
+    expect(blockedIndex).toBeGreaterThan(0);
+    expect(output.indexOf("##")).toBe(blockedIndex);
     const nextSectionIndex = output.indexOf("##", blockedIndex + 1);
     expect(nextSectionIndex).toBeGreaterThan(blockedIndex);
   });

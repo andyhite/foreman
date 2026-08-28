@@ -43,7 +43,7 @@ export interface WizardDeps {
   log: (message: string) => void;
 }
 
-async function preflight(deps: WizardDeps): Promise<void> {
+async function preflight(deps: WizardDeps): Promise<boolean> {
   printSection(deps.log, "Checking tools");
   const required: Array<[string, string]> = [
     ["bun", "https://bun.sh"],
@@ -55,8 +55,15 @@ async function preflight(deps: WizardDeps): Promise<void> {
     }
     deps.log(`  ${style("green", "✓")} ${bin}: found`);
   }
+  const recommended: Array<[string, string]> = [["gh", "needed to open PRs — https://cli.github.com"]];
+  let missingGh = false;
+  for (const [bin, note] of recommended) {
+    const found = await deps.runner.exists(bin);
+    if (!found) missingGh = true;
+    const mark = found ? style("green", "✓") : style("yellow", "!");
+    deps.log(`  ${mark} ${bin}: ${found ? "found" : `not found (${note})`}`);
+  }
   const optional: Array<[string, string]> = [
-    ["gh", "needed to open PRs — https://cli.github.com"],
     ["omp", "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi"],
     ["herdr", "only needed for the optional board — https://github.com/andyhite/herdr"],
   ];
@@ -65,6 +72,7 @@ async function preflight(deps: WizardDeps): Promise<void> {
     const mark = found ? style("green", "✓") : style("dim", "○");
     deps.log(`  ${mark} ${bin}: ${found ? "found" : `not found (${note})`}`);
   }
+  return missingGh;
 }
 
 /** Masks all but the last four characters, e.g. `lin_api_****************abcd`. */
@@ -179,19 +187,34 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
 
   if (mode === "link") {
     const pluginDir = join(options.repoRoot, "packages", "omp-plugin");
-    const code = await deps.runner.run("omp", ompLinkArgv(pluginDir, scope));
-    if (code !== 0) throw new Error("omp plugin link failed.");
+    const argv = ompLinkArgv(pluginDir, scope);
+    const code = await deps.runner.run("omp", argv);
+    if (code !== 0) {
+      throw new Error(
+        `omp plugin link failed (exit ${code}): \`omp ${argv.join(" ")}\`. The command's output is above. ` +
+          "Common causes: the omp CLI isn't authenticated, or another plugin is already linked at that scope.",
+      );
+    }
     deps.log(`  ${style("green", "✓")} linked ${pluginDir} (scope: ${scope})`);
     return;
   }
 
-  const marketplaceCode = await deps.runner.run("omp", ompMarketplaceAddArgv(options.githubRepo));
-  if (marketplaceCode !== 0) throw new Error("omp plugin marketplace add failed.");
-  const installCode = await deps.runner.run(
-    "omp",
-    ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME, options.githubRepo, scope),
-  );
-  if (installCode !== 0) throw new Error("omp plugin install failed.");
+  const marketplaceArgv = ompMarketplaceAddArgv(options.githubRepo);
+  const marketplaceCode = await deps.runner.run("omp", marketplaceArgv);
+  if (marketplaceCode !== 0) {
+    throw new Error(
+      `omp plugin marketplace add failed (exit ${marketplaceCode}): \`omp ${marketplaceArgv.join(" ")}\`. ` +
+        "The command's output is above. Common causes: no network, or `omp` not authenticated.",
+    );
+  }
+  const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME, options.githubRepo, scope);
+  const installCode = await deps.runner.run("omp", installArgv);
+  if (installCode !== 0) {
+    throw new Error(
+      `omp plugin install failed (exit ${installCode}): \`omp ${installArgv.join(" ")}\`. ` +
+        "The command's output is above. Common causes: no network, or `omp` not authenticated.",
+    );
+  }
   deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo} (scope: ${scope})`);
 }
 
@@ -208,20 +231,32 @@ async function setupHerdrPlugin(deps: WizardDeps, options: WizardOptions, mode: 
 
   if (mode === "link") {
     const pluginDir = join(options.repoRoot, "packages", "herdr-plugin");
-    const code = await deps.runner.run("herdr", herdrLinkArgv(pluginDir));
-    if (code !== 0) throw new Error("herdr plugin link failed.");
+    const argv = herdrLinkArgv(pluginDir);
+    const code = await deps.runner.run("herdr", argv);
+    if (code !== 0) {
+      throw new Error(
+        `herdr plugin link failed (exit ${code}): \`herdr ${argv.join(" ")}\`. The command's output is above. ` +
+          "Common causes: herdr isn't installed correctly, or another plugin is already linked there.",
+      );
+    }
     deps.log(`  ${style("green", "✓")} linked ${pluginDir}`);
     return;
   }
 
-  const code = await deps.runner.run("herdr", herdrInstallArgv(options.githubRepo, "packages/herdr-plugin"));
-  if (code !== 0) throw new Error("herdr plugin install failed.");
+  const herdrArgv = herdrInstallArgv(options.githubRepo, "packages/herdr-plugin");
+  const code = await deps.runner.run("herdr", herdrArgv);
+  if (code !== 0) {
+    throw new Error(
+      `herdr plugin install failed (exit ${code}): \`herdr ${herdrArgv.join(" ")}\`. ` +
+        "The command's output is above. Common causes: no network, or the repo isn't reachable on GitHub.",
+    );
+  }
   deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo}/packages/herdr-plugin`);
 }
 
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
-  await preflight(deps);
+  const missingGh = await preflight(deps);
   await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
 
   const herdrFound = await deps.runner.exists("herdr");
@@ -242,4 +277,7 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Global setup complete.`);
   deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it.`);
+  if (missingGh) {
+    deps.log(`  ${style("yellow", "!")} gh not found — Foreman cannot open PRs until you install it: https://cli.github.com`);
+  }
 }

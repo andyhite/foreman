@@ -69,6 +69,12 @@ function formatAge(ageMs: number): string {
 export function renderStatusConsole(state: StatusState): string {
   const sections: string[] = [];
 
+  const pastTtlCount = state.locks.filter((lock) => lock.pastTtl).length;
+  sections.push(
+    `**${state.blocked.length} blocked · ${state.proposalsAwaiting.count} proposals awaiting · ` +
+      `${state.locks.length} locks (${pastTtlCount} past TTL) · stage ${state.loop.stage}**`,
+  );
+
   sections.push("## Blocked (human)");
   sections.push(
     state.blocked.length > 0
@@ -84,8 +90,8 @@ export function renderStatusConsole(state: StatusState): string {
       ? state.locks
           .map(
             (lock) =>
-              `- ${lock.issueId} held by ${lock.agent} (dispatch ${lock.dispatchId}, ` +
-              `age ${formatAge(lock.ageMs)}${lock.pastTtl ? ", PAST TTL" : ""})`,
+              `- ${lock.pastTtl ? "⚠ " : ""}${lock.issueId} held by ${lock.agent} (dispatch ${lock.dispatchId}, ` +
+              `age ${formatAge(lock.ageMs)}${lock.pastTtl ? ", **PAST TTL**" : ""})`,
           )
           .join("\n")
       : "_none_",
@@ -118,12 +124,13 @@ export function renderStatusConsole(state: StatusState): string {
           )
           .join("\n")
       : "_none_";
-  sections.push(`Stage: ${state.loop.stage}\n${workerLines}`);
+  const stageLine = `Stage: ${state.loop.stage}${state.loop.stage === "dry-run" ? " _(dispatching nothing)_" : ""}`;
+  sections.push(`${stageLine}\n${workerLines}`);
 
   sections.push("## Backpressure");
   sections.push(
     state.backpressure.tripped
-      ? `TRIPPED — ${state.backpressure.reason ?? "no reason recorded"}`
+      ? `**TRIPPED** — ${state.backpressure.reason ?? "no reason recorded"}`
       : "clear",
   );
 

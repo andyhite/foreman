@@ -161,14 +161,14 @@ which is the explicit kickoff surface for every step.
 
 | Command | Dispatches | Argument |
 |---|---|---|
-| `/foreman-triage` | `foreman-triage` over the Inbox view | none |
-| `/foreman-refine` | `foreman-refine` | `<ISSUE-ID>` |
-| `/foreman-implement` | `foreman-implement` | `<ISSUE-ID>` |
-| `/foreman-review` | `foreman-review` | `<ISSUE-ID>` or PR |
-| `/foreman-apply` | no agent — the extension applies approved proposals directly (§7.1) | none |
-| `/foreman-merge` | no agent — the extension merges via the configured strategy once the review gate passes (§3.10) | `<ISSUE-ID>` |
-| `/foreman-unblock` | no agent — records the operator's reply and clears the block; the loop dispatches the resume (§9) | `<ISSUE-ID>` |
-| `/foreman-status` | no agent — renders the operator console | none |
+| `/foreman:triage` | `foreman-triage` over the Inbox view | none |
+| `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
+| `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
+| `/foreman:review` | `foreman-review` | `<ISSUE-ID>` or PR |
+| `/foreman:apply` | no agent — the extension applies approved proposals directly (§7.1) | none |
+| `/foreman:merge` | no agent — the extension merges via the configured strategy once the review gate passes (§3.10) | `<ISSUE-ID>` |
+| `/foreman:unblock` | no agent — records the operator's reply and clears the block; the loop dispatches the resume (§9) | `<ISSUE-ID>` |
+| `/foreman:status` | no agent — renders the operator console | none |
 
 Each dispatch command body must: resolve the target issue, assemble the shared
 `context` (the two-layer Context digest per §4.7 + the issue), state the agent to spawn,
@@ -180,7 +180,7 @@ drift from it.
 shells the same command the operator types, via print mode. One code path,
 so manual and automatic runs cannot diverge.
 
-`/foreman-status` is the in-chat operator console: blocked queue, in-flight
+`/foreman:status` is the in-chat operator console: blocked queue, in-flight
 locks, proposals awaiting approval, live agent registry, and loop state. Build
 it early — it is how the interrupt-batching model gets used before the board TUI
 (§17.4) exists, and it remains the fallback when herdr isn't running.
@@ -222,7 +222,7 @@ that must be real code:
    when something does.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
-   Use them to keep `/foreman-status` live and to detect aborts.
+   Use them to keep `/foreman:status` live and to detect aborts.
 8. **GitHub read client.** Extension-internal, like the Linear write client:
    fetches PR diffs and head SHAs for review dispatch (§7.4) and checks CI
    status for the review gate (§10). Never exposed as an agent tool.
@@ -269,7 +269,7 @@ the PAL resolve with fallback.
 ### 3.8 Scheduling
 
 omp has no built-in scheduler. Run the daily triage pass with cron or launchd
-invoking print mode (`omp -p`) against `/foreman-triage` — superseded by
+invoking print mode (`omp -p`) against `/foreman:triage` — superseded by
 `foreman intake` once §3.12 exists. Do not run both.
 
 ### 3.9 Hindsight memory — decide explicitly
@@ -356,7 +356,7 @@ pushed branch (§10), and Done cannot come from Linear's GitHub PR integration �
 the merge-detection worker (§16 item 7) becomes **required** in this mode, not
 optional.
 
-**`/foreman-merge <ISSUE-ID>`.** Operator-invoked, never loop-invoked — this
+**`/foreman:merge <ISSUE-ID>`.** Operator-invoked, never loop-invoked — this
 does not weaken the no-auto-merge non-goal (§19). The extension checks the
 review gate, then merges with the configured strategy (`gh pr merge` in PR
 mode, a local merge of the branch onto `baseBranch` in direct mode) and
@@ -459,7 +459,7 @@ drafted — just without repro, flagged in the proposal.
 run from cron/launchd or a herdr pane in the
 `foreman` workspace (§17.3). Respects team-wide proposal backpressure
 (§17.7). The apply pass (§7.1) also runs here on every tick, so approvals are
-picked up without a manual `/foreman-apply`.
+picked up without a manual `/foreman:apply`.
 
 ---
 
@@ -528,7 +528,7 @@ Linear's native set; no custom states.
 | `Todo` | **Refined and ready.** Gate §10 satisfied. | extension, from `RefineResult`; also on block, In Progress → Todo (§9) |
 | `In Progress` | Worktree open, code being written. | extension, at implement dispatch |
 | `In Review` | PR open, awaiting review. | extension, from `ImplementResult` |
-| `Done` | Merged. | Linear's GitHub integration on merge (PR mode); the loop's merge-detection worker when `pr.required: false` (§3.10). The operator does the merging, via `/foreman-merge` or by hand |
+| `Done` | Merged. | Linear's GitHub integration on merge (PR mode); the loop's merge-detection worker when `pr.required: false` (§3.10). The operator does the merging, via `/foreman:merge` or by hand |
 | `Canceled` | Won't do. | extension (approved proposal) or operator |
 | `Duplicate` | Merged into another issue. | extension (approved proposal) or operator |
 
@@ -806,7 +806,7 @@ applies `agent:proposed`. Nothing else is applied. Operator approves by removing
 
 **Applying approvals is not an agent job.** An approved `TriageProposal` item
 already says exactly what to do — applying it is deterministic, so
-`/foreman-apply` is extension code, not a re-dispatch of the agent. It queries
+`/foreman:apply` is extension code, not a re-dispatch of the agent. It queries
 issues whose latest Foreman proposal comment has no `agent:proposed` label, no
 `reject:` reply, and no later applied-marker comment, and applies each; on
 success it writes the applied marker. Everything it needs lives in the comment,
@@ -986,7 +986,7 @@ enumerated cases requiring §9), and explicit non-goals.
 `foreman-implement-issue` must include the **resume procedure** as a first-class
 path, not an afterthought: detect existing worktree → read prior
 `BlockRecord`/findings and the operator's reply → continue from partial commits.
-This is the path both `/foreman-unblock` fresh-spawn fallback (§9) and the
+This is the path both `/foreman:unblock` fresh-spawn fallback (§9) and the
 review fix cycle (§7.4) depend on.
 
 `foreman-block-protocol` bound to all four via `autoload-skills` is what makes
@@ -1040,7 +1040,7 @@ Budget exhaustion (§3.6) converts into Case B rather than a silent stall. This 
 well-supported: a soft-budget abort on a non-isolated kept-alive agent leaves the
 agent `idle` and resumable.
 
-**Resuming.** `/foreman-unblock <ISSUE-ID>` (or the blocked drain, §17.4)
+**Resuming.** `/foreman:unblock <ISSUE-ID>` (or the blocked drain, §17.4)
 records the operator's reply as a comment and clears the `blocked:*` label.
 That is the whole command: with the issue back in Todo and the label gone, the
 implementation gate passes and the next loop pass re-dispatches implement,
@@ -1058,7 +1058,7 @@ the block for resume mode, and a live agent can be revived at all — isolated
 agents park **without a reviver** and cannot be messaged back to life.
 
 The operator drains **Blocked (human)** once or twice daily via
-`/foreman-status`. Forcing agents to *write down* their confusion is a quality
+`/foreman:status`. Forcing agents to *write down* their confusion is a quality
 signal — a vague `BlockRecord` usually means the issue was under-refined, which
 is diagnostic information about the refine step.
 
@@ -1189,7 +1189,7 @@ standing project organization section.
 | `foreman loop` (per repo) | Every 5–10 min | Scheduler | — |
 | `foreman intake` (team-level) | Daily window | Scheduler | — |
 | Triage approval | Daily | Operator | ~10 min |
-| Blocked drain (`/foreman-status`) | 1–2× daily | Operator | ~15 min each |
+| Blocked drain (`/foreman:status`) | 1–2× daily | Operator | ~15 min each |
 | Prioritization / roadmap | Weekly | Operator | ~1 hour |
 | Workflow retro | Every 2 weeks | Operator | ~30 min |
 
@@ -1280,7 +1280,7 @@ commands; reinstall replacing the managed checkout.
 1. **TTSR propagation into subagent sessions** (§15).
 2. Whether plugin-provided `rules/` are discovered identically to project
    `.omp/rules/`.
-3. Slash-command namespacing (`/foreman:triage` vs `/foreman-triage`). Hyphens
+3. Slash-command namespacing (`/foreman:triage` vs `/foreman:triage`). Hyphens
    are the safe choice.
 4. Whether a pre-tool hook can hard-fail a call or only observe. If only
    observe, the `tools` allowlist is the sole enforcement.
@@ -1338,7 +1338,7 @@ interface Dispatcher {
 
 Two implementations:
 
-- **`PrintDispatcher`** — `omp -p '/foreman-implement ENG-142'`. No
+- **`PrintDispatcher`** — `omp -p '/foreman:implement ENG-142'`. No
   dependencies, works headless anywhere, zero visibility while running. **Pass
   the approval-mode flag explicitly** — the print-mode parent session is the
   same second interrupt surface described in §17.3, and left at defaults it can
@@ -1370,7 +1370,7 @@ recognizing patterns in terminal output. Its own docs are explicit that
 human attention and unacceptable as a source of truth for whether an issue
 advanced. Linear state plus the validated structured output (§6) remain
 authoritative for every `nextAction` decision. Herdr state drives the sidebar
-and `/foreman-status` ordering — nothing else.
+and `/foreman:status` ordering — nothing else.
 
 **Terminology collision, and a useful diagnostic.** Herdr's `blocked` means it
 recognized an approval or question UI on screen. Foreman's `blocked` means a
@@ -1379,7 +1379,7 @@ will cost you an afternoon. Better: treat any herdr `blocked` as a **Foreman
 bug**. The design says agents never ask questions and never hit approval
 prompts, so a recognized approval UI means either the parent session's approval
 mode wasn't configured or an agent found a path around the block protocol.
-Surface it in `/foreman-status` as an anomaly, not as a normal queue.
+Surface it in `/foreman:status` as an anomaly, not as a normal queue.
 
 Set the dispatched session's approval mode explicitly. Subagents get forced
 `yolo`, but the *parent* session herdr launches is interactive and can prompt on
@@ -1622,7 +1622,7 @@ The same rule applies to unapproved proposals: if the team-wide
 skips its dispatch — there is no point generating proposals faster than
 they're being approved.
 
-Backpressure state belongs in `/foreman-status` so it's visible why the loop
+Backpressure state belongs in `/foreman:status` so it's visible why the loop
 went quiet.
 
 ### 17.8 Retry and failure
@@ -1690,7 +1690,7 @@ than better.
    `session_start` validation, scope check, and ensure pass (§3.10, §3.11),
    lifecycle listeners,
    `foreman-block-protocol` skill, the skill-name resolution guard (§8), and
-   `/foreman-status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
+   `/foreman:status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
    agent — retrofitted, one agent gets a "just ask the user" fallback and it
    becomes the default.
 3. **`foreman intake` + `foreman-triage`, propose-only.** The team-level
@@ -1703,7 +1703,7 @@ than better.
 5. **`foreman-implement` + `foreman-review` + the fix cycle + TTSR rules.**
    Shaped by what 3 and 4 revealed. Includes the resume-mode path in the
    implement skill, the findings route with its cycle cap (§7.4), both merge
-   modes and `/foreman-merge` (§3.10). ~1.5 days, most of it in worktree
+   modes and `/foreman:merge` (§3.10). ~1.5 days, most of it in worktree
    lifecycle and the fix cycle.
 6. **`foreman loop` + `PrintDispatcher` + autonomy staging (§17).** The CLI
    with team resolution (§3.11), supervisor, per-repo lockfile, bookkeeping

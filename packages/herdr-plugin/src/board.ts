@@ -13,6 +13,7 @@
  */
 
 import { buildLinearClient, loadBoardConfig } from "./data.ts";
+import { defaultTheme } from "@foreman/core";
 import { defaultRunCommand, type ActionsOptions } from "./actions.ts";
 import { KeyDecoder, type Key } from "./tui/keys.ts";
 import { openTerminal } from "./tui/terminal.ts";
@@ -46,9 +47,34 @@ import {
 type ScreenId = "blocked" | "proposals" | "board" | "agents";
 const SCREEN_ORDER: ScreenId[] = ["blocked", "proposals", "board", "agents"];
 
+const LEGEND: Record<ScreenId, string> = {
+  blocked:
+    "↑/↓ move · 1-9 pick option · type a reply · Enter submit · Esc cancel · Ctrl-R refresh · Tab screen · q quit",
+  proposals:
+    "↑/↓ move · a accept · r reject · Enter submit reason · Esc cancel · Ctrl-R refresh · Tab screen · q quit",
+  board: "↑/↓ move · Ctrl-R refresh · Tab screen · q quit",
+  agents: "↑/↓ move · Enter focus pane · A attach · Ctrl-R refresh · Tab screen · q quit",
+};
+
 function resolveEntrypoint(): ScreenId {
   const raw = process.env.HERDR_PLUGIN_ENTRYPOINT_ID ?? process.argv[2] ?? "blocked";
   return (SCREEN_ORDER as string[]).includes(raw) ? (raw as ScreenId) : "blocked";
+}
+
+/**
+ * True while a blocked-reply or proposal-reject draft is in progress —
+ * `handleKey` skips the global `q`/`Tab` shortcuts in that state so a typed
+ * character never quits the board or discards the draft (SPEC §17.4).
+ */
+export function isComposingDraft(
+  screen: ScreenId,
+  blocked: BlockedScreenState,
+  proposals: ProposalsScreenState,
+): boolean {
+  return (
+    (screen === "blocked" && blocked.draftReply !== null) ||
+    (screen === "proposals" && proposals.draftReject !== null)
+  );
 }
 
 /** Entry point. Not invoked when this module is imported for testing. */
@@ -56,44 +82,63 @@ export async function runBoard(): Promise<void> {
   const config = loadBoardConfig();
   const client = buildLinearClient(config);
   const actionsOptions: ActionsOptions = { config, runCommand: defaultRunCommand };
+  const theme = defaultTheme;
 
   let screen: ScreenId = resolveEntrypoint();
   let blocked: BlockedScreenState = initialBlockedScreen();
   let proposals: ProposalsScreenState = initialProposalsScreen();
   let board: BoardScreenState | null = null;
   let agents: AgentsScreenState = initialAgentsScreen();
+  let refreshing = false;
 
   const terminal = openTerminal();
   const decoder = new KeyDecoder();
 
   async function refresh(): Promise<void> {
+    refreshing = true;
+    render();
     if (screen === "blocked") blocked = { ...blocked, entries: await loadBlockedScreen(client) };
     if (screen === "proposals") proposals = { ...proposals, entries: await loadProposalsScreen(client) };
     if (screen === "board") board = await loadBoardScreen(client, config);
     if (screen === "agents") agents = { ...agents, agents: await loadAgentsScreen(config, defaultRunCommand) };
+    refreshing = false;
     render();
   }
 
   function render(): void {
     const { columns, rows } = terminal.size();
-    const header = `[Tab] switch screen  [q] quit  — ${screen}\n`;
+    if (rows < 12 || columns < 40) {
+      terminal.writeFrame("Terminal too small — need at least 40×12.");
+      return;
+    }
+    const tabs = SCREEN_ORDER.map((id) => theme.tone(id === screen ? "selected" : "muted", id)).join(" · ");
+    const refreshIndicator = refreshing ? theme.tone("accent", " ⟳ refreshing…") : "";
+    const headerLine1 = `${theme.tone("title", "Foreman")} ${tabs}${refreshIndicator}`;
+    const headerLine2 = theme.tone("muted", LEGEND[screen]);
     let body: string;
-    if (screen === "blocked") body = renderBlockedScreen(blocked, columns, rows - 2);
-    else if (screen === "proposals") body = renderProposalsScreen(proposals, columns, rows - 2);
+    if (screen === "blocked") body = renderBlockedScreen(blocked, columns, rows - 3, theme);
+    else if (screen === "proposals") body = renderProposalsScreen(proposals, columns, rows - 3, theme);
     else if (screen === "board")
-      body = board ? renderBoardScreen(board, columns, rows - 2) : "Loading board…";
-    else body = renderAgentsScreen(agents, columns, rows - 2);
-    terminal.writeFrame(header + body);
+      body = board ? renderBoardScreen(board, columns, rows - 3, theme) : "Loading board…";
+    else body = renderAgentsScreen(agents, columns, rows - 3, theme);
+    terminal.writeFrame(`${headerLine1}\n${headerLine2}\n${body}`);
   }
 
   async function handleKey(key: Key): Promise<void> {
-    if (key.kind === "tab") {
+    const composing = isComposingDraft(screen, blocked, proposals);
+
+    if (key.kind === "ctrl" && key.value === "r") {
+      await refresh();
+      return;
+    }
+
+    if (key.kind === "tab" && !composing) {
       const index = SCREEN_ORDER.indexOf(screen);
       screen = SCREEN_ORDER[(index + 1) % SCREEN_ORDER.length] ?? "blocked";
       await refresh();
       return;
     }
-    if (key.kind === "char" && key.value === "q") {
+    if (key.kind === "char" && key.value === "q" && !composing) {
       terminal.stop();
       process.exit(0);
     }

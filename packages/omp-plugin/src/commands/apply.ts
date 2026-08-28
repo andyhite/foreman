@@ -40,8 +40,17 @@ export interface ApplyCommandResult {
 
 /** `/foreman:apply` — dispatches to the shape named by `argv` (already tokenized, without the leading slash-command name). */
 export async function runApplyCommand(linear: LinearWriter, argv: string[]): Promise<ApplyCommandResult> {
-  const usage =
-    'Usage: /foreman:apply | /foreman:apply --yes | /foreman:apply <ISSUE-ID> --approve | /foreman:apply <ISSUE-ID> --reject <reason>';
+  const usage = [
+    "Usage:",
+    "  /foreman:apply",
+    "  /foreman:apply --yes",
+    "  /foreman:apply ENG-1 --approve",
+    "  /foreman:apply ENG-1 --reject <reason>",
+  ].join("\n");
+
+  if (argv.length === 1 && argv[0] === "--help") {
+    return { ok: true, mutated: false, message: usage };
+  }
 
   if (argv.length === 0) {
     const candidates = await findApprovedUnapplied(linear);

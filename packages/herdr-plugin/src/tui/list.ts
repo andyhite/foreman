@@ -5,11 +5,15 @@
  * is directly unit-testable (`test/list.test.ts`).
  */
 
+import type { Theme, ToneName } from "@foreman/core";
+
 export interface ListItem {
   /** Rendered on the list line itself. */
   label: string;
   /** Rendered in the detail region when this item is selected. */
   detail: string[];
+  /** Optional tone applied to a non-selected row (e.g. blocked agents in red). */
+  tone?: ToneName;
 }
 
 export interface ListViewState {
@@ -88,6 +92,7 @@ export interface RenderListOptions {
   /** Rows available for the list column; the rest of the frame holds the detail region. */
   listRows: number;
   emptyMessage: string;
+  theme: Theme;
 }
 
 /**
@@ -97,11 +102,14 @@ export interface RenderListOptions {
  * the single enforcement point every screen routes through.
  */
 export function renderList(options: RenderListOptions): string[] {
-  const { title, items, view, width, listRows, emptyMessage } = options;
-  const lines: string[] = [padTruncate(title, width), padTruncate("-".repeat(title.length), width)];
+  const { title, items, view, width, listRows, emptyMessage, theme } = options;
+  const lines: string[] = [
+    theme.tone("title", padTruncate(title, width)),
+    theme.tone("muted", padTruncate("─".repeat(title.length), width)),
+  ];
 
   if (items.length === 0) {
-    lines.push(padTruncate(emptyMessage, width));
+    lines.push(theme.tone("muted", padTruncate(emptyMessage, width)));
     return lines;
   }
 
@@ -109,7 +117,9 @@ export function renderList(options: RenderListOptions): string[] {
   visible.forEach((item, offset) => {
     const index = view.scrollTop + offset;
     const marker = index === view.selected ? "> " : "  ";
-    lines.push(padTruncate(`${marker}${item.label}`, width));
+    const padded = padTruncate(`${marker}${item.label}`, width);
+    if (index === view.selected) lines.push(theme.tone("selected", padded));
+    else lines.push(item.tone ? theme.tone(item.tone, padded) : padded);
   });
 
   lines.push(padTruncate("", width));
@@ -127,5 +137,5 @@ export function renderList(options: RenderListOptions): string[] {
 
 function padTruncate(text: string, width: number): string {
   if (width <= 0) return "";
-  return text.length > width ? text.slice(0, width) : text;
+  return text.length > width ? text.slice(0, width) : text.padEnd(width);
 }

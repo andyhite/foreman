@@ -19,6 +19,7 @@ import {
   loadGlobalConfig,
   newDispatchId,
   PROPOSALS_FILTER,
+  defaultTheme,
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
@@ -58,6 +59,9 @@ Usage: foreman intake [options]
   --verbose               Log every skip, not just dispatch counts.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
   --help                  Show this text.
+
+Team-level: one process per team, not per repo. Per-repo work is
+\`foreman loop\`.
 `;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -73,6 +77,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const arg = argv[i];
     switch (arg) {
       case "--team": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --team");
         const value = argv[++i];
         if (!value) throw new Error("--team requires a key");
         parsed.team = value;
@@ -88,6 +93,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.verbose = true;
         break;
       case "--home": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --home");
         const value = argv[++i];
         if (!value) throw new Error("--home requires a path");
         parsed.configPath = value;
@@ -210,6 +216,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
           });
           void handle;
           ctx.bookkeeping.setLastTriageRun(now);
+          ctx.bookkeeping.setLastRun("intake", now);
           dispatched = true;
         } catch (error) {
           skipReason = `dispatch /foreman-triage failed: ${String(error)}`;
@@ -335,6 +342,15 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   };
 
   log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
+
+  if (args.dryRun) {
+    const rule = defaultTheme.tone("warn", "─".repeat(62));
+    log(rule);
+    log(defaultTheme.tone("warn", "DRY RUN — foreman intake will not act on issues."));
+    log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+    log(defaultTheme.tone("warn", "or omit --dry-run, to let it dispatch."));
+    log(rule);
+  }
 
   try {
     if (args.once) {

@@ -60,28 +60,28 @@ command = ["bun", "run", "dist/board.js", "agents"]
 # entrypoint id is baked into each argv.
 [[actions]]
 id = "open-blocked"
-title = "Foreman: Open blocked drain"
+title = "Foreman: Answer blocked questions"
 description = "List every BlockRecord and resolve one with a keypress (SPEC §9, §17.4)"
 contexts = ["global"]
 command = ["sh", "bin/open-pane", "blocked"]
 
 [[actions]]
 id = "open-proposals"
-title = "Foreman: Open proposal review"
+title = "Foreman: Approve or reject proposals"
 description = "Triage batch, per-item accept/reject"
 contexts = ["global"]
 command = ["sh", "bin/open-pane", "proposals"]
 
 [[actions]]
 id = "open-board"
-title = "Foreman: Open board"
+title = "Foreman: Board overview"
 description = "Issues by state, WIP, backpressure, last run per worker"
 contexts = ["global"]
 command = ["sh", "bin/open-pane", "board"]
 
 [[actions]]
 id = "open-agents"
-title = "Foreman: Open agent detail"
+title = "Foreman: Monitor live agents"
 description = "Live agent status, jump-to-pane / attach"
 contexts = ["global"]
 command = ["sh", "bin/open-pane", "agents"]

@@ -6,7 +6,7 @@
  * path the operator would type — then refreshes from Linear.
  */
 
-import type { GlobalConfig, LinearClient } from "@foreman/core";
+import type { GlobalConfig, LinearClient, Theme } from "@foreman/core";
 import { resolveBlock } from "../actions.ts";
 import { fetchBlockedEntries, type BlockedEntry } from "../data.ts";
 import type { Key } from "../tui/keys.ts";
@@ -140,7 +140,13 @@ export async function resolveSelectedBlock(
     : `Failed to resolve ${issueId}: ${result.stderr.trim() || result.stdout.trim()}`;
 }
 
-export function renderBlockedScreen(state: BlockedScreenState, width: number, rows: number): string {
+function statusTone(status: string): "ok" | "danger" | "muted" {
+  if (/^(Resolved|Accepted|Rejected)/.test(status)) return "ok";
+  if (status.startsWith("Failed")) return "danger";
+  return "muted";
+}
+
+export function renderBlockedScreen(state: BlockedScreenState, width: number, rows: number, theme: Theme): string {
   const listRows = Math.max(3, rows - 4);
   const items = state.entries.map(entryToListItem);
   const lines = renderList({
@@ -150,8 +156,9 @@ export function renderBlockedScreen(state: BlockedScreenState, width: number, ro
     width,
     listRows,
     emptyMessage: "Nothing blocked. Drain is empty.",
+    theme,
   });
-  if (state.draftReply !== null) lines.push(`Reply> ${state.draftReply}`);
-  if (state.status) lines.push(state.status);
+  if (state.draftReply !== null) lines.push(theme.tone("selected", ` Reply> ${state.draftReply} `));
+  if (state.status) lines.push(theme.tone(statusTone(state.status), state.status));
   return lines.join("\n");
 }

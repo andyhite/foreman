@@ -35,7 +35,7 @@ import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
 import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome } from "./results/apply.ts";
 import { extractFromLifecycle, extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
-import { getConfig, getEntry, getGitHub, getLinear, getContextDigest, initRuntime, resetRuntime } from "./runtime.ts";
+import { getConfig, getEntry, getGitHub, getLinear, getContextDigest, initRuntime, isRepoRegistered, resetRuntime } from "./runtime.ts";
 
 const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -260,8 +260,10 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     // config/scope validation above, not inside `initRuntime` — that function
     // is documented never to throw, so a failure here is surfaced the same
     // way the config-validation block above surfaces its `ConfigError`: a
-    // `session_start` notification, never a thrown error.
-    if (!init.missingApiKey) {
+    // `session_start` notification, never a thrown error. Skipped entirely
+    // when this cwd is not a registered repo — that is the normal state for
+    // most repos, not a failure to report (SPEC §3.11).
+    if (!init.missingApiKey && isRepoRegistered()) {
       try {
         const entry = getEntry();
         const linear = getLinear();
@@ -294,17 +296,19 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     if (!init.missingApiKey) {
       try {
         await sweep(getLinear(), new Date(), liveDispatchIds());
-      } catch {
+      } catch (error) {
         // Reaper sweep is best-effort at session start; a transient Linear
         // failure here must not block the session from starting.
+        console.error(`[foreman] reaper sweep failed: ${String(error)}`);
       }
     }
 
     reaperTimer = ctx.setInterval(async () => {
       try {
         await sweep(getLinear(), new Date(), liveDispatchIds());
-      } catch {
+      } catch (error) {
         // Same rationale as above — the interval callback must never throw.
+        console.error(`[foreman] reaper sweep failed: ${String(error)}`);
       }
     }, REAPER_INTERVAL_MS);
   });
@@ -318,6 +322,10 @@ export default function createForemanExtension(pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event: ToolCallEvent, _ctx: ExtensionContext): Promise<ToolCallDecision | void> => {
     if (event.toolName !== "task") return;
+    // Most repos never register with Foreman at all — that is normal, not an
+    // error — so an unregistered cwd must not intercept `task` calls at all;
+    // `toGuardDeps` calls `getEntry()`, which throws on an unregistered cwd.
+    if (!isRepoRegistered()) return;
     const guardDeps = toGuardDeps(PLUGIN_ROOT);
     const decision = await prepareTaskCall(event.input as TaskCallInput, guardDeps);
     if (decision.block) return { block: true, reason: decision.reason };

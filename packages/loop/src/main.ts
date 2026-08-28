@@ -19,6 +19,7 @@
 
 import {
   ConfigError,
+  defaultTheme,
   ensureMaintenanceProjects,
   HerdrDispatcher,
   LinearClient,
@@ -66,6 +67,14 @@ Usage: foreman loop [options]
   --home <path>            Home directory containing .foreman/config.json (default: real home).
   --verbose                Log every skip, not just dispatch counts.
   --help                   Show this text.
+
+Stages (loop.stage in ~/.foreman/config.json; --stage overrides):
+  dry-run     Decide and log; dispatch nothing. The default.
+  read-only   Dispatch agents that only comment and label.
+  full        Dispatch the whole pipeline.
+
+Triage is not part of this loop — the shared Triage inbox is consumed by
+\`foreman intake\`, one process per team. Run \`foreman intake --help\`.
 `;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -87,6 +96,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.dryRun = true;
         break;
       case "--stage": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --stage");
         const value = argv[++i];
         if (value !== "dry-run" && value !== "read-only" && value !== "full") {
           throw new Error(`--stage must be one of dry-run|read-only|full, got "${value ?? ""}"`);
@@ -98,24 +108,28 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.once = true;
         break;
       case "--worker": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --worker");
         const value = argv[++i];
         if (!value) throw new Error("--worker requires a name");
         parsed.workerNames.push(value);
         break;
       }
       case "--repo": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --repo");
         const value = argv[++i];
         if (!value) throw new Error("--repo requires an alias");
         parsed.repo = value;
         break;
       }
       case "--team": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --team");
         const value = argv[++i];
         if (!value) throw new Error("--team requires a key");
         parsed.team = value;
         break;
       }
       case "--home": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --home");
         const value = argv[++i];
         if (!value) throw new Error("--home requires a path");
         parsed.homePath = value;
@@ -223,6 +237,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     stateDir,
     entry,
     dryRun: args.dryRun || config.loop.stage === "dry-run",
+    verbose: args.verbose,
     log,
   });
 
@@ -258,6 +273,15 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
       `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
   );
+
+  if (config.loop.stage === "dry-run") {
+    const rule = defaultTheme.tone("warn", "─".repeat(62));
+    log(rule);
+    log(defaultTheme.tone("warn", "DRY RUN — stage=dry-run. No agent will be dispatched."));
+    log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+    log(defaultTheme.tone("warn", "or pass --stage full, to let workers act."));
+    log(rule);
+  }
 
   // Ensure pass (SPEC §3.11): every bound initiative must exist and have its
   // standing Maintenance project before reconcile's first board read, so
@@ -296,14 +320,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     await supervisor.reconcile();
 
     if (args.once) {
-      const reports = await supervisor.runTick(selected);
-      if (args.verbose) {
-        for (const report of reports) {
-          for (const skip of report.skipped) {
-            log(`  skip ${report.worker} ${skip.issueId ?? "(batch)"}: ${skip.code} — ${skip.message}`);
-          }
-        }
-      }
+      await supervisor.runTick(selected);
     } else {
       await supervisor.runForever(selected, { pollMs: 30_000 });
     }

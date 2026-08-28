@@ -4,7 +4,7 @@
  * draft. Both route through `actions.ts`, never a direct mutation.
  */
 
-import type { GlobalConfig, LinearClient } from "@foreman/core";
+import type { GlobalConfig, LinearClient, Theme } from "@foreman/core";
 import { acceptProposal, rejectProposal } from "../actions.ts";
 import { fetchProposalEntries, type ProposalEntry } from "../data.ts";
 import type { Key } from "../tui/keys.ts";
@@ -118,7 +118,12 @@ export async function applyProposalAction(
   return `Failed to ${action.kind} ${action.issueId}: ${result.stderr.trim() || result.stdout.trim()}`;
 }
 
-export function renderProposalsScreen(state: ProposalsScreenState, width: number, rows: number): string {
+export function renderProposalsScreen(
+  state: ProposalsScreenState,
+  width: number,
+  rows: number,
+  theme: Theme,
+): string {
   const listRows = Math.max(3, rows - 4);
   const items = state.entries.map(entryToListItem);
   const lines = renderList({
@@ -128,8 +133,15 @@ export function renderProposalsScreen(state: ProposalsScreenState, width: number
     width,
     listRows,
     emptyMessage: "No proposals awaiting approval.",
+    theme,
   });
-  if (state.draftReject !== null) lines.push(`Reject reason> ${state.draftReject}`);
-  if (state.status) lines.push(state.status);
+  if (state.draftReject !== null) lines.push(theme.tone("selected", ` Reject reason> ${state.draftReject} `));
+  if (state.status) lines.push(theme.tone(statusTone(state.status), state.status));
   return lines.join("\n");
+}
+
+function statusTone(status: string): "ok" | "danger" | "muted" {
+  if (/^(Resolved|Accepted|Rejected)/.test(status)) return "ok";
+  if (status.startsWith("Failed")) return "danger";
+  return "muted";
 }

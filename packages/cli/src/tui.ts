@@ -1,32 +1,13 @@
 /**
  * ANSI styling for `foreman setup` output.
  *
- * Hand-rolled, same rationale as `prompt.ts`: no chalk/kleur dependency.
- * Styling is disabled outright when stdout isn't a TTY or `$NO_COLOR` is
- * set, so piped output (CI logs, `foo | tee setup.log`) stays plain text
- * instead of littered with escape codes.
+ * Delegates to the shared `@foreman/core` theme; this file keeps only the
+ * `foreman setup`-specific banner and section helpers.
  */
 
-const colorEnabled = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+import { style } from "@foreman/core";
 
-const CODES = {
-  bold: 1,
-  dim: 2,
-  red: 31,
-  green: 32,
-  yellow: 33,
-  blue: 34,
-  magenta: 35,
-  cyan: 36,
-  gray: 90,
-} as const;
-
-type StyleName = keyof typeof CODES;
-
-/** Wraps `text` in the named SGR code, or returns it untouched when styling is disabled. */
-export function style(name: StyleName, text: string): string {
-  return colorEnabled ? `\x1b[${CODES[name]}m${text}\x1b[0m` : text;
-}
+export { style };
 
 const BANNER_LINES = [
   "8888888888                                                       ",

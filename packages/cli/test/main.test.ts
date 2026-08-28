@@ -19,7 +19,7 @@ describe("parseArgs", () => {
   it("parses --path for init and defaults it to unset", () => {
     expect(parseArgs(["init"]).path).toBeNull();
     expect(parseArgs(["init", "--path", "/tmp/some-repo"]).path).toBe("/tmp/some-repo");
-    expect(() => parseArgs(["init", "--path"])).toThrow(/--path requires a directory/);
+    expect(() => parseArgs(["init", "--path"])).toThrow(/missing value for --path/);
   });
 
   it("defaults githubRepo and every mode to unset", () => {

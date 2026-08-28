@@ -2,14 +2,26 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Dispatcher, DispatchHandle, DispatchOutcome, DispatchRequest, DispatchStatus, GlobalConfig } from "@foreman/core";
+import type {
+  Dispatcher,
+  DispatchHandle,
+  DispatchOutcome,
+  DispatchRequest,
+  DispatchStatus,
+  GlobalConfig,
+  LinearWriter,
+  ResolvedRepoEntry,
+} from "@foreman/core";
+import { Bookkeeping } from "../src/bookkeeping.ts";
 import {
   LoopLockHeldError,
+  Supervisor,
   SupervisorLock,
   lockPathFor,
   resolveDispatcher,
   type ProcessProbe,
 } from "../src/supervisor.ts";
+import type { Worker, WorkerContext, WorkerReport } from "../src/workers/types.ts";
 
 function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), "foreman-supervisor-"));
@@ -180,5 +192,81 @@ describe("resolveDispatcher", () => {
     );
     expect(dispatcher.kind).toBe("print");
     expect(logs.some((line) => line.toLowerCase().includes("herdr") && line.toLowerCase().includes("fall"))).toBe(true);
+  });
+});
+
+/** Minimal `LinearWriter` stub: `runTick` never calls it directly, only the stub worker does. */
+class NoopLinear implements Partial<LinearWriter> {}
+
+function makeEntry(): ResolvedRepoEntry {
+  return {
+    alias: "product",
+    repoPath: "/repos/product",
+    team: "ENG",
+    initiativeIds: ["initiative-1"],
+    baseBranch: "main",
+    pr: { required: true, draft: false, ciRequired: true },
+    merge: { strategy: "squash", deleteBranch: true },
+    branchPattern: "<issue-id>-<slug>",
+    worktreePattern: "../<repo>-<ISSUE-ID>",
+  };
+}
+
+/** Always dispatches one decision and skips one issue with a fixed code, for asserting log shape. */
+function makeStubWorker(): Worker {
+  return {
+    name: "refine",
+    cadenceMs: 0,
+    async run(ctx: WorkerContext): Promise<WorkerReport> {
+      return {
+        worker: "refine",
+        ranAt: ctx.now().toISOString(),
+        dispatched: [
+          { agent: "foreman-refine", issueId: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." },
+        ],
+        skipped: [{ stage: "refine", issueId: "ENG-2", code: "unprioritized", message: "Priority is None." }],
+        errors: [],
+      };
+    },
+  };
+}
+
+function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
+  const stateDir = tempStateDir();
+  return new Supervisor({
+    config: makeConfig("print"),
+    linear: new NoopLinear() as unknown as LinearWriter,
+    dispatcher: new FakeDispatcher("print", true),
+    bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),
+    stateDir,
+    entry: makeEntry(),
+    now: () => new Date("2026-06-01T12:00:00.000Z"),
+    log: (message) => logs.push(message),
+    dryRun: false,
+    verbose,
+  });
+}
+
+describe("Supervisor.runTick — verbose skip logging (defect: --verbose was inert in continuous mode)", () => {
+  it("always logs the dispatch count and per-decision dispatch lines, regardless of verbose", async () => {
+    const logs: string[] = [];
+    const supervisor = makeSupervisor(false, logs);
+    await supervisor.runTick([makeStubWorker()]);
+    expect(logs.some((line) => line.includes("refine: 1 dispatched, 1 skipped"))).toBe(true);
+    expect(logs.some((line) => line.includes("→ refine ENG-1: Backlog, priority 1."))).toBe(true);
+  });
+
+  it("logs skip records when verbose is true", async () => {
+    const logs: string[] = [];
+    const supervisor = makeSupervisor(true, logs);
+    await supervisor.runTick([makeStubWorker()]);
+    expect(logs.some((line) => line.includes("skip refine ENG-2: unprioritized") || line.includes("skip refine ENG-2 unprioritized"))).toBe(true);
+  });
+
+  it("omits skip records when verbose is false, even in the same runTick call used by continuous mode", async () => {
+    const logs: string[] = [];
+    const supervisor = makeSupervisor(false, logs);
+    await supervisor.runTick([makeStubWorker()]);
+    expect(logs.some((line) => line.includes("unprioritized"))).toBe(false);
   });
 });

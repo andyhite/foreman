@@ -106,41 +106,40 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.yes = true;
         break;
       case "--scope": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --scope");
         const value = argv[++i];
         if (value !== "user" && value !== "project") {
-          throw new Error(`--scope must be one of user|project, got "${value ?? ""}"`);
+          throw new Error(`--scope must be one of user|project, got "${value}"`);
         }
         parsed.scope = value;
         break;
       }
       case "--omp":
+        if (argv[i + 1] === undefined) throw new Error("missing value for --omp");
         parsed.ompMode = parseMode("--omp", argv[++i]);
         break;
       case "--herdr":
+        if (argv[i + 1] === undefined) throw new Error("missing value for --herdr");
         parsed.herdrMode = parseMode("--herdr", argv[++i]);
         break;
       case "--repo-source": {
-        const value = argv[++i];
-        if (!value) throw new Error("--repo-source requires an owner/repo value");
-        parsed.githubRepo = value;
+        if (argv[i + 1] === undefined) throw new Error("missing value for --repo-source");
+        parsed.githubRepo = argv[++i] as string;
         break;
       }
       case "--repo": {
-        const value = argv[++i];
-        if (!value) throw new Error("--repo requires a path");
-        parsed.repoPath = value;
+        if (argv[i + 1] === undefined) throw new Error("missing value for --repo");
+        parsed.repoPath = argv[++i] as string;
         break;
       }
       case "--path": {
-        const value = argv[++i];
-        if (!value) throw new Error("--path requires a directory");
-        parsed.path = value;
+        if (argv[i + 1] === undefined) throw new Error("missing value for --path");
+        parsed.path = argv[++i] as string;
         break;
       }
       case "--home": {
-        const value = argv[++i];
-        if (!value) throw new Error("--home requires a path");
-        parsed.home = value;
+        if (argv[i + 1] === undefined) throw new Error("missing value for --home");
+        parsed.home = argv[++i] as string;
         break;
       }
       case "--skip-build":

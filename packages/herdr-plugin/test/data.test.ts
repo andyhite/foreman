@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { encodeMarker, type BlockRecord, type TriageItem } from "@foreman/core";
-import { fetchBlockedEntries, fetchProposalEntries } from "../src/data.ts";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { encodeMarker, type BlockRecord, type GlobalConfig, type TriageItem } from "@foreman/core";
+import { fetchBlockedEntries, fetchProposalEntries, readLoopBookkeeping } from "../src/data.ts";
 import { LinearClient } from "@foreman/core";
 
 function jsonResponse(body: unknown): Response {
@@ -115,5 +118,58 @@ describe("fetchProposalEntries", () => {
     ]);
     const entries = await fetchProposalEntries(client);
     expect(entries).toHaveLength(0);
+  });
+});
+
+function makeConfig(stateDir: string, repos: GlobalConfig["repos"] = {}): GlobalConfig {
+  return {
+    repos,
+    loop: {
+      wipGlobal: 3,
+      wip: { refine: 2, implement: 3, review: 2 },
+      readyBufferTarget: 5,
+      backpressureThreshold: 5,
+      retryCap: 2,
+      reviewCycleCap: 2,
+      cadenceMinutes: 5,
+      stage: "dry-run",
+      dispatcher: "print",
+      mergeDetection: true,
+      stateDir,
+    },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql" },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr" },
+    repoDefaults: {
+      baseBranch: "main",
+      pr: { required: true, draft: false, ciRequired: true },
+      merge: { strategy: "squash", deleteBranch: true },
+      branchPattern: "<issue-id>-<slug>",
+      worktreePattern: "../<repo>-<ISSUE-ID>",
+    },
+  };
+}
+
+describe("readLoopBookkeeping — intake bookkeeping reaches the board (defect fix)", () => {
+  it("merges intake's own lastRunAt.intake even with no matching config.repos entry", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-board-data-"));
+    const intakeDir = join(stateDir, "intake");
+    mkdirSync(intakeDir, { recursive: true });
+    writeFileSync(
+      join(intakeDir, "bookkeeping.json"),
+      JSON.stringify({ lastRunAt: { intake: "2026-08-28T12:00:00.000Z" } }),
+    );
+
+    const config = makeConfig(stateDir); // no `repos` entries at all
+    const bookkeeping = readLoopBookkeeping(config);
+
+    expect(bookkeeping.lastRunAt.intake).toBe("2026-08-28T12:00:00.000Z");
+  });
+
+  it("is undefined when no intake bookkeeping file exists", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-board-data-"));
+    const config = makeConfig(stateDir);
+    const bookkeeping = readLoopBookkeeping(config);
+    expect(bookkeeping.lastRunAt.intake).toBeUndefined();
   });
 });

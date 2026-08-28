@@ -6,7 +6,7 @@
  */
 
 import type { GitHubClient, LinearWriter } from "@foreman/core";
-import { assertIssueInScope, decodeMarker, gateSummary, MARKER_KIND, reviewGate } from "@foreman/core";
+import { assertIssueInScope, decodeMarker, MARKER_KIND, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
 import { getEntry } from "../runtime.ts";
 
@@ -52,7 +52,8 @@ export async function runMerge(linear: LinearWriter, github: GitHubClient, issue
   });
 
   if (!gate.ok) {
-    return { merged: false, message: gateSummary("review", gate) };
+    const bullets = gate.failures.map((failure) => `- ${failure.message}`).join("\n");
+    return { merged: false, message: `review gate: fail\n${bullets}` };
   }
 
   if (repoSettings.pr.required) {

@@ -7,7 +7,7 @@
  * Foreman bug, not a normal queue entry.
  */
 
-import type { GlobalConfig } from "@foreman/core";
+import type { GlobalConfig, Theme } from "@foreman/core";
 import type { RunCommand } from "../actions.ts";
 import type { Key } from "../tui/keys.ts";
 import {
@@ -139,6 +139,7 @@ function agentToListItem(agent: HerdrAgent): ListItem {
       "",
       "Enter focuses this agent's pane, `A` attaches to it.",
     ].filter((line) => line.length > 0),
+    tone: agent.status === "blocked" ? "danger" : undefined,
   };
 }
 
@@ -169,9 +170,12 @@ export async function attachSelectedAgent(config: GlobalConfig, run: RunCommand,
     : `Failed to attach ${agent.paneId}: ${result.stderr.trim()}`;
 }
 
-export function renderAgentsScreen(state: AgentsScreenState, width: number, rows: number): string {
+export function renderAgentsScreen(state: AgentsScreenState, width: number, rows: number, theme: Theme): string {
   const listRows = Math.max(3, rows - 4);
-  const items = state.agents.map(agentToListItem);
+  const sorted = [...state.agents].sort(
+    (a, b) => a.title.localeCompare(b.title) || a.paneId.localeCompare(b.paneId),
+  );
+  const items = sorted.map(agentToListItem);
   const lines = renderList({
     title: `Agents — ${state.agents.length} live`,
     items,
@@ -179,6 +183,7 @@ export function renderAgentsScreen(state: AgentsScreenState, width: number, rows
     width,
     listRows,
     emptyMessage: "No live agents.",
+    theme,
   });
   if (state.status) lines.push(state.status);
   return lines.join("\n");

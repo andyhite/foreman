@@ -137,6 +137,8 @@ export interface SupervisorOptions {
   now?: () => Date;
   log?: (message: string) => void;
   dryRun: boolean;
+  /** Logs per-worker skip records in `runTick`, not just dispatch counts (SPEC §17.9). */
+  verbose?: boolean;
 }
 
 export interface RunTickOptions {
@@ -153,6 +155,7 @@ export class Supervisor {
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
   readonly #dryRun: boolean;
+  readonly #verbose: boolean;
   readonly #lock: SupervisorLock;
   #stopped = false;
 
@@ -165,6 +168,7 @@ export class Supervisor {
     this.#now = options.now ?? (() => new Date());
     this.#log = options.log ?? ((message) => console.log(`[foreman-loop] ${message}`));
     this.#dryRun = options.dryRun;
+    this.#verbose = options.verbose ?? false;
     this.#lock = new SupervisorLock(lockPathFor(options.stateDir));
   }
 
@@ -187,10 +191,15 @@ export class Supervisor {
    * this process was not running. Never touches Linear itself.
    */
   async reconcile(): Promise<void> {
+    const before = this.#bookkeeping.state.inFlight.length;
     const running = await this.#linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500 });
     const liveIssueIds = new Set(running.map((issue) => issue.identifier));
     const liveDispatchIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
     this.#bookkeeping.reconcile(liveIssueIds, liveDispatchIds);
+    const dropped = before - this.#bookkeeping.state.inFlight.length;
+    if (dropped > 0) {
+      this.#log(`reconciled: dropped ${dropped} stale in-flight record(s)`);
+    }
     this.#bookkeeping.save();
   }
 
@@ -221,6 +230,14 @@ export class Supervisor {
           `${worker.name}: ${report.dispatched.length} dispatched, ${report.skipped.length} skipped` +
             (report.errors.length > 0 ? `, ${report.errors.length} error(s)` : ""),
         );
+        for (const decision of report.dispatched) {
+          this.#log(`  → ${worker.name} ${decision.issueId ?? "(batch)"}: ${decision.reason}`);
+        }
+        if (this.#verbose) {
+          for (const skip of report.skipped) {
+            this.#log(`  skip ${worker.name} ${skip.issueId ?? "(batch)"}: ${skip.code} — ${skip.message}`);
+          }
+        }
       } catch (error) {
         this.#log(`${worker.name} failed: ${String(error)}`);
         reports.push({

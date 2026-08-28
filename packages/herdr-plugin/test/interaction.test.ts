@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { GlobalConfig } from "@foreman/core";
 import { acceptProposal, rejectProposal, resolveBlock } from "../src/actions.ts";
+import { isComposingDraft } from "../src/board.ts";
 import { handleBlockedKey, initialBlockedScreen } from "../src/screens/blocked.ts";
 import { handleProposalsKey, initialProposalsScreen } from "../src/screens/proposals.ts";
 import type { BlockedEntry, ProposalEntry } from "../src/data.ts";
@@ -157,6 +158,39 @@ describe("proposal review keys", () => {
     const empty = initialProposalsScreen();
     expect(handleProposalsKey(empty, { kind: "char", value: "a" }, ROWS).action).toBeNull();
     expect(handleProposalsKey(empty, { kind: "char", value: "r" }, ROWS).state.draftReject).toBeNull();
+  });
+});
+
+describe("global q/Tab do not swallow an in-progress draft", () => {
+  it("keeps composing once a blocked reply draft is open", () => {
+    const blocked = { ...initialBlockedScreen(), draftReply: "" };
+    const proposals = initialProposalsScreen();
+    expect(isComposingDraft("blocked", blocked, proposals)).toBe(true);
+    expect(isComposingDraft("proposals", blocked, proposals)).toBe(false);
+  });
+
+  it("keeps composing once a proposal reject draft is open", () => {
+    const blocked = initialBlockedScreen();
+    const proposals = { ...initialProposalsScreen(), draftReject: "" };
+    expect(isComposingDraft("proposals", blocked, proposals)).toBe(true);
+    expect(isComposingDraft("blocked", blocked, proposals)).toBe(false);
+  });
+
+  it("is false with no draft open, so q/Tab remain global shortcuts", () => {
+    expect(isComposingDraft("blocked", initialBlockedScreen(), initialProposalsScreen())).toBe(false);
+    expect(isComposingDraft("board", initialBlockedScreen(), initialProposalsScreen())).toBe(false);
+  });
+
+  it("appends a typed `q` to the draft instead of the board quitting", () => {
+    const base = { ...initialBlockedScreen(), entries: [blockedEntry("ENG-1", ["Evict stale", "Keep stale"])] };
+    const drafting = handleBlockedKey(base, { kind: "char", value: "o" }, ROWS).state;
+    expect(isComposingDraft("blocked", drafting, initialProposalsScreen())).toBe(true);
+
+    // board.ts's handleKey only reaches its q-quit branch when `!composing`; since
+    // isComposingDraft is true here, the real board falls through to this same
+    // handleBlockedKey call instead — proving `q` becomes text, not a quit.
+    const update = handleBlockedKey(drafting, { kind: "char", value: "q" }, ROWS);
+    expect(update.state.draftReply).toBe("oq");
   });
 });
 

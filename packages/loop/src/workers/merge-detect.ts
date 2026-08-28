@@ -23,6 +23,9 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   const skipped: WorkerReport["skipped"] = [];
 
   if (!ctx.config.loop.mergeDetection) {
+    ctx.log(
+      "merge detection disabled (loop.mergeDetection=false); merged PRs will not move to Done.",
+    );
     return { worker: "merge-detect", ranAt: now.toISOString(), dispatched: [], skipped, errors };
   }
 

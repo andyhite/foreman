@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createTheme, stripAnsi, visibleWidth } from "@foreman/core";
 import {
   initialListView,
   moveSelection,
@@ -7,6 +8,9 @@ import {
   wrapLine,
 } from "../src/tui/list.ts";
 import type { ListItem } from "../src/tui/list.ts";
+
+const plainTheme = createTheme(false);
+const colorTheme = createTheme(true);
 
 describe("moveSelection wrapping", () => {
   it("wraps from the last item to the first moving down", () => {
@@ -72,9 +76,10 @@ describe("renderList width", () => {
       width: 20,
       listRows: 5,
       emptyMessage: "Nothing blocked.",
+      theme: plainTheme,
     });
     for (const line of lines) {
-      expect(line.length).toBeLessThanOrEqual(20);
+      expect(visibleWidth(line)).toBeLessThanOrEqual(20);
     }
   });
 
@@ -86,7 +91,30 @@ describe("renderList width", () => {
       width: 40,
       listRows: 5,
       emptyMessage: "Nothing blocked.",
+      theme: plainTheme,
     });
     expect(lines.some((line) => line.includes("Nothing blocked."))).toBe(true);
+  });
+
+  it("produces byte-identical output to an unstyled theme when styling is disabled", () => {
+    const items: ListItem[] = [
+      { label: "ENG-142", detail: ["a detail line"] },
+      { label: "ENG-143", detail: ["short"], tone: "danger" },
+    ];
+    const options = {
+      title: "Blocked",
+      items,
+      view: { selected: 0, scrollTop: 0 },
+      width: 30,
+      listRows: 5,
+      emptyMessage: "Nothing blocked.",
+    };
+    const plainLines = renderList({ ...options, theme: plainTheme });
+    const styledLines = renderList({ ...options, theme: colorTheme });
+    expect(styledLines.length).toBe(plainLines.length);
+    for (const [index, plainLine] of plainLines.entries()) {
+      expect(stripAnsi(styledLines[index] ?? "")).toBe(plainLine);
+      expect(visibleWidth(styledLines[index] ?? "")).toBeLessThanOrEqual(30);
+    }
   });
 });

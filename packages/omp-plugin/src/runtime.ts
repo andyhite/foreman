@@ -13,7 +13,7 @@
 
 import type { GlobalConfig, Initiative, LinearWriter, Project, WorkflowState } from "@foreman/core";
 import type { ResolvedRepoEntry } from "@foreman/core";
-import { entryForCwd, GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
+import { ConfigError, entryForCwd, GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
 
 /** Thrown by any accessor called before `initRuntime` has run at least once. */
 export class ExtensionRuntimeNotInitializedError extends Error {
@@ -114,13 +114,38 @@ export function getConfig(): GlobalConfig {
   return requireRuntime().config;
 }
 
-/** Memoized resolution of this instance's registry entry from `process.cwd()` (SPEC §3.11). Throws `ConfigError` when cwd is not a registered repo. */
+/**
+ * Memoized resolution of this instance's registry entry from `process.cwd()`
+ * (SPEC §3.11). Throws `ConfigError` when cwd is not a registered repo —
+ * callers that must tolerate an unregistered cwd (most repos never run
+ * Foreman) should check `isRepoRegistered()` first.
+ */
 export function getEntry(): ResolvedRepoEntry {
   const rt = requireRuntime();
   if (!rt.entry) {
     rt.entry = entryForCwd(rt.config, process.cwd());
   }
   return rt.entry;
+}
+
+/**
+ * True when `process.cwd()` (or `cwd`) falls inside a repo registered in
+ * `~/.foreman/config.json`. Most repos never register with Foreman at all —
+ * that is a normal, silent state, not an error — so any entry-dependent
+ * behavior (the task guard, the session-start ensure pass) must check this
+ * before calling `getEntry()` rather than treating its `ConfigError` as a
+ * failure.
+ */
+export function isRepoRegistered(cwd: string = process.cwd()): boolean {
+  const rt = requireRuntime();
+  if (rt.entry) return true;
+  try {
+    rt.entry = entryForCwd(rt.config, cwd);
+    return true;
+  } catch (error) {
+    if (error instanceof ConfigError) return false;
+    throw error;
+  }
 }
 
 /** Throws when the API key was unresolvable — callers surface this as a tool-level error, not a crash. */

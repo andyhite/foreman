@@ -48,7 +48,7 @@ export interface ProposalEntry {
  * than throwing. See `BoardData.lastRunAt` for the field this awaits.
  */
 export interface LoopBookkeeping {
-  lastRunAt: Partial<Record<"triage" | "refine" | "implement" | "review", string | null>>;
+  lastRunAt: Partial<Record<"intake" | "refine" | "implement" | "review", string | null>>;
   attempts: Record<string, { count: number; lastAttemptAt: string }>;
   pendingDecisions: Array<{ issueId: string; stage: string; kind: string; attempts: number }>;
 }
@@ -175,8 +175,7 @@ export async function fetchProposalEntries(client: LinearClient): Promise<Propos
  */
 export function readLoopBookkeeping(config: GlobalConfig): LoopBookkeeping {
   const merged: LoopBookkeeping = { lastRunAt: {}, attempts: {}, pendingDecisions: [] };
-  for (const alias of Object.keys(config.repos)) {
-    const single = readAliasBookkeeping(config, alias);
+  const mergeIn = (single: LoopBookkeeping): void => {
     for (const [stage, at] of Object.entries(single.lastRunAt)) {
       const key = stage as keyof LoopBookkeeping["lastRunAt"];
       const existing = merged.lastRunAt[key];
@@ -187,13 +186,24 @@ export function readLoopBookkeeping(config: GlobalConfig): LoopBookkeeping {
       if (!existing || attempt.lastAttemptAt > existing.lastAttemptAt) merged.attempts[issueId] = attempt;
     }
     merged.pendingDecisions.push(...single.pendingDecisions);
+  };
+
+  for (const alias of Object.keys(config.repos)) {
+    mergeIn(readAliasBookkeeping(config, alias));
   }
+  const intakePath = join(expandHome(config.loop.stateDir), "intake", "bookkeeping.json");
+  mergeIn(readBookkeepingFile(intakePath));
+
   return merged;
 }
 
 /** Reads one instance's bookkeeping file (SPEC §3.11 per-alias state dir). */
 function readAliasBookkeeping(config: GlobalConfig, alias: string): LoopBookkeeping {
-  const path = join(expandHome(config.loop.stateDir), alias, "bookkeeping.json");
+  return readBookkeepingFile(join(expandHome(config.loop.stateDir), alias, "bookkeeping.json"));
+}
+
+/** Reads and parses one bookkeeping.json at an absolute path (SPEC §3.11). */
+function readBookkeepingFile(path: string): LoopBookkeeping {
   if (!existsSync(path)) return EMPTY_BOOKKEEPING;
   let parsed: unknown;
   try {

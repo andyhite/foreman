@@ -54,7 +54,13 @@ async function buildReviewCandidates(
         );
         headSha = stdout.trim();
         prOpen = headSha.length > 0;
-      } catch {
+      } catch (error) {
+        skipped.push({
+          stage: "review",
+          issueId: issue.identifier,
+          code: "head-sha-unavailable",
+          message: String(error),
+        });
         continue;
       }
     }
