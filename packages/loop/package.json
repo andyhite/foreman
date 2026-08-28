@@ -3,15 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Foreman supervisor: stage workers over Linear state",
-  "bin": {
-    "foreman-loop": "./dist/main.js"
-  },
-  "scripts": {
-    "build": "bun build ./src/main.ts --outdir ./dist --target node --format esm",
-    "start": "bun run ./src/main.ts"
-  },
+  "description": "Foreman supervisor: stage workers over Linear state, reached as `foreman loop`",
   "dependencies": {
     "@foreman/core": "workspace:*"
+  },
+  "main": "./src/main.ts",
+  "exports": {
+    ".": "./src/main.ts"
   }
 }

@@ -70,6 +70,15 @@ erroring. Each agent's `output` is instead a flat envelope —
 semantics while surviving every normalizer. `parseAgentOutput` enforces the
 "exactly one branch populated" invariant that JSON Schema cannot express.
 
+**There is no `foreman-loop` binary.** §17 names one, in eight places, and it
+was written before the spec had a `foreman` CLI at all — §18 puts the supervisor
+at build step 6 and the installer nowhere. Two installed binaries whose names
+differ by a hyphen is not a surface an operator can hold, so the supervisor is
+the `loop` subcommand of `foreman`, which owns every argument after it. What
+keeps the `foreman-loop` spelling is the log prefix and the herdr pane label
+(§17.4, §17.5) — those name a long-lived process, which is exactly what §17
+describes, and the pane label is what the startup guard matches on.
+
 ## Verified runtime facts worth keeping
 
 - Print mode: `omp -p --approval-mode <always-ask|write|yolo> --cwd <dir> '<prompt>'`.

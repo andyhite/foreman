@@ -10,6 +10,17 @@
         "typescript": "^5.9.3",
       },
     },
+    "packages/cli": {
+      "name": "@foreman/cli",
+      "version": "0.1.0",
+      "bin": {
+        "foreman": "./dist/main.js",
+      },
+      "dependencies": {
+        "@foreman/core": "workspace:*",
+        "@foreman/loop": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@foreman/core",
       "version": "0.1.0",
@@ -30,9 +41,6 @@
     "packages/loop": {
       "name": "@foreman/loop",
       "version": "0.1.0",
-      "bin": {
-        "foreman-loop": "./dist/main.js",
-      },
       "dependencies": {
         "@foreman/core": "workspace:*",
       },
@@ -46,6 +54,8 @@
     },
   },
   "packages": {
+    "@foreman/cli": ["@foreman/cli@workspace:packages/cli"],
+
     "@foreman/core": ["@foreman/core@workspace:packages/core"],
 
     "@foreman/herdr-plugin": ["@foreman/herdr-plugin@workspace:packages/herdr-plugin"],

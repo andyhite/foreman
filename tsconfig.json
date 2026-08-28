@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/omp-plugin" },
     { "path": "packages/loop" },
-    { "path": "packages/herdr-plugin" }
+    { "path": "packages/herdr-plugin" },
+    { "path": "packages/cli" }
   ]
 }

@@ -67,6 +67,21 @@ function readJsonFile(path: string, describeFor: string): unknown {
 }
 
 /**
+ * Applies `GlobalConfigSchema` defaults to `value` and validates the result,
+ * throwing `ConfigError` (labeled with `describeFor`, e.g. a file path) on
+ * failure. Shared by `loadGlobalConfig` and any writer that needs to know a
+ * patch produces a valid config before it touches disk (e.g. `foreman setup`).
+ */
+export function defaultAndValidateGlobalConfig(value: unknown, describeFor: string): GlobalConfig {
+  const defaulted = Value.Default(GlobalConfigSchema, value);
+  if (!Value.Check(GlobalConfigSchema, defaulted)) {
+    const problems = formatValidationErrors(GlobalConfigSchema, defaulted);
+    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, problems);
+  }
+  return defaulted as GlobalConfig;
+}
+
+/**
  * Loads and validates `<home>/.foreman/config.json` (SPEC §3.10). A missing
  * file is fine — it's the state of a fresh install — and yields a fully
  * defaulted config plus a warning. An unparseable or schema-invalid file
@@ -90,13 +105,7 @@ export function loadGlobalConfig(options?: {
     warnings.push(`No global config found at ${path}; using defaults.`);
   }
 
-  const defaulted = Value.Default(GlobalConfigSchema, parsed);
-  if (!Value.Check(GlobalConfigSchema, defaulted)) {
-    const problems = formatValidationErrors(GlobalConfigSchema, defaulted);
-    throw new ConfigError(`Invalid global config at ${path}`, problems);
-  }
-
-  const config = defaulted as GlobalConfig;
+  const config = defaultAndValidateGlobalConfig(parsed, path);
   if (Object.keys(config.projects).length === 0) {
     warnings.push("No projects mapped in config.projects; no Linear project resolves to a repo yet.");
   }

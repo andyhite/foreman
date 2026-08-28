@@ -93,15 +93,16 @@ async function loopPaneIsLive(herdrBin: string, paneId: string): Promise<boolean
 }
 
 /**
- * Absolute path to the built loop entrypoint, which lives in a sibling package.
- * Resolved from the plugin root rather than PATH: `foreman-loop` is a workspace
- * bin and is not installed globally.
+ * Absolute path to the built `foreman` CLI, which lives in a sibling package
+ * and carries the supervisor as `foreman loop`. Resolved from the plugin root
+ * rather than PATH: in dev-link mode the bin is a workspace symlink that was
+ * never installed globally, so PATH cannot be relied on.
  */
-function resolveLoopEntry(pluginRoot: string): string {
-  const entry = join(pluginRoot, "..", "loop", "dist", "main.js");
+function resolveCliEntry(pluginRoot: string): string {
+  const entry = join(pluginRoot, "..", "cli", "dist", "main.js");
   if (!existsSync(entry)) {
     throw new Error(
-      `The loop is not built at ${entry}. Run \`bun run build\` in the Foreman repo, ` +
+      `The foreman CLI is not built at ${entry}. Run \`bun run build\` in the Foreman repo, ` +
         `then restart herdr or invoke the startup hook again.`,
     );
   }
@@ -118,9 +119,9 @@ export async function runStartup(env: Record<string, string | undefined> = proce
   const stateDir = env.HERDR_PLUGIN_STATE_DIR;
   if (!stateDir) throw new Error("HERDR_PLUGIN_STATE_DIR is not set; cannot guard against double-start.");
   const pluginRoot = env.HERDR_PLUGIN_ROOT;
-  if (!pluginRoot) throw new Error("HERDR_PLUGIN_ROOT is not set; cannot locate the loop entrypoint.");
+  if (!pluginRoot) throw new Error("HERDR_PLUGIN_ROOT is not set; cannot locate the foreman CLI.");
 
-  const loopEntry = resolveLoopEntry(pluginRoot);
+  const cliEntry = resolveCliEntry(pluginRoot);
 
   const existing = readGuard(stateDir);
   if (existing && (await loopPaneIsLive(herdrBin, existing.paneId))) {
@@ -181,7 +182,7 @@ export async function runStartup(env: Record<string, string | undefined> = proce
     "pane",
     "run",
     paneId,
-    `exec bun run ${JSON.stringify(loopEntry)}`,
+    `exec bun run ${JSON.stringify(cliEntry)} loop`,
   ]);
   if (launch.exitCode !== 0) {
     throw new Error(`Failed to start the loop in pane ${paneId}: ${launch.stderr}`);

@@ -49,14 +49,39 @@ git clone https://github.com/andyhite/foreman
 cd foreman
 bun install
 bun run build
-omp plugin link packages/omp-plugin
+bun run packages/cli/dist/main.js setup
 ```
 
-This repo also ships a local marketplace catalog at
-`.omp-plugin/marketplace.json`, so `omp plugin marketplace add .` followed by
-`omp plugin install foreman@foreman-dev` works if you prefer the install path
-over a symlink. Either way, `bun run build` has to run first — the extension
-bundle is build output and is not committed.
+`foreman setup` (alias `init`) is the installer: it checks for `bun`/`git`/`gh`/`omp`/
+`herdr`, walks you through `~/.foreman/config.json` (Linear API key, team keys, and
+project → repo mappings), then installs the omp plugin and, optionally, the herdr
+board. Non-interactive use (CI, scripting) takes the same flags without prompting:
+
+```bash
+bun run packages/cli/dist/main.js setup --yes \
+  --omp link --scope user \
+  --herdr skip
+```
+
+Each plugin has two install modes:
+
+| Mode | Does |
+| --- | --- |
+| `link` ("dev mode") | Symlinks this checkout's `packages/omp-plugin` (or `packages/herdr-plugin`) in place — edits show up without reinstalling. |
+| `install` | Registers the plugin from GitHub (`andyhite/foreman`); no local checkout needed afterward. |
+
+`--scope user` (the default) installs the omp plugin across every repo you work in;
+`--scope project` scopes it to the current repo. Run `bun run packages/cli/dist/main.js
+setup --help` for the full flag list, including `--repo-source` to point at a fork.
+
+Setup is equivalent to, and replaces, running these by hand:
+
+```bash
+omp plugin link packages/omp-plugin              # dev mode
+# or
+omp plugin marketplace add andyhite/foreman       # install from GitHub
+omp plugin install foreman@foreman --scope user
+```
 
 Point Foreman at Linear and at least one repo in `~/.foreman/config.json`:
 
@@ -72,7 +97,8 @@ Point Foreman at Linear and at least one repo in `~/.foreman/config.json`:
 ```
 
 Foreman reads the Linear personal API key from `$LINEAR_API_KEY`, or from
-`linear.apiKeyFile` when the env var is unset. The `projects` map is the only
+`linear.apiKeyFile` when the env var is unset — `foreman setup` writes that file for
+you (mode `0600`) if you paste a key during the prompt. The `projects` map is the only
 place Foreman learns which repo a Linear project belongs to; an unmapped project
 is skipped rather than guessed at.
 
@@ -81,9 +107,9 @@ is skipped rather than guessed at.
 The supervisor polls Linear and dispatches whatever the gates allow.
 
 ```bash
-foreman-loop --dry-run --once --verbose   # decide and log, dispatch nothing
-foreman-loop --stage read-only            # comment and label, no code
-foreman-loop --stage full                 # the whole pipeline
+foreman loop --dry-run --once --verbose   # decide and log, dispatch nothing
+foreman loop --stage read-only            # comment and label, no code
+foreman loop --stage full                 # the whole pipeline
 ```
 
 `loop.stage` defaults to `dry-run`, so a loop started before you are ready logs
@@ -95,6 +121,10 @@ the gate that refused:
 [foreman-loop]   skip refine PLT-21: unprioritized — Priority is None.
 [foreman-loop]   skip triage (batch): before-triage-window — Before the 06:00 triage window.
 ```
+
+The `foreman-loop` prefix names the long-lived process, not the command — the
+same spelling herdr uses for its pane. The loop is a singleton: a second one
+refuses to start while the first holds the lock.
 
 ## Operator surface
 
@@ -114,11 +144,14 @@ Four dispatch commands run one agent by hand: `/foreman:triage`,
 
 If you use [herdr](https://github.com/andyhite/herdr), the board ships as a
 plugin with four screens — the blocked drain, proposal review, the board, and
-live agent detail. Requires herdr 0.8.0 or newer.
+live agent detail. Requires herdr 0.8.0 or newer. `foreman setup` offers to install
+it (dev-mode link or from GitHub); by hand:
 
 ```bash
 bun run build
-herdr plugin link packages/herdr-plugin
+herdr plugin link packages/herdr-plugin              # dev mode
+# or
+herdr plugin install andyhite/foreman/packages/herdr-plugin
 ```
 
 Linking registers four actions and, via its `[[startup]]` hook, ensures a
@@ -183,6 +216,7 @@ packages/
   omp-plugin/    The plugin: agents, skills, commands, rules, extension
   loop/           The supervisor and its six workers
   herdr-plugin/   The board: four TUI panes over the same core
+  cli/            foreman setup — the installer
 ```
 
 `packages/core` is the single source of truth for every contract. The four agent

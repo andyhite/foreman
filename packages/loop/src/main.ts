@@ -1,6 +1,11 @@
-#!/usr/bin/env node
 /**
- * `foreman-loop` CLI entrypoint (SPEC §17.5, §17.9, §18).
+ * The supervisor, reached as `foreman loop` (SPEC §17.5, §17.9, §18).
+ *
+ * SPEC §17 names a `foreman-loop` binary; it was written before a `foreman`
+ * CLI existed, and two binaries split by a hyphen is not a surface (see
+ * docs/VERIFIED.md). The log prefix and the herdr pane label keep the
+ * `foreman-loop` spelling, because those name the long-lived process, not the
+ * command an operator types.
  *
  * Hand-rolled argument parsing — the workspace's sole runtime dependency is
  * `@sinclair/typebox` (config validation), so no CLI framework here.
@@ -29,9 +34,9 @@ interface ParsedArgs {
   help: boolean;
 }
 
-const HELP_TEXT = `foreman-loop — Foreman supervisor (SPEC §17)
+const HELP_TEXT = `foreman loop — Foreman supervisor (SPEC §17)
 
-Usage: foreman-loop [options]
+Usage: foreman loop [options]
 
   --dry-run              Log what each worker would dispatch; dispatch nothing.
   --stage <s>             Override loop.stage: dry-run | read-only | full.
@@ -95,8 +100,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return parsed;
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+export async function runLoop(argv: readonly string[]): Promise<void> {
+  const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(HELP_TEXT);
     return;
@@ -191,12 +196,4 @@ async function main(): Promise<void> {
   } finally {
     supervisor.stop();
   }
-}
-
-const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMainModule) {
-  main().catch((error) => {
-    console.error(`[foreman-loop] fatal: ${String(error)}`);
-    process.exitCode = 1;
-  });
 }
