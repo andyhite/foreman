@@ -89,6 +89,9 @@ class FakeLinear implements LinearWriter {
   async teams() {
     return [];
   }
+  async projects() {
+    return [];
+  }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
     const issue = [...this.issuesById.values()].find((candidate) => candidate.id === id);

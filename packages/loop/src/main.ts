@@ -123,7 +123,11 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   };
 
   const apiKey = resolveLinearApiKey(config);
-  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
+  const linear = new LinearClient({
+    apiKey,
+    endpoint: config.linear.endpoint,
+    teamKeys: config.linear.teamKeys,
+  });
 
   const stateDir = expandHome(config.loop.stateDir);
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));

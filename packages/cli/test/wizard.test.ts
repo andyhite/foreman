@@ -3,21 +3,25 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
-import type { Choice, Prompter } from "../src/prompt.ts";
+import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
 
 class ScriptedPrompter implements Prompter {
+  confirmCalls: string[] = [];
+  multiSelectResult: string[] | null = null;
+  textAnswers: Record<string, string> = {};
   private confirmScript: boolean[];
 
   constructor(confirmScript: boolean[] = []) {
     this.confirmScript = [...confirmScript];
   }
 
-  text(_question: string, defaultValue: string): Promise<string> {
-    return Promise.resolve(defaultValue);
+  text(question: string, defaultValue: string): Promise<string> {
+    return Promise.resolve(this.textAnswers[question] ?? defaultValue);
   }
 
-  confirm(_question: string, defaultValue: boolean): Promise<boolean> {
+  confirm(question: string, defaultValue: boolean): Promise<boolean> {
+    this.confirmCalls.push(question);
     const next = this.confirmScript.shift();
     return Promise.resolve(next ?? defaultValue);
   }
@@ -28,6 +32,11 @@ class ScriptedPrompter implements Prompter {
 
   secret(_question: string): Promise<string> {
     return Promise.resolve("");
+  }
+
+  multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
+    if (this.multiSelectResult) return Promise.resolve(this.multiSelectResult as T[]);
+    return Promise.resolve(choices.filter((choice) => choice.checked).map((choice) => choice.value));
   }
 
   close(): void {
@@ -132,6 +141,72 @@ describe("runWizard", () => {
         }),
       ).rejects.toThrow(/omp plugin link failed/);
     } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("uses $LINEAR_API_KEY from the environment without prompting, and maps projects picked via the Linear API", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const originalFetch = globalThis.fetch;
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_test";
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query Projects")) {
+        return new Response(JSON.stringify({ data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }] } } }));
+      }
+      if (query.includes("query Teams")) {
+        return new Response(
+          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }] } } }),
+        );
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const prompter = new ScriptedPrompter();
+      prompter.multiSelectResult = ["p1"];
+      prompter.textAnswers['Repo path for "Plotroom"'] = "/repos/plotroom";
+
+      await runWizard(
+        baseOptions({ ompMode: "skip", herdrMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
+        { prompter, runner: new RecordingRunner(), log: () => {} },
+      );
+
+      expect(prompter.confirmCalls).not.toContain("Do you have a Linear personal API key to configure now?");
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.projects).toEqual({ p1: "/repos/plotroom" });
+      expect(config.linear.teamKeys).toEqual(["ENG"]);
+      expect(config.linear.apiKeyFile ?? null).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to manual project entry when the Linear API call fails", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const originalFetch = globalThis.fetch;
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_test";
+    globalThis.fetch = (async () => new Response("bad request", { status: 400 })) as unknown as typeof fetch;
+
+    try {
+      const prompter = new ScriptedPrompter([false]);
+      await runWizard(
+        baseOptions({ ompMode: "skip", herdrMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
+        { prompter, runner: new RecordingRunner(), log: () => {} },
+      );
+
+      expect(prompter.confirmCalls).toContain("Map a Linear project id to a repo path now?");
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.projects).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
     }
   });

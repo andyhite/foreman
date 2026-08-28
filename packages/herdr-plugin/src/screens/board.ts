@@ -39,7 +39,7 @@ const STAGES = ["triage", "refine", "implement", "review"] as const;
 
 export async function loadBoardScreen(client: LinearClient, config: GlobalConfig): Promise<BoardScreenState> {
   const [issues, blocked, running] = await Promise.all([
-    fetchIssuesByState(client, config.linear.teamKeys),
+    fetchIssuesByState(client),
     client.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
     client.issues({ filter: IN_FLIGHT_FILTER, limit: 500 }),
   ]);

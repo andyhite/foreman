@@ -136,6 +136,14 @@ export const TEAMS_QUERY = `
   }
 `;
 
+export const PROJECTS_QUERY = `
+  query Projects {
+    projects(first: 250) {
+      nodes { id name }
+    }
+  }
+`;
+
 export const ISSUE_UPDATE_MUTATION = (includeComments: boolean): string => `
   mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $id, input: $input) {

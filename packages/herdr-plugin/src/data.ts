@@ -77,6 +77,7 @@ export function buildLinearClient(
   return new LinearClient({
     apiKey: resolveLinearApiKey(config, env),
     endpoint: config.linear.endpoint,
+    teamKeys: config.linear.teamKeys,
   });
 }
 
@@ -172,9 +173,11 @@ export function readLoopBookkeeping(config: GlobalConfig): LoopBookkeeping {
   return { lastRunAt, attempts, pendingDecisions };
 }
 
-/** SPEC §17.4 board screen: issues grouped by workflow state name, for the ambient board. */
-export async function fetchIssuesByState(client: LinearClient, teamKeys: readonly string[]): Promise<Issue[]> {
-  const filter =
-    teamKeys.length > 0 ? { team: { key: { in: [...teamKeys] } } } : undefined;
-  return client.issues({ filter, limit: 500 });
+/**
+ * SPEC §17.4 board screen: issues grouped by workflow state name, for the
+ * ambient board. Team scoping lives in the client (`linear.teamKeys`), so this
+ * no longer builds its own — one filter, applied to every read.
+ */
+export async function fetchIssuesByState(client: LinearClient): Promise<Issue[]> {
+  return client.issues({ limit: 500 });
 }

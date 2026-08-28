@@ -15,6 +15,7 @@ import type {
   IssueRelationType,
   LinearId,
   Project,
+  ProjectRef,
   TeamRef,
   WorkflowState,
 } from "./types.ts";
@@ -54,6 +55,7 @@ export interface LinearReader {
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
+  projects(): Promise<ProjectRef[]>;
 }
 
 export interface IssueMutation {

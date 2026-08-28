@@ -53,7 +53,11 @@ export function initRuntime(options?: { home?: string; env?: Record<string, stri
   let missingApiKey = false;
   try {
     const apiKey = resolveLinearApiKey(config, options?.env ?? process.env);
-    linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
+    linear = new LinearClient({
+      apiKey,
+      endpoint: config.linear.endpoint,
+      teamKeys: config.linear.teamKeys,
+    });
   } catch {
     missingApiKey = true;
   }

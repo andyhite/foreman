@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
 import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
+import { inState } from "../src/linear/filters.ts";
 import {
   acceptanceCriteria,
   hasAcceptanceCriteria,
@@ -55,6 +56,20 @@ describe("LinearClient auth", () => {
     const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
     await client.issue("ENG-1");
     expect(capturedAuth).toBe("lin_api_secret");
+  });
+});
+
+describe("LinearClient projects", () => {
+  it("maps the projects connection into ProjectRef[]", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }, { id: "p2", name: "Herdr" }] } },
+      });
+    const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
+    expect(await client.projects()).toEqual([
+      { id: "p1", name: "Plotroom" },
+      { id: "p2", name: "Herdr" },
+    ]);
   });
 });
 
@@ -115,6 +130,48 @@ describe("LinearClient pagination", () => {
     expect(issues.length).toBe(3);
     expect(calls).toBe(2);
     expect(issues.map((issue) => issue.identifier)).toEqual(["ENG-1a", "ENG-1b", "ENG-2a"]);
+  });
+});
+
+describe("LinearClient team scope", () => {
+  /*
+   * Asserted on the wire, not on a return value: the whole point of scoping in
+   * the client is that eighteen call sites cannot forget it, and only the
+   * outgoing `filter` variable proves it was applied.
+   */
+  const captureFilter = async (
+    teamKeys: readonly string[] | undefined,
+    query: Parameters<LinearClient["issues"]>[0],
+  ): Promise<unknown> => {
+    let captured: unknown;
+    const fetchStub: FetchLike = async (_url, init) => {
+      // Our own outgoing request body, shaped by `request()` one call away.
+      const body = JSON.parse(init.body) as { variables: { filter?: unknown } };
+      captured = body.variables.filter;
+      return jsonResponse(200, {
+        data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub, teamKeys });
+    await client.issues(query);
+    return captured;
+  };
+
+  it("scopes an unfiltered read to the managed teams", async () => {
+    expect(await captureFilter(["ENG", "PLT"], {})).toEqual({
+      team: { key: { in: ["ENG", "PLT"] } },
+    });
+  });
+
+  it("ANDs the scope onto a caller's filter instead of replacing it", async () => {
+    expect(await captureFilter(["ENG"], { filter: inState("Todo") })).toEqual({
+      and: [{ state: { name: { eq: "Todo" } } }, { team: { key: { in: ["ENG"] } } }],
+    });
+  });
+
+  it("leaves the filter untouched when no teams are configured", async () => {
+    expect(await captureFilter([], { filter: inState("Todo") })).toEqual(inState("Todo"));
+    expect(await captureFilter(undefined, {})).toBeUndefined();
   });
 });
 

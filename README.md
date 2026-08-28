@@ -47,6 +47,19 @@ Foreman isn't published as a standalone package, so getting the CLI still means
 a one-time clone-and-build — after that, `foreman setup` registers the plugin
 straight from GitHub and none of your other repos need this checkout again.
 
+The one-line installer clones the checkout to `~/.foreman/src`, builds it,
+drops a `foreman` wrapper on `$PATH` (`~/.local/bin` by default), and launches
+`foreman setup`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/install.sh | bash
+```
+
+It's re-runnable — running it again pulls the latest checkout and re-runs
+setup on top of your existing `~/.foreman/config.json`. Extra arguments pass
+straight through to `foreman setup`, e.g.
+`... | bash -s -- --yes --omp install --scope user`. Prefer to do it by hand:
+
 ```bash
 git clone https://github.com/andyhite/foreman
 cd foreman
@@ -55,11 +68,19 @@ bun run packages/cli/dist/main.js setup --yes --omp install --scope user
 ```
 
 `foreman setup` (alias `init`) is the installer: it checks for `bun`/`git`/`gh`/
-`omp`/`herdr`, walks you through `~/.foreman/config.json` (Linear API key, team
-keys, and project → repo mappings), then installs the plugin(s) you choose.
-`--omp install` (shown above) is the production path — it registers the omp
-plugin from `andyhite/foreman` on GitHub rather than linking back to this
-checkout. Drop `--yes` to be walked through the config interactively instead:
+`omp`/`herdr`, walks you through `~/.foreman/config.json`, then installs the
+plugin(s) you choose. If `$LINEAR_API_KEY` is already set, setup skips the key
+prompt entirely and uses it straight away to list every project in your Linear
+workspace as a checkbox picker (`↑`/`↓` to move, `space` to toggle, `enter` to
+confirm) — pre-checking any project already mapped in your config, and
+guessing a repo path for each newly-picked project by matching its name
+against git checkouts in nearby directories (a sibling of this checkout,
+`~/Code`, `~/dev`, and similar). You still confirm or edit every guess before
+it's written; without a key (or without network access to Linear), setup
+falls back to typing project ids and paths by hand. `--omp install` (shown
+above) is the production path — it registers the omp plugin from
+`andyhite/foreman` on GitHub rather than linking back to this checkout. Drop
+`--yes` to be walked through the config interactively instead:
 
 ```bash
 bun run packages/cli/dist/main.js setup --omp install --scope user

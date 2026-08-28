@@ -14,6 +14,7 @@ import type {
   IssueRelationType,
   LinearId,
   Project,
+  ProjectRef,
   TeamRef,
   WorkflowState,
 } from "./types.ts";
@@ -39,6 +40,7 @@ import {
   ISSUES_QUERY,
   PROJECT_QUERY_OBJECT_CONTENT,
   PROJECT_QUERY_SCALAR_CONTENT,
+  PROJECTS_QUERY,
   TEAMS_QUERY,
   WORKFLOW_STATES_QUERY,
   WORKSPACE_LABELS_QUERY,
@@ -118,6 +120,14 @@ export interface LinearClientOptions {
   apiKey: string;
   endpoint?: string;
   fetch?: FetchLike;
+  /*
+   * Teams Foreman manages (`linear.teamKeys`). Empty or absent means every
+   * team. Applied here rather than at each `issues()` call site: there are
+   * eighteen of them across the loop, the extension, and the board, and a
+   * config key that silently fails to scope one of them would hand another
+   * team's Triage queue to the triage batch.
+   */
+  teamKeys?: readonly string[];
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -126,6 +136,7 @@ export class LinearClient implements LinearWriter {
   private readonly apiKey: string;
   private readonly endpoint: string;
   private readonly fetchImpl: FetchLike;
+  private readonly teamScope: IssueFilter | null;
   private readonly labelIdCache = new Map<string, LinearId>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
   /** Once the working project-document content shape is discovered, reuse it. */
@@ -135,6 +146,10 @@ export class LinearClient implements LinearWriter {
     this.apiKey = options.apiKey;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.teamScope =
+      options.teamKeys && options.teamKeys.length > 0
+        ? { team: { key: { in: [...options.teamKeys] } } }
+        : null;
   }
 
   private async request<T>(
@@ -282,16 +297,27 @@ export class LinearClient implements LinearWriter {
     return data.issue ? this.mapIssue(data.issue) : null;
   }
 
+  /**
+   * ANDs the managed-team scope onto a caller's filter. A caller that passes no
+   * filter still gets scoped; an unscoped client returns the filter untouched,
+   * so `teamKeys: []` keeps the documented "every team" meaning.
+   */
+  private scoped(filter: IssueFilter | undefined): IssueFilter | undefined {
+    if (!this.teamScope) return filter;
+    return filter ? { and: [filter, this.teamScope] } : this.teamScope;
+  }
+
   async issues(query: IssueQuery): Promise<Issue[]> {
     const includeComments = query.includeComments ?? false;
     const pageSize = query.first ?? 50;
+    const filter = this.scoped(query.filter);
     const results: Issue[] = [];
     let after: string | undefined;
     for (;;) {
       const data = await this.request<{
         issues: { nodes: WireIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
       }>(ISSUES_QUERY(includeComments), {
-        filter: query.filter,
+        filter,
         after,
         first: pageSize,
       });
@@ -403,6 +429,11 @@ export class LinearClient implements LinearWriter {
   async teams(): Promise<TeamRef[]> {
     const data = await this.request<{ teams: { nodes: TeamRef[] } }>(TEAMS_QUERY, {});
     return data.teams.nodes;
+  }
+
+  async projects(): Promise<ProjectRef[]> {
+    const data = await this.request<{ projects: { nodes: ProjectRef[] } }>(PROJECTS_QUERY, {});
+    return data.projects.nodes;
   }
 
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {

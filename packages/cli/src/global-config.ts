@@ -27,6 +27,24 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
   return raw.trim().length > 0 ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
+export interface ExistingConfig {
+  projects: Record<string, string>;
+  teamKeys: string[];
+  apiKeyFile: string | null;
+}
+
+/** Reads whatever is already on disk, defaulted for the wizard to show as prompt defaults. */
+export function readGlobalConfig(home: string = homedir()): ExistingConfig {
+  const configPath = join(home, ".foreman", "config.json");
+  const existing = readExistingConfig(configPath);
+  const linear = (existing.linear as Record<string, unknown> | undefined) ?? {};
+  return {
+    projects: (existing.projects as Record<string, string> | undefined) ?? {},
+    teamKeys: Array.isArray(linear.teamKeys) ? (linear.teamKeys as string[]) : [],
+    apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
+  };
+}
+
 /** Deep-merges `patch` onto `existing` one object level deep, patch wins on conflicts. */
 function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
   const merged = { ...existing };
