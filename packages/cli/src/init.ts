@@ -89,6 +89,8 @@ async function resolveConfiguredApiKey(options: InitOptions): Promise<string | n
 
 interface InitiativePick {
   ids: string[];
+  /** id → name, when known (API path only) — lets prompts and summaries reference initiatives by name. */
+  names: Map<string, string>;
   /** The workspace's sole team key, when the API path was used and unambiguous. */
   soleTeamKey: string | null;
 }
@@ -109,7 +111,7 @@ async function pickInitiativeIdsManually(deps: InitDeps, boundIds: Set<string>):
     .split(",")
     .map((id) => id.trim())
     .filter((id) => id.length > 0);
-  return { ids, soleTeamKey: null };
+  return { ids, names: new Map(), soleTeamKey: null };
 }
 
 /**
@@ -143,6 +145,7 @@ async function pickInitiativeIds(
   }
 
   const sorted = [...initiatives].sort((a, b) => a.name.localeCompare(b.name));
+  const names = new Map(sorted.map((initiative) => [initiative.id, initiative.name]));
   const choices: Array<CheckboxChoice<string>> = sorted.map((initiative) => {
     const elsewhereAlias = boundElsewhere.get(initiative.id);
     return {
@@ -154,7 +157,7 @@ async function pickInitiativeIds(
   });
   const ids = await deps.prompter.multiSelect("Which Linear initiatives does this repo host?", choices);
   const soleTeam = teams.length === 1 ? teams[0] : undefined;
-  return { ids, soleTeamKey: soleTeam?.key ?? null };
+  return { ids, names, soleTeamKey: soleTeam?.key ?? null };
 }
 
 /** Per-initiative optional subdirectory hint (SPEC §3.10) — blank writes the bare id, not `{ id, path: "" }`. */
@@ -162,6 +165,7 @@ async function pickInitiativeBindings(
   deps: InitDeps,
   ids: string[],
   existingEntry: RepoEntry | null,
+  names: Map<string, string>,
 ): Promise<InitiativeBinding[]> {
   const existingPathById = new Map<string, string>();
   for (const binding of existingEntry?.initiatives ?? []) {
@@ -171,7 +175,7 @@ async function pickInitiativeBindings(
   const bindings: InitiativeBinding[] = [];
   for (const id of ids) {
     const subdir = await deps.prompter.text(
-      `Subdirectory for initiative ${id} (blank = repo root)`,
+      `Subdirectory for initiative "${names.get(id) ?? id}" (blank = repo root)`,
       existingPathById.get(id) ?? "",
     );
     bindings.push(subdir.length > 0 ? { id, path: subdir } : id);
@@ -224,7 +228,7 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     ? await pickInitiativeIds(deps, apiKey, boundIds, boundElsewhere)
     : await pickInitiativeIdsManually(deps, boundIds);
 
-  const bindings = await pickInitiativeBindings(deps, picked.ids, existingEntry);
+  const bindings = await pickInitiativeBindings(deps, picked.ids, existingEntry, picked.names);
 
   /*
    * An entry with no initiatives is rejected by the loader's own validation, so
@@ -259,8 +263,10 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   const configPath = writeGlobalConfig({ repos: { [alias]: entry } }, options.home);
   deps.log(`  wrote ${configPath}`);
   deps.log(`  ${style("green", "✓")} registered "${alias}" → ${repoRoot}`);
-  const idList = bindings.map((binding) => (typeof binding === "string" ? binding : binding.id));
-  deps.log(`  bound initiative(s): ${idList.join(", ")}`);
+  const nameList = bindings
+    .map((binding) => (typeof binding === "string" ? binding : binding.id))
+    .map((id) => picked.names.get(id) ?? id);
+  deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
 
   printSection(deps.log, "Next step");
   deps.log("  foreman loop --dry-run --once --verbose");

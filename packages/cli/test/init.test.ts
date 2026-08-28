@@ -107,7 +107,7 @@ describe("runInit", () => {
       const git = new FakeGit(defaultGitResponses("/repos/mono"));
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i2";
-      prompter.textAnswers["Subdirectory for initiative i2 (blank = repo root)"] = "apps/zero";
+      prompter.textAnswers['Subdirectory for initiative "i2" (blank = repo root)'] = "apps/zero";
 
       const deps: InitDeps = { prompter, git, log: () => {} };
       await runInit(baseOptions({}, home, "/repos/mono"), deps);
