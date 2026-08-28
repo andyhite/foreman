@@ -171,7 +171,7 @@ which is the explicit kickoff surface for every step.
 | `/foreman-status` | no agent — renders the operator console | none |
 
 Each dispatch command body must: resolve the target issue, assemble the shared
-`context` (project `Context` doc digest + the issue), state the agent to spawn,
+`context` (the two-layer Context digest per §4.7 + the issue), state the agent to spawn,
 and state the gate that must hold. It must **not** restate the procedure — that
 lives in the autoloaded skill (§8). A command that duplicates its skill will
 drift from it.
@@ -208,12 +208,16 @@ that must be real code:
    descriptions, labels, state moves, sub-issue and spike creation, discovered
    work, comments, review renderings. This is where principle 9 lives.
 6. **Config loader.** Reads and validates the layered `.foreman/config.json`
-   files (§3.10) — including the project→repo map `projects:
-   { <linear-project-id>: <repo-path> }`, the only place Foreman learns which
-   git repo a Linear project belongs to. Consumed by worktree creation, triage
-   repro reads, and the loop. Validated on `session_start` alongside the
-   skill-name guard (§8); a dispatch against an unmapped project or an invalid
-   config fails loudly before any spawn.
+   files (§3.10) — including the repo map keyed by **initiative ID** (IDs, not
+   names — grouping prefixes rename): `repos: { <initiative-id>:
+   <repo-path> }`, one entry per product, set once. Resolution: issue →
+   project → its single product initiative (§4.0) → map entry → fail loudly.
+   Consumed by worktree creation, triage repro reads, and the loop. Validated
+   on `session_start` alongside the skill-name guard (§8); a dispatch whose
+   repo cannot resolve, or an invalid config, fails loudly before any spawn.
+   A project-level override is deliberately absent — nothing needs one today,
+   and the resolution chain makes adding it a five-line change when something
+   does.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
    Use them to keep `/foreman-status` live and to detect aborts.
@@ -282,7 +286,7 @@ JSON config, loaded and schema-validated by `core` (TypeBox — the same
 machinery as the output schemas) and consumed by all three consumers. Two
 layers, deep-merged, repo wins:
 
-1. **Global:** `~/.foreman/config.json` — the project→repo map, loop tuning,
+1. **Global:** `~/.foreman/config.json` — the repo map, loop tuning,
    and `repoDefaults`.
 2. **Per-repo:** `<repo>/.foreman/config.json` — overrides for that repo,
    versioned with the code it governs.
@@ -293,7 +297,7 @@ default defined here, not a constant):
 ```jsonc
 {
   // global only
-  "projects": { "<linear-project-id>": "<repo-path>" },   // §3.5
+  "repos": { "<initiative-id>": "<repo-path>" },          // §3.5 — one per product
   "loop": {
     "wipGlobal": 3,                                       // §17.6
     "wip": { "triage": 1, "refine": 2, "implement": 3, "review": 2 },
@@ -346,14 +350,55 @@ not require a loop restart.
 
 ## 4. Linear data model
 
+### 4.0 Workspace topology (pre-loop setup)
+
+**One team for everything.** Teams are where Linear scopes the machinery:
+workflow states, estimate config, the Triage inbox, team labels, and the issue
+prefix are all per-team. Everything §4 configures exists exactly once only if
+there is exactly one team. Products are differentiated by initiative and
+project, never by team. If a product ever outgrows this, Linear sub-teams can
+inherit workflow and labels from a parent — a migration path that doesn't fork
+config.
+
+**Route the operator's own issues through Triage.** Issues land in Triage only
+when created by an integration, from inside the Triage view, or by a
+non-member. The operator *is* a member, so self-filed issues — most inbound —
+would skip straight to Backlog, bypassing classification, dedupe, and priority
+proposals, then permanently fail the refinement gate untyped. Set the team's
+default issue template to Triage status so everything enters through one
+funnel.
+
+**Initiatives on from day one, and load-bearing.** Initiative = the product
+(§4.1); the repo map (§3.5, §3.10) and the product `Context` doc (§4.7) hang
+off it. Portfolio groupings (e.g. the weekly micro-products practice) are
+naming-convention parents — `Micro-products > dontletitdie.lol` — since real
+sub-initiatives are Enterprise-gated. Grouping prefixes are review lenses only;
+no Foreman config attaches to them.
+
+**Exactly one initiative per project.** Linear allows a project under multiple
+initiatives; Foreman does not — repo and context resolution (§3.5, §4.7) must
+be unambiguous. Validator-enforced.
+
+**A standing `Maintenance` project per product.** Foreman-touched issues must
+belong to a project (§10), because the project edge is the only path from an
+issue to its repo and context. Bugs and chores outside any milestone live in
+the product's standing `Maintenance` project — Linear's own recommended
+pattern for work that should stay open indefinitely.
+
 ### 4.1 Hierarchy
 
 | Level | Use |
 |---|---|
-| Initiative | Long-lived themes. Read-only context. |
-| Project | Unit of shipped work. Has an attached `Context` document (§4.7). |
+| Team | **Exactly one.** Owns states, estimates, Triage, team labels, and the issue prefix (§4.0). |
+| Initiative | **The product/app.** Never closes. Carries the repo mapping (§3.5, §3.10) and the product `Context` doc (§4.7). ~1:1 with a repo. Naming-convention parents group a portfolio (§4.0). |
+| Project | **A shippable increment** — a feature or milestone that ends — or the product's standing `Maintenance` project. Carries the project brief (§4.7). |
 | Issue | Unit of agent work. One issue = one worktree = one PR. |
 | Sub-issue | Product of `foreman-refine` splitting an oversized issue. |
+
+The definitional line between initiative and project is lifecycle, not size: an
+initiative is a container that never closes, a project is a thing that ships
+and closes. A micro-product is a product that happens to take a week — it gets
+an initiative like anything else, holding a single `Launch` project.
 
 ### 4.2 Workflow states
 
@@ -449,21 +494,32 @@ Fibonacci, read as *agent-session size*, not human time.
 | 5 | **Split it.** `foreman-refine` must decompose. |
 | 8 | Not an issue. Convert to a project or a spike. |
 
-### 4.7 Project `Context` document
+### 4.7 Context documents
 
-Every project has an attached Linear Document titled `Context`: problem
-statement and success criteria, architectural decisions and constraints, domain
-vocabulary, known non-goals, and the Definition of Done (§4.8).
+Two layers, split by lifecycle:
 
-A digest of this doc is what goes into the task tool's required `context`
-parameter, which omp renders into every spawned subagent's system prompt.
-Operator maintains it; agents may propose edits as comments but must not write
-to it.
+**Product `Context` doc — on the initiative.** Architectural decisions and
+constraints, domain vocabulary, known non-goals, and the Definition of Done
+(§4.8). Stable across milestones — one copy per *project* would rot into N
+drifting copies of the same decisions.
+
+**Project brief — on the project.** The increment's problem statement and
+success criteria, nothing product-wide. For a micro-product's single `Launch`
+project the brief carries everything and the product doc can start as a stub.
+
+The task tool's required `context` parameter gets a digest of **both**,
+concatenated product-first, which omp renders into every spawned subagent's
+system prompt. Operator maintains them; agents may propose edits as comments
+but must not write to them.
+
+**Verify during build:** documents attach at the initiative level on the
+current plan (§16). If not, the product `Context` doc lives pinned in the
+product's `Maintenance` project and resolution follows the same chain.
 
 ### 4.8 Definition of Done
 
-A **global** quality bar in the `Context` doc, separate from per-issue
-acceptance criteria: tests written and passing, lint and typecheck clean, no new
+A **per-product** quality bar in the product `Context` doc (§4.7), separate
+from per-issue acceptance criteria: tests written and passing, lint and typecheck clean, no new
 LSP diagnostics, docs updated if public API changed.
 
 Without it, every acceptance-criteria list restates the same boilerplate,
@@ -482,7 +538,10 @@ worker treats `legacy` issues in Backlog *or* Todo as its input (§17.5), and
 `foreman-refine` strips the label when it processes one. Priority remains the
 throttle: an unprioritized legacy issue waits like any other. Without the
 label, day one is a wall of gate failures with no funnel back to refinement.
-Preferred over a cutoff date, which strands issues you actually want.
+Preferred over a cutoff date, which strands issues you actually want. The
+amnesty pass is also when projectless pre-existing issues get homed — default
+destination the product's `Maintenance` project — since the refinement gate
+requires project membership (§10).
 
 ### 4.10 Required saved views
 
@@ -608,12 +667,14 @@ schemaMode: strict
 | **Model role** | `smol` |
 
 No Linear mutation surface of any kind, no `edit`, no `write`, no `bash`.
-Read-only by construction. Repro reads resolve the repo via the project→repo
-map (§3.5).
+Read-only by construction. Repro reads resolve the repo via the repo map
+(§3.5).
 
 **Per item:** classify (`type:`), dedupe by semantic similarity, attempt repro
 *by reading only*, propose a Priority with severity reasoning, flag missing
-information, propose native `blocked by` relations, recommend a destination.
+information, propose native `blocked by` relations, recommend a destination —
+including project assignment: a milestone project or the product's standing
+`Maintenance` project (§4.0).
 
 **Output:** a `TriageProposal`. The extension writes one comment per item — the
 human rendering plus an embedded machine-readable copy of the item — and
@@ -658,7 +719,8 @@ refinement quality is where reasoning actually pays, and a second opinion
 catching a bad split before implementation is cheap.
 
 1. Verify Priority ≠ `None`. Refuse if unprioritized.
-2. Read the project `Context` doc, Definition of Done included.
+2. Read the product `Context` doc and the project brief (§4.7), Definition of
+   Done included.
 3. Draft the description in the §13.1 template — returned as
    `refinedDescription`, never written directly.
 4. Acceptance criteria as observable behaviors, verifiable by someone who didn't
@@ -728,7 +790,7 @@ schemaMode: strict
 Model role `slow`. Read-only everywhere — the Linear review comment (§13.4) and
 the PR review are rendered by the extension from the `ReviewResult`.
 
-Inputs are the diff, the issue, and the `Context` doc. The agent holds no git
+Inputs are the diff, the issue, and the Context docs (§4.7). The agent holds no git
 or GitHub tool, so the extension fetches the diff and head SHA at dispatch —
 from the PR via its GitHub read client (§3.5), or from git (`baseBranch..head`)
 when `pr.required: false` (§3.10) — writes them to a file, and passes the
@@ -873,9 +935,10 @@ Validator functions in the extension, consumed by agents, commands, and hooks.
 Never reimplemented in prose. `legacy` never bypasses a gate — legacy issues
 route through the refine worker instead (§4.9, §17.5).
 
-**Refinement gate** (`Backlog → Todo`): `type:` present; Priority ≠ `None`;
-description has `## Acceptance Criteria`; ≥1 criterion; estimate set and ≤3; no
-`blocked:*` label.
+**Refinement gate** (`Backlog → Todo`): belongs to a project with exactly one
+initiative (§4.0); `type:` present; Priority ≠ `None`; description has
+`## Acceptance Criteria`; ≥1 criterion; estimate set and ≤3; no `blocked:*`
+label.
 
 **Implementation gate** (`Todo → In Progress`): refinement gate satisfied;
 `agent:ready` present; `agent:running` absent; `agent:hands-off` absent; no
@@ -924,7 +987,7 @@ orphaned or just held by a live agent.
 - One issue → one worktree → one branch → one PR — or one direct branch merge
   when `pr.required: false` (§3.10). No exceptions to the 1:1:1 shape.
 - **Foreman owns worktree lifecycle**, not omp's isolation layer (§3.7). The
-  repo is resolved via the project→repo map (§3.5, §3.10).
+  repo is resolved via the repo map (§3.5, §3.10).
 - Worktree path: `../<repo>-<ISSUE-ID>` (e.g. `../plotroom-ENG-142`) —
   default, per-repo `worktreePattern` (§3.10).
 - Branch: `<issue-id>-<kebab-slug>` (e.g. `eng-142-fix-triage-dedupe`) —
@@ -1094,6 +1157,9 @@ commands; reinstall replacing the managed checkout.
    workflow (§4.2); if not, the loop gains a small merge-detection worker.
 8. Frontmatter tool-name spellings (`search`, `dap`, `exec`) and whether
    `output: schemas/….json` resolves relative to the plugin root.
+9. Whether documents attach at the initiative level on the current plan
+   (§4.7). Fallback: the product `Context` doc lives pinned in the product's
+   `Maintenance` project.
 
 ---
 
@@ -1181,7 +1247,7 @@ entirely if left at defaults.
 
 | Herdr object | Foreman mapping |
 |---|---|
-| Workspace | One per repo, matching the Linear project (per the project→repo map, §3.5). |
+| Workspace | One per repo, matching the product initiative (per the repo map, §3.5). |
 | Tab | One per in-flight issue, named for the issue (`ENG-142`). |
 | Pane | The agent, `--cwd` set to that issue's worktree. |
 | `foreman` workspace | The `foreman-loop` and `foreman-board` panes, plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. |
@@ -1452,16 +1518,20 @@ than better.
 
 1. **Plugin skeleton + Linear config.** Correct `omp.extensions` key, local
    marketplace install, `/reload-plugins` loop working. The `core` config
-   loader with schema validation, layering, and defaults (§3.10). Linear
-   states, load-bearing labels, `legacy` amnesty pass, six saved views, one
-   worked `Context` doc with a Definition of Done. Resolve §16 items 5 and 7.
-   ~half a day.
+   loader with schema validation, layering, and defaults (§3.10). Workspace
+   topology per §4.0: single team, default issue template → Triage,
+   initiatives enabled, one initiative per product (grouping prefixes where
+   wanted), standing `Maintenance` projects, repo map populated. Then Linear
+   states, load-bearing labels, `legacy` amnesty pass (including homing
+   projectless issues, §4.9), six saved views, one worked product `Context`
+   doc + project brief with a Definition of Done. Resolve §16 items 5, 7,
+   and 9. ~1 day.
 2. **Schemas + extension core + interrupt protocol.** The four result schemas
    and `BlockRecord` union first — everything downstream consumes them. Then
    typed Linear read tools, the result-application layer that makes the
    extension the sole Linear writer (principle 9), gate validators, the lock manager
    (dispatch IDs, claim/release), the lock reaper, the config loader's
-   `session_start` validation and project→repo lookup (§3.10), lifecycle listeners,
+   `session_start` validation and repo-map lookup (§3.10), lifecycle listeners,
    `foreman-block-protocol` skill, the skill-name resolution guard (§8), and
    `/foreman-status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
    agent — retrofitted, one agent gets a "just ask the user" fallback and it
@@ -1490,7 +1560,7 @@ than better.
    drain alone and use it for a week before building the rest — if it doesn't
    measurably shorten the drain, the remaining screens won't either.
 
-Roughly 8 focused days of build, spread across several weeks of observation
+Roughly 8.5 focused days of build, spread across several weeks of observation
 windows. The waiting is the point; compressing it is how you end up with a loop
 that dispatches confidently into a routing bug.
 
