@@ -1,6 +1,6 @@
 # Verified during build
 
-`SPEC.md` §16 lists nine assumptions to verify while building, and §18 assigns
+`SPEC.md` §16 lists ten assumptions to verify while building, and §18 assigns
 them to build steps. This is the answer sheet. Where an answer contradicts the
 spec, the code follows the answer and the discrepancy is called out — the spec
 was written against documentation, and some of it was wrong.
@@ -18,6 +18,7 @@ was written against documentation, and some of it was wrong.
 | 7 | Does Linear's GitHub integration auto-transition to Done on merge? | **Only with setup** | The transition is a team-level workflow automation, not default behavior, and when two or more PRs link to one issue all must merge. Foreman cannot rely on it, so the merge-detection worker is required rather than optional — `loop.mergeDetection` defaults to `true` in both PR and direct-branch mode. |
 | 8 | Frontmatter tool spellings, and `output:` path resolution | **Tools: corrected. Path: never resolves — inline instead** | There is no `search` tool (it is `grep` + `glob`) and no `dap` tool (it is `debug`); `exec` is an expansion alias for `eval` + `bash`, and the agents list those two explicitly. A frontmatter `output:` **string is `JSON.parse`d, not read as a path**: a probe carrying `output: schemas/probe.json` failed preflight with `Invalid strict effective output schema: JSON Parse error: Unexpected identifier "schemas"`. The schema must therefore be **inlined in the frontmatter**, which is what the agents ship — as a YAML block scalar (`output: \|`) holding pretty-printed JSON, generated into the file by `packages/core/scripts/emit-schemas.ts` so the TypeBox definition in `core` stays the single source of truth. Verified end to end: `foreman-triage` with its 11 KB inlined schema passed preflight and a child under `schemaMode: "strict"` returned a valid envelope (`{"blocked": false, "result": {"items": [{"issueId": "ENG-1", "type": "type:bug", …`) with no validation error. The sibling `schemas/*.json` files remain as human reference. |
 | 9 | Do documents attach at the initiative level? | **Yes — the fallback is unnecessary** | `Document` carries `initiative: Initiative` alongside `project: Project` and `issue: Issue`, and `Initiative` carries `documents: DocumentConnection`, `content: String`, and `documentContent: DocumentContent`. Introspected against the live API. §4.7's contingency — pinning the product `Context` doc in the standing `Maintenance` project — is therefore dead weight and is not implemented. |
+| 10 | Linear project↔team semantics for the ensure pass, and can issues be queried by team + initiative in one hop | **Team required; initiative attachment is a second mutation; one-hop query works** | `ProjectCreateInput` has exactly two non-null fields: `name: String!` and `teamIds: [String!]!` — creating a project requires an explicit team and there is no `initiativeId` field on the input. Attaching the created project to an initiative is a separate mutation, `initiativeToProjectCreate(input: { projectId: String!, initiativeId: String!, sortOrder: Float })`, returning `{ success }`; callers must handle the window between the two calls. `Initiative.projects: ProjectConnection` is a direct edge (the read-side mirror of `Project.initiatives`). For querying, `NullableProjectFilter.initiatives: InitiativeCollectionFilter` exists and executes: `issues(filter: { project: { initiatives: { some: { id: { in: [...] } } } } })` returns results in one hop — no need to resolve the initiative's projects first. All introspected and executed against the live API this session. |
 
 ## Where the spec is wrong
 
@@ -104,9 +105,29 @@ describes, and the pane label is what the startup guard matches on.
   genuinely permits a project under several initiatives, so §4.0's "exactly one
   initiative per project" is ours to enforce and cannot be delegated to the API.
   `projectInitiative()` rejects on both 0 and >1, naming the initiatives found.
-- **`IssueFilter` has no initiative field.** Only `project:
-  NullableProjectFilter`; `ProjectFilter.initiatives` exists, but issues cannot
-  be filtered by initiative in one hop. Filtering work by product is therefore
+- **`IssueFilter` has no *direct* initiative field, but filtering issues by
+  initiative is still one hop.** Only `project: NullableProjectFilter` exists
+  on `IssueFilter`, and `ProjectFilter.initiatives` exists on the project side —
+  but `NullableProjectFilter.initiatives: InitiativeCollectionFilter` also
+  exists and executes, so `issues(filter: { project: { initiatives: { some: {
+  id: { in: [...] } } } } })` filters issues by initiative through the project
+  edge in a single query. (An earlier pass of this file claimed this needed
   two queries — resolve the initiative's projects, then filter issues by that
-  project set — which is why repo resolution caches the project→initiative edge
-  per client rather than re-deriving it per issue.
+  project set. That claim was wrong; it was never executed against the live
+  API.) Repo resolution still caches the project→initiative edge per client,
+  which remains true independent of this correction — it serves
+  `projectInitiative()`'s single-initiative validation (below), not issue
+  filtering.
+- **`projectCreate` requires `teamIds`.** `ProjectCreateInput` has exactly two
+  non-null fields, `name: String!` and `teamIds: [String!]!`; there is no way
+  to create a project without assigning it to at least one team. This is why
+  the ensure pass's `Maintenance` project is created team-assigned rather than
+  initiative-assigned.
+- **`ProjectCreateInput` has no `initiativeId`; attaching an initiative is a
+  second mutation.** `initiativeToProjectCreate(input: { projectId: String!,
+  initiativeId: String!, sortOrder: Float })` returns `{ success: Boolean! }`
+  and must run after `projectCreate` succeeds — there is a window between the
+  two calls where the project exists without its initiative.
+- **`Initiative.projects: ProjectConnection` is a direct edge**, symmetric with
+  `Project.initiatives` (above): reading an initiative's projects is one
+  query, no fan-out needed.

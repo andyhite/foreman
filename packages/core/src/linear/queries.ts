@@ -193,6 +193,17 @@ export const INITIATIVES_QUERY = `
   }
 `;
 
+/** An initiative's projects — used to check for the standing Maintenance project (SPEC §3.11). */
+export const INITIATIVE_PROJECTS_QUERY = `
+  query InitiativeProjects($initiativeId: String!) {
+    initiative(id: $initiativeId) {
+      projects(first: 250) {
+        nodes { id name }
+      }
+    }
+  }
+`;
+
 export const ISSUE_UPDATE_MUTATION = (includeComments: boolean): string => `
   mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $id, input: $input) {
@@ -244,6 +255,23 @@ export const ISSUE_LABEL_CREATE_MUTATION = `
     issueLabelCreate(input: $input) {
       success
       issueLabel { id name parent { id } }
+    }
+  }
+`;
+
+export const PROJECT_CREATE_MUTATION = `
+  mutation ProjectCreate($input: ProjectCreateInput!) {
+    projectCreate(input: $input) {
+      success
+      project { id name }
+    }
+  }
+`;
+
+export const INITIATIVE_TO_PROJECT_CREATE_MUTATION = `
+  mutation InitiativeToProjectCreate($input: InitiativeToProjectCreateInput!) {
+    initiativeToProjectCreate(input: $input) {
+      success
     }
   }
 `;

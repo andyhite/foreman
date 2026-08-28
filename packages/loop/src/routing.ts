@@ -25,16 +25,11 @@ import {
 } from "@foreman/core";
 import type { Bookkeeping } from "./bookkeeping.ts";
 
-export type StageName = "triage" | "refine" | "implement" | "review";
+export type StageName = "refine" | "implement" | "review";
 
-export type ForemanAgentName =
-  | "foreman-triage"
-  | "foreman-refine"
-  | "foreman-implement"
-  | "foreman-review";
+export type ForemanAgentName = "foreman-refine" | "foreman-implement" | "foreman-review";
 
 const AGENT_BY_STAGE: Record<StageName, ForemanAgentName> = {
-  triage: "foreman-triage",
   refine: "foreman-refine",
   implement: "foreman-implement",
   review: "foreman-review",
@@ -77,8 +72,6 @@ export interface ReviewCandidate {
  * `linear/filters.ts`.
  */
 export interface BoardSnapshot {
-  /** Issues in the Triage state (SPEC §4.10.1). */
-  inbox: Issue[];
   /** Backlog issues, plus `legacy` issues sitting in Backlog or Todo (SPEC §4.9). */
   backlog: Issue[];
   /** Todo issues, evaluated against the implementation gate. */
@@ -87,8 +80,6 @@ export interface BoardSnapshot {
   reviewCandidates: ReviewCandidate[];
   /** Count of issues carrying any `blocked:*` label (SPEC §4.10.2). */
   blockedHumanCount: number;
-  /** Count of issues carrying `agent:proposed` (SPEC §4.10.4). */
-  proposedCount: number;
   /** Current depth of the Ready buffer (SPEC §17.6). */
   readyBufferCount: number;
 }
@@ -127,7 +118,7 @@ function suppressingLabel(issue: Issue): { code: string; message: string } | nul
 
 function stagePermitted(stage: StageName, loopStage: GlobalConfig["loop"]["stage"]): boolean {
   if (loopStage === "full") return true;
-  if (loopStage === "read-only") return stage === "triage" || stage === "review";
+  if (loopStage === "read-only") return stage === "review";
   // "dry-run": every stage decides; the caller (the worker) simply does not
   // act on the decision (SPEC §17.9 step 2).
   return true;
@@ -147,7 +138,6 @@ interface RoutingContext {
   stageRemaining: Record<StageName, number>;
   loop: GlobalConfig["loop"];
   loopStage: GlobalConfig["loop"]["stage"];
-  lastTriageRunAt: string | null;
 }
 
 function pushSkip(ctx: RoutingContext, stage: StageName, issueId: string | null, code: string, message: string): void {
@@ -296,89 +286,21 @@ function routeReview(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
   }
 }
 
-/** `"HH:MM"` window compared against `now`'s local time-of-day. */
-function pastTriageWindow(window: string, now: Date): boolean {
-  const [hoursText, minutesText] = window.split(":");
-  const windowMinutes = Number(hoursText) * 60 + Number(minutesText);
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  return nowMinutes >= windowMinutes;
-}
-
-function sameCalendarDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-}
-
-function routeTriage(
-  ctx: RoutingContext,
-  snapshot: BoardSnapshot,
-  now: Date,
-  backpressureTripped: boolean,
-  proposalsTripped: boolean,
-): void {
-  if (snapshot.inbox.length === 0) {
-    pushSkip(ctx, "triage", null, "inbox-empty", "Inbox is empty.");
-    return;
-  }
-  if (backpressureTripped) {
-    pushSkip(ctx, "triage", null, "backpressure-blocked-queue", "Blocked-human queue exceeds threshold.");
-    return;
-  }
-  if (proposalsTripped) {
-    pushSkip(
-      ctx,
-      "triage",
-      null,
-      "backpressure-proposals",
-      "Unapproved `agent:proposed` count exceeds threshold — no point generating more.",
-    );
-    return;
-  }
-  if (!stagePermitted("triage", ctx.loopStage)) {
-    pushSkip(ctx, "triage", null, "stage-not-permitted", `Loop stage "${ctx.loopStage}" does not permit triage.`);
-    return;
-  }
-  if (!pastTriageWindow(ctx.loop.triageWindow, now)) {
-    pushSkip(ctx, "triage", null, "before-triage-window", `Before the ${ctx.loop.triageWindow} triage window.`);
-    return;
-  }
-  if (ctx.lastTriageRunAt && sameCalendarDay(new Date(ctx.lastTriageRunAt), now)) {
-    pushSkip(ctx, "triage", null, "triage-already-ran-today", "Daily triage batch already ran today.");
-    return;
-  }
-  if (ctx.globalRemaining <= 0) {
-    pushSkip(ctx, "triage", null, "wip-global-full", "Global WIP cap reached.");
-    return;
-  }
-  if (ctx.stageRemaining.triage <= 0) {
-    pushSkip(ctx, "triage", null, "wip-stage-full", `triage WIP cap (${ctx.loop.wip.triage}) reached.`);
-    return;
-  }
-  ctx.decisions.push({
-    agent: "foreman-triage",
-    issueId: null,
-    command: "/foreman-triage",
-    reason: `Inbox has ${snapshot.inbox.length} item(s); daily window reached.`,
-  });
-  admitDecision(ctx, "triage");
-}
 
 /**
  * The heart of the loop (SPEC §17.1). Every decision here is a predicate over
  * `snapshot` — no network access, no model call. `bookkeeping` supplies the
- * in-flight counts that back the WIP checks; `now` drives the triage window.
+ * in-flight counts that back the WIP checks.
  */
 export function nextActions(
   snapshot: BoardSnapshot,
   config: GlobalConfig,
   bookkeeping: Bookkeeping,
-  now: Date,
 ): RoutingResult {
   const loop = config.loop;
   const backpressureTripped = snapshot.blockedHumanCount > loop.backpressureThreshold;
-  const proposalsTripped = snapshot.proposedCount > loop.backpressureThreshold;
 
   const stageRemaining: Record<StageName, number> = {
-    triage: Math.max(0, loop.wip.triage - bookkeeping.countInFlight("triage")),
     refine: Math.max(0, loop.wip.refine - bookkeeping.countInFlight("refine")),
     implement: Math.max(0, loop.wip.implement - bookkeeping.countInFlight("implement")),
     review: Math.max(0, loop.wip.review - bookkeeping.countInFlight("review")),
@@ -390,10 +312,8 @@ export function nextActions(
     stageRemaining,
     loop,
     loopStage: loop.stage,
-    lastTriageRunAt: bookkeeping.state.lastTriageRunAt,
   };
 
-  routeTriage(ctx, snapshot, now, backpressureTripped, proposalsTripped);
   routeRefine(ctx, snapshot, backpressureTripped);
   routeImplement(ctx, snapshot, backpressureTripped);
   routeReview(ctx, snapshot, backpressureTripped);

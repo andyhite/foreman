@@ -7,8 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionToolConfig, InferShape, ZodRawShape } from "@oh-my-pi/pi-coding-agent";
-import { resolveRepoConfig } from "@foreman/core";
-import { getConfig, getGitHub } from "../runtime.ts";
+import { getEntry, getGitHub } from "../runtime.ts";
 
 const OPS = ["create", "view"] as const;
 
@@ -39,7 +38,7 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
       }
 
       // op === "create"
-      const repoSettings = resolveRepoConfig(getConfig(), params.repoPath);
+      const repoSettings = getEntry();
       if (!repoSettings.pr.required) {
         return errorResult(
           "This repo sets pr.required: false (direct-branch mode). Push the branch instead of opening a PR.",

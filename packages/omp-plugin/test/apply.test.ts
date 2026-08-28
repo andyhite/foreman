@@ -99,6 +99,9 @@ class FakeLinear implements LinearWriter {
   async initiatives() {
     return [];
   }
+  async initiativeProjects() {
+    return [];
+  }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_TODO, STATE_IN_REVIEW, STATE_BACKLOG];
   }
@@ -135,6 +138,10 @@ class FakeLinear implements LinearWriter {
     this.issuesById.set(created.identifier, created);
     return created;
   }
+  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string }) {
+    return { id: `project-created-${input.name}`, name: input.name };
+  }
+  async addProjectToInitiative() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.commentCalls.push(input);
     return { id: `comment-${this.commentCalls.length}`, body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };

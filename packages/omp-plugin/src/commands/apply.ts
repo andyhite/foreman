@@ -16,15 +16,15 @@
  * is the same action taken deliberately for one issue.
  */
 
-import type { Issue, LinearWriter, TriageItem } from "@foreman/core";
+import type { LinearWriter, TriageItem } from "@foreman/core";
 import {
   AGENT_LABEL,
-  MARKER_KIND,
-  encodeMarker,
-  findMarkers,
-  resolveState,
+  applyProposal,
+  findApprovedUnapplied,
+  hasLaterApplied,
+  hasLaterReject,
+  latestProposal,
 } from "@foreman/core";
-import type { FoundMarker } from "@foreman/core";
 
 export interface ApplyPlanEntry {
   issueId: string;
@@ -38,100 +38,6 @@ export interface ApplyCommandResult {
   plan?: ApplyPlanEntry[];
 }
 
-function latestProposal(issue: Issue): FoundMarker<TriageItem> | null {
-  const markers = findMarkers<TriageItem>(MARKER_KIND.proposal, issue.comments);
-  return markers[markers.length - 1] ?? null;
-}
-
-function hasLaterApplied(issue: Issue, afterCreatedAt: string): boolean {
-  return findMarkers(MARKER_KIND.applied, issue.comments).some((marker) => marker.createdAt > afterCreatedAt);
-}
-
-function hasLaterReject(issue: Issue, afterCreatedAt: string): boolean {
-  return issue.comments.some(
-    (comment) => comment.createdAt > afterCreatedAt && comment.body.trim().toLowerCase().startsWith("reject:"),
-  );
-}
-
-function isCurrentlyProposed(issue: Issue): boolean {
-  return issue.labels.some((label) => label.name === AGENT_LABEL.proposed);
-}
-
-/** Every issue whose latest proposal is approved (label removed), un-rejected, and not yet applied. */
-async function findApprovedUnapplied(linear: LinearWriter): Promise<Array<{ issue: Issue; found: FoundMarker<TriageItem> }>> {
-  const issues = await linear.issues({ includeComments: true, limit: 500 });
-  const candidates: Array<{ issue: Issue; found: FoundMarker<TriageItem> }> = [];
-  for (const issue of issues) {
-    const found = latestProposal(issue);
-    if (!found) continue;
-    if (isCurrentlyProposed(issue)) continue;
-    if (hasLaterApplied(issue, found.createdAt)) continue;
-    if (hasLaterReject(issue, found.createdAt)) continue;
-    candidates.push({ issue, found });
-  }
-  return candidates;
-}
-
-/** SPEC §7.1: destination, type label, priority, project, duplicate relation, proposed blockers, then the applied marker. */
-async function applyProposalItem(linear: LinearWriter, issue: Issue, item: TriageItem, dispatchMarkerCreatedAt: string): Promise<void> {
-  const destinationKey = item.destination === "Backlog" ? "backlog" : item.destination === "Canceled" ? "canceled" : "duplicate";
-  const teamStates = await linear.workflowStates(issue.team.id);
-  const targetState = resolveState(destinationKey, teamStates);
-
-  const typeLabel = await linear.ensureLabel(item.type, issue.team.id);
-  const addedLabelIds = [typeLabel.id];
-
-  if (item.triageLabel) {
-    const triageLabel = await linear.ensureLabel(item.triageLabel, issue.team.id);
-    addedLabelIds.push(triageLabel.id);
-  }
-
-  const mutation: Parameters<LinearWriter["updateIssue"]>[1] = {
-    stateId: targetState.id,
-    priority: item.proposedPriority,
-    addedLabelIds,
-  };
-
-  // `destinationProject` names a project, never a UUID (SPEC §7.1); an
-  // unmatched name must not silently drop the rest of the mutation, so it is
-  // folded into the same applied-marker note the file already uses to
-  // report what happened, rather than failing the whole apply.
-  let projectNote = "";
-  if (item.destinationProject) {
-    const projects = await linear.projects();
-    const destinationProject = item.destinationProject;
-    const match = projects.find((candidate) => candidate.name.toLowerCase() === destinationProject.toLowerCase());
-    if (match) {
-      mutation.projectId = match.id;
-    } else {
-      projectNote = ` Proposed project "${destinationProject}" not found; project left unset.`;
-    }
-  }
-
-  await linear.updateIssue(issue.id, mutation);
-
-  if (item.duplicateOf) {
-    const duplicate = await linear.issue(item.duplicateOf);
-    if (duplicate) {
-      await linear.createRelation({ issueId: issue.id, relatedIssueId: duplicate.id, type: "duplicate" });
-    }
-  }
-
-  for (const blockerId of item.proposedBlockedBy) {
-    const blocker = await linear.issue(blockerId);
-    if (blocker) {
-      await linear.createRelation({ issueId: issue.id, relatedIssueId: blocker.id, type: "blocks" });
-    }
-  }
-
-  const body = encodeMarker(
-    MARKER_KIND.applied,
-    { issueId: issue.identifier, appliedProposalAt: dispatchMarkerCreatedAt },
-    `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.${projectNote}`,
-  );
-  await linear.createComment({ issueId: issue.id, body });
-}
-
 /** `/foreman:apply` — dispatches to the shape named by `argv` (already tokenized, without the leading slash-command name). */
 export async function runApplyCommand(linear: LinearWriter, argv: string[]): Promise<ApplyCommandResult> {
   const usage =
@@ -143,14 +49,14 @@ export async function runApplyCommand(linear: LinearWriter, argv: string[]): Pro
       ok: true,
       mutated: false,
       message: candidates.length > 0 ? `${candidates.length} approved proposal(s) pending apply.` : "Nothing to apply.",
-      plan: candidates.map(({ issue, found }) => ({ issueId: issue.identifier, item: found.data })),
+      plan: candidates.map((candidate) => ({ issueId: candidate.issue.identifier, item: candidate.item })),
     };
   }
 
   if (argv.length === 1 && argv[0] === "--yes") {
     const candidates = await findApprovedUnapplied(linear);
-    for (const { issue, found } of candidates) {
-      await applyProposalItem(linear, issue, found.data, found.createdAt);
+    for (const candidate of candidates) {
+      await applyProposal(linear, candidate);
     }
     return { ok: true, mutated: true, message: `Applied ${candidates.length} approved proposal(s).` };
   }
@@ -175,7 +81,7 @@ export async function runApplyCommand(linear: LinearWriter, argv: string[]): Pro
     if (proposedLabel) {
       await linear.updateIssue(issue.id, { removedLabelIds: [proposedLabel.id] });
     }
-    await applyProposalItem(linear, issue, found.data, found.createdAt);
+    await applyProposal(linear, { issue, item: found.data, proposedAt: found.createdAt });
     return { ok: true, mutated: true, message: `Approved and applied ${issueId}.` };
   }
 

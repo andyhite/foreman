@@ -12,7 +12,8 @@
  */
 
 import type { GlobalConfig, Initiative, LinearWriter, Project, WorkflowState } from "@foreman/core";
-import { GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
+import type { ResolvedRepoEntry } from "@foreman/core";
+import { entryForCwd, GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
 
 /** Thrown by any accessor called before `initRuntime` has run at least once. */
 export class ExtensionRuntimeNotInitializedError extends Error {
@@ -36,6 +37,8 @@ interface Runtime {
   lockTtlMs: number;
   stateCache: Map<string, WorkflowState[]>;
   contextDigestCache: Map<string, string>;
+  /** Memoized by `getEntry()` on first access — `entryForCwd` throws `ConfigError` on an unregistered cwd, so it must not run eagerly in `initRuntime` (SPEC §3.5 item 6, mirroring the Linear client's lazy construction above). */
+  entry: ResolvedRepoEntry | null;
 }
 
 let runtime: Runtime | null = null;
@@ -65,10 +68,25 @@ export function initRuntime(options?: { home?: string; env?: Record<string, stri
   let missingApiKey = false;
   try {
     const apiKey = resolveLinearApiKey(config, options?.env ?? process.env);
+    // The team to scope the client to is `entryForCwd(config, cwd).team` (SPEC
+    // §3.11). Resolving that entry here would make a missing/unregistered repo
+    // fail `initRuntime` itself, which must never throw (see the module doc);
+    // and when the entry has no `team`, SPEC §3.11's fallback is "the sole team
+    // the credential can access", which is an async `teams()` call this sync
+    // function cannot make. So: resolve the entry defensively, best-effort, and
+    // leave the client unscoped (matching all teams) when there is no entry or
+    // no entry team — `getEntry()` still throws its own `ConfigError` later for
+    // any caller that actually needs the entry to exist.
+    let team: string | null = null;
+    try {
+      team = entryForCwd(config, process.cwd(), options?.home).team;
+    } catch {
+      team = null;
+    }
     linear = new LinearClient({
       apiKey,
       endpoint: config.linear.endpoint,
-      teamKeys: config.linear.teamKeys,
+      team,
     });
   } catch {
     missingApiKey = true;
@@ -81,6 +99,7 @@ export function initRuntime(options?: { home?: string; env?: Record<string, stri
     lockTtlMs: lockTtlMs(config),
     stateCache: new Map(),
     contextDigestCache: new Map(),
+    entry: null,
   };
 
   return { ok: true, missingApiKey, warnings };
@@ -93,6 +112,15 @@ function requireRuntime(): Runtime {
 
 export function getConfig(): GlobalConfig {
   return requireRuntime().config;
+}
+
+/** Memoized resolution of this instance's registry entry from `process.cwd()` (SPEC §3.11). Throws `ConfigError` when cwd is not a registered repo. */
+export function getEntry(): ResolvedRepoEntry {
+  const rt = requireRuntime();
+  if (!rt.entry) {
+    rt.entry = entryForCwd(rt.config, process.cwd());
+  }
+  return rt.entry;
 }
 
 /** Throws when the API key was unresolvable — callers surface this as a tool-level error, not a crash. */

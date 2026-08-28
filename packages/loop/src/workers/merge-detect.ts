@@ -1,5 +1,5 @@
 /**
- * Merge-detection worker (SPEC §16 item 7, §3.10). Linear's GitHub
+ * Merge-detection worker (SPEC §16 item 7, §3.10, §3.11). Linear's GitHub
  * integration only auto-transitions to Done when a team workflow automation
  * has been configured, and in direct-branch mode (`pr.required: false`)
  * there is no PR event at all — so this worker is required, not optional
@@ -12,11 +12,10 @@ import {
   GitHubClient,
   branchNameFor,
   inState,
-  repoForIssue,
-  resolveRepoConfig,
   resolveState,
 } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
+import { filterInScope } from "./types.ts";
 
 async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
@@ -28,33 +27,21 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   const github = new GitHubClient();
-  const inReview = await ctx.linear.issues({ filter: inState("In Review"), limit: 500 });
+  const inReviewIssues = await ctx.linear.issues({ filter: inState("In Review"), limit: 500 });
+  const { inScope: inReview, skipped: scopeSkips } = await filterInScope(ctx, "review", inReviewIssues);
+  skipped.push(...scopeSkips);
 
+  const repoPath = ctx.entry.repoPath;
   for (const issue of inReview) {
-    if (!issue.project) continue;
-    let repoPath: string;
-    try {
-      repoPath = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      skipped.push({
-        stage: "review",
-        issueId: issue.identifier,
-        code: "unresolved-repo",
-        message,
-      });
-      continue;
-    }
-    const repoSettings = resolveRepoConfig(ctx.config, repoPath);
-    const branch = branchNameFor(repoSettings.branchPattern, issue);
+    const branch = branchNameFor(ctx.entry.branchPattern, issue);
 
     let merged = false;
     try {
-      if (repoSettings.pr.required) {
+      if (ctx.entry.pr.required) {
         const pr = await github.prForBranch(repoPath, branch);
         merged = pr ? await github.isMerged(repoPath, pr.number) : false;
       } else {
-        const mergedBranches = await github.mergedBranches(repoPath, repoSettings.baseBranch, [branch]);
+        const mergedBranches = await github.mergedBranches(repoPath, ctx.entry.baseBranch, [branch]);
         merged = mergedBranches.includes(branch);
       }
     } catch (error) {

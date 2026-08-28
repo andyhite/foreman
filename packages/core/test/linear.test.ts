@@ -201,7 +201,7 @@ describe("LinearClient team scope", () => {
    * outgoing `filter` variable proves it was applied.
    */
   const captureFilter = async (
-    teamKeys: readonly string[] | undefined,
+    team: string | null | undefined,
     query: Parameters<LinearClient["issues"]>[0],
   ): Promise<unknown> => {
     let captured: unknown;
@@ -213,25 +213,25 @@ describe("LinearClient team scope", () => {
         data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
       });
     };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub, teamKeys });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub, team });
     await client.issues(query);
     return captured;
   };
 
-  it("scopes an unfiltered read to the managed teams", async () => {
-    expect(await captureFilter(["ENG", "PLT"], {})).toEqual({
-      team: { key: { in: ["ENG", "PLT"] } },
+  it("scopes an unfiltered read to the managed team", async () => {
+    expect(await captureFilter("ENG", {})).toEqual({
+      team: { key: { eq: "ENG" } },
     });
   });
 
   it("ANDs the scope onto a caller's filter instead of replacing it", async () => {
-    expect(await captureFilter(["ENG"], { filter: inState("Todo") })).toEqual({
-      and: [{ state: { name: { eq: "Todo" } } }, { team: { key: { in: ["ENG"] } } }],
+    expect(await captureFilter("ENG", { filter: inState("Todo") })).toEqual({
+      and: [{ state: { name: { eq: "Todo" } } }, { team: { key: { eq: "ENG" } } }],
     });
   });
 
-  it("leaves the filter untouched when no teams are configured", async () => {
-    expect(await captureFilter([], { filter: inState("Todo") })).toEqual(inState("Todo"));
+  it("leaves the filter untouched when no team is configured", async () => {
+    expect(await captureFilter(null, { filter: inState("Todo") })).toEqual(inState("Todo"));
     expect(await captureFilter(undefined, {})).toBeUndefined();
   });
 });
@@ -398,6 +398,94 @@ describe("LinearClient ensureLabel", () => {
     const cachedCallsBefore = labelQueryCalls;
     await client.ensureLabel("type:bug", "team-1");
     expect(labelQueryCalls).toBe(cachedCallsBefore);
+  });
+});
+
+describe("LinearClient initiativeProjects", () => {
+  it("maps an initiative's projects connection into ProjectRef[]", async () => {
+    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
+    const fetchStub: FetchLike = async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return jsonResponse(200, {
+        data: {
+          initiative: {
+            projects: { nodes: [{ id: "p1", name: "Maintenance" }] },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.initiativeProjects("init-1")).toEqual([{ id: "p1", name: "Maintenance" }]);
+    expect(capturedBody?.query).toContain("query InitiativeProjects");
+    expect(capturedBody?.variables).toEqual({ initiativeId: "init-1" });
+  });
+
+  it("returns an empty array when the initiative is absent", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { initiative: null } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.initiativeProjects("missing")).toEqual([]);
+  });
+});
+
+describe("LinearClient createProject", () => {
+  it("sends teamIds and maps the created project into a ProjectRef", async () => {
+    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
+    const fetchStub: FetchLike = async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return jsonResponse(200, {
+        data: { projectCreate: { success: true, project: { id: "p1", name: "Maintenance" } } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    const result = await client.createProject({ name: "Maintenance", teamIds: ["team-1"] });
+    expect(result).toEqual({ id: "p1", name: "Maintenance" });
+    expect(capturedBody?.query).toContain("mutation ProjectCreate");
+    expect(capturedBody?.variables).toEqual({
+      input: { name: "Maintenance", teamIds: ["team-1"] },
+    });
+  });
+
+  it("throws when success is false", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, { data: { projectCreate: { success: false, project: null } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(
+      client.createProject({ name: "Maintenance", teamIds: ["team-1"] }),
+    ).rejects.toThrow(LinearApiError);
+  });
+
+  it("throws when success is true but project is null", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, { data: { projectCreate: { success: true, project: null } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(
+      client.createProject({ name: "Maintenance", teamIds: ["team-1"] }),
+    ).rejects.toThrow(/Failed to create project/);
+  });
+});
+
+describe("LinearClient addProjectToInitiative", () => {
+  it("sends the projectId/initiativeId pair and resolves on success", async () => {
+    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
+    const fetchStub: FetchLike = async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return jsonResponse(200, { data: { initiativeToProjectCreate: { success: true } } });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await client.addProjectToInitiative({ projectId: "p1", initiativeId: "init-1" });
+    expect(capturedBody?.query).toContain("mutation InitiativeToProjectCreate");
+    expect(capturedBody?.variables).toEqual({
+      input: { projectId: "p1", initiativeId: "init-1" },
+    });
+  });
+
+  it("throws when success is false", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, { data: { initiativeToProjectCreate: { success: false } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(
+      client.addProjectToInitiative({ projectId: "p1", initiativeId: "init-1" }),
+    ).rejects.toThrow(LinearApiError);
   });
 });
 

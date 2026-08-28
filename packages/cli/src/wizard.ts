@@ -1,17 +1,17 @@
 /**
  * `foreman setup` wizard body (SPEC §3.10, §3.1, §17.4).
  *
- * Four steps, each skippable independently: preflight tool checks, the
- * global config file, the omp plugin, and the optional herdr board. Nothing
+ * Three steps, each skippable independently: preflight tool checks, the
+ * Linear API key, and the omp plugin plus optional herdr board. Nothing
  * here is a hard failure except a missing `bun` — everything else degrades
  * to a printed instruction so a partial environment still finishes with a
- * usable config.
+ * usable config. This wizard is global only: it never touches the `repos`
+ * registry — run `foreman init` inside a repo to register it.
  */
 
-import { LinearApiError, LinearClient, type InitiativeRef, type TeamRef } from "@foreman/core";
 import { join } from "node:path";
 import type { Runner } from "./exec.ts";
-import { readGlobalConfig, writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
+import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import {
   DEFAULT_OMP_PLUGIN_NAME,
   herdrInstallArgv,
@@ -21,8 +21,7 @@ import {
   ompLinkArgv,
   ompMarketplaceAddArgv,
 } from "./plugin-commands.ts";
-import type { CheckboxChoice, Prompter } from "./prompt.ts";
-import { guessRepoPath } from "./repo-detect.ts";
+import type { Prompter } from "./prompt.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 
 export type PluginMode = "link" | "install" | "skip";
@@ -115,120 +114,18 @@ async function resolveLinearApiKey(
   return { apiKey, apiKeyFile };
 }
 
-interface InitiativeSelection {
-  repos: Record<string, string>;
-  teamKeys: string[];
-}
-
-/**
- * Fetches every initiative (product) in the workspace and lets the operator
- * check the ones Foreman should manage, pre-checking initiatives already
- * mapped in `existingRepos` and pre-filling each repo path from
- * `guessRepoPath` — the operator confirms or edits rather than typing every
- * path by hand. Returns null on any API failure or an empty workspace so the
- * caller can fall back to manual entry instead of dead-ending the wizard.
- */
-async function pickInitiativesFromLinear(
-  prompter: Prompter,
-  log: (message: string) => void,
-  apiKey: string,
-  repoRoot: string,
-  existingRepos: Record<string, string>,
-): Promise<InitiativeSelection | null> {
-  const client = new LinearClient({ apiKey });
-  let initiatives: InitiativeRef[];
-  let teams: TeamRef[];
-  try {
-    [initiatives, teams] = await Promise.all([client.initiatives(), client.teams()]);
-  } catch (error) {
-    const message = error instanceof LinearApiError ? error.message : String(error);
-    log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}) — falling back to manual entry.`);
-    return null;
-  }
-  if (initiatives.length === 0) {
-    log(`  ${style("yellow", "!")} no initiatives found in this Linear workspace — falling back to manual entry.`);
-    return null;
-  }
-
-  const sorted = [...initiatives].sort((a, b) => a.name.localeCompare(b.name));
-  const choices: Array<CheckboxChoice<string>> = sorted.map((initiative) => {
-    const mappedPath = existingRepos[initiative.id];
-    return {
-      value: initiative.id,
-      label: initiative.name,
-      checked: mappedPath !== undefined,
-      hint: mappedPath ? `already mapped → ${mappedPath}` : undefined,
-    };
-  });
-
-  const selectedIds = await prompter.multiSelect(
-    "Which Linear initiatives (products) should Foreman manage?",
-    choices,
-  );
-  const initiativesById = new Map(sorted.map((initiative) => [initiative.id, initiative] as const));
-  const mapped: Record<string, string> = {};
-  for (const id of selectedIds) {
-    const initiative = initiativesById.get(id);
-    if (!initiative) continue;
-    const suggestion = existingRepos[id] ?? guessRepoPath(initiative.name, repoRoot) ?? "";
-    const repoPath = await prompter.text(`Repo path for "${initiative.name}"`, suggestion);
-    if (repoPath.length > 0) mapped[id] = repoPath;
-  }
-
-  return { repos: mapped, teamKeys: teams.map((team) => team.key) };
-}
-
-/** The pre-API fallback: an initiative-id/repo-path loop, team keys are prompted separately. */
-async function pickInitiativesManually(prompter: Prompter): Promise<Record<string, string>> {
-  const mapped: Record<string, string> = {};
-  if (await prompter.confirm("Map a Linear initiative id to a repo path now?", false)) {
-    for (;;) {
-      const initiativeId = await prompter.text("Linear initiative id (blank to stop)", "");
-      if (initiativeId.length === 0) break;
-      const repoPath = await prompter.text(`Repo path for initiative ${initiativeId}`, "");
-      if (repoPath.length > 0) mapped[initiativeId] = repoPath;
-      if (!(await prompter.confirm("Map another initiative?", false))) break;
-    }
-  }
-  return mapped;
-}
-
 async function configureGlobalConfig(
   prompter: Prompter,
   log: (message: string) => void,
   home: string,
   skipLinear: boolean,
-  repoRoot: string,
 ): Promise<void> {
-  printSection(log, "Global config (~/.foreman/config.json)");
+  printSection(log, "Linear API key (~/.foreman/config.json)");
 
-  const { apiKey, apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
-  const existing = readGlobalConfig(home);
+  const { apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
 
-  const picked = apiKey
-    ? await pickInitiativesFromLinear(prompter, log, apiKey, repoRoot, existing.repos)
-    : null;
-  const manuallyMapped = picked ? {} : await pickInitiativesManually(prompter);
-  const repos = { ...existing.repos, ...(picked?.repos ?? manuallyMapped) };
-
-  const suggestedTeamKeys = existing.teamKeys.length > 0 ? existing.teamKeys : (picked?.teamKeys ?? []);
-  const teamKeysRaw = await prompter.text(
-    "Linear team keys to manage, comma-separated (blank = every team)",
-    suggestedTeamKeys.join(", "),
-  );
-  const teamKeys = teamKeysRaw
-    .split(",")
-    .map((key) => key.trim())
-    .filter((key) => key.length > 0);
-
-  const configPath = writeGlobalConfig({ repos, linear: { teamKeys, apiKeyFile } }, home);
+  const configPath = writeGlobalConfig({ linear: { apiKeyFile } }, home);
   log(`  wrote ${configPath}`);
-  const initiativeCount = Object.keys(repos).length;
-  if (initiativeCount === 0) {
-    log('  no initiatives mapped yet — add them under "repos" before the loop can dispatch anything.');
-  } else {
-    log(`  ${style("green", "✓")} ${initiativeCount} initiative(s)/product(s) mapped to a repo.`);
-  }
 }
 
 async function buildRepo(deps: WizardDeps, repoRoot: string, skipBuild: boolean): Promise<void> {
@@ -325,7 +222,7 @@ async function setupHerdrPlugin(deps: WizardDeps, options: WizardOptions, mode: 
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
   await preflight(deps);
-  await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear, options.repoRoot);
+  await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
 
   const herdrFound = await deps.runner.exists("herdr");
   const ompMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "link");
@@ -343,6 +240,6 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   await setupHerdrPlugin(deps, options, herdrMode);
 
   printSection(deps.log, "Done");
-  deps.log(`  ${style("green", "✓")} Edit ~/.foreman/config.json to map more Linear initiatives to repos.`);
-  deps.log(`  ${style("cyan", "→")} Then: foreman loop --dry-run --once --verbose`);
+  deps.log(`  ${style("green", "✓")} Global setup complete.`);
+  deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it.`);
 }

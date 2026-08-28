@@ -64,7 +64,7 @@ foreman/
   packages/
     core/                       # Linear client, schemas, gate validators
     omp-plugin/                 # below — installed user-scoped in ~/.omp/plugins/
-    loop/                       # supervisor + stage workers (§17.5)
+    loop/                       # `foreman loop` + `foreman intake` CLIs (§3.11, §3.12)
     herdr-plugin/               # optional: herdr-plugin.toml + board TUI (§17.4)
 ```
 
@@ -207,17 +207,19 @@ that must be real code:
    `SingleResult` and drive every Linear mutation from validated objects —
    descriptions, labels, state moves, sub-issue and spike creation, discovered
    work, comments, review renderings. This is where principle 9 lives.
-6. **Config loader.** Reads and validates the layered `.foreman/config.json`
-   files (§3.10) — including the repo map keyed by **initiative ID** (IDs, not
-   names — grouping prefixes rename): `repos: { <initiative-id>:
-   <repo-path> }`, one entry per product, set once. Resolution: issue →
-   project → its single product initiative (§4.0) → map entry → fail loudly.
-   Consumed by worktree creation, triage repro reads, and the loop. Validated
-   on `session_start` alongside the skill-name guard (§8); a dispatch whose
-   repo cannot resolve, or an invalid config, fails loudly before any spawn.
-   A project-level override is deliberately absent — nothing needs one today,
-   and the resolution chain makes adding it a five-line change when something
-   does.
+6. **Config loader.** Reads and validates the global `~/.foreman/config.json`
+   (§3.10) — including the `repos` registry: each entry's path, `team`, and
+   bound `initiatives` (**IDs**, not names — grouping prefixes rename), per
+   the instance model (§3.11). The instance's own entry is resolved by
+   matching cwd against registry paths. Scope check: issue → project → its
+   single product initiative (§4.0) → must be in this entry's bound set — the
+   loop skips misses, manual commands refuse with the reason. Validated on
+   `session_start` alongside the skill-name guard (§8) — including the
+   cross-repo initiative-uniqueness check (§3.10) — and the ensure pass
+   (§3.11) runs here too; an invalid config or unresolvable scope fails
+   loudly before any spawn. Per-project overrides are deliberately absent —
+   nothing needs one today, and the chain makes adding it a five-line change
+   when something does.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
    Use them to keep `/foreman-status` live and to detect aborts.
@@ -267,8 +269,8 @@ the PAL resolve with fallback.
 ### 3.8 Scheduling
 
 omp has no built-in scheduler. Run the daily triage pass with cron or launchd
-invoking print mode (`omp -p`) against `/foreman-triage` — superseded by the
-loop's triage worker once §17.5 exists. Do not run both.
+invoking print mode (`omp -p`) against `/foreman-triage` — superseded by
+`foreman intake` once §3.12 exists. Do not run both.
 
 ### 3.9 Hindsight memory — decide explicitly
 
@@ -279,46 +281,72 @@ doc with no way for the agent to know which is authoritative. Recommend
 disabling autonomous memory for Foreman-managed repos so one source of truth is
 actually one.
 
-### 3.10 Configuration — `.foreman/config.json`
+### 3.10 Configuration — `~/.foreman/config.json`
 
-Everything that is a *parameter* rather than an *invariant* lives in layered
-JSON config, loaded and schema-validated by `core` (TypeBox — the same
-machinery as the output schemas) and consumed by all three consumers. Two
-layers, deep-merged, repo wins:
+Everything that is a *parameter* rather than an *invariant* lives in **one
+global config file**, loaded and schema-validated by `core` (TypeBox — the
+same machinery as the output schemas) and consumed by all three consumers. No
+per-repo config files: the `repos` registry inside the global file is the
+single table binding repos to teams and initiatives, which gives both
+consumers the same lookup — instances resolve their scope from it by cwd, and
+intake inverts it in memory for initiative→repo without any filesystem
+scanning. Per-repo settings deep-merge over `repoDefaults`, entry wins. The
+trade-off is accepted deliberately: repo settings no longer travel with a
+clone, which matters for teams and not for one operator — and the file itself
+can live in the dotfiles repo like any other machine config. `foreman init`,
+run once per repo inside that repo, is the command that produces one `repos`
+entry — it never runs global setup and `foreman setup` never touches this
+table.
 
-1. **Global:** `~/.foreman/config.json` — the repo map, loop tuning,
-   and `repoDefaults`.
-2. **Per-repo:** `<repo>/.foreman/config.json` — overrides for that repo,
-   versioned with the code it governs.
+The registry key is named `repos`, not `projects` — in this document
+"project" means a Linear milestone (§4.1), and overloading it for repo
+entries would guarantee confusion.
 
 Sketch (defaults shown; every number quoted elsewhere in this spec is a
 default defined here, not a constant):
 
 ```jsonc
 {
-  // global only
-  "repos": { "<initiative-id>": "<repo-path>" },          // §3.5 — one per product
   "loop": {
     "wipGlobal": 3,                                       // §17.6
-    "wip": { "triage": 1, "refine": 2, "implement": 3, "review": 2 },
+    "wip": { "refine": 2, "implement": 3, "review": 2 },
     "readyBufferTarget": 5,                               // §17.6
     "backpressureThreshold": 5,                           // §17.7
     "retryCap": 2,                                        // §17.8
     "reviewCycleCap": 2,                                  // §7.4
-    "cadenceMinutes": 5,
-    "triageWindow": "06:00"
+    "cadenceMinutes": 5
   },
-  "triage": { "staleLowDays": 90 },                       // §7.1
+  "intake": {                                             // §3.12 — team-level process
+    "window": "06:00",
+    "staleLowDays": 90                                    // §7.1
+  },
 
-  // per-repo (or global "repoDefaults")
-  "baseBranch": "main",
-  "pr": { "required": true, "draft": false, "ciRequired": true },
-  "merge": { "strategy": "squash",                        // merge | squash | rebase
-             "deleteBranch": true },
-  "branchPattern": "<issue-id>-<slug>",                   // §12
-  "worktreePattern": "../<repo>-<ISSUE-ID>"               // §12
+  "repoDefaults": {                                       // inherited by every repos.* entry
+    "baseBranch": "main",
+    "pr": { "required": true, "draft": false, "ciRequired": true },
+    "merge": { "strategy": "squash",                      // merge | squash | rebase
+               "deleteBranch": true },
+    "branchPattern": "<issue-id>-<slug>",                 // §12
+    "worktreePattern": "../<repo>-<ISSUE-ID>"             // §12
+  },
+
+  "repos": {                                              // the registry (§3.11) — every Foreman-managed repo
+    "plotroom": {                                         // alias: `--repo`, herdr workspace name, state dir
+      "path": "~/Code/plotroom",
+      "team": "PLT",                                      // optional if unambiguous
+      "initiatives": [                                    // one or more; monorepos list several
+        "<initiative-id>",
+        { "id": "<initiative-id>", "path": "apps/zero" }  // optional path hint, fed to context assembly and implement's initial reads
+      ]
+      // plus any repoDefaults override, e.g. "pr": { "required": false }
+    }
+  }
 }
 ```
+
+Registry validation the split files couldn't do: an initiative bound in two
+`repos` entries is now a config error caught at load, not a runtime surprise
+— previously no single instance could see the collision.
 
 **`pr.required: false` — direct-branch mode.** The workflow shape is unchanged
 (one issue → one worktree → one branch), but implement pushes the branch and
@@ -346,6 +374,93 @@ Reload semantics: the extension reads config at `session_start`; the loop
 re-reads at the top of every cadence tick, so tuning WIP or backpressure does
 not require a loop restart.
 
+### 3.11 Instance model — one Foreman per repo
+
+Foreman runs **in a repo, for that repo's initiatives**. There is no central
+daemon watching all of Linear; the unit of deployment is an instance launched
+in a working directory (normally a repo root), scoped to a team plus the
+initiatives bound to that repo in the global `repos` registry (§3.10). A
+monorepo binds several initiatives — the `plotroom` entry binds
+`Plotroom Fleet` and `Plotroom Zero`.
+
+**Invocation.** `foreman loop [--repo <alias>] [--team <KEY>]`, run in the
+repo. The instance's registry entry resolves by matching cwd (symlinks
+resolved) against entry paths; `--repo` overrides, and an unregistered
+directory fails loudly naming the fix (add an entry). Team resolution:
+`--team` flag → the entry's `team` → the sole team the credential can access
+→ fail loudly. Manual slash commands resolve the same way from the session's
+cwd.
+
+**Scope predicate.** An issue is in scope iff it belongs to the team AND its
+project's initiative is in this instance's bound set. The loop silently skips
+out-of-scope issues (they belong to another instance); a manual command
+against an out-of-scope issue refuses with the reason, never guesses.
+
+**Ensure pass.** On instance start (and extension `session_start`): verify
+each bound initiative exists and has its standing `Maintenance` project,
+creating that project — team-assigned, since Linear's `ProjectCreateInput`
+requires `teamIds` and has no `initiativeId` — if missing. Attaching the new
+project to the initiative is a second mutation, `initiativeToProjectCreate`,
+run after creation succeeds. Milestone projects enter through intake
+proposals the operator approves (§3.12); the ensure pass itself auto-creates
+only `Maintenance`.
+
+**Concurrent instances are already safe.** The mutex is in Linear, not in any
+process: claim-before-dispatch (§11, §17.5) prevents double-work even if two
+instances' scopes overlap. The per-repo lockfile (§17.5) prevents two
+instances *of the same repo*; nothing else needs coordinating.
+
+**Triage is not part of the per-repo loop.** The shared team inbox is
+consumed by the single team-level intake process (§3.12); repo instances run
+refine, implement, and review only. One consumer, no scope negotiation, no
+proposal races.
+
+**Shared human, shared tripwire.** WIP limits are per-instance (§17.6);
+backpressure is **team-wide** (§17.7) — the blocked and proposal counts are
+queried across the whole team, so five instances still throttle against the
+one operator's actual drain rate, with Linear as the only coordination point.
+
+**Per-instance state.** The loop lockfile and bookkeeping file (§17.5) live
+in `~/.foreman/state/<repo-alias>/` — with no per-repo config directory,
+state is global too, keyed by the registry alias.
+
+### 3.12 Intake — the team-level triage process
+
+One process for the whole team, separate from the per-repo loops:
+`foreman intake`. (Named to avoid colliding with the `foreman-triage` agent it
+dispatches.) The shared Triage inbox is a single queue, and a single consumer
+is strictly simpler than N repo-scoped loops negotiating over it.
+
+**What it does.** The operator files rough material into the inbox — a
+two-line bug, a one-line idea, naming the initiative it belongs to. On its
+window, intake dispatches `foreman-triage` (§7.1), which turns each item into
+a finished **draft**: bug- and task-sized items become fully drafted issues
+(§13.1 shape, proposed priority and estimate) destined for a project under
+that initiative; idea-sized items become **proposed milestone projects** —
+name, project brief (§4.7), optional seed issues. Everything is
+proposal-grade until approved: the point of intake is that approval becomes a
+yes/no on finished work, not a prompt to go write it yourself. Nothing —
+especially not a project — is created unapproved.
+
+**Intake drafts; refine stamps.** Intake works from the ticket, the Context
+docs, and light repo reads. `foreman-refine` (§7.2) still runs after the
+operator prioritizes: it verifies the draft against the code via LSP,
+finalizes the estimate, and applies `agent:ready`. This keeps the priority
+throttle intact — intake fleshes out everything in the inbox, but nothing is
+repo-verified and dispatched until prioritized.
+
+**Repo lookup.** Intake is team-level and repro/context reads need repos —
+which is exactly what the global registry (§3.10) provides: intake inverts
+`repos` in memory for initiative→repo, no filesystem scanning, no refresh
+interval. An initiative bound to no registry entry still gets classified and
+drafted — just without repro, flagged in the proposal.
+
+**Process shape.** A singleton with a lockfile in `~/.foreman/state/intake/`,
+run from cron/launchd or a herdr pane in the
+`foreman` workspace (§17.3). Respects team-wide proposal backpressure
+(§17.7). The apply pass (§7.1) also runs here on every tick, so approvals are
+picked up without a manual `/foreman-apply`.
+
 ---
 
 ## 4. Linear data model
@@ -356,8 +471,10 @@ not require a loop restart.
 workflow states, estimate config, the Triage inbox, team labels, and the issue
 prefix are all per-team. Everything §4 configures exists exactly once only if
 there is exactly one team. Products are differentiated by initiative and
-project, never by team. If a product ever outgrows this, Linear sub-teams can
-inherit workflow and labels from a parent — a migration path that doesn't fork
+project, never by team. The loop still takes an explicit team scope
+(`--team`, §3.11) — one team is the recommended topology, not a hardcoded
+assumption. If a product ever outgrows this, Linear sub-teams can inherit
+workflow and labels from a parent — a migration path that doesn't fork
 config.
 
 **Route the operator's own issues through Triage.** Issues land in Triage only
@@ -369,8 +486,8 @@ default issue template to Triage status so everything enters through one
 funnel.
 
 **Initiatives on from day one, and load-bearing.** Initiative = the product
-(§4.1); the repo map (§3.5, §3.10) and the product `Context` doc (§4.7) hang
-off it. Portfolio groupings (e.g. the weekly micro-products practice) are
+(§4.1); the registry's repo bindings (§3.10, §3.11) and the product
+`Context` doc (§4.7) hang off it. Portfolio groupings (e.g. the weekly micro-products practice) are
 naming-convention parents — `Micro-products > dontletitdie.lol` — since real
 sub-initiatives are Enterprise-gated. Grouping prefixes are review lenses only;
 no Foreman config attaches to them.
@@ -390,7 +507,7 @@ pattern for work that should stay open indefinitely.
 | Level | Use |
 |---|---|
 | Team | **Exactly one.** Owns states, estimates, Triage, team labels, and the issue prefix (§4.0). |
-| Initiative | **The product/app.** Never closes. Carries the repo mapping (§3.5, §3.10) and the product `Context` doc (§4.7). ~1:1 with a repo. Naming-convention parents group a portfolio (§4.0). |
+| Initiative | **The product/app.** Never closes. Hosted by exactly one repo — a monorepo may host several initiatives; the global registry binds them (§3.10, §3.11). Carries the product `Context` doc (§4.7). Naming-convention parents group a portfolio (§4.0). |
 | Project | **A shippable increment** — a feature or milestone that ends — or the product's standing `Maintenance` project. Carries the project brief (§4.7). |
 | Issue | Unit of agent work. One issue = one worktree = one PR. |
 | Sub-issue | Product of `foreman-refine` splitting an oversized issue. |
@@ -606,8 +723,11 @@ Sketch schemas — refine during build, but keep the shapes:
 ```
 TriageProposal
   items[]: { issueId, type, proposedPriority, severityReasoning,
-             duplicateOf?, proposedBlockedBy[], destination,
-             reproConfidence, missingInfo[] }
+             duplicateOf?, proposedBlockedBy[], reproConfidence,
+             missingInfo[], draftDescription, proposedEstimate?,
+             destination: existingProjectId
+                        | newProject { initiativeId, name, brief,
+                                       seedIssues[] } }
   summary
 
 RefineResult
@@ -652,7 +772,7 @@ structured data written into Linear, not as the agent's return channel.
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
 blocking: false
-thinking-level: low
+thinking-level: medium
 advisor: off
 prewalk: false
 autoload-skills: [foreman-triage-inbox, foreman-block-protocol]
@@ -662,19 +782,22 @@ schemaMode: strict
 
 | | |
 |---|---|
-| **Transition** | `Triage → Backlog / Canceled / Duplicate` |
-| **Trigger** | The loop's triage worker (§17.5). Never called mid-flow by another agent. |
-| **Model role** | `smol` |
+| **Transition** | `Triage → Backlog / Canceled / Duplicate`, or a proposed new project (§3.12) |
+| **Trigger** | The intake process (§3.12). Never called mid-flow by another agent. |
+| **Model role** | default — drafting project briefs and full descriptions outgrew `smol` |
 
 No Linear mutation surface of any kind, no `edit`, no `write`, no `bash`.
-Read-only by construction. Repro reads resolve the repo via the repo map
-(§3.5).
+Read-only by construction. Scope is the whole team inbox (§3.12); repro and
+context reads resolve repos through the registry index intake inverts from
+`repos` (§3.10) — no filesystem scanning.
 
 **Per item:** classify (`type:`), dedupe by semantic similarity, attempt repro
 *by reading only*, propose a Priority with severity reasoning, flag missing
-information, propose native `blocked by` relations, recommend a destination —
-including project assignment: a milestone project or the product's standing
-`Maintenance` project (§4.0).
+information, propose native `blocked by` relations, and **draft the artifact**
+(§3.12): a full §13.1-shape description with a proposed estimate, destined for
+an existing project (a milestone or the product's standing `Maintenance`
+project, §4.0) — or, for idea-sized items, a proposed new milestone project
+with its brief and optional seed issues.
 
 **Output:** a `TriageProposal`. The extension writes one comment per item — the
 human rendering plus an embedded machine-readable copy of the item — and
@@ -691,6 +814,17 @@ so approval state is derivable from Linear alone — no second store to lose.
 (It cannot be an agent anyway: tool allowlists are static frontmatter, so there
 is no such thing as an invocation-scoped write grant.) Triage stays read-only
 forever.
+
+**Known gap — `destinationProject` is ambiguous in a monorepo.** The field is a
+project *name*, never a UUID, but §4.0 gives every product its own standing
+`Maintenance` project, and the ensure pass (§3.11) creates them. A repo binding
+two initiatives therefore ends up with two projects named `Maintenance` in the
+same team, and `TriageItem` carries no initiative field, so the name alone
+cannot say which product the operator meant. The apply pass resolves the name
+and, when it matches more than one project, applies **no** project and records
+the ambiguity in the applied marker — attaching an issue to the wrong product's
+project is worse than leaving it unset for a human. Closing this properly means
+giving `TriageItem` an initiative, not teaching the resolver to guess.
 
 **Permission:** may recommend `Canceled` freely. Un-actioned `Low` items older
 than 90 days should be proposed for cancellation by default.
@@ -721,7 +855,8 @@ catching a bad split before implementation is cheap.
 1. Verify Priority ≠ `None`. Refuse if unprioritized.
 2. Read the product `Context` doc and the project brief (§4.7), Definition of
    Done included.
-3. Draft the description in the §13.1 template — returned as
+3. Draft the description in the §13.1 template — or, for intake-drafted
+   issues (§3.12), verify and revise the draft against the code. Returned as
    `refinedDescription`, never written directly.
 4. Acceptance criteria as observable behaviors, verifiable by someone who didn't
    write the code. Do not restate the Definition of Done.
@@ -987,7 +1122,7 @@ orphaned or just held by a live agent.
 - One issue → one worktree → one branch → one PR — or one direct branch merge
   when `pr.required: false` (§3.10). No exceptions to the 1:1:1 shape.
 - **Foreman owns worktree lifecycle**, not omp's isolation layer (§3.7). The
-  repo is resolved via the repo map (§3.5, §3.10).
+  repo is the instance's own working directory (§3.11).
 - Worktree path: `../<repo>-<ISSUE-ID>` (e.g. `../plotroom-ENG-142`) —
   default, per-repo `worktreePattern` (§3.10).
 - Branch: `<issue-id>-<kebab-slug>` (e.g. `eng-142-fix-triage-dedupe`) —
@@ -1051,8 +1186,8 @@ standing project organization section.
 
 | Activity | Frequency | Actor | Effort |
 |---|---|---|---|
-| `foreman-loop` | Every 5–10 min | Scheduler | — |
-| `foreman-triage` run | Daily, early | Loop | — |
+| `foreman loop` (per repo) | Every 5–10 min | Scheduler | — |
+| `foreman intake` (team-level) | Daily window | Scheduler | — |
 | Triage approval | Daily | Operator | ~10 min |
 | Blocked drain (`/foreman-status`) | 1–2× daily | Operator | ~15 min each |
 | Prioritization / roadmap | Weekly | Operator | ~1 hour |
@@ -1160,6 +1295,13 @@ commands; reinstall replacing the managed checkout.
 9. Whether documents attach at the initiative level on the current plan
    (§4.7). Fallback: the product `Context` doc lives pinned in the product's
    `Maintenance` project.
+10. ~~Linear project↔team semantics for the ensure pass (§3.11): whether
+    creating a project under an initiative requires an explicit team
+    association, and whether issues can be queried by team + initiative
+    efficiently enough for the 5-minute cadence.~~ **Resolved** — see §3.11 and
+    `docs/VERIFIED.md` §16 item 10: project creation requires `teamIds`, and
+    issue-by-initiative filtering is a single query through
+    `NullableProjectFilter.initiatives`.
 
 ---
 
@@ -1174,9 +1316,10 @@ makes is already a pure predicate over Linear state — the gate validators in
 adds nondeterminism to something fully determined, and when it misroutes you
 get to debug a prompt instead of reading a function.
 
-The supervisor is a plain Node process (`foreman-loop`) that imports the same
-validators as the extension, run from cron or launchd. It contains no model
-call. When it decides to dispatch, it hands the decision to a Dispatcher
+The supervisor is a plain Node process — `foreman loop [--team <KEY>]`, run
+in the repo it serves (§3.11) — that imports the same validators as the
+extension. One instance per repo, each scoped to that repo's bound
+initiatives. It contains no model call. When it decides to dispatch, it hands the decision to a Dispatcher
 (§17.2), which launches the same command the operator would type (§3.4). LLM
 work happens only inside agents.
 
@@ -1247,10 +1390,10 @@ entirely if left at defaults.
 
 | Herdr object | Foreman mapping |
 |---|---|
-| Workspace | One per repo, matching the product initiative (per the repo map, §3.5). |
+| Workspace | One per repo — the instance and its bound initiatives (§3.11). |
 | Tab | One per in-flight issue, named for the issue (`ENG-142`). |
 | Pane | The agent, `--cwd` set to that issue's worktree. |
-| `foreman` workspace | The `foreman-loop` and `foreman-board` panes, plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. |
+| `foreman` workspace | The `foreman-board` and `foreman intake` panes plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. Each repo workspace holds its own `foreman loop` pane (§3.11). |
 
 Tabs are bounded by the WIP limit (§17.6), so at WIP 3 the layout stays legible
 rather than becoming a wall of panes.
@@ -1303,18 +1446,21 @@ its log inline, and restart it by restarting the pane.
 The constraint is narrower than "not in a plugin." It is:
 
 - **The loop must not live in the board's pane.** If the loop and the view share
-  a process, closing the board stops the loop. Run two panes — `foreman-loop`
-  (the supervisor, §17.5) and `foreman-board` (the view) — or a loop pane plus
-  an on-demand popup board. The view is disposable; the loop is not.
+  a process, closing the board stops the loop. Loop panes live one per repo
+  workspace (§3.11, §17.3); the board is a separate pane — one view over the
+  whole team, since it only reads Linear. The view is disposable; the loops
+  are not.
 - **`[[startup]]` starts the loop pane; it does not *be* the loop.** Startup
   hooks are one-shot initialization commands, not supervised services. Spawning
   a long-lived pane is a one-shot action, so this is exactly the right use: on
-  server restore, the startup hook re-creates the `foreman-loop` pane. What runs
+  server restore, the startup hook re-creates each repo's loop pane. What runs
   inside it is a normal long-running process.
-- **The loop is a singleton.** Take a lockfile in `HERDR_PLUGIN_STATE_DIR` on
-  start and refuse to run if another holder is live. Two supervisors racing the
-  same board is the one failure mode that corrupts state rather than just
-  wasting tokens.
+- **The loop is a per-repo singleton.** Take a lockfile in
+  `~/.foreman/state/<repo-alias>/` (§3.11) on start and refuse to run if
+  another holder is live for the same repo. Two supervisors racing the same repo is
+  the one failure mode that corrupts state rather than just wasting tokens;
+  instances of *different* repos coexist by design, coordinated only through
+  Linear's locks (§11).
 
 Pane lifetime still ends at reboot or `herdr server stop`. The startup hook
 covers server restore; add a launchd/systemd unit only if you want the loop to
@@ -1371,19 +1517,20 @@ single sweep means implement starves waiting for refinement to happen in the
 same pass.
 
 ```
-foreman-loop  (one process, one lockfile, N async workers)
+foreman loop  (one process per repo, one lockfile each, N async workers)
   ├─ reaper       every 5 min   — stale locks (§11)
-  ├─ triage       daily window  — batch over the Inbox view
   ├─ refine       every 5 min   — top Ready buffer up to target
   ├─ implement    every 5 min   — pull from Ready
   └─ review       every 5 min   — PRs whose head SHA has no ReviewResult
 ```
 
+Triage is not a loop worker — it belongs to the team-level intake process
+(§3.12).
+
 Each worker owns one transition and evaluates only its own predicate:
 
 | Worker | Selects | Condition | Dispatches |
 |---|---|---|---|
-| `triage` | Inbox view | non-empty, daily window | `foreman-triage` (batch) |
 | `refine` | Backlog; plus `legacy` in Backlog or Todo (§4.9) | priority ≠ None, no `agent:*` | `foreman-refine` |
 | `implement` | Todo | implementation gate passes | `foreman-implement` |
 | `review` | In Review | PR open, no `ReviewResult` for head SHA | `foreman-review` |
@@ -1404,7 +1551,8 @@ what makes concurrent stages safe. Agents verify the ID; they never claim.
 **Loop bookkeeping.** Attempt counters (§17.8), review-cycle counters (§7.4),
 last-triage-run (so a mid-day loop restart doesn't refire the daily batch),
 `reviewedSha` per PR, and dispatch history live in a small SQLite (or JSON)
-file in the loop's state dir. Explicitly **non-authoritative** — it is dispatch
+file in `~/.foreman/state/<repo-alias>/` (§3.11). Explicitly
+**non-authoritative** — it is dispatch
 bookkeeping, not workflow state, so it does not create a second source of truth
 beside Linear. Lost or corrupted, the worst case is one redundant dispatch or
 one premature retry; the reaper reconciles it against Linear and the registry
@@ -1417,16 +1565,19 @@ reasonable later optimization; nothing here needs sub-minute latency.
 
 Two layers, and the global one is the one that protects you.
 
-**Global cap on concurrent agents. Start at 3.** This governs. The failure mode
-of an autonomous loop is generating work faster than the operator can absorb it,
-and a low ceiling is the only thing that surfaces that early enough to correct.
+**Global cap on concurrent agents. Start at 3.** Per instance (§3.11) — each
+repo's loop caps its own agents; the cross-instance guard is team-wide
+backpressure (§17.7). This governs. The failure mode of an autonomous loop is
+generating work faster than the operator can absorb it, and a low ceiling is
+the only thing that surfaces that early enough to correct. Running several
+instances multiplies effective volume, so start additional instances with the
+same caution as raising the cap.
 
 **Per-stage sub-limits**, which must sum to more than the global cap or they do
 nothing useful — they shape the mix, the global cap sets the volume:
 
 | Worker | Sub-limit | Note |
 |---|---|---|
-| `triage` | 1 | Batch job; never more than one in flight. |
 | `refine` | 2 | Short, cheap, keeps the buffer stocked. |
 | `implement` | 3 | The expensive one. |
 | `review` | 2 | Fast, and unblocks merges. |
@@ -1448,9 +1599,12 @@ own counters, held in Linear where every worker can see them.
 ### 17.7 Backpressure — the rule that makes this safe
 
 **If the Blocked (human) queue exceeds a threshold, every worker stops
-dispatching new work.** Threshold starts at 5.
+dispatching new work.** Threshold starts at 5, and the count is **team-wide**,
+not per-instance (§3.11): every instance queries `blocked:*` across the whole
+team, so N repos' loops all throttle against the one operator's actual drain
+rate, with Linear as the only coordination point.
 
-Backpressure is global, never per-stage. This matters more now that stages run
+Backpressure is global, never per-stage or per-instance. This matters more now that stages run
 independently: a per-stage rule would let refine keep stocking the Ready buffer
 while you're drowning in blocked implement work, so you'd surface from the drain
 to find a large queue of refined issues nobody can start on. One tripwire, all
@@ -1463,9 +1617,10 @@ attention, and the work is stale by the time it's unblocked. A loop with a human
 decision point in it must be rate-limited by that human's actual throughput, not
 by machine capacity.
 
-The same rule applies to unapproved proposals. If `agent:proposed` count exceeds
-the threshold, skip the triage dispatch — there is no point generating
-proposals faster than they're being approved.
+The same rule applies to unapproved proposals: if the team-wide
+`agent:proposed` count exceeds the threshold, the intake process (§3.12)
+skips its dispatch — there is no point generating proposals faster than
+they're being approved.
 
 Backpressure state belongs in `/foreman-status` so it's visible why the loop
 went quiet.
@@ -1493,12 +1648,12 @@ Do not go from manual commands to a full loop. Each stage runs until it's
 boring:
 
 1. **Manual.** Commands only. The loop doesn't exist yet.
-2. **Dry run.** `foreman-loop --dry-run` logs what each worker would dispatch and does
+2. **Dry run.** `foreman loop --dry-run` logs what each worker would dispatch and does
    nothing. Run for a week. Read the log every morning. This is where routing
    bugs surface for free.
-3. **Read-only auto.** The loop dispatches `foreman-triage` and
-   `foreman-review` only. Both are non-mutating, so a bad dispatch costs tokens
-   and nothing else.
+3. **Read-only auto.** `foreman intake` goes live (propose-only by
+   construction) and the loop dispatches `foreman-review` only. Both are
+   non-mutating, so a bad dispatch costs tokens and nothing else.
 4. **Full loop.** Add `foreman-refine` and `foreman-implement`, WIP 3,
    backpressure 5.
 5. **Herdr dispatcher.** Swap the dispatcher only after the loop is boring on
@@ -1521,7 +1676,8 @@ than better.
    loader with schema validation, layering, and defaults (§3.10). Workspace
    topology per §4.0: single team, default issue template → Triage,
    initiatives enabled, one initiative per product (grouping prefixes where
-   wanted), standing `Maintenance` projects, repo map populated. Then Linear
+   wanted), the `repos` registry populated and the ensure pass
+   creating `Maintenance` projects (§3.10, §3.11). Then Linear
    states, load-bearing labels, `legacy` amnesty pass (including homing
    projectless issues, §4.9), six saved views, one worked product `Context`
    doc + project brief with a Definition of Done. Resolve §16 items 5, 7,
@@ -1531,24 +1687,30 @@ than better.
    typed Linear read tools, the result-application layer that makes the
    extension the sole Linear writer (principle 9), gate validators, the lock manager
    (dispatch IDs, claim/release), the lock reaper, the config loader's
-   `session_start` validation and repo-map lookup (§3.10), lifecycle listeners,
+   `session_start` validation, scope check, and ensure pass (§3.10, §3.11),
+   lifecycle listeners,
    `foreman-block-protocol` skill, the skill-name resolution guard (§8), and
    `/foreman-status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
    agent — retrofitted, one agent gets a "just ask the user" fallback and it
    becomes the default.
-3. **`foreman-triage`, propose-only + `/foreman-apply`.** Inbox view, applying
-   nothing without approval, on cron. ~half a day. **Run it for a week before
-   building anything else.** Its bad proposals teach more about where the
-   operator's judgment lives than designing the rest up front.
+3. **`foreman intake` + `foreman-triage`, propose-only.** The team-level
+   process (§3.12): registry-derived repo lookup, daily window, the drafting
+   agent, and the apply pass — creating nothing without approval. ~1 day. **Run it for a
+   week before building anything else.** Its bad proposals — especially the
+   project briefs — teach more about where the operator's judgment lives than
+   designing the rest up front.
 4. **`foreman-refine` + `foreman-spike`.** After triage tuning. ~half a day.
 5. **`foreman-implement` + `foreman-review` + the fix cycle + TTSR rules.**
    Shaped by what 3 and 4 revealed. Includes the resume-mode path in the
    implement skill, the findings route with its cycle cap (§7.4), both merge
    modes and `/foreman-merge` (§3.10). ~1.5 days, most of it in worktree
    lifecycle and the fix cycle.
-6. **`foreman-loop` + `PrintDispatcher` + autonomy staging (§17).** Supervisor,
-   lockfile, bookkeeping file, the four stage workers, global cap and per-stage
-   sub-limits, Ready buffer target, backpressure, retry counter, `--dry-run`.
+6. **`foreman loop` + `PrintDispatcher` + autonomy staging (§17).** The CLI
+   with team resolution (§3.11), supervisor, per-repo lockfile, bookkeeping
+   file, the three stage workers plus reaper, per-instance cap and per-stage
+   sub-limits, Ready buffer target, team-wide backpressure, retry counter,
+   `--dry-run`. Prove it single-instance in one repo before starting a
+   second.
    ~1.5 days. Start with the `implement` worker alone and add the others one at
    a time — four workers introduced together makes a routing bug impossible to
    attribute. Then walk the staging ladder, a week per stage.
@@ -1560,7 +1722,7 @@ than better.
    drain alone and use it for a week before building the rest — if it doesn't
    measurably shorten the drain, the remaining screens won't either.
 
-Roughly 8.5 focused days of build, spread across several weeks of observation
+Roughly 9 focused days of build, spread across several weeks of observation
 windows. The waiting is the point; compressing it is how you end up with a loop
 that dispatches confidently into a routing bug.
 
@@ -1591,6 +1753,13 @@ that dispatches confidently into a routing bug.
 - Cross-agent messaging as a design element — `hub` is a live-process
   optimization for revival and the review fix cycle (§9); Linear is the
   message bus
+- Unapproved project creation — intake *proposes* milestone projects with the
+  brief already written (§3.12), but nothing is created until the operator
+  approves; the ensure pass auto-creates only the standing `Maintenance`
+  project (§3.11)
+- A second intake process — the team inbox has exactly one consumer (§3.12)
+- A central daemon watching all of Linear — the instance model (§3.11) is
+  per-repo by design
 - An `area:` ontology beyond what `foreman-implement` reads
 - Publishing to a public marketplace before it works locally
 - Config keys that can disable gates, WIP limits, backpressure, the lock

@@ -67,20 +67,17 @@ bun install && bun run build
 bun run packages/cli/dist/main.js setup --yes --omp install --scope user
 ```
 
-`foreman setup` (alias `init`) is the installer: it checks for `bun`/`git`/`gh`/
-`omp`/`herdr`, walks you through `~/.foreman/config.json`, then installs the
-plugin(s) you choose. If `$LINEAR_API_KEY` is already set, setup skips the key
-prompt entirely and uses it straight away to list every product (initiative)
-in your Linear workspace as a checkbox picker (`↑`/`↓` to move, `space` to
-toggle, `enter` to confirm) — pre-checking any product already mapped in your
-config, and guessing a repo path for each newly-picked product by matching
-its name against git checkouts in nearby directories (a sibling of this
-checkout, `~/Code`, `~/dev`, and similar). You still confirm or edit every
-guess before it's written; without a key (or without network access to
-Linear), setup falls back to typing initiative ids and paths by hand.
-`--omp install` (shown above) is the production path — it registers the omp
-plugin from `andyhite/foreman` on GitHub rather than linking back to this
-checkout. Drop `--yes` to be walked through the config interactively instead:
+`foreman setup` is the one-time-per-machine installer: it checks for
+`bun`/`git`/`gh`/`omp`/`herdr`, walks you through the Linear API key, and
+installs the plugin(s) you choose. It never touches repos, initiatives, or
+teams — that's `foreman init`'s job (below), run once per repo instead. If
+`$LINEAR_API_KEY` is already set, setup skips the key prompt entirely and
+uses it straight away to confirm you're pointed at the right workspace;
+without a key (or without network access to Linear), setup falls back to a
+manual prompt for where to store one. `--omp install` (shown above) is the
+production path — it registers the omp plugin from `andyhite/foreman` on
+GitHub rather than linking back to this checkout. Drop `--yes` to be walked
+through the prompts interactively instead:
 
 `--scope user` (the default) installs the omp plugin across every repo you
 work in; `--scope project` scopes it to the current repo. The herdr board is
@@ -93,26 +90,58 @@ omp plugin marketplace add andyhite/foreman
 omp plugin install foreman@foreman --scope user
 ```
 
-Point Foreman at Linear and at least one repo in `~/.foreman/config.json` —
-`setup` prompts for this, or edit it directly:
+Once setup has run, register each repo Foreman will manage by running
+`foreman init` **inside that repo**:
+
+```bash
+cd ~/Code/my-app
+foreman init
+```
+
+`foreman init` resolves the repo root with `git rev-parse --show-toplevel`,
+then lists every product (initiative) in your Linear workspace as a checkbox
+picker (`↑`/`↓` to move, `space` to toggle, `enter` to confirm) — pre-checking
+any already mapped to this repo — and asks for the team and alias. You
+confirm or edit every choice before it's written to `~/.foreman/config.json`.
+`--skip-linear` takes manual initiative ids instead of querying the API;
+`--path <dir>` registers a directory other than the current one; `-y`/`--yes`
+accepts every default and pre-checked value non-interactively; `--home
+<path>` overrides `~/.foreman` for testing. `foreman init` never prompts for
+or writes the Linear API key — that's `foreman setup`'s job.
+
+`foreman init` writes an entry like this to `~/.foreman/config.json`'s
+`repos` table — or edit it directly:
 
 ```json
 {
   "repos": {
-    "a1b2c3d4-0000-0000-0000-000000000000": "~/Code/my-app"
+    "my-app": {
+      "path": "~/Code/my-app",
+      "initiatives": ["a1b2c3d4-0000-0000-0000-000000000000"]
+    }
   },
   "linear": {
-    "teamKeys": ["ENG"]
+    "apiKeyEnv": "LINEAR_API_KEY"
   }
 }
 ```
 
 Foreman reads the Linear personal API key from `$LINEAR_API_KEY`, or from
 `linear.apiKeyFile` when the env var is unset — `foreman setup` writes that file
-for you (mode `0600`) if you paste a key during the prompt. The `repos` map,
-keyed by initiative ID, is the only place Foreman learns which repo a product
-belongs to; an issue whose project has no initiative, or whose initiative
-isn't in the map, is skipped rather than guessed at.
+for you (mode `0600`) if you paste a key during the prompt. The `repos`
+registry, keyed by alias, is the single table binding a repo to a team and the
+initiatives it hosts, each entry written by one `foreman init` run; an issue
+whose project has no initiative, or whose initiative isn't bound to any
+entry, is skipped rather than guessed at. A monorepo lists several
+initiatives on one entry.
+
+Order of operations: `foreman setup` once per machine, `foreman init` once
+per repo, then Foreman is **one `foreman loop` instance per repo**: run
+`foreman loop [--repo <alias>] [--team <KEY>]` inside each Foreman-managed
+repo — the instance's entry resolves by matching cwd against registry paths,
+or `--repo` overrides. The shared Triage inbox is consumed separately, by one
+team-level `foreman intake [--team <KEY>]` process — not by any loop
+instance.
 
 Once installed, day-to-day use is `foreman loop` (below) and the `/foreman:*`
 slash commands inside any omp session. See [Development](#development) below
@@ -135,7 +164,7 @@ the gate that refused:
 ```
 [foreman-loop] refine: 0 dispatched, 43 skipped
 [foreman-loop]   skip refine PLT-21: unprioritized — Priority is None.
-[foreman-loop]   skip triage (batch): before-triage-window — Before the 06:00 triage window.
+[foreman-loop]   skip implement ENG-9: backpressure — team-wide blocked depth at threshold.
 ```
 
 The `foreman-loop` prefix names the long-lived process, not the command — the
@@ -190,19 +219,18 @@ fallback and continues in print mode rather than stalling.
 
 ## Configuration
 
-`~/.foreman/config.json` holds everything; `<repo>/.foreman/config.json` may
-override the per-repo keys, versioned alongside the code they govern. Defaults
-are chosen so that an empty config is a safe config.
+`~/.foreman/config.json` holds everything — one global file, no per-repo
+config. Defaults are chosen so that an empty config is a safe config.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `loop.stage` | `dry-run` | Autonomy rung: `dry-run`, `read-only`, `full` |
-| `loop.wipGlobal` | `3` | Hard cap on concurrent agents |
-| `loop.wip` | `1/2/3/2` | Per-stage caps: triage, refine, implement, review |
-| `loop.backpressureThreshold` | `5` | Blocked depth at which all dispatch stops |
+| `loop.wipGlobal` | `3` | Hard cap on concurrent agents, per instance |
+| `loop.wip` | `2/3/2` | Per-stage caps: refine, implement, review (triage is not a loop worker) |
+| `loop.backpressureThreshold` | `5` | Team-wide blocked depth at which all dispatch stops |
 | `loop.readyBufferTarget` | `5` | How deep refine keeps the Todo buffer |
 | `loop.reviewCycleCap` | `2` | Review round trips before it escalates to you |
-| `loop.triageWindow` | `06:00` | When the daily triage batch may start |
+| `intake.window` | `06:00` | When the daily intake batch may start |
 | `loop.cadenceMinutes` | `5` | Poll interval |
 | `repoDefaults.pr.required` | `true` | Open a PR rather than pushing to the base branch |
 | `repoDefaults.merge.strategy` | `squash` | `merge`, `squash`, or `rebase` |
@@ -231,7 +259,7 @@ packages/
   omp-plugin/    The plugin: agents, skills, commands, rules, extension
   loop/           The supervisor and its six workers
   herdr-plugin/   The board: four TUI panes over the same core
-  cli/            The foreman CLI — setup, and delegates `loop` to packages/loop
+  cli/            The foreman CLI — setup, init, and delegates `loop` to packages/loop
 ```
 
 `packages/core` is the single source of truth for every contract. The four agent
@@ -253,8 +281,10 @@ bun run setup
 
 `bun run setup` runs `setup --omp link --herdr link` straight from source
 (no prebuilt `@foreman/cli` needed); everything after `setup` still prompts,
-so it's the same config walkthrough as the top-level install, just wired to
-link both plugins back to this checkout instead of installing from GitHub.
+so it's the same tool-preflight-and-Linear-key walkthrough as the top-level
+install, just wired to link both plugins back to this checkout instead of
+installing from GitHub. Run `bun run packages/cli/src/main.ts init` inside
+each repo you want to register, same as with a built CLI.
 
 `omp plugin link` and `herdr plugin link` register the checkout but skip its
 build step, so every source change needs `bun run build` (or `bun run --filter

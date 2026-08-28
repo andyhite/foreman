@@ -1,6 +1,7 @@
 /**
  * Review worker (SPEC §17.5): selects PRs (or, in direct-branch mode,
- * pushed branches) whose head SHA has no `ReviewResult` marker yet.
+ * pushed branches) whose head SHA has no `ReviewResult` marker yet, scoped
+ * to this instance (SPEC §3.11).
  */
 
 import {
@@ -8,51 +9,37 @@ import {
   GitHubClient,
   MARKER_KIND,
   branchNameFor,
-  expandHome,
   inState,
   latestMarker,
   newDispatchId,
   nodeRunner,
-  repoForIssue,
-  resolveRepoConfig,
 } from "@foreman/core";
 import type { BoardSnapshot, ReviewCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
+import { filterInScope } from "./types.ts";
 
 async function buildReviewCandidates(
   ctx: WorkerContext,
   github: GitHubClient,
   skipped: WorkerReport["skipped"],
 ): Promise<ReviewCandidate[]> {
-  const inReview = await ctx.linear.issues({
+  const inReviewIssues = await ctx.linear.issues({
     filter: inState("In Review"),
     limit: 500,
     includeComments: true,
   });
+  const { inScope: inReview, skipped: scopeSkips } = await filterInScope(ctx, "review", inReviewIssues);
+  skipped.push(...scopeSkips);
 
+  const repoPath = ctx.entry.repoPath;
   const candidates: ReviewCandidate[] = [];
   for (const issue of inReview) {
-    if (!issue.project) continue;
-    let repoPath: string;
-    try {
-      repoPath = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      skipped.push({
-        stage: "review",
-        issueId: issue.identifier,
-        code: "unresolved-repo",
-        message,
-      });
-      continue;
-    }
-    const repoSettings = resolveRepoConfig(ctx.config, repoPath);
-    const branch = branchNameFor(repoSettings.branchPattern, issue);
+    const branch = branchNameFor(ctx.entry.branchPattern, issue);
 
     let prOpen = false;
     let headSha = "";
-    if (repoSettings.pr.required) {
+    if (ctx.entry.pr.required) {
       const pr = await github.prForBranch(repoPath, branch);
       if (!pr) continue;
       prOpen = pr.state === "OPEN";
@@ -92,16 +79,14 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   ]);
 
   const snapshot: BoardSnapshot = {
-    inbox: [],
     backlog: [],
     todo: [],
     reviewCandidates,
     blockedHumanCount: blockedHuman.length,
-    proposedCount: 0,
     readyBufferCount: 0,
   };
 
-  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping, now);
+  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...candidateSkips);
 
   if (!ctx.dryRun) {
@@ -109,23 +94,6 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
       if (!decision.issueId) continue;
       const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
       if (!candidate) continue;
-      let cwd: string;
-      if (candidate.issue.project === null) {
-        cwd = `${expandHome(ctx.config.loop.stateDir)}/scratch`;
-      } else {
-        try {
-          cwd = await repoForIssue({ linear: ctx.linear, config: ctx.config }, candidate.issue);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          skipped.push({
-            stage: "review",
-            issueId: decision.issueId,
-            code: "unresolved-repo",
-            message,
-          });
-          continue;
-        }
-      }
 
       const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
       try {
@@ -134,7 +102,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
           issueId: decision.issueId,
           command: decision.command,
           dispatchId,
-          cwd,
+          cwd: ctx.entry.repoPath,
         });
         ctx.bookkeeping.recordDispatch({
           agent: decision.agent,
@@ -143,7 +111,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "review",
         });
-        if (candidate) ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
+        ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }

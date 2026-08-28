@@ -15,10 +15,11 @@ import type {
   IssueQuery,
   LinearWriter,
   Project,
+  ResolvedRepoEntry,
   TeamRef,
   WorkflowState,
 } from "@foreman/core";
-import { AGENT_LABEL, LinearApiError, TYPE_LABEL } from "@foreman/core";
+import { AGENT_LABEL, TYPE_LABEL } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { implementWorker } from "../src/workers/implement.ts";
 import { refineWorker } from "../src/workers/refine.ts";
@@ -31,23 +32,21 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
     repos: {},
     loop: {
       wipGlobal: 3,
-      wip: { triage: 1, refine: 2, implement: 3, review: 2 },
+      wip: { refine: 2, implement: 3, review: 2 },
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      triageWindow: "06:00",
       stage: "full",
       dispatcher: "print",
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    triage: { staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
-      teamKeys: [],
       endpoint: "https://api.linear.app/graphql",
     },
     agent: {
@@ -64,6 +63,22 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       branchPattern: "<issue-id>-<slug>",
       worktreePattern: "../<repo>-<ISSUE-ID>",
     },
+    ...overrides,
+  };
+}
+
+/** A resolved instance entry (SPEC §3.11), the same shape `resolveRepoEntry` returns. */
+function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntry {
+  return {
+    alias: "product",
+    repoPath: "/repos/product",
+    team: "ENG",
+    initiativeIds: ["initiative-1"],
+    baseBranch: "main",
+    pr: { required: true, draft: false, ciRequired: true },
+    merge: { strategy: "squash", deleteBranch: true },
+    branchPattern: "<issue-id>-<slug>",
+    worktreePattern: "../<repo>-<ISSUE-ID>",
     ...overrides,
   };
 }
@@ -161,6 +176,9 @@ class FakeLinear implements LinearWriter {
   async initiatives(): Promise<InitiativeRef[]> {
     return [];
   }
+  async initiativeProjects(): Promise<never[]> {
+    return [];
+  }
   async workflowStates(): Promise<WorkflowState[]> {
     return [];
   }
@@ -183,6 +201,10 @@ class FakeLinear implements LinearWriter {
     throw new Error("not used in these tests");
   }
   async createRelation(): Promise<void> {}
+  async createProject(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async addProjectToInitiative(): Promise<void> {}
   async deleteRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not used in these tests");
@@ -192,12 +214,18 @@ class FakeLinear implements LinearWriter {
   }
 }
 
-function makeContext(linear: LinearWriter, config: GlobalConfig, dispatcher: Dispatcher): WorkerContext {
+function makeContext(
+  linear: LinearWriter,
+  config: GlobalConfig,
+  dispatcher: Dispatcher,
+  entry: ResolvedRepoEntry = makeEntry(),
+): WorkerContext {
   return {
     config,
     bookkeeping: freshBookkeeping(),
     dispatcher,
     linear,
+    entry,
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
     dryRun: false,
@@ -207,54 +235,36 @@ function makeContext(linear: LinearWriter, config: GlobalConfig, dispatcher: Dis
 
 // ---- implement worker -------------------------------------------------------
 
-describe("implementWorker — repo resolution (SPEC §3.5 item 6, §4.0)", () => {
-  it("reports an unresolved-repo skip, not a thrown tick, when the project's initiative is ambiguous", async () => {
+describe("implementWorker — scope resolution (SPEC §3.11)", () => {
+  it("reports an out-of-scope skip when the resolved initiative is not bound to this entry", async () => {
     const issue = makeIssue();
-    const linear = new FakeLinear([issue], async () => {
-      throw new LinearApiError("Project belongs to 2 initiatives", null, null);
-    });
-    const config = makeConfig({ repos: {} });
+    const linear = new FakeLinear([issue], async () => ({ id: "initiative-2", name: "Other Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
     const dispatcher = new FakeDispatcher();
-    const ctx = makeContext(linear, config, dispatcher);
+    const ctx = makeContext(linear, config, dispatcher, entry);
 
     const report = await implementWorker.run(ctx);
 
     expect(report.errors).toEqual([]);
     expect(dispatcher.calls).toEqual([]);
-    expect(report.skipped).toContainEqual({
-      stage: "implement",
-      issueId: issue.identifier,
-      code: "unresolved-repo",
-      message: "Project belongs to 2 initiatives",
-    });
-  });
-
-  it("reports an unresolved-repo skip when the resolved initiative is absent from config.repos", async () => {
-    const issue = makeIssue();
-    const linear = new FakeLinear([issue], async () => ({ id: "initiative-1", name: "Product" }));
-    const config = makeConfig({ repos: {} }); // no "initiative-1" entry
-    const dispatcher = new FakeDispatcher();
-    const ctx = makeContext(linear, config, dispatcher);
-
-    const report = await implementWorker.run(ctx);
-
-    expect(dispatcher.calls).toEqual([]);
-    const skip = report.skipped.find((s) => s.code === "unresolved-repo");
+    const skip = report.skipped.find((s) => s.code === "out-of-scope");
     expect(skip).toBeDefined();
     expect(skip?.issueId).toBe(issue.identifier);
-    expect(skip?.message).toContain("initiative-1");
+    expect(skip?.message).toContain("initiative-2");
   });
 
-  it("dispatches with the mapped repo path when the initiative resolves cleanly", async () => {
+  it("dispatches at the entry's repo path when the initiative is bound", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue], async () => ({ id: "initiative-1", name: "Product" }));
-    const config = makeConfig({ repos: { "initiative-1": "/repos/product" } });
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath: "/repos/product" });
+    const config = makeConfig();
     const dispatcher = new FakeDispatcher();
-    const ctx = makeContext(linear, config, dispatcher);
+    const ctx = makeContext(linear, config, dispatcher, entry);
 
     const report = await implementWorker.run(ctx);
 
-    expect(report.skipped.some((s) => s.code === "unresolved-repo")).toBe(false);
+    expect(report.skipped.some((s) => s.code === "out-of-scope")).toBe(false);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]?.cwd).toBe("/repos/product");
   });
@@ -262,27 +272,28 @@ describe("implementWorker — repo resolution (SPEC §3.5 item 6, §4.0)", () =>
 
 // ---- refine worker -----------------------------------------------------------
 
-describe("refineWorker — repo resolution (SPEC §3.5 item 6, §4.0)", () => {
-  it("reports an unresolved-repo skip when the initiative is missing from config.repos", async () => {
+describe("refineWorker — scope resolution (SPEC §3.11)", () => {
+  it("reports an out-of-scope skip when the initiative is not bound to this entry", async () => {
     const issue = makeIssue({
       state: { id: "state-0", name: "Backlog", type: "backlog", position: 0 },
       priority: 2,
       labels: [{ id: `label-${TYPE_LABEL.feature}`, name: TYPE_LABEL.feature, parentId: null }],
     });
-    const linear = new FakeLinear([issue], async () => ({ id: "initiative-2", name: "Product" }));
-    const config = makeConfig({ repos: {} });
+    const linear = new FakeLinear([issue], async () => ({ id: "initiative-2", name: "Other Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
     const dispatcher = new FakeDispatcher();
-    const ctx = makeContext(linear, config, dispatcher);
+    const ctx = makeContext(linear, config, dispatcher, entry);
 
     const report = await refineWorker.run(ctx);
 
     expect(dispatcher.calls).toEqual([]);
-    const skip = report.skipped.find((s) => s.code === "unresolved-repo");
+    const skip = report.skipped.find((s) => s.code === "out-of-scope");
     expect(skip).toBeDefined();
     expect(skip?.issueId).toBe(issue.identifier);
   });
 
-  it("still uses the scratch directory for a project-less issue rather than skipping", async () => {
+  it("reports an out-of-scope skip, with a no-project reason, for a project-less issue", async () => {
     const issue = makeIssue({
       state: { id: "state-0", name: "Backlog", type: "backlog", position: 0 },
       priority: 2,
@@ -292,14 +303,35 @@ describe("refineWorker — repo resolution (SPEC §3.5 item 6, §4.0)", () => {
     const linear = new FakeLinear([issue], async () => {
       throw new Error("must not be called when the issue has no project");
     });
-    const config = makeConfig({ repos: {} });
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
     const dispatcher = new FakeDispatcher();
-    const ctx = makeContext(linear, config, dispatcher);
+    const ctx = makeContext(linear, config, dispatcher, entry);
 
     const report = await refineWorker.run(ctx);
 
-    expect(report.skipped.some((s) => s.code === "unresolved-repo")).toBe(false);
+    expect(dispatcher.calls).toEqual([]);
+    const skip = report.skipped.find((s) => s.code === "out-of-scope");
+    expect(skip).toBeDefined();
+    expect(skip?.issueId).toBe(issue.identifier);
+  });
+
+  it("dispatches at the entry's repo path when the initiative is bound", async () => {
+    const issue = makeIssue({
+      state: { id: "state-0", name: "Backlog", type: "backlog", position: 0 },
+      priority: 2,
+      labels: [{ id: `label-${TYPE_LABEL.feature}`, name: TYPE_LABEL.feature, parentId: null }],
+    });
+    const linear = new FakeLinear([issue], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath: "/repos/product" });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await refineWorker.run(ctx);
+
+    expect(report.skipped.some((s) => s.code === "out-of-scope")).toBe(false);
     expect(dispatcher.calls).toHaveLength(1);
-    expect(dispatcher.calls[0]?.cwd).toContain("scratch");
+    expect(dispatcher.calls[0]?.cwd).toBe("/repos/product");
   });
 });

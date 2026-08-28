@@ -34,10 +34,9 @@ session.
 
 ## Configuration
 
-Foreman reads layered JSON config, repo overrides winning over global:
+Foreman reads one global config file:
 
-- `~/.foreman/config.json` — the repo map (keyed by initiative), loop tuning, repo defaults.
-- `<repo>/.foreman/config.json` — per-repo overrides, versioned with the code.
+- `~/.foreman/config.json` — the `repos` registry (alias → path, team, bound initiatives), loop tuning, and `repoDefaults`, deep-merged with each entry's overrides.
 
 ## Commands
 

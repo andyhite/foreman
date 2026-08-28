@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Dispatcher, GlobalConfig, LinearWriter } from "@foreman/core";
+import type { Dispatcher, GlobalConfig, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
 import { IN_FLIGHT_FILTER } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./workers/types.ts";
@@ -132,6 +132,8 @@ export interface SupervisorOptions {
   dispatcher: Dispatcher;
   bookkeeping: Bookkeeping;
   stateDir: string;
+  /** This instance's resolved registry entry (SPEC §3.11), threaded to every worker. */
+  entry: ResolvedRepoEntry;
   now?: () => Date;
   log?: (message: string) => void;
   dryRun: boolean;
@@ -147,6 +149,7 @@ export class Supervisor {
   readonly #linear: LinearWriter;
   readonly #dispatcher: Dispatcher;
   readonly #bookkeeping: Bookkeeping;
+  readonly #entry: ResolvedRepoEntry;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
   readonly #dryRun: boolean;
@@ -158,6 +161,7 @@ export class Supervisor {
     this.#linear = options.linear;
     this.#dispatcher = options.dispatcher;
     this.#bookkeeping = options.bookkeeping;
+    this.#entry = options.entry;
     this.#now = options.now ?? (() => new Date());
     this.#log = options.log ?? ((message) => console.log(`[foreman-loop] ${message}`));
     this.#dryRun = options.dryRun;
@@ -196,6 +200,7 @@ export class Supervisor {
       bookkeeping: this.#bookkeeping,
       dispatcher: this.#dispatcher,
       linear: this.#linear,
+      entry: this.#entry,
       now: this.#now,
       log: this.#log,
       dryRun: this.#dryRun,

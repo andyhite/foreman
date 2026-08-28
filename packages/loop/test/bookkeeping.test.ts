@@ -89,16 +89,16 @@ describe("Bookkeeping — in-flight tracking", () => {
     const bookkeeping = Bookkeeping.load(path);
     bookkeeping.recordDispatch({ agent: "foreman-implement", issueId: "ENG-1", dispatchId: "d1", startedAt: "now", stage: "implement" });
     bookkeeping.recordDispatch({ agent: "foreman-implement", issueId: "ENG-2", dispatchId: "d2", startedAt: "now", stage: "implement" });
-    bookkeeping.recordDispatch({ agent: "foreman-triage", issueId: null, dispatchId: "d3", startedAt: "now", stage: "triage" });
+    bookkeeping.recordDispatch({ agent: "foreman-review", issueId: null, dispatchId: "d3", startedAt: "now", stage: "review" });
 
     // Only ENG-1 still carries agent:running in Linear; ENG-2's lock was
     // released (or expired and swept) while this process wasn't running.
-    // The batch dispatch d3 is reconciled against live dispatch ids instead.
+    // The batch dispatch d3 (issueId null) is reconciled against live dispatch ids instead.
     bookkeeping.reconcile(new Set(["ENG-1"]), new Set(["d3"]));
 
     expect(bookkeeping.totalInFlight()).toBe(2);
     expect(bookkeeping.countInFlight("implement")).toBe(1);
-    expect(bookkeeping.countInFlight("triage")).toBe(1);
+    expect(bookkeeping.countInFlight("review")).toBe(1);
   });
 });
 

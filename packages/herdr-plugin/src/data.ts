@@ -70,6 +70,25 @@ export function loadBoardConfig(env: Record<string, string | undefined> = proces
   return config;
 }
 
+/**
+ * Resolves the single team key to scope the board's `LinearClient` to, per
+ * SPEC §17.4: the board is "one view over the whole team." `config.repos`
+ * entries carry an optional `team` (SPEC §3.10) — when every entry that
+ * names one agrees, that is unambiguously the operator's team; when they
+ * disagree, or none names one, the client is left unscoped rather than
+ * guessing (falls back to the client's own single-team resolution, SPEC
+ * §3.11's `resolveTeamKey`, which the board does not have the async Linear
+ * read to perform here).
+ */
+function resolveBoardTeamKey(config: GlobalConfig): string | null {
+  const teams = new Set(
+    Object.values(config.repos)
+      .map((entry) => entry.team)
+      .filter((team): team is string => typeof team === "string"),
+  );
+  return teams.size === 1 ? [...teams][0]! : null;
+}
+
 export function buildLinearClient(
   config: GlobalConfig,
   env: Record<string, string | undefined> = process.env,
@@ -77,7 +96,7 @@ export function buildLinearClient(
   return new LinearClient({
     apiKey: resolveLinearApiKey(config, env),
     endpoint: config.linear.endpoint,
-    teamKeys: config.linear.teamKeys,
+    team: resolveBoardTeamKey(config),
   });
 }
 
@@ -144,12 +163,37 @@ export async function fetchProposalEntries(client: LinearClient): Promise<Propos
 }
 
 /**
- * Reads the loop's bookkeeping file read-only (SPEC §17.4 board screen: "last
- * run per worker from the loop's bookkeeping file"). Absence — the loop has
- * never run, or hasn't written yet — is not an error: returns empty state.
+ * Reads the loop's bookkeeping read-only and aggregates it across every
+ * registry alias (SPEC §17.4 board screen: "last run per worker from the
+ * loop's bookkeeping file"). State is per-instance now — one `foreman loop`
+ * per repo, one bookkeeping file at
+ * `<stateDir>/<alias>/bookkeeping.json` (SPEC §3.11, §17.5) — but the board
+ * is "one view over the whole team" (§17.4), so it reads every alias's file
+ * and merges them rather than picking one. A missing file for a given alias
+ * — that instance has never run, or hasn't written yet — is not an error:
+ * it contributes nothing to the merge.
  */
 export function readLoopBookkeeping(config: GlobalConfig): LoopBookkeeping {
-  const path = join(expandHome(config.loop.stateDir), "bookkeeping.json");
+  const merged: LoopBookkeeping = { lastRunAt: {}, attempts: {}, pendingDecisions: [] };
+  for (const alias of Object.keys(config.repos)) {
+    const single = readAliasBookkeeping(config, alias);
+    for (const [stage, at] of Object.entries(single.lastRunAt)) {
+      const key = stage as keyof LoopBookkeeping["lastRunAt"];
+      const existing = merged.lastRunAt[key];
+      if (at && (!existing || at > existing)) merged.lastRunAt[key] = at;
+    }
+    for (const [issueId, attempt] of Object.entries(single.attempts)) {
+      const existing = merged.attempts[issueId];
+      if (!existing || attempt.lastAttemptAt > existing.lastAttemptAt) merged.attempts[issueId] = attempt;
+    }
+    merged.pendingDecisions.push(...single.pendingDecisions);
+  }
+  return merged;
+}
+
+/** Reads one instance's bookkeeping file (SPEC §3.11 per-alias state dir). */
+function readAliasBookkeeping(config: GlobalConfig, alias: string): LoopBookkeeping {
+  const path = join(expandHome(config.loop.stateDir), alias, "bookkeeping.json");
   if (!existsSync(path)) return EMPTY_BOOKKEEPING;
   let parsed: unknown;
   try {
@@ -175,8 +219,9 @@ export function readLoopBookkeeping(config: GlobalConfig): LoopBookkeeping {
 
 /**
  * SPEC §17.4 board screen: issues grouped by workflow state name, for the
- * ambient board. Team scoping lives in the client (`linear.teamKeys`), so this
- * no longer builds its own — one filter, applied to every read.
+ * ambient board. Team scoping lives in the client (`linear.team`, resolved by
+ * `resolveBoardTeamKey` above), so this no longer builds its own — one
+ * filter, applied to every read.
  */
 export async function fetchIssuesByState(client: LinearClient): Promise<Issue[]> {
   return client.issues({ limit: 500 });

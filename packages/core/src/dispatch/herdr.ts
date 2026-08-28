@@ -2,11 +2,12 @@
  * `HerdrDispatcher` (SPEC §17.2, §17.3).
  *
  * A real terminal pane per agent, live state, and the ability to attach and
- * take over. Layout: one workspace per repo (matching the product initiative
- * via the repo map), one tab per in-flight issue named for the issue, one
- * pane per agent with `--cwd` set to the issue's worktree, and a `foreman`
- * workspace holding the loop, the board, and a scratch tab for the
- * worktree-less triage/refine/review agents.
+ * take over. Layout: one workspace per repo (the instance and its bound
+ * initiatives from the registry, §3.11), one tab per in-flight issue named
+ * for the issue, one pane per agent with `--cwd` set to the issue's
+ * worktree, and a `foreman` workspace holding the board and `foreman
+ * intake` panes and a scratch tab for the worktree-less triage/refine/review
+ * agents — each repo workspace holds its own `foreman loop` pane.
  *
  * Everything herdr returns is read from its own JSON output — ids are never
  * predicted, because `pane move` changes a pane's qualified id and only the

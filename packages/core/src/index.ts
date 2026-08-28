@@ -8,11 +8,13 @@
  * an issue is ready, so nothing here is re-implemented downstream.
  */
 
+export * from "./apply/index.ts";
 export * from "./config/index.ts";
 export * from "./dispatch/index.ts";
 export * from "./domain/labels.ts";
 export * from "./domain/priority.ts";
 export * from "./domain/states.ts";
+export * from "./ensure.ts";
 export * from "./gates/index.ts";
 export * from "./git/index.ts";
 export * from "./github/index.ts";
@@ -23,3 +25,4 @@ export * from "./render/index.ts";
 export * from "./repo.ts";
 export * from "./schemas/index.ts";
 export * from "./schemas/parse.ts";
+export * from "./team.ts";

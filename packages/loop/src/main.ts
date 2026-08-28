@@ -1,5 +1,5 @@
 /**
- * The supervisor, reached as `foreman loop` (SPEC §17.5, §17.9, §18).
+ * The supervisor, reached as `foreman loop` (SPEC §17.5, §17.9, §18, §3.11).
  *
  * SPEC §17 names a `foreman-loop` binary; it was written before a `foreman`
  * CLI existed, and two binaries split by a hyphen is not a surface (see
@@ -9,32 +9,51 @@
  *
  * Hand-rolled argument parsing — the workspace's sole runtime dependency is
  * `@sinclair/typebox` (config validation), so no CLI framework here.
+ *
+ * One process per repo (SPEC §3.11): the instance's registry entry resolves
+ * either from `--repo <alias>` or by matching `process.cwd()` against the
+ * registry, and the team resolves from `--team`, the entry's `team`, or the
+ * sole team the credential can reach. Triage is not part of this loop —
+ * `foreman intake` (`index.ts`) owns the shared Triage inbox (SPEC §3.12).
  */
 
-import { LinearClient, loadGlobalConfig, lockTtlMs, resolveLinearApiKey } from "@foreman/core";
-import { HerdrDispatcher, PrintDispatcher } from "@foreman/core";
+import {
+  ConfigError,
+  ensureMaintenanceProjects,
+  HerdrDispatcher,
+  LinearClient,
+  PrintDispatcher,
+  entryForCwd,
+  expandHome,
+  loadGlobalConfig,
+  lockTtlMs,
+  resolveLinearApiKey,
+  resolveRepoEntry,
+  resolveTeamKey,
+} from "@foreman/core";
+import { join } from "node:path";
 import { Bookkeeping } from "./bookkeeping.ts";
 import { Supervisor, bookkeepingPathFor, resolveDispatcher } from "./supervisor.ts";
-import { triageWorker } from "./workers/triage.ts";
 import { refineWorker } from "./workers/refine.ts";
 import { implementWorker } from "./workers/implement.ts";
 import { reviewWorker } from "./workers/review.ts";
 import { reaperWorker } from "./workers/reaper.ts";
 import { mergeDetectWorker } from "./workers/merge-detect.ts";
 import type { Worker } from "./workers/types.ts";
-import { expandHome } from "@foreman/core";
 
 interface ParsedArgs {
   dryRun: boolean;
   stage: "dry-run" | "read-only" | "full" | null;
   once: boolean;
   workerNames: string[];
-  configPath: string | null;
+  repo: string | null;
+  team: string | null;
+  homePath: string | null;
   verbose: boolean;
   help: boolean;
 }
 
-const HELP_TEXT = `foreman loop — Foreman supervisor (SPEC §17)
+const HELP_TEXT = `foreman loop — Foreman supervisor (SPEC §17, §3.11)
 
 Usage: foreman loop [options]
 
@@ -42,7 +61,9 @@ Usage: foreman loop [options]
   --stage <s>             Override loop.stage: dry-run | read-only | full.
   --once                  Run one tick of the selected workers, then exit.
   --worker <name>          Restrict to this worker; repeatable.
-  --config <path>          Home directory containing .foreman/config.json (default: real home).
+  --repo <alias>           Registry alias to run as (default: resolved from cwd).
+  --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
+  --home <path>            Home directory containing .foreman/config.json (default: real home).
   --verbose                Log every skip, not just dispatch counts.
   --help                   Show this text.
 `;
@@ -53,7 +74,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     stage: null,
     once: false,
     workerNames: [],
-    configPath: null,
+    repo: null,
+    team: null,
+    homePath: null,
     verbose: false,
     help: false,
   };
@@ -80,10 +103,22 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.workerNames.push(value);
         break;
       }
-      case "--config": {
+      case "--repo": {
         const value = argv[++i];
-        if (!value) throw new Error("--config requires a path");
-        parsed.configPath = value;
+        if (!value) throw new Error("--repo requires an alias");
+        parsed.repo = value;
+        break;
+      }
+      case "--team": {
+        const value = argv[++i];
+        if (!value) throw new Error("--team requires a key");
+        parsed.team = value;
+        break;
+      }
+      case "--home": {
+        const value = argv[++i];
+        if (!value) throw new Error("--home requires a path");
+        parsed.homePath = value;
         break;
       }
       case "--verbose":
@@ -108,7 +143,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   }
 
   const { config: loadedConfig, warnings } = loadGlobalConfig(
-    args.configPath ? { home: args.configPath } : undefined,
+    args.homePath ? { home: args.homePath } : undefined,
   );
   for (const warning of warnings) console.error(`[foreman-loop] ${warning}`);
 
@@ -122,18 +157,53 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     },
   };
 
-  const apiKey = resolveLinearApiKey(config);
-  const linear = new LinearClient({
-    apiKey,
-    endpoint: config.linear.endpoint,
-    teamKeys: config.linear.teamKeys,
-  });
+  // Instance resolution (SPEC §3.11): `--repo` names a registry alias
+  // directly; otherwise the entry is inferred from cwd. A `ConfigError` here
+  // must exit loudly before anything is dispatched — an unresolvable
+  // instance has nothing safe to do.
+  let entry;
+  try {
+    entry = args.repo
+      ? resolveRepoEntry(config, args.repo, args.homePath ?? undefined)
+      : entryForCwd(config, process.cwd(), args.homePath ?? undefined);
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      console.error(`[foreman-loop] ${error.message}`);
+      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
 
-  const stateDir = expandHome(config.loop.stateDir);
+  const apiKey = resolveLinearApiKey(config);
+  // `resolveTeamKey` needs a client only to call `teams()`, which happens
+  // only when neither `--team` nor the entry's `team` supply a key. `team`
+  // scoping on `LinearClient` is a constructor option, not mutable state, so
+  // an unscoped client resolves the team first; every other call in this
+  // process then goes through a second, team-scoped client (SPEC §3.11) —
+  // simpler than threading an optional team through every query site.
+  const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
+
+  let team: string;
+  try {
+    team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: entry.team });
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      console.error(`[foreman-loop] ${error.message}`);
+      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
+
+  const stateDir = join(expandHome(config.loop.stateDir), entry.alias);
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));
 
   const log = (message: string): void => {
-    console.log(`[foreman-loop] ${message}`);
+    console.log(`[foreman-loop:${entry.alias}] ${message}`);
   };
 
   const dispatcher = await resolveDispatcher(
@@ -151,6 +221,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     dispatcher,
     bookkeeping,
     stateDir,
+    entry,
     dryRun: args.dryRun || config.loop.stage === "dry-run",
     log,
   });
@@ -165,25 +236,64 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
+  const allWorkers: Worker[] = [
+    reaperWorker,
+    refineWorker,
+    implementWorker,
+    reviewWorker,
+    mergeDetectWorker,
+  ];
+  const selected = args.workerNames.length > 0
+    ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))
+    : allWorkers;
+
+  /*
+   * Before `reconcile()`, which is the first Linear call. An operator debugging
+   * a 401 needs to know which instance, repo, and team they just started; a
+   * raw API error with no identity above it is unreadable once several
+   * instances are running (SPEC §3.11).
+   */
+  log(
+    `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
+      `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
+      `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
+  );
+
+  // Ensure pass (SPEC §3.11): every bound initiative must exist and have its
+  // standing Maintenance project before reconcile's first board read, so
+  // refine/implement never race a missing project. `team` here is a team
+  // *key*; `createProject` needs the UUID, so resolve it the same way the
+  // rest of this file resolves other Linear ids — via `teams()`.
+  try {
+    const teams = await linear.teams();
+    const teamRef = teams.find((candidate) => candidate.key === team);
+    if (!teamRef) {
+      throw new ConfigError(`Team "${team}" was not found for the ensure pass`, [
+        "the resolved team key no longer matches a team the credential can reach",
+      ]);
+    }
+    const ensureReports = await ensureMaintenanceProjects(linear, {
+      initiativeIds: entry.initiativeIds,
+      teamId: teamRef.id,
+    });
+    for (const report of ensureReports) {
+      log(
+        `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
+          `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      console.error(`[foreman-loop] ${error.message}`);
+      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+
   try {
     await supervisor.reconcile();
-
-    const allWorkers: Worker[] = [
-      reaperWorker,
-      triageWorker,
-      refineWorker,
-      implementWorker,
-      reviewWorker,
-      mergeDetectWorker,
-    ];
-    const selected = args.workerNames.length > 0
-      ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))
-      : allWorkers;
-
-    log(
-      `starting: stage=${config.loop.stage} dispatcher=${dispatcher.kind} ` +
-        `workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
-    );
 
     if (args.once) {
       const reports = await supervisor.runTick(selected);

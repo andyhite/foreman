@@ -145,29 +145,13 @@ describe("runWizard", () => {
     }
   });
 
-  it("uses $LINEAR_API_KEY from the environment without prompting, and maps initiatives picked via the Linear API", async () => {
+  it("resolves the Linear API key from the environment without prompting, and writes no repos key", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    const originalFetch = globalThis.fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
     process.env.LINEAR_API_KEY = "lin_api_test";
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-      const query = JSON.parse(String(init?.body)).query as string;
-      if (query.includes("query Initiatives")) {
-        return new Response(JSON.stringify({ data: { initiatives: { nodes: [{ id: "i1", name: "Plotroom" }] } } }));
-      }
-      if (query.includes("query Teams")) {
-        return new Response(
-          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }] } } }),
-        );
-      }
-      throw new Error(`unexpected query: ${query}`);
-    }) as unknown as typeof fetch;
 
     try {
       const prompter = new ScriptedPrompter();
-      prompter.multiSelectResult = ["i1"];
-      prompter.textAnswers['Repo path for "Plotroom"'] = "/repos/plotroom";
-
       await runWizard(
         baseOptions({ ompMode: "skip", herdrMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
         { prompter, runner: new RecordingRunner(), log: () => {} },
@@ -175,23 +159,19 @@ describe("runWizard", () => {
 
       expect(prompter.confirmCalls).not.toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
-      expect(config.repos).toEqual({ i1: "/repos/plotroom" });
-      expect(config.linear.teamKeys).toEqual(["ENG"]);
-      expect(config.linear.apiKeyFile ?? null).toBeNull();
+      expect(config.repos).toBeUndefined();
+      expect(config.linear?.apiKeyFile ?? null).toBeNull();
     } finally {
-      globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("falls back to manual initiative entry when the Linear API call fails", async () => {
+  it("prompts for and writes the Linear API key when not skipped and no env var is set", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    const originalFetch = globalThis.fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
-    process.env.LINEAR_API_KEY = "lin_api_test";
-    globalThis.fetch = (async () => new Response("bad request", { status: 400 })) as unknown as typeof fetch;
+    delete process.env.LINEAR_API_KEY;
 
     try {
       const prompter = new ScriptedPrompter([false]);
@@ -200,13 +180,29 @@ describe("runWizard", () => {
         { prompter, runner: new RecordingRunner(), log: () => {} },
       );
 
-      expect(prompter.confirmCalls).toContain("Map a Linear initiative id to a repo path now?");
+      expect(prompter.confirmCalls).toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
       expect(config.repos).toBeUndefined();
     } finally {
-      globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("closing message names `foreman init` as the next step, not `foreman loop`", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const logs: string[] = [];
+      await runWizard(baseOptions({ ompMode: "skip", herdrMode: "skip" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      expect(logs.some((line) => line.includes("foreman init"))).toBe(true);
+      expect(logs.some((line) => line.includes("foreman loop"))).toBe(false);
+    } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });

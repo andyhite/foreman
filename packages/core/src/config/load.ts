@@ -1,13 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { Value } from "@sinclair/typebox/value";
 import {
   type GlobalConfig,
   GlobalConfigSchema,
-  type RepoConfigFile,
-  RepoConfigFileSchema,
+  type RepoEntry,
   type RepoSettings,
+  type RepoSettingsOverride,
 } from "./schema.ts";
 
 /** Raised on any config problem the operator must fix before Foreman proceeds (SPEC §3.10). */
@@ -28,7 +28,71 @@ export interface LoadedConfig {
   warnings: string[];
 }
 
-export type ResolvedRepoConfig = RepoSettings & { repoPath: string };
+/**
+ * A registry entry with `repoDefaults` already merged in and its bindings
+ * flattened — what every consumer actually wants (SPEC §3.10, §3.11).
+ */
+export type ResolvedRepoEntry = RepoSettings & {
+  /** Registry key: the `--repo` argument, herdr workspace name, and state-dir segment. */
+  alias: string;
+  /** Absolute, `~`-expanded. */
+  repoPath: string;
+  /** `null` when the entry defers team resolution to `--team` or the sole accessible team. */
+  team: string | null;
+  initiativeIds: string[];
+};
+
+/**
+ * Canonical absolute path, symlinks resolved, for a path that may not exist.
+ *
+ * A plain `realpathSync` throws on a missing path, and falling back to the raw
+ * input is not good enough: on macOS an existing `/var/...` canonicalizes to
+ * `/private/var/...`, so comparing a resolved path against an unresolved one
+ * never matches. That breaks cwd matching in both directions — a cwd below a
+ * repo that has no such subdirectory on disk, and a registry entry whose repo
+ * is not cloned yet.
+ *
+ * So: resolve the longest existing ancestor, then re-append the remainder.
+ */
+function canonicalPath(p: string): string {
+  const absolute = resolve(p);
+  let head = absolute;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const resolved = realpathSync(head);
+      return tail.length === 0 ? resolved : join(resolved, ...tail);
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return absolute;
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Rejects an initiative bound in two registry entries (SPEC §3.10). The split
+ * per-repo files could not catch this — no single instance could see the
+ * collision — so it is checked once, here, at load.
+ */
+function assertInitiativesUnique(config: GlobalConfig, describeFor: string): void {
+  const ownerByInitiative: Record<string, string> = {};
+  const problems: string[] = [];
+  for (const alias of Object.keys(config.repos)) {
+    for (const id of boundInitiativeIds(config.repos[alias]!)) {
+      const owner = ownerByInitiative[id];
+      if (owner !== undefined) {
+        problems.push(`initiative ${id} is bound to both repos.${owner} and repos.${alias}`);
+        continue;
+      }
+      ownerByInitiative[id] = alias;
+    }
+  }
+  if (problems.length > 0) {
+    throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
+  }
+}
 
 /** `~` expands to `home` (default `os.homedir()`); any other path is returned unchanged. */
 export function expandHome(p: string, home: string = homedir()): string {
@@ -106,8 +170,9 @@ export function loadGlobalConfig(options?: {
   }
 
   const config = defaultAndValidateGlobalConfig(parsed, path);
+  assertInitiativesUnique(config, path);
   if (Object.keys(config.repos).length === 0) {
-    warnings.push("No repos mapped in config.repos; no Linear initiative resolves to a repo yet.");
+    warnings.push("No entries in config.repos; no repo is Foreman-managed yet.");
   }
 
   return { config, sources, warnings };
@@ -118,7 +183,7 @@ export function loadGlobalConfig(options?: {
  * whole-object replacement), so a repo overriding only `pr.draft` keeps the
  * default `pr.required` (SPEC §3.10).
  */
-function mergeRepoSettings(base: RepoSettings, override: Partial<RepoSettings>): RepoSettings {
+function mergeRepoSettings(base: RepoSettings, override: RepoSettingsOverride): RepoSettings {
   return {
     baseBranch: override.baseBranch ?? base.baseBranch,
     pr: { ...base.pr, ...override.pr },
@@ -129,41 +194,79 @@ function mergeRepoSettings(base: RepoSettings, override: Partial<RepoSettings>):
 }
 
 /**
- * Resolves the effective repo settings for `repoPath`: `config.repoDefaults`
- * deep-merged with `<repoPath>/.foreman/config.json` (repo wins) (SPEC §3.10).
+ * Every initiative ID bound to `entry`, discarding the optional path hints.
+ * Exported because it is the instance's scope set (SPEC §3.11) and intake's
+ * index key (SPEC §3.12), and both must read bindings the same way.
  */
-export function resolveRepoConfig(config: GlobalConfig, repoPath: string): ResolvedRepoConfig {
-  const path = join(repoPath, ".foreman", "config.json");
-
-  let override: RepoConfigFile = {};
-  if (existsSync(path)) {
-    const parsed = readJsonFile(path, "repo config");
-    const defaulted = Value.Default(RepoConfigFileSchema, parsed);
-    if (!Value.Check(RepoConfigFileSchema, defaulted)) {
-      const problems = formatValidationErrors(RepoConfigFileSchema, defaulted);
-      throw new ConfigError(`Invalid repo config at ${path}`, problems);
-    }
-    override = defaulted as RepoConfigFile;
-  }
-
-  const merged = mergeRepoSettings(config.repoDefaults, override);
-  return { ...merged, repoPath };
+export function boundInitiativeIds(entry: RepoEntry): string[] {
+  return entry.initiatives.map((binding) => (typeof binding === "string" ? binding : binding.id));
 }
 
 /**
- * Resolves the Linear initiative id → repo path map (SPEC §3.5). Throws before
- * any spawn if the initiative is unmapped, and expands a leading `~` in the
- * mapped path.
+ * Resolves the registry entry for `alias`: `config.repoDefaults` deep-merged
+ * with the entry's own overrides, entry winning (SPEC §3.10). The returned
+ * `repoPath` is `~`-expanded and absolute.
  */
-export function repoForInitiative(config: GlobalConfig, initiativeId: string, home?: string): string {
-  const repoPath = config.repos[initiativeId];
-  if (repoPath === undefined) {
-    throw new ConfigError(
-      `Linear initiative "${initiativeId}" is not mapped to a repo in config.repos`,
-      [`repos.${initiativeId} is unset`],
-    );
+export function resolveRepoEntry(config: GlobalConfig, alias: string, home?: string): ResolvedRepoEntry {
+  const entry = config.repos[alias];
+  if (entry === undefined) {
+    throw new ConfigError(`No repos entry named "${alias}"`, [
+      `repos.${alias} is unset; add it to ${join(home ?? homedir(), ".foreman", "config.json")}`,
+    ]);
   }
-  return expandHome(repoPath, home);
+
+  return {
+    ...mergeRepoSettings(config.repoDefaults, entry),
+    alias,
+    repoPath: expandHome(entry.path, home),
+    team: entry.team ?? null,
+    initiativeIds: boundInitiativeIds(entry),
+  };
+}
+
+/**
+ * Resolves the instance's own entry by matching `cwd` against registry paths
+ * (SPEC §3.11). Symlinks are resolved on both sides, and a cwd *inside* a
+ * registered repo matches it, so running from a subdirectory works.
+ *
+ * The longest matching path wins, which is what makes a registered repo nested
+ * inside another registered repo resolve to the inner one.
+ */
+export function entryForCwd(config: GlobalConfig, cwd: string, home?: string): ResolvedRepoEntry {
+  const target = canonicalPath(cwd);
+
+  let bestAlias: string | null = null;
+  let bestLength = -1;
+  for (const alias of Object.keys(config.repos)) {
+    const candidate = canonicalPath(expandHome(config.repos[alias]!.path, home));
+    const inside = target === candidate || target.startsWith(`${candidate}${sep}`);
+    if (inside && candidate.length > bestLength) {
+      bestAlias = alias;
+      bestLength = candidate.length;
+    }
+  }
+
+  if (bestAlias === null) {
+    throw new ConfigError(`No repos entry matches the working directory ${target}`, [
+      `add an entry under repos in ${join(home ?? homedir(), ".foreman", "config.json")}, or pass --repo <alias>`,
+    ]);
+  }
+  return resolveRepoEntry(config, bestAlias, home);
+}
+
+/**
+ * Inverts the registry into initiative ID → alias (SPEC §3.12). Intake is
+ * team-level and needs repos for repro and context reads; this is the whole of
+ * that lookup — no filesystem scanning, no refresh interval.
+ */
+export function initiativeIndex(config: GlobalConfig): Record<string, string> {
+  const index: Record<string, string> = {};
+  for (const alias of Object.keys(config.repos)) {
+    for (const id of boundInitiativeIds(config.repos[alias]!)) {
+      index[id] = alias;
+    }
+  }
+  return index;
 }
 
 /**

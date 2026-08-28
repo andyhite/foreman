@@ -8,16 +8,21 @@
  * changes underneath an untouched config.
  */
 
-import { defaultAndValidateGlobalConfig } from "@foreman/core";
+import { defaultAndValidateGlobalConfig, type RepoEntry } from "@foreman/core";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+/**
+ * A sparse slice of the global config. Both fields are optional because the two
+ * writers own disjoint parts of the file: `foreman setup` writes the Linear
+ * credential and never touches `repos`, `foreman init` writes exactly one
+ * `repos` entry and never touches the credential.
+ */
 export interface ConfigPatch {
-  repos: Record<string, string>;
-  linear: {
-    teamKeys: string[];
-    apiKeyFile: string | null;
+  repos?: Record<string, RepoEntry>;
+  linear?: {
+    apiKeyFile?: string | null;
   };
 }
 
@@ -28,8 +33,7 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
 }
 
 export interface ExistingConfig {
-  repos: Record<string, string>;
-  teamKeys: string[];
+  repos: Record<string, RepoEntry>;
   apiKeyFile: string | null;
 }
 
@@ -39,8 +43,7 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
   const existing = readExistingConfig(configPath);
   const linear = (existing.linear as Record<string, unknown> | undefined) ?? {};
   return {
-    repos: (existing.repos as Record<string, string> | undefined) ?? {},
-    teamKeys: Array.isArray(linear.teamKeys) ? (linear.teamKeys as string[]) : [],
+    repos: (existing.repos as Record<string, RepoEntry> | undefined) ?? {},
     apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
   };
 }
@@ -49,14 +52,13 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
 function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
   const merged = { ...existing };
 
-  if (Object.keys(patch.repos).length > 0) {
-    merged.repos = { ...(existing.repos as Record<string, string> | undefined), ...patch.repos };
+  if (patch.repos && Object.keys(patch.repos).length > 0) {
+    merged.repos = { ...(existing.repos as Record<string, RepoEntry> | undefined), ...patch.repos };
   }
 
   const existingLinear = (existing.linear as Record<string, unknown> | undefined) ?? {};
   const linearPatch: Record<string, unknown> = { ...existingLinear };
-  if (patch.linear.teamKeys.length > 0) linearPatch.teamKeys = patch.linear.teamKeys;
-  if (patch.linear.apiKeyFile) linearPatch.apiKeyFile = patch.linear.apiKeyFile;
+  if (patch.linear?.apiKeyFile) linearPatch.apiKeyFile = patch.linear.apiKeyFile;
   if (Object.keys(linearPatch).length > 0) merged.linear = linearPatch;
 
   return merged;

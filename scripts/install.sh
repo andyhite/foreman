@@ -62,9 +62,15 @@ printf '\n\033[1mRunning foreman setup...\033[0m\n\n'
 
 # Piped through `curl | bash`, this script's own stdin is the pipe, not a
 # terminal — reconnect the wizard to /dev/tty so it can still prompt
-# interactively. No /dev/tty (CI, a non-interactive shell) falls back to
-# --yes so the installer never hangs on a read from a closed stream.
-if [ -t 1 ] && [ -r /dev/tty ]; then
+# interactively. Reopening /dev/tty as a fresh fd breaks Bun's raw-mode
+# keypress reading (used by the checkbox prompts), so only do this when
+# stdin isn't already a real terminal — running the script directly
+# (`./scripts/install.sh`, not piped) needs no reconnection at all. No
+# /dev/tty (CI, a non-interactive shell) falls back to --yes so the
+# installer never hangs on a read from a closed stream.
+if [ -t 0 ]; then
+  "$FOREMAN_BIN_DIR/foreman" setup "$@"
+elif [ -t 1 ] && [ -r /dev/tty ]; then
   "$FOREMAN_BIN_DIR/foreman" setup "$@" < /dev/tty
 else
   "$FOREMAN_BIN_DIR/foreman" setup --yes "$@"

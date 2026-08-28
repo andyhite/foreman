@@ -15,10 +15,12 @@ import type { BlockRecord } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   ConfigError,
+  ensureMaintenanceProjects,
   ensureWorktree,
   isBudgetTruncation,
   newDispatchId,
   parseAgentOutput,
+  resolveTeamKey,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
@@ -33,7 +35,7 @@ import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
 import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome } from "./results/apply.ts";
 import { extractFromLifecycle, extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
-import { getConfig, getGitHub, getLinear, getContextDigest, initRuntime, resetRuntime } from "./runtime.ts";
+import { getConfig, getEntry, getGitHub, getLinear, getContextDigest, initRuntime, resetRuntime } from "./runtime.ts";
 
 const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -50,6 +52,7 @@ function toGuardDeps(pluginRoot: string): TaskGuardDeps {
     linear: getLinear(),
     github: getGitHub(),
     config: getConfig(),
+    entry: getEntry(),
     now: () => new Date(),
     newDispatchId: (agent, issueId, now) => newDispatchId(agent, issueId, now),
     ensureWorktree: (input) => ensureWorktree(input),
@@ -250,6 +253,42 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     if (existsSync(join(PLUGIN_ROOT, "agents"))) {
       const problems = checkSkillAutoload({ pluginRoot: PLUGIN_ROOT, cwd: ctx.cwd });
       for (const problem of problems) ctx.ui.notify(formatSkillGuardProblem(problem), "error");
+    }
+
+    // Ensure pass (SPEC §3.11): every initiative bound to this instance must
+    // exist and have its standing Maintenance project. Runs alongside the
+    // config/scope validation above, not inside `initRuntime` — that function
+    // is documented never to throw, so a failure here is surfaced the same
+    // way the config-validation block above surfaces its `ConfigError`: a
+    // `session_start` notification, never a thrown error.
+    if (!init.missingApiKey) {
+      try {
+        const entry = getEntry();
+        const linear = getLinear();
+        const teams = await linear.teams();
+        const teamKey = await resolveTeamKey({ linear: { teams: async () => teams }, entryTeam: entry.team });
+        const teamRef = teams.find((candidate) => candidate.key === teamKey);
+        if (!teamRef) {
+          throw new ConfigError(`Team "${teamKey}" was not found for the ensure pass`, [
+            "the resolved team key no longer matches a team the credential can reach",
+          ]);
+        }
+        const reports = await ensureMaintenanceProjects(linear, {
+          initiativeIds: entry.initiativeIds,
+          teamId: teamRef.id,
+        });
+        for (const report of reports) {
+          if (report.created) {
+            ctx.ui.notify(
+              `Foreman: created the Maintenance project for initiative "${report.initiativeName}".`,
+              "info",
+            );
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Foreman ensure pass failed: ${message}`, "error");
+      }
     }
 
     if (!init.missingApiKey) {

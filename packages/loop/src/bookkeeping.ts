@@ -49,8 +49,13 @@ export interface BookkeepingState {
   reviewedSha: Record<string, string>;
   inFlight: DispatchRecordEntry[];
   pendingDecisions: PendingDecision[];
-  /** Last time each stage worker completed a tick, for `/foreman-status` and the board. */
-  lastRunAt: Record<StageName, string | null>;
+  /**
+   * Last time each loop stage worker completed a tick, for `/foreman-status`
+   * and the board — plus `"intake"`, written only by the separate `foreman
+   * intake` process against its own `<stateDir>/intake/` bookkeeping file
+   * (SPEC §3.12), never the same file a loop instance writes.
+   */
+  lastRunAt: Record<StageName | "intake", string | null>;
 }
 
 const CURRENT_VERSION = 1;
@@ -64,7 +69,7 @@ export function emptyBookkeepingState(): BookkeepingState {
     reviewedSha: {},
     inFlight: [],
     pendingDecisions: [],
-    lastRunAt: { triage: null, refine: null, implement: null, review: null },
+    lastRunAt: { refine: null, implement: null, review: null, intake: null },
   };
 }
 
@@ -223,7 +228,7 @@ export class Bookkeeping {
     return this.#state.reviewedSha[issueId] ?? null;
   }
 
-  setLastRun(stage: StageName, now: Date): void {
+  setLastRun(stage: StageName | "intake", now: Date): void {
     this.#state.lastRunAt[stage] = now.toISOString();
   }
 }

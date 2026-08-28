@@ -10,10 +10,11 @@
  */
 
 import type { GateResult, GlobalConfig, Issue, LinearWriter } from "@foreman/core";
-import type { GitHubClient, EnsureWorktreeResult } from "@foreman/core";
+import type { GitHubClient, EnsureWorktreeResult, ResolvedRepoEntry } from "@foreman/core";
 import {
   AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
+  assertIssueInScope,
   LABEL_GROUP,
   branchNameFor,
   diffRange,
@@ -26,8 +27,6 @@ import {
   readLockComment,
   refinementGate,
   renderLockComment,
-  repoForIssue,
-  resolveRepoConfig,
   resolveState,
   worktreePathFor,
 } from "@foreman/core";
@@ -68,6 +67,8 @@ export interface TaskGuardDeps {
   linear: LinearWriter;
   github: GitHubClient;
   config: GlobalConfig;
+  /** This instance's resolved registry entry (SPEC §3.11) — the repo path and merged repo settings for implement/review dispatch. */
+  entry: ResolvedRepoEntry;
   now: () => Date;
   newDispatchId: (agent: string, issueId: string, now: Date) => string;
   ensureWorktree: (input: {
@@ -238,23 +239,23 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   let diffPath: string | null = null;
 
   if (stage === "implement") {
-    const repoPath = await repoForIssue({ linear: deps.linear, config: deps.config }, issue);
-    const repoSettings = resolveRepoConfig(deps.config, repoPath);
-    branch = branchNameFor(repoSettings.branchPattern, issue);
-    worktreePath = worktreePathFor(repoSettings.worktreePattern, repoPath, issue);
-    baseBranch = repoSettings.baseBranch;
+    await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
+    const repoPath = deps.entry.repoPath;
+    branch = branchNameFor(deps.entry.branchPattern, issue);
+    worktreePath = worktreePathFor(deps.entry.worktreePattern, repoPath, issue);
+    baseBranch = deps.entry.baseBranch;
     await deps.ensureWorktree({ repoPath, worktreePath, branch, baseBranch });
     const teamStates = await deps.linear.workflowStates(issue.team.id);
     const inProgress = resolveState("inProgress", teamStates);
     await deps.linear.updateIssue(issue.id, { stateId: inProgress.id });
   } else if (stage === "review") {
-    const repoPath = await repoForIssue({ linear: deps.linear, config: deps.config }, issue);
-    const repoSettings = resolveRepoConfig(deps.config, repoPath);
-    baseBranch = repoSettings.baseBranch;
+    await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
+    const repoPath = deps.entry.repoPath;
+    baseBranch = deps.entry.baseBranch;
     branch = issue.branchName;
     const pr = await deps.github.prForBranch(repoPath, branch);
     const diff =
-      repoSettings.pr.required && pr
+      deps.entry.pr.required && pr
         ? await deps.github.prDiff(repoPath, pr.number)
         : await diffRange(repoPath, baseBranch, branch);
     diffPath = await deps.writeDiffFile(identifier, diff);

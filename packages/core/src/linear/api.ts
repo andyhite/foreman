@@ -65,6 +65,12 @@ export interface LinearReader {
   initiative(initiativeId: string): Promise<Initiative | null>;
   /** Every initiative in the workspace — the setup wizard's picker. */
   initiatives(): Promise<InitiativeRef[]>;
+  /**
+   * Every project attached to an initiative — the ensure pass's existence
+   * check (SPEC §3.11). `Initiative.projects` is a direct edge, so this is one
+   * query, not a scan of `projects()` filtered by membership.
+   */
+  initiativeProjects(initiativeId: string): Promise<ProjectRef[]>;
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
@@ -99,6 +105,27 @@ export interface CreateIssueInput {
 export interface LinearWriter extends LinearReader {
   updateIssue(id: string, input: IssueMutation): Promise<Issue>;
   createIssue(input: CreateIssueInput): Promise<Issue>;
+  /**
+   * `teamIds` is required, not optional: Linear's `ProjectCreateInput` declares
+   * exactly two non-null fields, `name` and `teamIds` (SPEC §16 item 10,
+   * measured). This is why §3.11 says the ensure pass creates `Maintenance`
+   * "team-assigned" — the API permits nothing else.
+   */
+  createProject(input: {
+    name: string;
+    teamIds: LinearId[];
+    description?: string;
+    content?: string;
+  }): Promise<ProjectRef>;
+  /**
+   * Attaches an existing project to an initiative.
+   *
+   * A separate mutation because `ProjectCreateInput` has no `initiativeId`
+   * field at all (SPEC §16 item 10, measured) — creating a project under an
+   * initiative is unavoidably two calls, so a caller that needs both must
+   * handle the window between them.
+   */
+  addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void>;
   createComment(input: {
     issueId: string;
     body: string;

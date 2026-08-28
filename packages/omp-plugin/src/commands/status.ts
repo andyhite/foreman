@@ -13,15 +13,21 @@ import {
   LABEL_GROUP,
   PROPOSALS_FILTER,
   decodeMarker,
+  expandHome,
   labelsInGroup,
   lockState,
   MARKER_KIND,
   readLockComment,
   renderStatusConsole,
 } from "@foreman/core";
-import { getConfig } from "../runtime.ts";
+import { getConfig, getEntry } from "../runtime.ts";
 
-/** The loop's bookkeeping file this command reads read-only, tolerating absence. */
+/**
+ * The loop's bookkeeping file this command reads read-only, tolerating
+ * absence. NOTE: this reads `loop-state.json`, but the loop (per SPEC §17.5)
+ * writes `bookkeeping.json` — a pre-existing filename mismatch, out of scope
+ * for this migration; left as-is rather than fixed as a side quest.
+ */
 interface LoopBookkeeping {
   stage: string;
   workers: Array<{ worker: string; lastRunAt: string | null; dispatchCount: number }>;
@@ -96,6 +102,7 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
 
 export async function renderStatus(linear: LinearWriter): Promise<string> {
   const config = getConfig();
-  const state = await buildStatusState(linear, config.loop.stateDir);
+  const stateDir = join(expandHome(config.loop.stateDir), getEntry().alias);
+  const state = await buildStatusState(linear, stateDir);
   return renderStatusConsole(state);
 }

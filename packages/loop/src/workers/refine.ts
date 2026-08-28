@@ -1,22 +1,21 @@
 /**
  * Refine worker (SPEC §17.5): keeps the Ready buffer stocked to
  * `loop.readyBufferTarget`. Selects Backlog issues, plus `legacy` issues
- * sitting in Backlog or Todo (SPEC §4.9).
+ * sitting in Backlog or Todo (SPEC §4.9), scoped to this instance (SPEC §3.11).
  */
 
 import {
   BLOCKED_HUMAN_FILTER,
   LEGACY_LABEL,
-  expandHome,
   hasLabel,
   inState,
   newDispatchId,
   readyFilter,
-  repoForIssue,
 } from "@foreman/core";
 import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
+import { filterInScope } from "./types.ts";
 
 async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
@@ -30,42 +29,26 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   ]);
 
   const legacyInTodo = todoIssues.filter((issue) => hasLabel(issue, LEGACY_LABEL));
-  const backlog = [...backlogIssues, ...legacyInTodo];
+  const { inScope: backlog, skipped: scopeSkips } = await filterInScope(ctx, "refine", [
+    ...backlogIssues,
+    ...legacyInTodo,
+  ]);
 
   const snapshot: BoardSnapshot = {
-    inbox: [],
     backlog,
     todo: [],
     reviewCandidates: [],
     blockedHumanCount: blockedHuman.length,
-    proposedCount: 0,
     readyBufferCount: ready.length,
   };
 
-  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping, now);
+  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
+  skipped.push(...scopeSkips);
   if (!ctx.dryRun) {
     for (const decision of decisions) {
-
       if (!decision.issueId) continue;
       const issue = backlog.find((candidate) => candidate.identifier === decision.issueId);
       if (!issue) continue;
-      let cwd: string;
-      if (issue.project === null) {
-        cwd = `${expandHome(ctx.config.loop.stateDir)}/scratch`;
-      } else {
-        try {
-          cwd = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          skipped.push({
-            stage: "refine",
-            issueId: decision.issueId,
-            code: "unresolved-repo",
-            message,
-          });
-          continue;
-        }
-      }
       const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
       try {
         const handle = await ctx.dispatcher.dispatch({
@@ -73,7 +56,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
           issueId: decision.issueId,
           command: decision.command,
           dispatchId,
-          cwd,
+          cwd: ctx.entry.repoPath,
         });
         ctx.bookkeeping.recordDispatch({
           agent: decision.agent,

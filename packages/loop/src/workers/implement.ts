@@ -1,67 +1,48 @@
 /**
  * Implement worker (SPEC §17.5): pulls from Todo issues that pass the
- * implementation gate. On a retry-cap-exhausted attempt (§17.8), converts
- * the counter into a `blocked:needs-decision` Linear write instead of
- * dispatching again.
+ * implementation gate, scoped to this instance (SPEC §3.11). On a
+ * retry-cap-exhausted attempt (§17.8), converts the counter into a
+ * `blocked:needs-decision` Linear write instead of dispatching again.
  */
 
 import {
-  AGENT_LABEL,
   BLOCKED_HUMAN_FILTER,
-  BLOCKED_LABEL,
-  expandHome,
   inState,
   newDispatchId,
-  repoForIssue,
 } from "@foreman/core";
 import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
+import { filterInScope } from "./types.ts";
 import { applyPendingDecisions } from "./decisions.ts";
 
 async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
 
-  const [todo, blockedHuman] = await Promise.all([
+  const [todoIssues, blockedHuman] = await Promise.all([
     ctx.linear.issues({ filter: inState("Todo"), limit: 500 }),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
 
+  const { inScope: todo, skipped: scopeSkips } = await filterInScope(ctx, "implement", todoIssues);
+
   const snapshot: BoardSnapshot = {
-    inbox: [],
     backlog: [],
     todo,
     reviewCandidates: [],
     blockedHumanCount: blockedHuman.length,
-    proposedCount: 0,
     readyBufferCount: 0,
   };
 
-  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping, now);
+  const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
+  skipped.push(...scopeSkips);
 
   if (!ctx.dryRun) {
     for (const decision of decisions) {
       if (!decision.issueId) continue;
       const issue = todo.find((candidate) => candidate.identifier === decision.issueId);
       if (!issue) continue;
-      let cwd: string;
-      if (issue.project === null) {
-        cwd = `${expandHome(ctx.config.loop.stateDir)}/scratch`;
-      } else {
-        try {
-          cwd = await repoForIssue({ linear: ctx.linear, config: ctx.config }, issue);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          skipped.push({
-            stage: "implement",
-            issueId: decision.issueId,
-            code: "unresolved-repo",
-            message,
-          });
-          continue;
-        }
-      }
       const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
       try {
         const handle = await ctx.dispatcher.dispatch({
@@ -69,7 +50,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
           issueId: decision.issueId,
           command: decision.command,
           dispatchId,
-          cwd,
+          cwd: ctx.entry.repoPath,
         });
         ctx.bookkeeping.recordDispatch({
           agent: decision.agent,

@@ -33,8 +33,10 @@ import { LinearApiError } from "./api.ts";
 import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
+  INITIATIVE_PROJECTS_QUERY,
   INITIATIVE_QUERY_OBJECT_CONTENT,
   INITIATIVE_QUERY_SCALAR_CONTENT,
+  INITIATIVE_TO_PROJECT_CREATE_MUTATION,
   INITIATIVES_QUERY,
   ISSUE_BY_ID_QUERY,
   ISSUE_CREATE_MUTATION,
@@ -43,6 +45,7 @@ import {
   ISSUE_RELATION_DELETE_MUTATION,
   ISSUE_UPDATE_MUTATION,
   ISSUES_QUERY,
+  PROJECT_CREATE_MUTATION,
   PROJECT_INITIATIVES_QUERY,
   PROJECT_QUERY_OBJECT_CONTENT,
   PROJECT_QUERY_SCALAR_CONTENT,
@@ -127,13 +130,13 @@ export interface LinearClientOptions {
   endpoint?: string;
   fetch?: FetchLike;
   /*
-   * Teams Foreman manages (`linear.teamKeys`). Empty or absent means every
-   * team. Applied here rather than at each `issues()` call site: there are
-   * eighteen of them across the loop, the extension, and the board, and a
-   * config key that silently fails to scope one of them would hand another
-   * team's Triage queue to the triage batch.
+   * The one team this client is scoped to (SPEC §3.11). Absent means every
+   * team the credential reaches. Applied here rather than at each `issues()`
+   * call site: there are eighteen of them across the loop, the extension, and
+   * the board, and a config key that silently fails to scope one of them would
+   * hand another team's Triage queue to the intake batch.
    */
-  teamKeys?: readonly string[];
+  team?: string | null;
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -155,10 +158,7 @@ export class LinearClient implements LinearWriter {
     this.apiKey = options.apiKey;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
-    this.teamScope =
-      options.teamKeys && options.teamKeys.length > 0
-        ? { team: { key: { in: [...options.teamKeys] } } }
-        : null;
+    this.teamScope = options.team ? { team: { key: { eq: options.team } } } : null;
   }
 
   private async request<T>(
@@ -309,7 +309,7 @@ export class LinearClient implements LinearWriter {
   /**
    * ANDs the managed-team scope onto a caller's filter. A caller that passes no
    * filter still gets scoped; an unscoped client returns the filter untouched,
-   * so `teamKeys: []` keeps the documented "every team" meaning.
+   * so an absent `team` keeps the documented "every team" meaning.
    */
   private scoped(filter: IssueFilter | undefined): IssueFilter | undefined {
     if (!this.teamScope) return filter;
@@ -554,6 +554,57 @@ export class LinearClient implements LinearWriter {
   async projects(): Promise<ProjectRef[]> {
     const data = await this.request<{ projects: { nodes: ProjectRef[] } }>(PROJECTS_QUERY, {});
     return data.projects.nodes;
+  }
+
+  /** An initiative's projects — used to check for the standing Maintenance project (SPEC §3.11). */
+  async initiativeProjects(initiativeId: string): Promise<ProjectRef[]> {
+    const data = await this.request<{
+      initiative: { projects: { nodes: ProjectRef[] } } | null;
+    }>(INITIATIVE_PROJECTS_QUERY, { initiativeId });
+    return data.initiative?.projects.nodes ?? [];
+  }
+
+  /**
+   * `ProjectCreateInput` has exactly two non-null fields on the live API:
+   * `name: String!` and `teamIds: [String!]!` — a project cannot exist
+   * without a team, so `teamIds` is required here rather than optional.
+   * There is no `initiativeId`/`initiativeIds` field on the input at all
+   * (all 23 fields were dumped and checked); attaching a project to an
+   * initiative is a separate `initiativeToProjectCreate` mutation (measured
+   * against the live API this session; see SPEC §16 item 10), so a caller
+   * that needs both must call `addProjectToInitiative` afterward and handle
+   * the window between the two calls.
+   */
+  async createProject(input: {
+    name: string;
+    teamIds: LinearId[];
+    description?: string;
+    content?: string;
+  }): Promise<ProjectRef> {
+    const data = await this.request<{
+      projectCreate: { success: boolean; project: ProjectRef | null };
+    }>(PROJECT_CREATE_MUTATION, { input });
+    // `success` is non-null but `project` is nullable on `ProjectPayload` —
+    // a true `success` with a null `project` is still an error, not a
+    // `ProjectRef` with undefined fields.
+    if (!data.projectCreate.success || !data.projectCreate.project) {
+      throw new LinearApiError(`Failed to create project "${input.name}"`, null, null);
+    }
+    return data.projectCreate.project;
+  }
+
+  async addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void> {
+    const data = await this.request<{ initiativeToProjectCreate: { success: boolean } }>(
+      INITIATIVE_TO_PROJECT_CREATE_MUTATION,
+      { input },
+    );
+    if (!data.initiativeToProjectCreate.success) {
+      throw new LinearApiError(
+        `Failed to attach project ${input.projectId} to initiative ${input.initiativeId}`,
+        null,
+        null,
+      );
+    }
   }
 
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {

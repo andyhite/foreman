@@ -4,7 +4,8 @@
  * predicate by calling into `routing.ts` rather than re-deriving selection.
  */
 
-import type { Dispatcher, GlobalConfig, LinearWriter } from "@foreman/core";
+import type { Dispatcher, GlobalConfig, Issue, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
+import { issueScope } from "@foreman/core";
 import type { Bookkeeping } from "../bookkeeping.ts";
 import type { DispatchDecision, SkipRecord, StageName } from "../routing.ts";
 
@@ -21,6 +22,8 @@ export interface WorkerContext {
   bookkeeping: Bookkeeping;
   dispatcher: Dispatcher;
   linear: LinearWriter;
+  /** This instance's resolved registry entry (SPEC §3.11): repo path, team, bound initiatives, merged settings. */
+  entry: ResolvedRepoEntry;
   /** Injectable clock, so tests never depend on wall time. */
   now: () => Date;
   log: (message: string) => void;
@@ -32,4 +35,33 @@ export interface Worker {
   name: string;
   cadenceMs: number;
   run(ctx: WorkerContext): Promise<WorkerReport>;
+}
+
+/**
+ * Filters `issues` down to the ones in this instance's scope (SPEC §3.11):
+ * their project's initiative must be bound to `ctx.entry`. Out-of-scope
+ * issues never reach a worker's dispatch logic — they belong to another
+ * instance, so this is a routine, silent skip, not an error.
+ */
+export async function filterInScope(
+  ctx: WorkerContext,
+  stage: StageName,
+  issues: readonly Issue[],
+): Promise<{ inScope: Issue[]; skipped: SkipRecord[] }> {
+  const inScope: Issue[] = [];
+  const skipped: SkipRecord[] = [];
+  for (const issue of issues) {
+    const verdict = await issueScope({ linear: ctx.linear, entry: ctx.entry }, issue);
+    if (verdict.inScope) {
+      inScope.push(issue);
+    } else {
+      skipped.push({
+        stage,
+        issueId: issue.identifier,
+        code: "out-of-scope",
+        message: verdict.message ?? `${issue.identifier} is out of scope for repos.${ctx.entry.alias}`,
+      });
+    }
+  }
+  return { inScope, skipped };
 }

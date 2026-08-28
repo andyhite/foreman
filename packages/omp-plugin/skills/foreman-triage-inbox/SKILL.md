@@ -15,7 +15,7 @@ implementation gate downstream cares about `type:`, priority, and estimate.
 
 - Each Triage item: title, description, comments, reporter.
 - The existing backlog, for dedupe comparison (`foreman_linear_read`).
-- The repo, read-only, for repro attempts — resolved via the repo map (§3.5).
+- The repo, read-only, for repro attempts — resolved via the global `repos` registry (§3.10, §3.12).
 
 ## Procedure
 

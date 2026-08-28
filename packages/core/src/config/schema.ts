@@ -1,38 +1,44 @@
 import { type Static, Type } from "@sinclair/typebox";
 
 /**
- * `.foreman/config.json` (SPEC §3.10).
+ * `~/.foreman/config.json` (SPEC §3.10).
  *
- * Two layers, deep-merged, repo wins. Every number quoted elsewhere in the spec
- * is a default defined here, not a constant.
+ * One global file, no per-repo config: the `repos` registry is the single
+ * table binding repos to teams and initiatives, so both consumers share one
+ * lookup. Every number quoted elsewhere in the spec is a default defined
+ * here, not a constant.
  *
  * `additionalProperties: false` everywhere is deliberate: a typo that silently
  * falls back to a default is the config-file equivalent of `autoload-skills`
  * dropping an unknown skill name without a warning.
  */
 
-/** Per-repo settings. Also the shape of the global `repoDefaults` block. */
+export const PrSettingsSchema = Type.Object(
+  {
+    required: Type.Boolean({ default: true }),
+    draft: Type.Boolean({ default: false }),
+    ciRequired: Type.Boolean({ default: true }),
+  },
+  { additionalProperties: false, default: {} },
+);
+
+export const MergeSettingsSchema = Type.Object(
+  {
+    strategy: Type.Union(
+      [Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase")],
+      { default: "squash" },
+    ),
+    deleteBranch: Type.Boolean({ default: true }),
+  },
+  { additionalProperties: false, default: {} },
+);
+
+/** The fully-populated shape: the `repoDefaults` block, and what consumers receive after merging. */
 export const RepoSettingsSchema = Type.Object(
   {
     baseBranch: Type.String({ default: "main", minLength: 1 }),
-    pr: Type.Object(
-      {
-        required: Type.Boolean({ default: true }),
-        draft: Type.Boolean({ default: false }),
-        ciRequired: Type.Boolean({ default: true }),
-      },
-      { additionalProperties: false, default: {} },
-    ),
-    merge: Type.Object(
-      {
-        strategy: Type.Union(
-          [Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase")],
-          { default: "squash" },
-        ),
-        deleteBranch: Type.Boolean({ default: true }),
-      },
-      { additionalProperties: false, default: {} },
-    ),
+    pr: PrSettingsSchema,
+    merge: MergeSettingsSchema,
     /** Tokens: `<issue-id>` (lowercased identifier), `<slug>`, `<ISSUE-ID>`, `<repo>`. */
     branchPattern: Type.String({ default: "<issue-id>-<slug>", minLength: 1 }),
     /** Resolved relative to the repo directory. */
@@ -43,13 +49,35 @@ export const RepoSettingsSchema = Type.Object(
 
 export type RepoSettings = Static<typeof RepoSettingsSchema>;
 
+/**
+ * What a registry entry may override. Deliberately *deep*-partial: a plain
+ * `Type.Partial(RepoSettingsSchema)` makes only the top-level keys optional,
+ * so `"pr": { "required": false }` — the override the spec itself gives as the
+ * example (SPEC §3.10) — would fail for the missing `draft` and `ciRequired`.
+ *
+ * No `default` on any member: an override is distinguishable from "inherit"
+ * only by being absent, and `mergeRepoSettings` spreads these over the
+ * defaults key-by-key.
+ */
+export const RepoSettingsOverrideSchema = Type.Object(
+  {
+    baseBranch: Type.Optional(Type.String({ minLength: 1 })),
+    pr: Type.Optional(Type.Partial(PrSettingsSchema, { additionalProperties: false })),
+    merge: Type.Optional(Type.Partial(MergeSettingsSchema, { additionalProperties: false })),
+    branchPattern: Type.Optional(Type.String({ minLength: 1 })),
+    worktreePattern: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+export type RepoSettingsOverride = Static<typeof RepoSettingsOverrideSchema>;
+
 export const LoopSettingsSchema = Type.Object(
   {
     /** Global cap on concurrent agents. This is the one that protects you (SPEC §17.6). */
     wipGlobal: Type.Integer({ default: 3, minimum: 1 }),
     wip: Type.Object(
       {
-        triage: Type.Integer({ default: 1, minimum: 1 }),
         refine: Type.Integer({ default: 2, minimum: 1 }),
         implement: Type.Integer({ default: 3, minimum: 1 }),
         review: Type.Integer({ default: 2, minimum: 1 }),
@@ -66,8 +94,6 @@ export const LoopSettingsSchema = Type.Object(
     retryCap: Type.Integer({ default: 2, minimum: 1 }),
     reviewCycleCap: Type.Integer({ default: 2, minimum: 1 }),
     cadenceMinutes: Type.Integer({ default: 5, minimum: 1 }),
-    /** Local time-of-day window in which the daily triage batch may start. */
-    triageWindow: Type.String({ default: "06:00", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }),
     /**
      * Autonomy staging (SPEC §17.9). Defaults to the safest rung, so a loop
      * started before its operator is ready logs instead of dispatching.
@@ -97,8 +123,11 @@ export const LoopSettingsSchema = Type.Object(
 
 export type LoopSettings = Static<typeof LoopSettingsSchema>;
 
-export const TriageSettingsSchema = Type.Object(
+/** The team-level intake process (SPEC §3.12). */
+export const IntakeSettingsSchema = Type.Object(
   {
+    /** Local time-of-day window in which the daily intake batch may start. */
+    window: Type.String({ default: "06:00", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }),
     /** Un-actioned `Low` items older than this are proposed for cancellation. */
     staleLowDays: Type.Integer({ default: 90, minimum: 1 }),
     /** Inbox items handed to one triage batch. */
@@ -107,7 +136,7 @@ export const TriageSettingsSchema = Type.Object(
   { additionalProperties: false, default: {} },
 );
 
-export type TriageSettings = Static<typeof TriageSettingsSchema>;
+export type IntakeSettings = Static<typeof IntakeSettingsSchema>;
 
 export const LinearSettingsSchema = Type.Object(
   {
@@ -121,8 +150,6 @@ export const LinearSettingsSchema = Type.Object(
     apiKeyFile: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
       default: null,
     }),
-    /** Team keys Foreman manages, e.g. `["ENG"]`. Empty means every team. */
-    teamKeys: Type.Array(Type.String({ minLength: 1 }), { default: [] }),
     endpoint: Type.String({ default: "https://api.linear.app/graphql", minLength: 1 }),
   },
   { additionalProperties: false, default: {} },
@@ -154,27 +181,79 @@ export const AgentSettingsSchema = Type.Object(
 
 export type AgentSettings = Static<typeof AgentSettingsSchema>;
 
-/** `~/.foreman/config.json`. */
+/**
+ * One initiative bound to a repo: a bare initiative ID, or an ID plus the
+ * subdirectory hosting that app. The path hint feeds context assembly and
+ * implement's initial reads, and only means anything for a monorepo binding
+ * several initiatives (SPEC §3.10, §3.11).
+ *
+ * IDs, never names — grouping prefixes rename (SPEC §3.5 item 6).
+ */
+export const InitiativeBindingSchema = Type.Union([
+  Type.String({ minLength: 1 }),
+  Type.Object(
+    {
+      id: Type.String({ minLength: 1 }),
+      /** Relative to the entry's `path`. */
+      path: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+export type InitiativeBinding = Static<typeof InitiativeBindingSchema>;
+
+/**
+ * One `repos` registry entry, keyed by alias (SPEC §3.10). The alias is the
+ * `--repo` argument, the herdr workspace name, and the state-dir segment.
+ *
+ * Carries optional `RepoSettings` overrides that deep-merge over
+ * `repoDefaults`, entry wins. Those overrides MUST stay sparse: they are
+ * distinguishable from "inherit the default" only by being absent. This holds
+ * because `repos` is a `Type.Record`, and `Value.Default` does not recurse
+ * into record values — so never call `Value.Default` on this schema directly,
+ * or every entry silently acquires a full set of defaults and `repoDefaults`
+ * stops winning anything.
+ */
+export const RepoEntrySchema = Type.Composite(
+  [
+    Type.Object(
+      {
+        /** Repo root. `~` expands. Matched against cwd to resolve the instance (SPEC §3.11). */
+        path: Type.String({ minLength: 1 }),
+        /** Linear team key. Optional when the credential reaches exactly one team (SPEC §3.11). */
+        team: Type.Optional(Type.String({ minLength: 1 })),
+        /** One or more; a monorepo lists several. */
+        initiatives: Type.Array(InitiativeBindingSchema, { minItems: 1 }),
+      },
+      { additionalProperties: false },
+    ),
+    RepoSettingsOverrideSchema,
+  ],
+  { additionalProperties: false },
+);
+
+export type RepoEntry = Static<typeof RepoEntrySchema>;
+
+/** `~/.foreman/config.json` — the only config file (SPEC §3.10). */
 export const GlobalConfigSchema = Type.Object(
   {
-    /** Linear initiative id → repo path. The only place Foreman learns this (SPEC §3.5). */
-    repos: Type.Record(Type.String(), Type.String({ minLength: 1 }), {
-      default: {},
-    }),
     loop: LoopSettingsSchema,
-    triage: TriageSettingsSchema,
+    intake: IntakeSettingsSchema,
     linear: LinearSettingsSchema,
     agent: AgentSettingsSchema,
+    /** Inherited by every `repos` entry. */
     repoDefaults: RepoSettingsSchema,
+    /**
+     * Alias → entry. The single table binding repos to teams and initiatives:
+     * instances resolve their own scope from it by cwd, intake inverts it in
+     * memory for initiative→repo (SPEC §3.10, §3.11, §3.12).
+     */
+    repos: Type.Record(Type.String({ minLength: 1 }), RepoEntrySchema, {
+      default: {},
+    }),
   },
   { additionalProperties: false, default: {} },
 );
 
 export type GlobalConfig = Static<typeof GlobalConfigSchema>;
-
-/** `<repo>/.foreman/config.json` — repo keys only, versioned with the code they govern. */
-export const RepoConfigFileSchema = Type.Partial(RepoSettingsSchema, {
-  additionalProperties: false,
-});
-
-export type RepoConfigFile = Static<typeof RepoConfigFileSchema>;

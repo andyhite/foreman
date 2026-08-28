@@ -4,14 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConfigError,
+  boundInitiativeIds,
+  entryForCwd,
   expandHome,
+  initiativeIndex,
   loadGlobalConfig,
   lockTtlMs,
-  repoForInitiative,
   resolveLinearApiKey,
-  resolveRepoConfig,
+  resolveRepoEntry,
 } from "../src/config/index.ts";
-import type { GlobalConfig } from "../src/config/schema.ts";
+import type { GlobalConfig, RepoEntry } from "../src/config/schema.ts";
 
 function makeHome(): string {
   return mkdtempSync(join(tmpdir(), "foreman-config-"));
@@ -19,12 +21,6 @@ function makeHome(): string {
 
 function writeGlobalConfig(home: string, contents: unknown): void {
   const dir = join(home, ".foreman");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "config.json"), JSON.stringify(contents), "utf8");
-}
-
-function writeRepoConfig(repoPath: string, contents: unknown): void {
-  const dir = join(repoPath, ".foreman");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "config.json"), JSON.stringify(contents), "utf8");
 }
@@ -119,62 +115,206 @@ describe("loadGlobalConfig", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("throws ConfigError when an initiative is bound to two entries", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: {
+          plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] },
+          zero: { path: "~/code/zero", initiatives: ["init-1"] },
+        },
+      });
+      try {
+        loadGlobalConfig({ home });
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConfigError);
+        const configError = error as ConfigError;
+        expect(configError.problems.some((p) => p.includes("init-1") && p.includes("plotroom") && p.includes("zero"))).toBe(true);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
-describe("resolveRepoConfig", () => {
-  it("deep-merges repoDefaults with the repo file, repo winning, siblings kept", () => {
+describe("resolveRepoEntry", () => {
+  it("deep-merges repoDefaults with the entry, entry winning, siblings kept", () => {
     const home = makeHome();
-    const repo = mkdtempSync(join(tmpdir(), "foreman-repo-"));
     try {
-      writeGlobalConfig(home, { repoDefaults: { pr: { required: true, draft: false } } });
-      writeRepoConfig(repo, { pr: { draft: true } });
+      writeGlobalConfig(home, {
+        repoDefaults: { pr: { required: true, draft: false } },
+        repos: {
+          plotroom: { path: "~/code/plotroom", initiatives: ["init-1"], pr: { draft: true } },
+        },
+      });
       const { config } = loadGlobalConfig({ home });
-      const resolved = resolveRepoConfig(config, repo);
+      const resolved = resolveRepoEntry(config, "plotroom", home);
       expect(resolved.pr.draft).toBe(true);
       expect(resolved.pr.required).toBe(true);
       expect(resolved.pr.ciRequired).toBe(true);
-      expect(resolved.repoPath).toBe(repo);
+      expect(resolved.repoPath).toBe(join(home, "code", "plotroom"));
+      expect(resolved.alias).toBe("plotroom");
+      expect(resolved.initiativeIds).toEqual(["init-1"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
-      rmSync(repo, { recursive: true, force: true });
     }
   });
 
-  it("falls back entirely to repoDefaults when no repo file exists", () => {
+  it("falls back entirely to repoDefaults when the entry has no overrides", () => {
     const home = makeHome();
-    const repo = mkdtempSync(join(tmpdir(), "foreman-repo-"));
     try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
       const { config } = loadGlobalConfig({ home });
-      const resolved = resolveRepoConfig(config, repo);
+      const resolved = resolveRepoEntry(config, "plotroom", home);
       expect(resolved.baseBranch).toBe("main");
       expect(resolved.merge.strategy).toBe("squash");
     } finally {
       rmSync(home, { recursive: true, force: true });
-      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a sparse override's sibling keys at the repoDefaults value", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repoDefaults: { baseBranch: "trunk", merge: { strategy: "rebase", deleteBranch: false } },
+        repos: {
+          plotroom: {
+            path: "~/code/plotroom",
+            initiatives: ["init-1"],
+            merge: { strategy: "merge" },
+          },
+        },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const resolved = resolveRepoEntry(config, "plotroom", home);
+      expect(resolved.merge.strategy).toBe("merge");
+      expect(resolved.merge.deleteBranch).toBe(false);
+      expect(resolved.baseBranch).toBe("trunk");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("throws ConfigError for an unknown alias", () => {
+    const home = makeHome();
+    try {
+      const { config } = loadGlobalConfig({ home });
+      expect(() => resolveRepoEntry(config, "unknown-alias", home)).toThrow(ConfigError);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });
 
-describe("repoForInitiative", () => {
-  it("expands a leading ~ using the given home", () => {
+describe("entryForCwd", () => {
+  it("matches an exact registered path", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { repos: { "init-1": "~/code/plotroom" } });
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
       const { config } = loadGlobalConfig({ home });
-      expect(repoForInitiative(config, "init-1", home)).toBe(join(home, "code", "plotroom"));
+      const cwd = join(home, "code", "plotroom");
+      mkdirSync(cwd, { recursive: true });
+      const resolved = entryForCwd(config, cwd, home);
+      expect(resolved.alias).toBe("plotroom");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("throws ConfigError naming the initiative id for an unmapped initiative", () => {
+  it("matches from a subdirectory of the registered path", () => {
     const home = makeHome();
     try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
       const { config } = loadGlobalConfig({ home });
-      expect(() => repoForInitiative(config, "unmapped-initiative")).toThrow(ConfigError);
+      const cwd = join(home, "code", "plotroom", "apps", "zero");
+      mkdirSync(cwd, { recursive: true });
+      const resolved = entryForCwd(config, cwd, home);
+      expect(resolved.alias).toBe("plotroom");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("prefers the longest matching path for a nested registered repo", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: {
+          outer: { path: "~/code/plotroom", initiatives: ["init-1"] },
+          inner: { path: "~/code/plotroom/apps/zero", initiatives: ["init-2"] },
+        },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const cwd = join(home, "code", "plotroom", "apps", "zero", "src");
+      mkdirSync(cwd, { recursive: true });
+      const resolved = entryForCwd(config, cwd, home);
+      expect(resolved.alias).toBe("inner");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("throws ConfigError when no entry matches", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const cwd = join(home, "somewhere", "else");
+      mkdirSync(cwd, { recursive: true });
+      expect(() => entryForCwd(config, cwd, home)).toThrow(ConfigError);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("expands ~ in the registry path before matching", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const cwd = join(home, "code", "plotroom");
+      mkdirSync(cwd, { recursive: true });
+      const resolved = entryForCwd(config, cwd, home);
+      expect(resolved.repoPath).toBe(cwd);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("initiativeIndex", () => {
+  it("indexes both bare-string and {id,path} bindings by alias", () => {
+    const entries: Record<string, RepoEntry> = {
+      plotroom: {
+        path: "~/code/plotroom",
+        initiatives: ["init-fleet", { id: "init-zero", path: "apps/zero" }],
+      },
+    };
+    const config = { repos: entries } as unknown as GlobalConfig;
+    expect(initiativeIndex(config)).toEqual({ "init-fleet": "plotroom", "init-zero": "plotroom" });
+  });
+});
+
+describe("boundInitiativeIds", () => {
+  it("discards path hints and returns bare ids", () => {
+    const entry: RepoEntry = {
+      path: "~/code/plotroom",
+      initiatives: ["init-fleet", { id: "init-zero", path: "apps/zero" }],
+    } as RepoEntry;
+    expect(boundInitiativeIds(entry)).toEqual(["init-fleet", "init-zero"]);
   });
 });
 

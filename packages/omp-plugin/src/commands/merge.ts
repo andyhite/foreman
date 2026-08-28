@@ -6,9 +6,9 @@
  */
 
 import type { GitHubClient, LinearWriter } from "@foreman/core";
-import { decodeMarker, gateSummary, MARKER_KIND, repoForIssue, resolveRepoConfig, reviewGate } from "@foreman/core";
+import { assertIssueInScope, decodeMarker, gateSummary, MARKER_KIND, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
-import { getConfig } from "../runtime.ts";
+import { getEntry } from "../runtime.ts";
 
 export interface MergeCommandResult {
   merged: boolean;
@@ -30,9 +30,10 @@ export async function runMerge(linear: LinearWriter, github: GitHubClient, issue
   if (!issue) return { merged: false, message: `Unknown issue "${issueId}".` };
   if (!issue.project) return { merged: false, message: `${issueId} has no project; cannot resolve its repo.` };
 
-  const config = getConfig();
-  const repoPath = await repoForIssue({ linear, config }, issue);
-  const repoSettings = resolveRepoConfig(config, repoPath);
+  const entry = getEntry();
+  await assertIssueInScope({ linear, entry }, issue);
+  const repoPath = entry.repoPath;
+  const repoSettings = entry;
   const branch = issue.branchName;
 
   const pr = await github.prForBranch(repoPath, branch);

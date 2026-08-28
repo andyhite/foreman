@@ -13,6 +13,7 @@ import type {
   IssueLabel,
   IssueMutation,
   LinearWriter,
+  ResolvedRepoEntry,
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
@@ -96,6 +97,9 @@ class FakeLinear implements LinearWriter {
   async initiatives() {
     return [];
   }
+  async initiativeProjects() {
+    return [];
+  }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_TODO, STATE_IN_PROGRESS];
   }
@@ -129,6 +133,10 @@ class FakeLinear implements LinearWriter {
   async createIssue(input: CreateIssueInput): Promise<Issue> {
     return makeIssue({ id: `created-${input.title}`, title: input.title });
   }
+  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string }) {
+    return { id: `project-created-${input.name}`, name: input.name };
+  }
+  async addProjectToInitiative() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.createCommentCalls.push(input);
     return { id: "comment-1", body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };
@@ -149,26 +157,30 @@ class FakeLinear implements LinearWriter {
 
 function makeConfig(): GlobalConfig {
   return {
-    repos: { "initiative-1": "/repo" },
+    repos: {
+      test: {
+        path: "/repo",
+        team: "ENG",
+        initiatives: ["initiative-1"],
+      },
+    },
     loop: {
       wipGlobal: 3,
-      wip: { triage: 1, refine: 2, implement: 3, review: 2 },
+      wip: { refine: 2, implement: 3, review: 2 },
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      triageWindow: "06:00",
       stage: "dry-run",
       dispatcher: "print",
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    triage: { staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
-      teamKeys: [],
       endpoint: "https://api.linear.app/graphql",
     },
     agent: {
@@ -188,11 +200,28 @@ function makeConfig(): GlobalConfig {
   } as GlobalConfig;
 }
 
+/** The registry entry `makeConfig()`'s `repos.test` resolves to — repoDefaults already merged in. */
+function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntry {
+  return {
+    alias: "test",
+    repoPath: "/repo",
+    team: "ENG",
+    initiativeIds: ["initiative-1"],
+    baseBranch: "main",
+    pr: { required: true, draft: false, ciRequired: true },
+    merge: { strategy: "squash", deleteBranch: true },
+    branchPattern: "<issue-id>-<slug>",
+    worktreePattern: "../<repo>-<ISSUE-ID>",
+    ...overrides,
+  };
+}
+
 function makeDeps(linear: LinearWriter, overrides: Partial<TaskGuardDeps> = {}): TaskGuardDeps {
   return {
     linear,
     github: new GitHubClient(),
     config: makeConfig(),
+    entry: makeEntry(),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     newDispatchId: (agent, issueId) => `${agent}-${issueId}-dispatch-1`,
     ensureWorktree: async (input) => ({ created: true, branchExisted: false, worktreePath: input.worktreePath }),
@@ -301,6 +330,16 @@ describe("prepareTaskCall — refusals", () => {
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
     expect(decision.reason).toContain("belongs to 2 initiatives");
+  });
+
+  it("refuses an out-of-scope issue instead of guessing (SPEC §3.11)", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    linear.initiativesByProject.set("project-1", [{ id: "initiative-2", name: "Other" }]);
+    const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
+    expect(decision.block).toBe(true);
+    expect(decision.reason).toContain("initiative-2");
+    expect(decision.reason).toContain("not bound");
   });
 });
 

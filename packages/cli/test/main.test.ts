@@ -10,10 +10,16 @@ const entrypoint = (): string => join(import.meta.dir, "..", "src", "main.ts");
 const repoRoot = (): string => join(import.meta.dir, "..", "..", "..");
 
 describe("parseArgs", () => {
-  it("recognizes setup and its init alias", () => {
+  it("treats setup and init as distinct commands, not aliases", () => {
     expect(parseArgs(["setup"]).command).toBe("setup");
-    expect(parseArgs(["init"]).command).toBe("setup");
+    expect(parseArgs(["init"]).command).toBe("init");
     expect(parseArgs([]).command).toBeNull();
+  });
+
+  it("parses --path for init and defaults it to unset", () => {
+    expect(parseArgs(["init"]).path).toBeNull();
+    expect(parseArgs(["init", "--path", "/tmp/some-repo"]).path).toBe("/tmp/some-repo");
+    expect(() => parseArgs(["init", "--path"])).toThrow(/--path requires a directory/);
   });
 
   it("defaults githubRepo and every mode to unset", () => {

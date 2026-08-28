@@ -18,9 +18,11 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["bun", "run", "build"]
 
-# One-shot: ensures a long-lived foreman-loop pane exists. Re-runs on live
-# handoff, so startup.ts guards double-start via HERDR_PLUGIN_STATE_DIR
-# (SPEC §17.4 — "[[startup]] starts the loop pane; it does not be the loop").
+# One-shot: ensures one foreman-loop pane per registry repo (each in that
+# repo's own workspace) plus the shared foreman-intake pane in the `foreman`
+# workspace. Re-runs on live handoff, so startup.ts guards double-start per
+# alias via HERDR_PLUGIN_STATE_DIR (SPEC §3.11, §17.3, §17.4 — "[[startup]]
+# starts the loop pane; it does not be the loop").
 [[startup]]
 command = ["bun", "run", "dist/startup.js"]
 
