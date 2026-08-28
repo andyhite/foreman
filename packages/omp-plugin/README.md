@@ -15,7 +15,8 @@ client, gate validators, lock manager, and config loader.
 
 ## Install (local development)
 
-From the repo root:
+From the repo root, after `bun install && bun run build` — the extension bundle
+at `dist/extension.js` is build output and is not committed:
 
 ```
 /marketplace add ./
@@ -46,7 +47,7 @@ Foreman reads layered JSON config, repo overrides winning over global:
 | `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
 | `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` | `<ISSUE-ID or PR>` |
-| `/foreman:apply` | extension code — applies approved triage proposals | none |
+| `/foreman:apply` | extension code — reviews or applies staged proposals | none, `--yes`, `<ISSUE-ID> --approve`, or `<ISSUE-ID> --reject <reason>` |
 | `/foreman:merge` | extension code — merges once the review gate passes | `<ISSUE-ID>` |
 | `/foreman:unblock` | extension code — records the operator's reply and clears a block | `<ISSUE-ID>` |
 | `/foreman:status` | extension code — renders the operator console | none |
