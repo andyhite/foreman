@@ -229,5 +229,5 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
 
   section(deps.log, "Done");
   deps.log("  Edit ~/.foreman/config.json to map more Linear projects to repos.");
-  deps.log("  Then: foreman-loop --dry-run --once --verbose");
+  deps.log("  Then: foreman loop --dry-run --once --verbose");
 }

@@ -9,12 +9,13 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc --build --force",
-    "test": "bun test",
     "build": "bun run --filter '*' build",
-    "schemas": "bun run packages/core/scripts/emit-schemas.ts",
+    "check": "bun run typecheck && bun run test && bun run contract",
     "contract": "bun run packages/omp-plugin/scripts/check-contract.ts",
-    "check": "bun run typecheck && bun run test && bun run contract"
+    "schemas": "bun run packages/core/scripts/emit-schemas.ts",
+    "setup": "bun run packages/cli/src/main.ts setup --omp link --herdr link",
+    "test": "bun test",
+    "typecheck": "tsc --build --force"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
