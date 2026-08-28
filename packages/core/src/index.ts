@@ -1,0 +1,24 @@
+/**
+ * `@foreman/core` — the one place the Linear client, the output schemas, and the
+ * gate validators exist.
+ *
+ * Foreman is three consumers over this core (SPEC §3.1): the omp plugin
+ * extension, the loop supervisor, and the herdr board. Duplicating a validator
+ * between them is how the workers and the agents start disagreeing about whether
+ * an issue is ready, so nothing here is re-implemented downstream.
+ */
+
+export * from "./config/index.ts";
+export * from "./dispatch/index.ts";
+export * from "./domain/labels.ts";
+export * from "./domain/priority.ts";
+export * from "./domain/states.ts";
+export * from "./gates/index.ts";
+export * from "./git/index.ts";
+export * from "./github/index.ts";
+export * from "./linear/index.ts";
+export * from "./lock.ts";
+export * from "./markers.ts";
+export * from "./render/index.ts";
+export * from "./schemas/index.ts";
+export * from "./schemas/parse.ts";

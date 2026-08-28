@@ -1,0 +1,337 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "foreman/implement-output",
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "blocked",
+    "result",
+    "block"
+  ],
+  "properties": {
+    "blocked": {
+      "description": "False for a normal result, true when you are blocked. Set it first, then populate exactly one of `result` / `block` and null the other.",
+      "type": "boolean"
+    },
+    "result": {
+      "description": "The normal result. Null if and only if `blocked` is true.",
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "title": "ImplementResult",
+          "type": "object",
+          "required": [
+            "issueId",
+            "branch",
+            "prUrl",
+            "headSha",
+            "criteriaMet",
+            "testsAdded",
+            "discoveredWork",
+            "approachSummary"
+          ],
+          "properties": {
+            "issueId": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "branch": {
+              "minLength": 1,
+              "description": "The branch you pushed. Must match the branch the dispatcher created.",
+              "type": "string"
+            },
+            "prUrl": {
+              "description": "The PR you opened. Empty string when the repo sets `pr.required: false` and you pushed the branch without opening a PR.",
+              "type": "string"
+            },
+            "headSha": {
+              "minLength": 1,
+              "description": "The commit you pushed. The review gate pins itself to this.",
+              "type": "string"
+            },
+            "criteriaMet": {
+              "description": "One entry per acceptance criterion. The criteria are the contract.",
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "CriterionEvidence",
+                "type": "object",
+                "required": [
+                  "criterion",
+                  "evidence"
+                ],
+                "properties": {
+                  "criterion": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "evidence": {
+                    "minLength": 1,
+                    "description": "file:line, test name, or command output that shows it holds.",
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "testsAdded": {
+              "description": "Tests covering each acceptance criterion.",
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "TestAdded",
+                "type": "object",
+                "required": [
+                  "path",
+                  "covers"
+                ],
+                "properties": {
+                  "path": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "covers": {
+                    "minLength": 1,
+                    "description": "Which acceptance criterion this test defends.",
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "discoveredWork": {
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "DiscoveredWork",
+                "description": "Out-of-scope findings. The extension files these as new Backlog issues with native relations — you never create them yourself.",
+                "type": "object",
+                "required": [
+                  "title",
+                  "description",
+                  "type",
+                  "relation"
+                ],
+                "properties": {
+                  "title": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "description": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "const": "type:bug",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type:feature",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type:chore",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type:spike",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type:docs",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "relation": {
+                    "description": "`blocks` only when this issue's work genuinely cannot ship without it. Otherwise `related`.",
+                    "anyOf": [
+                      {
+                        "const": "blocks",
+                        "type": "string"
+                      },
+                      {
+                        "const": "related",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "approachSummary": {
+              "minLength": 1,
+              "description": "How you solved it, for the review comment and the PR body.",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "block": {
+      "description": "The block record. Null if and only if `blocked` is false.",
+      "anyOf": [
+        {
+          "$id": "foreman/block-record",
+          "additionalProperties": false,
+          "title": "BlockRecord",
+          "type": "object",
+          "required": [
+            "blocked",
+            "type",
+            "whatIWasDoing",
+            "whatINeed",
+            "options",
+            "recommendation",
+            "stateLeftBehind",
+            "costOfWrongGuess",
+            "blockedByIssues"
+          ],
+          "properties": {
+            "blocked": {
+              "const": true,
+              "type": "boolean"
+            },
+            "type": {
+              "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+              "anyOf": [
+                {
+                  "const": "dependency",
+                  "type": "string"
+                },
+                {
+                  "const": "needs-input",
+                  "type": "string"
+                },
+                {
+                  "const": "needs-decision",
+                  "type": "string"
+                },
+                {
+                  "const": "external",
+                  "type": "string"
+                },
+                {
+                  "const": "budget",
+                  "type": "string"
+                }
+              ]
+            },
+            "whatIWasDoing": {
+              "minLength": 1,
+              "description": "Where the run stopped, in enough detail to resume from.",
+              "type": "string"
+            },
+            "whatINeed": {
+              "minLength": 1,
+              "description": "The single question or decision that unblocks this.",
+              "type": "string"
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "label",
+                      "tradeoff"
+                    ],
+                    "properties": {
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "tradeoff": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recommendation": {
+              "description": "Which option you would pick, and why. Null only when you truly have no lean.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stateLeftBehind": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "worktree",
+                "branch",
+                "pushed",
+                "commits",
+                "notes"
+              ],
+              "properties": {
+                "worktree": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "branch": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pushed": {
+                  "type": "boolean"
+                },
+                "commits": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "notes": {
+                  "type": "string"
+                }
+              }
+            },
+            "costOfWrongGuess": {
+              "minLength": 1,
+              "description": "What it costs if you guess instead of asking. This is why you blocked.",
+              "type": "string"
+            },
+            "blockedByIssues": {
+              "description": "Human identifiers (e.g. ENG-142) of issues that block this one. Required and non-empty when `type` is `dependency`; empty otherwise.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

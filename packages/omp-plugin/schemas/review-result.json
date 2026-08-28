@@ -1,0 +1,360 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "foreman/review-output",
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "blocked",
+    "result",
+    "block"
+  ],
+  "properties": {
+    "blocked": {
+      "description": "False for a normal result, true when you are blocked. Set it first, then populate exactly one of `result` / `block` and null the other.",
+      "type": "boolean"
+    },
+    "result": {
+      "description": "The normal result. Null if and only if `blocked` is true.",
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "title": "ReviewResult",
+          "type": "object",
+          "required": [
+            "issueId",
+            "reviewedSha",
+            "criteriaVerification",
+            "dodSatisfied",
+            "dodChecklist",
+            "findings",
+            "projectOrganization",
+            "scopeCreep",
+            "testAdequacy",
+            "verdict"
+          ],
+          "properties": {
+            "issueId": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reviewedSha": {
+              "minLength": 1,
+              "description": "The head SHA you reviewed, taken from the diff you were given. This pins the review: a later push invalidates it and triggers re-review.",
+              "type": "string"
+            },
+            "criteriaVerification": {
+              "description": "One entry per acceptance criterion on the issue.",
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "CriterionVerification",
+                "type": "object",
+                "required": [
+                  "criterion",
+                  "satisfied",
+                  "evidence"
+                ],
+                "properties": {
+                  "criterion": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "satisfied": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "minLength": 1,
+                    "description": "file:line evidence. An assertion with no location is not evidence.",
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "dodSatisfied": {
+              "description": "The global Definition of Done from the project Context doc.",
+              "type": "boolean"
+            },
+            "dodChecklist": {
+              "description": "Per-item Definition of Done results, for the rendered checklist.",
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "DodCheck",
+                "type": "object",
+                "required": [
+                  "item",
+                  "satisfied",
+                  "evidence"
+                ],
+                "properties": {
+                  "item": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "satisfied": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "title": "Finding",
+                "type": "object",
+                "required": [
+                  "severity",
+                  "file",
+                  "line",
+                  "description"
+                ],
+                "properties": {
+                  "severity": {
+                    "description": "`blocking` routes back to implement and burns one of the two review→fix cycles. Reserve it for things that must change before merge.",
+                    "anyOf": [
+                      {
+                        "const": "blocking",
+                        "type": "string"
+                      },
+                      {
+                        "const": "should-fix",
+                        "type": "string"
+                      },
+                      {
+                        "const": "nit",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "file": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "line": {
+                    "anyOf": [
+                      {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "description": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "projectOrganization": {
+              "minLength": 1,
+              "description": "Standing field on every review: structure, module boundaries, naming, placement. Say 'no concerns' explicitly rather than leaving it thin.",
+              "type": "string"
+            },
+            "scopeCreep": {
+              "description": "Changes outside the acceptance criteria and out-of-scope list.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "testAdequacy": {
+              "minLength": 1,
+              "description": "Answer by inspection: would these tests fail if the change were reverted?",
+              "type": "string"
+            },
+            "verdict": {
+              "description": "Advisory only — you hold no merge authority. `request-changes` if and only if there is at least one `blocking` finding.",
+              "anyOf": [
+                {
+                  "const": "approve",
+                  "type": "string"
+                },
+                {
+                  "const": "request-changes",
+                  "type": "string"
+                },
+                {
+                  "const": "comment",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "block": {
+      "description": "The block record. Null if and only if `blocked` is false.",
+      "anyOf": [
+        {
+          "$id": "foreman/block-record",
+          "additionalProperties": false,
+          "title": "BlockRecord",
+          "type": "object",
+          "required": [
+            "blocked",
+            "type",
+            "whatIWasDoing",
+            "whatINeed",
+            "options",
+            "recommendation",
+            "stateLeftBehind",
+            "costOfWrongGuess",
+            "blockedByIssues"
+          ],
+          "properties": {
+            "blocked": {
+              "const": true,
+              "type": "boolean"
+            },
+            "type": {
+              "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+              "anyOf": [
+                {
+                  "const": "dependency",
+                  "type": "string"
+                },
+                {
+                  "const": "needs-input",
+                  "type": "string"
+                },
+                {
+                  "const": "needs-decision",
+                  "type": "string"
+                },
+                {
+                  "const": "external",
+                  "type": "string"
+                },
+                {
+                  "const": "budget",
+                  "type": "string"
+                }
+              ]
+            },
+            "whatIWasDoing": {
+              "minLength": 1,
+              "description": "Where the run stopped, in enough detail to resume from.",
+              "type": "string"
+            },
+            "whatINeed": {
+              "minLength": 1,
+              "description": "The single question or decision that unblocks this.",
+              "type": "string"
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "label",
+                      "tradeoff"
+                    ],
+                    "properties": {
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "tradeoff": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recommendation": {
+              "description": "Which option you would pick, and why. Null only when you truly have no lean.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stateLeftBehind": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "worktree",
+                "branch",
+                "pushed",
+                "commits",
+                "notes"
+              ],
+              "properties": {
+                "worktree": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "branch": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pushed": {
+                  "type": "boolean"
+                },
+                "commits": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "notes": {
+                  "type": "string"
+                }
+              }
+            },
+            "costOfWrongGuess": {
+              "minLength": 1,
+              "description": "What it costs if you guess instead of asking. This is why you blocked.",
+              "type": "string"
+            },
+            "blockedByIssues": {
+              "description": "Human identifiers (e.g. ENG-142) of issues that block this one. Required and non-empty when `type` is `dependency`; empty otherwise.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

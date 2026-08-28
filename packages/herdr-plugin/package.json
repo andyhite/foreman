@@ -1,0 +1,16 @@
+{
+  "name": "@foreman/herdr-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Foreman board: herdr plugin panes for the blocked drain, proposal review, and board",
+  "bin": {
+    "foreman-board": "./dist/board.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/board.ts ./src/startup.ts ./src/events.ts --outdir ./dist --target node --format esm"
+  },
+  "dependencies": {
+    "@foreman/core": "workspace:*"
+  }
+}

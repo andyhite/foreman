@@ -1,0 +1,16 @@
+{
+  "name": "foreman-dev",
+  "owner": { "name": "Andy Hite" },
+  "metadata": {
+    "description": "Local development marketplace for the Foreman plugin",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "foreman",
+      "description": "Agile SDLC workflow over Linear",
+      "source": "./packages/omp-plugin",
+      "category": "development"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+# Foreman board — herdr plugin manifest (SPEC §17.4).
+#
+# Bind the blocked drain to a key in ~/.config/herdr/config.toml, e.g.:
+#
+#   [[keys.command]]
+#   key = "ctrl+shift+b"
+#   type = "plugin_action"
+#   command = "foreman.open-blocked"
+#   description = "Foreman: open the blocked drain"
+
+id = "foreman"
+name = "Foreman board"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Blocked drain, proposal review, board, and agent detail for Foreman (SPEC §17.4)"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["bun", "run", "build"]
+
+# One-shot: ensures a long-lived foreman-loop pane exists. Re-runs on live
+# handoff, so startup.ts guards double-start via HERDR_PLUGIN_STATE_DIR
+# (SPEC §17.4 — "[[startup]] starts the loop pane; it does not be the loop").
+[[startup]]
+command = ["bun", "run", "dist/startup.js"]
+
+[[panes]]
+id = "blocked"
+title = "Foreman: Blocked drain"
+placement = "popup"
+width = 100
+height = 36
+command = ["bun", "run", "dist/board.js", "blocked"]
+
+[[panes]]
+id = "proposals"
+title = "Foreman: Proposals"
+placement = "popup"
+width = 100
+height = 36
+command = ["bun", "run", "dist/board.js", "proposals"]
+
+[[panes]]
+id = "board"
+title = "Foreman: Board"
+placement = "tab"
+command = ["bun", "run", "dist/board.js", "board"]
+
+[[panes]]
+id = "agents"
+title = "Foreman: Agents"
+placement = "overlay"
+width = 90
+height = 30
+command = ["bun", "run", "dist/board.js", "agents"]
+
+[[actions]]
+id = "open-blocked"
+title = "Foreman: Open blocked drain"
+description = "List every BlockRecord and resolve one with a keypress (SPEC §9, §17.4)"
+contexts = ["global"]
+
+[[actions]]
+id = "open-proposals"
+title = "Foreman: Open proposal review"
+description = "Triage batch, per-item accept/reject"
+contexts = ["global"]
+
+[[actions]]
+id = "open-board"
+title = "Foreman: Open board"
+description = "Issues by state, WIP, backpressure, last run per worker"
+contexts = ["global"]
+
+[[actions]]
+id = "open-agents"
+title = "Foreman: Open agent detail"
+description = "Live agent status, jump-to-pane / attach"
+contexts = ["global"]
+
+# Refresh sidebar tokens on agent state change (SPEC §17.4 "Events").
+[[events]]
+on = "agent.status_changed"
+command = ["bun", "run", "dist/events.js"]
+
+# Herdr `blocked` means a Foreman bug (SPEC §17.3), not a normal queue entry —
+# events.ts distinguishes this case from a routine status refresh and reports
+# it loudly rather than routing on it.
+[[events]]
+on = "agent.blocked"
+command = ["bun", "run", "dist/events.js"]

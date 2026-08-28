@@ -1,0 +1,19 @@
+{
+  "name": "@foreman/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Foreman shared core: Linear client, config, result schemas, gate validators",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo 'core is consumed as source by bundling consumers'",
+    "schemas": "bun run scripts/emit-schemas.ts"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.48"
+  }
+}

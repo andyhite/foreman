@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-types/
+*.tsbuildinfo
+.DS_Store
+
+# bun.lock is committed: CI installs with --frozen-lockfile.
+bun.lockb
