@@ -166,7 +166,8 @@ which is the explicit kickoff surface for every step.
 | `/foreman-implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman-review` | `foreman-review` | `<ISSUE-ID>` or PR |
 | `/foreman-apply` | no agent — the extension applies approved proposals directly (§7.1) | none |
-| `/foreman-unblock` | resumes a blocked agent (§9) | `<ISSUE-ID>` |
+| `/foreman-merge` | no agent — the extension merges via the configured strategy once the review gate passes (§3.10) | `<ISSUE-ID>` |
+| `/foreman-unblock` | no agent — records the operator's reply and clears the block; the loop dispatches the resume (§9) | `<ISSUE-ID>` |
 | `/foreman-status` | no agent — renders the operator console | none |
 
 Each dispatch command body must: resolve the target issue, assemble the shared
@@ -206,14 +207,19 @@ that must be real code:
    `SingleResult` and drive every Linear mutation from validated objects —
    descriptions, labels, state moves, sub-issue and spike creation, discovered
    work, comments, review renderings. This is where principle 9 lives.
-6. **Project→repo map.** Plugin config `projects: { <linear-project-id>:
-   <repo-path> }` — the only place Foreman learns which git repo a Linear
-   project belongs to. Consumed by worktree creation, triage repro reads, and
-   the loop. Validated on `session_start` alongside the skill-name guard (§8);
-   a dispatch against an unmapped project fails loudly before any spawn.
+6. **Config loader.** Reads and validates the layered `.foreman/config.json`
+   files (§3.10) — including the project→repo map `projects:
+   { <linear-project-id>: <repo-path> }`, the only place Foreman learns which
+   git repo a Linear project belongs to. Consumed by worktree creation, triage
+   repro reads, and the loop. Validated on `session_start` alongside the
+   skill-name guard (§8); a dispatch against an unmapped project or an invalid
+   config fails loudly before any spawn.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
    Use them to keep `/foreman-status` live and to detect aborts.
+8. **GitHub read client.** Extension-internal, like the Linear write client:
+   fetches PR diffs and head SHAs for review dispatch (§7.4) and checks CI
+   status for the review gate (§10). Never exposed as an agent tool.
 
 ### 3.6 Budgets — use the native ones
 
@@ -269,6 +275,73 @@ doc with no way for the agent to know which is authoritative. Recommend
 disabling autonomous memory for Foreman-managed repos so one source of truth is
 actually one.
 
+### 3.10 Configuration — `.foreman/config.json`
+
+Everything that is a *parameter* rather than an *invariant* lives in layered
+JSON config, loaded and schema-validated by `core` (TypeBox — the same
+machinery as the output schemas) and consumed by all three consumers. Two
+layers, deep-merged, repo wins:
+
+1. **Global:** `~/.foreman/config.json` — the project→repo map, loop tuning,
+   and `repoDefaults`.
+2. **Per-repo:** `<repo>/.foreman/config.json` — overrides for that repo,
+   versioned with the code it governs.
+
+Sketch (defaults shown; every number quoted elsewhere in this spec is a
+default defined here, not a constant):
+
+```jsonc
+{
+  // global only
+  "projects": { "<linear-project-id>": "<repo-path>" },   // §3.5
+  "loop": {
+    "wipGlobal": 3,                                       // §17.6
+    "wip": { "triage": 1, "refine": 2, "implement": 3, "review": 2 },
+    "readyBufferTarget": 5,                               // §17.6
+    "backpressureThreshold": 5,                           // §17.7
+    "retryCap": 2,                                        // §17.8
+    "reviewCycleCap": 2,                                  // §7.4
+    "cadenceMinutes": 5,
+    "triageWindow": "06:00"
+  },
+  "triage": { "staleLowDays": 90 },                       // §7.1
+
+  // per-repo (or global "repoDefaults")
+  "baseBranch": "main",
+  "pr": { "required": true, "draft": false, "ciRequired": true },
+  "merge": { "strategy": "squash",                        // merge | squash | rebase
+             "deleteBranch": true },
+  "branchPattern": "<issue-id>-<slug>",                   // §12
+  "worktreePattern": "../<repo>-<ISSUE-ID>"               // §12
+}
+```
+
+**`pr.required: false` — direct-branch mode.** The workflow shape is unchanged
+(one issue → one worktree → one branch), but implement pushes the branch and
+opens no PR (`prUrl` stays empty in the `ImplementResult`), review diffs
+`baseBranch..head` fetched by the extension (§7.4), the review gate targets the
+pushed branch (§10), and Done cannot come from Linear's GitHub PR integration —
+the merge-detection worker (§16 item 7) becomes **required** in this mode, not
+optional.
+
+**`/foreman-merge <ISSUE-ID>`.** Operator-invoked, never loop-invoked — this
+does not weaken the no-auto-merge non-goal (§19). The extension checks the
+review gate, then merges with the configured strategy (`gh pr merge` in PR
+mode, a local merge of the branch onto `baseBranch` in direct mode) and
+deletes the branch if configured. One command, both modes, gate-checked
+either way.
+
+**Config tunes parameters, never removes invariants.** There is no key that
+disables a gate, the WIP limit, backpressure, the lock protocol, or
+propose-before-apply. `backpressureThreshold: 0` means "no new dispatches
+while anything is blocked," not "off." Validation rejects unknown keys — a
+typo that silently falls back to a default is the config-file equivalent of
+the `autoload-skills` silent-ignore trap (§8).
+
+Reload semantics: the extension reads config at `session_start`; the loop
+re-reads at the top of every cadence tick, so tuning WIP or backpressure does
+not require a loop restart.
+
 ---
 
 ## 4. Linear data model
@@ -290,10 +363,10 @@ Linear's native set; no custom states.
 |---|---|---|
 | `Triage` | Unprocessed inbound. | Linear inbox, operator, integrations |
 | `Backlog` | Accepted, not yet refined. | extension, from `TriageProposal` |
-| `Todo` | **Refined and ready.** Gate §10 satisfied. | extension, from `RefineResult` |
+| `Todo` | **Refined and ready.** Gate §10 satisfied. | extension, from `RefineResult`; also on block, In Progress → Todo (§9) |
 | `In Progress` | Worktree open, code being written. | extension, at implement dispatch |
 | `In Review` | PR open, awaiting review. | extension, from `ImplementResult` |
-| `Done` | Merged. | Linear's GitHub integration on merge; the operator does the merging |
+| `Done` | Merged. | Linear's GitHub integration on merge (PR mode); the loop's merge-detection worker when `pr.required: false` (§3.10). The operator does the merging, via `/foreman-merge` or by hand |
 | `Canceled` | Won't do. | extension (approved proposal) or operator |
 | `Duplicate` | Merged into another issue. | extension (approved proposal) or operator |
 
@@ -400,12 +473,16 @@ drifts per issue. Acceptance criteria cover only what is specific to the issue;
 
 ### 4.9 Legacy amnesty
 
-Every gate will fail on issues predating Foreman — no template, no estimate, no
-priority. Apply `legacy` to all pre-existing issues at install time. Gates skip
-`legacy` issues; `foreman-refine` strips the label when it processes one.
-Without this, day one is either a bulk-refine of the whole backlog or agents
-refusing everything. Preferred over a cutoff date, which strands issues you
-actually want.
+Issues predating Foreman have no template, no estimate, no priority — and may
+sit in any state, including Todo. Apply `legacy` to all pre-existing issues at
+install time. The label means "unrefined, regardless of state": it never
+bypasses a gate — a `legacy` issue in Todo still fails the implementation gate
+(no `agent:ready`, no criteria) and cannot be dispatched. Instead, the refine
+worker treats `legacy` issues in Backlog *or* Todo as its input (§17.5), and
+`foreman-refine` strips the label when it processes one. Priority remains the
+throttle: an unprioritized legacy issue waits like any other. Without the
+label, day one is a wall of gate failures with no funnel back to refinement.
+Preferred over a cutoff date, which strands issues you actually want.
 
 ### 4.10 Required saved views
 
@@ -431,7 +508,7 @@ in prose.
 
 | Field | Behavior | Foreman policy |
 |---|---|---|
-| `tools` | Explicit allowlist. `hub` is force-added regardless. `exec` expands to `eval` + `bash`. `task` is auto-added if `spawns` is set. | The security boundary. Enumerate per agent (§7). No agent gets any Linear or GitHub mutation tool except implement's `foreman_github_pr` (§2.9). |
+| `tools` | Explicit allowlist. `hub` is force-added regardless. `exec` expands to `eval` + `bash`. `task` is auto-added if `spawns` is set. | The security boundary. Enumerate per agent (§7). No agent gets any Linear or GitHub mutation tool except implement's `foreman_github_pr` (principle 9). |
 | `spawns` | Grants the child the `task` tool so it can fan out further. | **`false` on all four.** Recursive fan-out inside a workflow agent is exactly the uncontrolled behavior Foreman exists to prevent. Set explicitly; do not rely on the depth gate. |
 | `blocking` | `true` runs the spawn inline; default is a background job whose result is delivered into the parent conversation later. No bundled agent sets it. | `true` only for `foreman-refine` (short-lived; inline is right both when the operator invokes it and in the loop's print-mode parent). Everything else background. |
 | `thinking-level` | The agent's effort selector. `auto` does per-prompt classification. Per-spawn `effort` overrides it, but only when `task.enableEffort=true` (default off) — so in practice frontmatter is the real control. | Per agent, §7. Don't rely on `effort` unless you enable the setting. |
@@ -538,16 +615,21 @@ map (§3.5).
 *by reading only*, propose a Priority with severity reasoning, flag missing
 information, propose native `blocked by` relations, recommend a destination.
 
-**Output:** a `TriageProposal`. The extension writes one comment per item and
+**Output:** a `TriageProposal`. The extension writes one comment per item — the
+human rendering plus an embedded machine-readable copy of the item — and
 applies `agent:proposed`. Nothing else is applied. Operator approves by removing
 `agent:proposed`, rejects with `reject: <reason>`.
 
 **Applying approvals is not an agent job.** An approved `TriageProposal` item
 already says exactly what to do — applying it is deterministic, so
-`/foreman-apply` is extension code walking approved items, not a re-dispatch of
-the agent. (It cannot be an agent anyway: tool allowlists are static
-frontmatter, so there is no such thing as an invocation-scoped write grant.)
-Triage stays read-only forever.
+`/foreman-apply` is extension code, not a re-dispatch of the agent. It queries
+issues whose latest Foreman proposal comment has no `agent:proposed` label, no
+`reject:` reply, and no later applied-marker comment, and applies each; on
+success it writes the applied marker. Everything it needs lives in the comment,
+so approval state is derivable from Linear alone — no second store to lose.
+(It cannot be an agent anyway: tool allowlists are static frontmatter, so there
+is no such thing as an invocation-scoped write grant.) Triage stays read-only
+forever.
 
 **Permission:** may recommend `Canceled` freely. Un-actioned `Low` items older
 than 90 days should be proposed for cancellation by default.
@@ -623,7 +705,9 @@ protocol can reference it.
    and become new Backlog issues with native relations — created by the
    extension, not the agent.
 4. Tests covering each acceptance criterion.
-5. Open a PR (§13.2), linking the issue.
+5. Open a PR (§13.2) linking the issue — or, when the repo sets
+   `pr.required: false` (§3.10), push the branch and skip the PR; `prUrl`
+   stays empty in the result.
 6. Yield the `ImplementResult`. The extension moves the issue to In Review,
    releases the lock, and files `discoveredWork`.
 
@@ -644,10 +728,16 @@ schemaMode: strict
 Model role `slow`. Read-only everywhere — the Linear review comment (§13.4) and
 the PR review are rendered by the extension from the `ReviewResult`.
 
-Inputs are the diff, the issue, and the `Context` doc. Child sessions don't
-inherit history, so cold context holds structurally — what *does* carry over is
-the workspace tree, skills, context files, and the shared `local://` root. Don't
-put implementation rationale in `context`.
+Inputs are the diff, the issue, and the `Context` doc. The agent holds no git
+or GitHub tool, so the extension fetches the diff and head SHA at dispatch —
+from the PR via its GitHub read client (§3.5), or from git (`baseBranch..head`)
+when `pr.required: false` (§3.10) — writes them to a file, and passes the
+path in `context` — the agent `read`s it. Test adequacy is judged by reading,
+not execution: "would these tests fail if the change is reverted?" is answered
+by inspection. Child sessions don't inherit history, so cold context holds
+structurally — what *does* carry over is the workspace tree, skills, context
+files, and the shared `local://` root. Don't put implementation rationale in
+`context`.
 
 Checks: each acceptance criterion satisfied with file:line evidence; Definition
 of Done satisfied; correctness and edge cases; test adequacy (do tests fail if
@@ -659,12 +749,16 @@ Findings classified `blocking` / `should-fix` / `nit`.
 **The fix cycle.** `reviewedSha` pins what was reviewed, which makes both halves
 of the cycle machine-checkable: the review worker re-dispatches whenever the
 PR's head SHA has no `ReviewResult` (§17.5), and blocking findings route back
-automatically — the extension messages the parked implement agent via `hub` with
-the findings (fresh-spawn fallback per §9), implement pushes fixes and yields an
-updated result, and the new head SHA triggers re-review. After **2** review→fix
-cycles without a clean result, convert to `blocked:needs-decision` (§17.8) — a
-standing disagreement between implement and review is operator information, not
-something to ping-pong overnight.
+automatically — the extension writes the findings to the issue and re-dispatches
+implement, which lands in resume mode (§7.3 step 2), pushes fixes, and yields an
+updated result; the new head SHA triggers re-review. When the implement agent's
+process is still alive (interactive or herdr-dispatched sessions), messaging the
+parked agent via `hub` is a cheaper equivalent — but under the loop's
+`PrintDispatcher` every dispatch is a fresh process and the registry dies with
+it (§11), so resume-mode re-spawn is the primary path, not a fallback. After
+**2** review→fix cycles without a clean result, convert to
+`blocked:needs-decision` (§17.8) — a standing disagreement between implement and
+review is operator information, not something to ping-pong overnight.
 
 **No merge authority.** Do not build auto-merge in the first pass.
 
@@ -733,31 +827,38 @@ so an agent that "asks" simply stalls and burns budget.
 in the `BlockRecord` (the extension creates or verifies it and comments naming
 the blocker). Apply **no** `blocked:*` label; the relation is the state and
 resolves itself. Yield a `BlockRecord` with `type: dependency`; the extension
-releases the lock.
+releases the lock and moves the issue back to Todo. The incomplete relation now
+fails the implementation gate, so the implement worker skips it; when the
+blocker completes, the relation resolves, the gate passes, and the next loop
+pass re-dispatches — landing in resume mode (§7.3 step 2). No manual step.
 
 **Case B — blocked on a human.** Yield a `BlockRecord` with the question or
 enumerated options, the recommendation, the state left behind (worktree path,
 partial commits), and the cost of a wrong guess. The extension writes the Linear
-comment, applies the `blocked:*` label, releases the lock, and leaves the
-worktree intact with the branch pushed.
+comment, applies the `blocked:*` label, releases the lock, moves the issue back
+to Todo, and leaves the worktree intact with the branch pushed. The label keeps
+every worker away (§17.5) until the operator answers.
 
 Budget exhaustion (§3.6) converts into Case B rather than a silent stall. This is
 well-supported: a soft-budget abort on a non-isolated kept-alive agent leaves the
 agent `idle` and resumable.
 
-**Resuming — message, don't respawn.** `/foreman-unblock <ISSUE-ID>` should
-locate the parked agent in the registry and message it via `hub` rather than
-spawning fresh. omp's own guidance is explicit that messaging an existing agent
-beats a new spawn, because it already holds the relevant context; messaging a
-parked agent revives it. Fall back to a fresh spawn only if the agent was
-`aborted` (terminal) or the process has since restarted — and a fresh spawn must
-land in **resume mode** (§7.3 step 2, §8): the skill's first move on finding an
-existing worktree is to read the prior state and the operator's reply, then
-continue rather than restart. The same `hub` channel carries review findings
-back to a parked implement agent (§7.4).
+**Resuming.** `/foreman-unblock <ISSUE-ID>` (or the blocked drain, §17.4)
+records the operator's reply as a comment and clears the `blocked:*` label.
+That is the whole command: with the issue back in Todo and the label gone, the
+implementation gate passes and the next loop pass re-dispatches implement,
+which lands in **resume mode** (§7.3 step 2, §8) — the skill's first move on
+finding an existing worktree is to read the prior `BlockRecord` and the
+operator's reply, then continue rather than restart. When the original agent's
+process is still alive (interactive or herdr-dispatched sessions), messaging
+the parked agent via `hub` is a cheaper resume — it already holds the context,
+and messaging a parked agent revives it — but under the loop's
+`PrintDispatcher` the process is gone by the time the reply arrives (§11), so
+resume-mode re-spawn is the normal path and hub revival the optimization.
 
-This is a direct payoff from running implement non-isolated: isolated agents park
-**without a reviver** and cannot be messaged back to life.
+Non-isolated execution is what makes both paths possible: the worktree survives
+the block for resume mode, and a live agent can be revived at all — isolated
+agents park **without a reviver** and cannot be messaged back to life.
 
 The operator drains **Blocked (human)** once or twice daily via
 `/foreman-status`. Forcing agents to *write down* their confusion is a quality
@@ -769,8 +870,8 @@ is diagnostic information about the refine step.
 ## 10. Gates
 
 Validator functions in the extension, consumed by agents, commands, and hooks.
-Never reimplemented in prose. Issues labeled `legacy` bypass all gates until
-first refined.
+Never reimplemented in prose. `legacy` never bypasses a gate — legacy issues
+route through the refine worker instead (§4.9, §17.5).
 
 **Refinement gate** (`Backlog → Todo`): `type:` present; Priority ≠ `None`;
 description has `## Acceptance Criteria`; ≥1 criterion; estimate set and ≤3; no
@@ -780,9 +881,11 @@ description has `## Acceptance Criteria`; ≥1 criterion; estimate set and ≤3;
 `agent:ready` present; `agent:running` absent; `agent:hands-off` absent; no
 incomplete `blocked by` relations.
 
-**Review gate** (`In Review → Done`): PR open and CI green; a `ReviewResult`
-exists for the PR's **current head SHA**; zero `blocking` findings outstanding;
-every acceptance criterion checked off; Definition of Done satisfied.
+**Review gate** (`In Review → Done`): a `ReviewResult` exists for the
+**current head SHA**; CI green; zero `blocking` findings outstanding; every
+acceptance criterion checked off; Definition of Done satisfied. In PR mode
+(§3.10) the PR must also be open; with `pr.required: false` the pushed branch
+is the review target.
 
 ---
 
@@ -794,11 +897,15 @@ process**, while the Linear label outlives it — so the reaper is still require
 but it can cross-reference the registry to decide whether a lock is genuinely
 orphaned or just held by a live agent.
 
-- **The dispatcher claims; agents never do.** The extension writes
-  `agent:running` + dispatch ID + timestamp *before* the spawn (§17.5) and
-  releases it when the yield is consumed. Agents verify the lock carries their
-  dispatch ID (§7.3) and otherwise never write or clear it. One owner, no claim
-  race, and manual and loop dispatch share the code path.
+- **The dispatcher claims; agents never do.** The extension applies
+  `agent:running` *before* the spawn (§17.5) and releases it when the yield is
+  consumed. The label is the mutex; the dispatch ID and timestamp ride in a
+  machine-readable lock comment (`foreman:lock`) written in the same mutation —
+  a label can't carry them, and the reaper and the agent's verify step both
+  need them. Release marks the comment released. Agents verify via
+  `foreman_linear_read` that the live lock comment carries their dispatch ID
+  (§7.3) and otherwise never write or clear anything. One owner, no claim race,
+  and manual and loop dispatch share the code path.
 - TTL derives from the runtime cap: 2× `task.maxRuntimeMs` plus margin — with
   the 2 h cap (§3.6), ~4–5 h. Long implementations are legitimate; a lock
   outliving twice the hard runtime cap is not.
@@ -814,11 +921,14 @@ orphaned or just held by a live agent.
 
 ## 12. Repo and worktree conventions
 
-- One issue → one worktree → one branch → one PR. No exceptions.
+- One issue → one worktree → one branch → one PR — or one direct branch merge
+  when `pr.required: false` (§3.10). No exceptions to the 1:1:1 shape.
 - **Foreman owns worktree lifecycle**, not omp's isolation layer (§3.7). The
-  repo is resolved via the project→repo map (§3.5).
-- Worktree path: `../<repo>-<ISSUE-ID>` (e.g. `../plotroom-ENG-142`)
-- Branch: `<issue-id>-<kebab-slug>` (e.g. `eng-142-fix-triage-dedupe`)
+  repo is resolved via the project→repo map (§3.5, §3.10).
+- Worktree path: `../<repo>-<ISSUE-ID>` (e.g. `../plotroom-ENG-142`) —
+  default, per-repo `worktreePattern` (§3.10).
+- Branch: `<issue-id>-<kebab-slug>` (e.g. `eng-142-fix-triage-dedupe`) —
+  default, per-repo `branchPattern`; base branch from `baseBranch` (§3.10).
 - Worktrees are disposable but must survive a block. No state outside the
   worktree, Linear, and the PR.
 - Cleanup of merged worktrees is a scheduled chore, not an agent responsibility.
@@ -827,7 +937,8 @@ orphaned or just held by a live agent.
 
 ## 13. Artifact templates
 
-Renderings of structured output, written into Linear by the extension.
+Renderings of structured output, written into Linear by the extension (PR body
+excepted — §13.2).
 
 ### 13.1 Issue description
 
@@ -854,7 +965,10 @@ Do not restate the Definition of Done here.
 
 Issue link, approach summary, checklist mirroring acceptance criteria, test
 coverage note, Definition of Done checklist, and **Discovered work** from
-`ImplementResult.discoveredWork`.
+`ImplementResult.discoveredWork`. The one artifact the extension does not
+render: the PR must exist before yield (§7.3), so the implement agent authors
+the body from the same data at creation — the mirror of its `foreman_github_pr`
+exception to principle 9. The extension never rewrites it.
 
 ### 13.3 Spike issue
 
@@ -978,6 +1092,8 @@ commands; reinstall replacing the managed checkout.
    the `foreman-` prefix rule but does affect what you can delegate to.
 7. Whether Linear's GitHub integration auto-transition on merge fits the
    workflow (§4.2); if not, the loop gains a small merge-detection worker.
+8. Frontmatter tool-name spellings (`search`, `dap`, `exec`) and whether
+   `output: schemas/….json` resolves relative to the plugin root.
 
 ---
 
@@ -1202,7 +1318,7 @@ Each worker owns one transition and evaluates only its own predicate:
 | Worker | Selects | Condition | Dispatches |
 |---|---|---|---|
 | `triage` | Inbox view | non-empty, daily window | `foreman-triage` (batch) |
-| `refine` | Backlog | priority ≠ None, no `legacy`, no `agent:*` | `foreman-refine` |
+| `refine` | Backlog; plus `legacy` in Backlog or Todo (§4.9) | priority ≠ None, no `agent:*` | `foreman-refine` |
 | `implement` | Todo | implementation gate passes | `foreman-implement` |
 | `review` | In Review | PR open, no `ReviewResult` for head SHA | `foreman-review` |
 
@@ -1296,6 +1412,11 @@ retrying and convert to a `blocked:needs-decision` with the failure output
 attached. A loop that retries indefinitely burns budget on something
 structurally broken, usually an under-refined issue.
 
+One carve-out: a schema-invalid yield from a budget force-stop (§3.6) is not a
+failure — the agent was cut off mid-thought, not broken. The extension detects
+the abort via the lifecycle events (§3.5), synthesizes a Case B `BlockRecord`
+from the partial output, and routes it through §9 instead of the retry counter.
+
 Review→fix cycles are counted the same way and capped at **2** (§7.4); hitting
 the cap converts to `blocked:needs-decision` with both the findings and the
 implement agent's last result attached.
@@ -1330,16 +1451,17 @@ than better.
 ## 18. Build order
 
 1. **Plugin skeleton + Linear config.** Correct `omp.extensions` key, local
-   marketplace install, `/reload-plugins` loop working. Linear states,
-   load-bearing labels, `legacy` amnesty pass, six saved views, one worked
-   `Context` doc with a Definition of Done. Resolve §16 items 5 and 7. ~half a
-   day.
+   marketplace install, `/reload-plugins` loop working. The `core` config
+   loader with schema validation, layering, and defaults (§3.10). Linear
+   states, load-bearing labels, `legacy` amnesty pass, six saved views, one
+   worked `Context` doc with a Definition of Done. Resolve §16 items 5 and 7.
+   ~half a day.
 2. **Schemas + extension core + interrupt protocol.** The four result schemas
    and `BlockRecord` union first — everything downstream consumes them. Then
    typed Linear read tools, the result-application layer that makes the
-   extension the sole Linear writer (§2.9), gate validators, the lock manager
-   (dispatch IDs, claim/release), the lock reaper, the project→repo config map
-   with its `session_start` validation, lifecycle listeners,
+   extension the sole Linear writer (principle 9), gate validators, the lock manager
+   (dispatch IDs, claim/release), the lock reaper, the config loader's
+   `session_start` validation and project→repo lookup (§3.10), lifecycle listeners,
    `foreman-block-protocol` skill, the skill-name resolution guard (§8), and
    `/foreman-status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
    agent — retrofitted, one agent gets a "just ask the user" fallback and it
@@ -1351,8 +1473,9 @@ than better.
 4. **`foreman-refine` + `foreman-spike`.** After triage tuning. ~half a day.
 5. **`foreman-implement` + `foreman-review` + the fix cycle + TTSR rules.**
    Shaped by what 3 and 4 revealed. Includes the resume-mode path in the
-   implement skill and the hub-message findings route with its cycle cap
-   (§7.4). ~1.5 days, most of it in worktree lifecycle and the fix cycle.
+   implement skill, the findings route with its cycle cap (§7.4), both merge
+   modes and `/foreman-merge` (§3.10). ~1.5 days, most of it in worktree
+   lifecycle and the fix cycle.
 6. **`foreman-loop` + `PrintDispatcher` + autonomy staging (§17).** Supervisor,
    lockfile, bookkeeping file, the four stage workers, global cap and per-stage
    sub-limits, Ready buffer target, backpressure, retry counter, `--dry-run`.
@@ -1378,7 +1501,7 @@ that dispatches confidently into a routing bug.
 - Auto-merge on clean review, at any autonomy stage
 - An orchestrator *agent* — routing is a pure function (§17.1)
 - Agents holding Linear or GitHub write tools (implement's `foreman_github_pr`
-  excepted) — the extension is the sole writer (§2.9)
+  excepted) — the extension is the sole writer (principle 9)
 - An uncapped review→fix cycle (§7.4)
 - A loop that dispatches without a WIP limit or backpressure
 - Herdr agent state as a routing input (§17.3)
@@ -1395,7 +1518,11 @@ that dispatches confidently into a routing bug.
 - `isolated: true` on any Foreman agent
 - `spawns: true` on any Foreman agent
 - Velocity, burndown, or points-completed metrics
-- Cross-agent messaging as a design element — `hub` is used for revival and
-  the review fix cycle only; Linear is the message bus
+- Cross-agent messaging as a design element — `hub` is a live-process
+  optimization for revival and the review fix cycle (§9); Linear is the
+  message bus
 - An `area:` ontology beyond what `foreman-implement` reads
 - Publishing to a public marketplace before it works locally
+- Config keys that can disable gates, WIP limits, backpressure, the lock
+  protocol, or propose-before-apply — config tunes parameters, never removes
+  invariants (§3.10)
