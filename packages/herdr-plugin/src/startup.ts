@@ -79,46 +79,81 @@ async function runHerdrJson<T>(herdrBin: string, args: string[]): Promise<HerdrJ
 }
 
 /**
- * Whether an existing agent named `foreman-loop` is still live — checked via
- * `herdr agent get`, since a stopped process leaves no live agent even if the
- * guard pane record still points at a pane. Absence of a live agent, not
- * absence of the pane, is what should trigger a re-launch.
+ * Whether the guarded pane still exists. `pane get` exits 0 for a live pane
+ * and non-zero once it is closed, which is the signal that matters here: the
+ * hook's contract is "a long-lived loop pane exists", and a pane whose loop
+ * has exited still holds the operator's scrollback about why.
  *
- * UNVERIFIED: exit-code-as-liveness (0 = live, nonzero = not found/dead) is
- * inferred, not confirmed against `herdr agent get --help` or real output.
- * Keep this defensive rather than parsing a specific error shape if it turns
- * out to be wrong.
+ * Deliberately not `agent get`: the loop is an ordinary process, not a coding
+ * agent, so herdr never registers it under an agent name (see below).
  */
-async function loopAgentIsLive(herdrBin: string): Promise<boolean> {
-  const { exitCode } = await defaultRunCommand(herdrBin, ["agent", "get", LOOP_PANE_LABEL]);
+async function loopPaneIsLive(herdrBin: string, paneId: string): Promise<boolean> {
+  const { exitCode } = await defaultRunCommand(herdrBin, ["pane", "get", paneId]);
   return exitCode === 0;
 }
 
 /**
- * Idempotent startup: ensures workspace `foreman`, a tab, a shell pane, and a
- * `foreman-loop` agent running inside it, then persists the ids to the guard
- * file so a re-run on live handoff can verify liveness instead of blindly
- * recreating the layout (SPEC §17.4).
+ * Absolute path to the built loop entrypoint, which lives in a sibling package.
+ * Resolved from the plugin root rather than PATH: `foreman-loop` is a workspace
+ * bin and is not installed globally.
+ */
+function resolveLoopEntry(pluginRoot: string): string {
+  const entry = join(pluginRoot, "..", "loop", "dist", "main.js");
+  if (!existsSync(entry)) {
+    throw new Error(
+      `The loop is not built at ${entry}. Run \`bun run build\` in the Foreman repo, ` +
+        `then restart herdr or invoke the startup hook again.`,
+    );
+  }
+  return entry;
+}
+
+/**
+ * Idempotent startup: ensures workspace `foreman`, a tab, and the loop running
+ * as an ordinary process in that tab's pane, then persists the ids so a re-run
+ * on live handoff verifies liveness instead of rebuilding the layout (SPEC §17.4).
  */
 export async function runStartup(env: Record<string, string | undefined> = process.env): Promise<void> {
   const herdrBin = env.HERDR_BIN_PATH ?? "herdr";
   const stateDir = env.HERDR_PLUGIN_STATE_DIR;
   if (!stateDir) throw new Error("HERDR_PLUGIN_STATE_DIR is not set; cannot guard against double-start.");
+  const pluginRoot = env.HERDR_PLUGIN_ROOT;
+  if (!pluginRoot) throw new Error("HERDR_PLUGIN_ROOT is not set; cannot locate the loop entrypoint.");
+
+  const loopEntry = resolveLoopEntry(pluginRoot);
 
   const existing = readGuard(stateDir);
-  if (existing && (await loopAgentIsLive(herdrBin))) {
+  if (existing && (await loopPaneIsLive(herdrBin, existing.paneId))) {
     return;
   }
 
-  const workspace = await runHerdrJson<{ workspace: { workspace_id: string } }>(herdrBin, [
-    "workspace",
-    "create",
-    "--label",
-    WORKSPACE_LABEL,
-    "--no-focus",
-  ]);
-  const workspaceId = workspace.result?.workspace?.workspace_id ?? existing?.workspaceId;
-  if (!workspaceId) throw new Error(`Failed to create the ${WORKSPACE_LABEL} workspace: ${workspace.stderr}`);
+  /*
+   * Reuse an existing `foreman` workspace before creating one. `workspace
+   * create` always creates, so an unconditional call produces a duplicate every
+   * time the guard file is absent — measured against herdr 0.8.2, three
+   * workspaces all labelled `foreman` after three startup runs. The operator's
+   * own workspace for this repo is almost always already there.
+   */
+  const listed = await runHerdrJson<{ workspaces: Array<{ workspace_id: string; label?: string }> }>(
+    herdrBin,
+    ["workspace", "list"],
+  );
+  const reusable = listed.result?.workspaces?.find((w) => w.label === WORKSPACE_LABEL);
+
+  let workspaceId = reusable?.workspace_id ?? existing?.workspaceId ?? null;
+  if (!workspaceId) {
+    const created = await runHerdrJson<{ workspace: { workspace_id: string } }>(herdrBin, [
+      "workspace",
+      "create",
+      "--label",
+      WORKSPACE_LABEL,
+      "--no-focus",
+    ]);
+    workspaceId = created.result?.workspace?.workspace_id ?? null;
+    if (!workspaceId) {
+      throw new Error(`Failed to create the ${WORKSPACE_LABEL} workspace: ${created.stderr}`);
+    }
+  }
 
   const tab = await runHerdrJson<{ tab: { tab_id: string }; root_pane: { pane_id: string } }>(herdrBin, [
     "tab",
@@ -133,22 +168,23 @@ export async function runStartup(env: Record<string, string | undefined> = proce
   const paneId = tab.result?.root_pane?.pane_id;
   if (!tabId || !paneId) throw new Error(`Failed to create the ${LOOP_PANE_LABEL} tab: ${tab.stderr}`);
 
-  const agentStart = await defaultRunCommand(herdrBin, [
-    "agent",
-    "start",
-    LOOP_PANE_LABEL,
-    "--kind",
-    "omp",
-    "--pane",
+  /*
+   * `pane run`, not `agent start`. The loop is a supervisor process, and
+   * `agent start --kind omp` launches an *interactive omp session* in the pane
+   * and waits for herdr to recognize it as a coding agent. Measured against
+   * herdr 0.8.2, that is exactly what happens: the pane came up as an omp agent
+   * sitting at a question prompt, herdr reported `agent_not_ready`, and the loop
+   * never ran. Agent commands are for things herdr must classify as agents;
+   * ordinary processes belong to the pane surface.
+   */
+  const launch = await defaultRunCommand(herdrBin, [
+    "pane",
+    "run",
     paneId,
-    "--timeout",
-    "30000",
-    "--",
-    "foreman-loop",
-    "start",
+    `exec bun run ${JSON.stringify(loopEntry)}`,
   ]);
-  if (agentStart.exitCode !== 0) {
-    throw new Error(`Failed to start the ${LOOP_PANE_LABEL} agent: ${agentStart.stderr}`);
+  if (launch.exitCode !== 0) {
+    throw new Error(`Failed to start the loop in pane ${paneId}: ${launch.stderr}`);
   }
 
   writeGuard(stateDir, { workspaceId, tabId, paneId, createdAt: new Date().toISOString() });

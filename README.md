@@ -113,12 +113,32 @@ Four dispatch commands run one agent by hand: `/foreman:triage`,
 `/foreman:refine`, `/foreman:implement`, `/foreman:review`.
 
 If you use [herdr](https://github.com/andyhite/herdr), the board ships as a
-plugin with four panes — the blocked drain, proposal review, the board, and
-live agent detail:
+plugin with four screens — the blocked drain, proposal review, the board, and
+live agent detail. Requires herdr 0.8.0 or newer.
 
 ```bash
+bun run build
 herdr plugin link packages/herdr-plugin
 ```
+
+Linking registers four actions and, via its `[[startup]]` hook, ensures a
+long-lived `foreman-loop` pane in a workspace labelled `foreman` — reusing yours
+if you already have one. Bind the screens you want in
+`~/.config/herdr/config.toml`; an action is the only thing a keybinding can
+address, so each screen is reached through one:
+
+```toml
+[[keys.command]]
+key = "ctrl+shift+b"
+type = "plugin_action"
+command = "andyhite.foreman.open-blocked"
+description = "Foreman: open the blocked drain"
+```
+
+The other three are `open-proposals`, `open-board`, and `open-agents`. To run
+agents in real panes you can attach to instead of headless children, set
+`loop.dispatcher` to `"herdr"`; if the server is unreachable the loop logs a
+fallback and continues in print mode rather than stalling.
 
 ## Configuration
 

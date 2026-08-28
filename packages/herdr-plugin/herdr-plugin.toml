@@ -5,10 +5,10 @@
 #   [[keys.command]]
 #   key = "ctrl+shift+b"
 #   type = "plugin_action"
-#   command = "foreman.open-blocked"
+#   command = "andyhite.foreman.open-blocked"
 #   description = "Foreman: open the blocked drain"
 
-id = "foreman"
+id = "andyhite.foreman"
 name = "Foreman board"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
@@ -28,16 +28,16 @@ command = ["bun", "run", "dist/startup.js"]
 id = "blocked"
 title = "Foreman: Blocked drain"
 placement = "popup"
-width = 100
-height = 36
+width = "85%"
+height = "80%"
 command = ["bun", "run", "dist/board.js", "blocked"]
 
 [[panes]]
 id = "proposals"
 title = "Foreman: Proposals"
 placement = "popup"
-width = 100
-height = 36
+width = "85%"
+height = "80%"
 command = ["bun", "run", "dist/board.js", "proposals"]
 
 [[panes]]
@@ -49,43 +49,48 @@ command = ["bun", "run", "dist/board.js", "board"]
 [[panes]]
 id = "agents"
 title = "Foreman: Agents"
+# No width/height: herdr accepts an explicit pane size only for `popup`.
 placement = "overlay"
-width = 90
-height = 30
 command = ["bun", "run", "dist/board.js", "agents"]
 
+# Every action shells `bin/open-pane`: actions are the only thing the palette
+# and `[[keys.command]]` can address, and they take no arguments, so the
+# entrypoint id is baked into each argv.
 [[actions]]
 id = "open-blocked"
 title = "Foreman: Open blocked drain"
 description = "List every BlockRecord and resolve one with a keypress (SPEC §9, §17.4)"
 contexts = ["global"]
+command = ["sh", "bin/open-pane", "blocked"]
 
 [[actions]]
 id = "open-proposals"
 title = "Foreman: Open proposal review"
 description = "Triage batch, per-item accept/reject"
 contexts = ["global"]
+command = ["sh", "bin/open-pane", "proposals"]
 
 [[actions]]
 id = "open-board"
 title = "Foreman: Open board"
 description = "Issues by state, WIP, backpressure, last run per worker"
 contexts = ["global"]
+command = ["sh", "bin/open-pane", "board"]
 
 [[actions]]
 id = "open-agents"
 title = "Foreman: Open agent detail"
 description = "Live agent status, jump-to-pane / attach"
 contexts = ["global"]
+command = ["sh", "bin/open-pane", "agents"]
 
 # Refresh sidebar tokens on agent state change (SPEC §17.4 "Events").
+#
+# Verified against herdr 0.8.2: the event namespace is `pane.*`, not `agent.*`,
+# and there is no blocked-specific event — `pane.agent_status_changed` fires on
+# every transition, including into `blocked`. A herdr `blocked` means a Foreman
+# bug (SPEC §17.3), not a normal queue entry, so events.ts separates that case
+# from a routine status refresh and reports it loudly rather than routing on it.
 [[events]]
-on = "agent.status_changed"
-command = ["bun", "run", "dist/events.js"]
-
-# Herdr `blocked` means a Foreman bug (SPEC §17.3), not a normal queue entry —
-# events.ts distinguishes this case from a routine status refresh and reports
-# it loudly rather than routing on it.
-[[events]]
-on = "agent.blocked"
+on = "pane.agent_status_changed"
 command = ["bun", "run", "dist/events.js"]

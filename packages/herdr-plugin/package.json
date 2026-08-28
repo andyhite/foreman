@@ -8,7 +8,8 @@
     "foreman-board": "./dist/board.js"
   },
   "scripts": {
-    "build": "bun build ./src/board.ts ./src/startup.ts ./src/events.ts --outdir ./dist --target node --format esm"
+    "//target": "bun, not node: every consumer invokes `bun`, and --target node miscompiles this package — a single-entry build crashes on bun's CJS entry guard, and a multi-entry build decodes string literals as Latin-1 (an em dash became 3 chars, so widths and rules were wrong too).",
+    "build": "bun build ./src/board.ts ./src/startup.ts ./src/events.ts --outdir ./dist --target bun --format esm"
   },
   "dependencies": {
     "@foreman/core": "workspace:*"
