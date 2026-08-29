@@ -30,8 +30,23 @@ interface GhPrListEntry {
 }
 
 interface GhCheckRun {
-  state: string;
+  status: string;
   conclusion: string | null;
+}
+
+/**
+ * Thrown by `mergeBranchLocally` when `repoPath` — the operator's own
+ * checkout, not a worktree — has uncommitted changes. Merging into a dirty
+ * tree would either fail mid-sequence after `baseBranch` is already pulled,
+ * or silently carry the operator's changes onto `baseBranch` and push them.
+ */
+export class DirtyWorkingTreeError extends Error {
+  constructor(repoPath: string) {
+    super(
+      `${repoPath} has uncommitted changes; commit or stash them before merging locally`,
+    );
+    this.name = "DirtyWorkingTreeError";
+  }
 }
 
 export class GitHubClient {
@@ -41,8 +56,12 @@ export class GitHubClient {
     this.#runner = options?.runner ?? nodeRunner;
   }
 
-  /** `gh pr list --head <branch>`, or null when no PR exists for the branch. */
-  async prForBranch(repoPath: string, branch: string): Promise<PullRequestInfo | null> {
+  /** `gh pr list --head <branch>`; `options.state` defaults to `"open"` (Contract 2). */
+  async prForBranch(
+    repoPath: string,
+    branch: string,
+    options?: { state?: "open" | "all" },
+  ): Promise<PullRequestInfo | null> {
     const { stdout } = await this.#runner.run(
       [
         "gh",
@@ -50,6 +69,8 @@ export class GitHubClient {
         "list",
         "--head",
         branch,
+        "--state",
+        options?.state ?? "open",
         "--json",
         "number,url,headRefOid,state,isDraft,mergeable",
         "--limit",
@@ -125,15 +146,21 @@ export class GitHubClient {
    */
   async ciStatus(repoPath: string, ref: string): Promise<CiState> {
     const { stdout } = await this.#runner.run(
-      ["gh", "api", `repos/{owner}/{repo}/commits/${ref}/check-runs`],
+      [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        `repos/{owner}/{repo}/commits/${ref}/check-runs`,
+      ],
       { cwd: repoPath },
     );
-    const parsed = JSON.parse(stdout) as { check_runs: GhCheckRun[] };
-    const runs = parsed.check_runs;
+    const pages = JSON.parse(stdout) as { check_runs: GhCheckRun[] }[];
+    const runs = pages.flatMap((page) => page.check_runs);
     if (runs.length === 0) {
       return "none";
     }
-    if (runs.some((run) => run.state !== "completed")) {
+    if (runs.some((run) => run.status !== "completed")) {
       return "pending";
     }
     if (runs.some((run) => run.conclusion !== "success" && run.conclusion !== "neutral")) {
@@ -195,7 +222,13 @@ export class GitHubClient {
     return merged;
   }
 
-  /** The direct-branch-mode half of `/foreman-merge` (`pr.required: false`, SPEC §3.10). */
+  /**
+   * The direct-branch-mode half of `/foreman-merge` (`pr.required: false`,
+   * SPEC §3.10). Operates directly in `repoPath` — the operator's own
+   * checkout, not a worktree — so it refuses a dirty tree up front and
+   * restores whatever ref was checked out before it started, in a `finally`,
+   * rather than leaving the operator stranded on `baseBranch`.
+   */
   async mergeBranchLocally(
     repoPath: string,
     branch: string,
@@ -203,28 +236,45 @@ export class GitHubClient {
     strategy: MergeStrategy,
     deleteBranch: boolean,
   ): Promise<void> {
-    await this.#runner.run(["git", "checkout", baseBranch], { cwd: repoPath });
-    await this.#runner.run(["git", "pull", "origin", baseBranch], { cwd: repoPath });
-
-    if (strategy === "squash") {
-      await this.#runner.run(["git", "merge", "--squash", branch], { cwd: repoPath });
-      await this.#runner.run(
-        ["git", "commit", "-m", `Merge branch '${branch}' (squash)`],
-        { cwd: repoPath },
-      );
-    } else if (strategy === "rebase") {
-      await this.#runner.run(["git", "rebase", branch], { cwd: repoPath });
-    } else {
-      await this.#runner.run(["git", "merge", "--no-ff", branch], { cwd: repoPath });
+    const status = await this.#runner.run(["git", "status", "--porcelain"], { cwd: repoPath });
+    if (status.stdout.trim().length > 0) {
+      throw new DirtyWorkingTreeError(repoPath);
     }
 
-    await this.#runner.run(["git", "push", "origin", baseBranch], { cwd: repoPath });
-
-    if (deleteBranch) {
-      await this.#runner.run(["git", "branch", "-D", branch], { cwd: repoPath });
-      await this.#runner.run(["git", "push", "origin", "--delete", branch], {
+    const startingRef = (
+      await this.#runner.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], {
         cwd: repoPath,
-      });
+      }).catch(() =>
+        this.#runner.run(["git", "rev-parse", "HEAD"], { cwd: repoPath }),
+      )
+    ).stdout.trim();
+
+    try {
+      await this.#runner.run(["git", "checkout", baseBranch], { cwd: repoPath });
+      await this.#runner.run(["git", "pull", "origin", baseBranch], { cwd: repoPath });
+
+      if (strategy === "squash") {
+        await this.#runner.run(["git", "merge", "--squash", branch], { cwd: repoPath });
+        await this.#runner.run(
+          ["git", "commit", "-m", `Merge branch '${branch}' (squash)`],
+          { cwd: repoPath },
+        );
+      } else if (strategy === "rebase") {
+        await this.#runner.run(["git", "rebase", branch], { cwd: repoPath });
+      } else {
+        await this.#runner.run(["git", "merge", "--no-ff", branch], { cwd: repoPath });
+      }
+
+      await this.#runner.run(["git", "push", "origin", baseBranch], { cwd: repoPath });
+
+      if (deleteBranch) {
+        await this.#runner.run(["git", "branch", "-D", branch], { cwd: repoPath });
+        await this.#runner.run(["git", "push", "origin", "--delete", branch], {
+          cwd: repoPath,
+        });
+      }
+    } finally {
+      await this.#runner.run(["git", "checkout", startingRef], { cwd: repoPath });
     }
   }
 }

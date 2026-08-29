@@ -88,10 +88,11 @@ export interface TaskGuardDeps {
 const FOREMAN_PREFIX = "foreman-";
 const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
 
-type Stage = "triage" | "refine" | "implement" | "review";
+type Stage = "triage" | "plan" | "refine" | "implement" | "review";
 
-function stageFor(agent: string): Stage | null {
+export function stageFor(agent: string): Stage | null {
   if (agent === "foreman-triage") return "triage";
+  if (agent === "foreman-plan") return "plan";
   if (agent === "foreman-refine") return "refine";
   if (agent === "foreman-implement") return "implement";
   if (agent === "foreman-review") return "review";
@@ -165,9 +166,20 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
 }
 
 
+interface PreparedCleanup {
+  issue: Issue;
+  dispatchId: string;
+  agent: string;
+  worktree: string | null;
+  takenAt: Date;
+  ttlMs: number;
+  previousStateId: string | null;
+}
+
 interface PreparedItem {
   item: TaskItemInput;
   contextDigest: string | null;
+  cleanup?: PreparedCleanup;
 }
 
 /**
@@ -198,8 +210,12 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   }
 
   if (stage === "triage") {
-    const digest = await deps.contextDigest(null);
-    return { item: revised, contextDigest: digest };
+    return { item: revised, contextDigest: await deps.contextDigest(null) };
+  }
+  if (stage === "plan") {
+    const projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1];
+    if (!projectId) throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
+    return { item: revised, contextDigest: await deps.contextDigest(projectId) };
   }
 
   const match = ISSUE_MARKER_RE.exec(item.task);
@@ -237,11 +253,13 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   let branch: string | null = null;
   let baseBranch: string | null = null;
   let diffPath: string | null = null;
+  const previousStateId = issue.state.id;
+
 
   if (stage === "implement") {
     await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
     const repoPath = deps.entry.repoPath;
-    branch = branchNameFor(deps.entry.branchPattern, issue);
+    branch = branchNameFor(deps.entry.branchPattern, issue, repoPath);
     worktreePath = worktreePathFor(deps.entry.worktreePattern, repoPath, issue);
     baseBranch = deps.entry.baseBranch;
     await deps.ensureWorktree({ repoPath, worktreePath, branch, baseBranch });
@@ -271,7 +289,54 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     "FOREMAN-BASE": baseBranch ?? undefined,
   });
 
-  return { item: revised, contextDigest: null };
+  return {
+    item: revised,
+    contextDigest: null,
+    cleanup: {
+      issue,
+      dispatchId,
+      agent,
+      worktree: worktreePath,
+      takenAt: now,
+      ttlMs,
+      previousStateId: stage === "implement" ? previousStateId : null,
+    },
+  };
+}
+
+/**
+ * A task call is all-or-blocked: if a later item cannot be prepared, no
+ * earlier lock may outlive the blocked call. Worktrees are deliberately left
+ * intact for the operator; they may contain pre-existing branch state.
+ */
+async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGuardDeps): Promise<void> {
+  await Promise.all(
+    cleanups.map(async (cleanup) => {
+      try {
+        const running = await deps.linear.ensureLabel(AGENT_LABEL.running, cleanup.issue.team.id);
+        await deps.linear.updateIssue(cleanup.issue.id, {
+          removedLabelIds: [running.id],
+          ...(cleanup.previousStateId ? { stateId: cleanup.previousStateId } : {}),
+        });
+        await deps.linear.createComment({
+          issueId: cleanup.issue.id,
+          body: renderLockComment({
+            dispatchId: cleanup.dispatchId,
+            agent: cleanup.agent,
+            issueId: cleanup.issue.identifier,
+            takenAt: cleanup.takenAt.toISOString(),
+            ttlMs: cleanup.ttlMs,
+            worktree: cleanup.worktree,
+            released: true,
+            releasedAt: deps.now().toISOString(),
+          }),
+        });
+      } catch {
+        // Preserve the original preparation failure. A reaper can recover a
+        // cleanup that fails because Linear itself is unavailable.
+      }
+    }),
+  );
 }
 
 /**
@@ -284,6 +349,7 @@ export async function prepareTaskCall(
   input: TaskCallInput,
   deps: TaskGuardDeps,
 ): Promise<TaskGuardDecision> {
+  const cleanups: PreparedCleanup[] = [];
   try {
     const flat = input.tasks === undefined;
     const items: TaskItemInput[] = input.tasks ?? [
@@ -300,6 +366,7 @@ export async function prepareTaskCall(
     let contextAppend = "";
     for (const item of items) {
       const prepared = await prepareItem(item, deps);
+      if (prepared.cleanup) cleanups.push(prepared.cleanup);
       if (prepared.contextDigest) contextAppend += `\n\n${prepared.contextDigest}`;
       revisedItems.push(prepared.item);
     }
@@ -321,9 +388,11 @@ export async function prepareTaskCall(
 
     return { input: revisedInput };
   } catch (error) {
+    await unwindPrepared(cleanups, deps);
     return { block: true, reason: error instanceof Error ? error.message : String(error) };
   }
 }
+
 
 /** Shared by the extension's config validation and the unblock/apply commands. */
 export function extractIssueId(task: string): string | null {

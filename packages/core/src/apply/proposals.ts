@@ -37,14 +37,19 @@ export function latestProposal(issue: Issue): FoundMarker<TriageItem> | null {
   return markers[markers.length - 1] ?? null;
 }
 
+/** Only `applied` markers with `appliedProposalAt` are proposal-apply markers (Contract 1); a plugin `dispatchApplied` marker is a different event and must not mask an approved proposal. */
 export function hasLaterApplied(issue: Issue, afterCreatedAt: string): boolean {
-  return findMarkers(MARKER_KIND.applied, issue.comments).some((marker) => marker.createdAt > afterCreatedAt);
+  return findMarkers<{ appliedProposalAt?: string }>(MARKER_KIND.applied, issue.comments).some(
+    (marker) => marker.createdAt > afterCreatedAt && marker.data.appliedProposalAt !== undefined,
+  );
 }
 
 export function hasLaterReject(issue: Issue, afterCreatedAt: string): boolean {
-  return issue.comments.some(
-    (comment) => comment.createdAt > afterCreatedAt && comment.body.trim().toLowerCase().startsWith("reject:"),
-  );
+  return issue.comments.some((comment) => {
+    if (comment.createdAt <= afterCreatedAt) return false;
+    const start = comment.body.trim().toLowerCase();
+    return start.startsWith("reject:") || start.startsWith("rejected:");
+  });
 }
 
 export function isCurrentlyProposed(issue: Issue): boolean {
@@ -133,7 +138,10 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
   for (const blockerId of item.proposedBlockedBy) {
     const blocker = await linear.issue(blockerId);
     if (blocker) {
-      await linear.createRelation({ issueId: issue.id, relatedIssueId: blocker.id, type: "blocks" });
+      // `blocker` blocks `issue` (Linear stores "A blocks B" as
+      // `{ issueId: A, relatedIssueId: B }`), the same orientation as
+      // `applyRefine`'s spike case — not the inverse.
+      await linear.createRelation({ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
     }
   }
 
@@ -147,15 +155,42 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
   return { issueId: issue.id, identifier: issue.identifier, destination: item.destination, note: projectNote };
 }
 
-/** find + apply every candidate. Returns what it applied. */
+/** A candidate that failed to apply; the caller decides whether to retry next pass. */
+export interface ApplyFailure {
+  issueId: string;
+  identifier: string;
+  error: string;
+}
+
+/** The outcome of one `runApplyPass` invocation: what applied cleanly, and what failed and why. */
+export interface ApplyPassResult {
+  applied: AppliedProposal[];
+  failures: ApplyFailure[];
+}
+
+/**
+ * find + apply every candidate, isolating each: `applyProposal` is not
+ * atomic (state, labels, relations, then the marker written last), so one
+ * candidate's failure must never abort the batch and hide every remaining
+ * approved proposal until the next pass.
+ */
 export async function runApplyPass(
   linear: LinearWriter,
   options?: { filter?: IssueFilter; limit?: number },
-): Promise<AppliedProposal[]> {
+): Promise<ApplyPassResult> {
   const candidates = await findApprovedUnapplied(linear, options);
   const applied: AppliedProposal[] = [];
+  const failures: ApplyFailure[] = [];
   for (const candidate of candidates) {
-    applied.push(await applyProposal(linear, candidate));
+    try {
+      applied.push(await applyProposal(linear, candidate));
+    } catch (error) {
+      failures.push({
+        issueId: candidate.issue.id,
+        identifier: candidate.issue.identifier,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-  return applied;
+  return { applied, failures };
 }

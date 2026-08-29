@@ -128,12 +128,13 @@ function suppressingLabel(issue: Issue): { code: string; message: string } | nul
   return null;
 }
 
-function stagePermitted(stage: StageName, loopStage: GlobalConfig["loop"]["stage"]): boolean {
+export function stagePermitted(stage: StageName, loopStage: GlobalConfig["loop"]["stage"]): boolean {
   if (loopStage === "full") return true;
   if (loopStage === "read-only") return stage === "review";
-  // "dry-run": every stage decides; the caller (the worker) simply does not
-  // act on the decision (SPEC §17.9 step 2).
-  return true;
+  // "dry-run" evaluates every stage but workers never dispatch. Unknown
+  // runtime input is not an autonomy rung: fail closed rather than treating
+  // a malformed control request as permission for the whole pipeline.
+  return loopStage === "dry-run";
 }
 
 /** Older first, then higher priority first — SPEC §17.5's pickup order. */

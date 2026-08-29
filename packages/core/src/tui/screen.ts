@@ -69,14 +69,21 @@ export class Screen {
     };
     this.#stdout.on("resize", this.#onResize);
 
-    const leaveOnSignal = () => this.leave();
-    process.on("exit", leaveOnSignal);
+    const leaveOnSignal = (signal: NodeJS.Signals) => {
+      this.leave();
+      // Registering a listener suppresses Node/Bun's default terminate
+      // action, so the process must re-raise its own exit; SIGHUP has no
+      // conventional exit code, this mirrors the shell convention of
+      // 128 + signal number for INT (2), TERM (15), HUP (1).
+      const signo = signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1;
+      process.exit(128 + signo);
+    };
+    process.on("exit", () => this.leave());
     process.on("SIGINT", leaveOnSignal);
     process.on("SIGTERM", leaveOnSignal);
     process.on("SIGHUP", leaveOnSignal);
     const proc: NodeJS.EventEmitter = process;
     this.#exitHandlers = [
-      () => proc.removeListener("exit", leaveOnSignal),
       () => proc.removeListener("SIGINT", leaveOnSignal),
       () => proc.removeListener("SIGTERM", leaveOnSignal),
       () => proc.removeListener("SIGHUP", leaveOnSignal),
@@ -105,6 +112,7 @@ export class Screen {
   }
 
   render(canvas: Canvas): void {
+    if (!this.#open) return;
     const lines = canvas.toLines();
     let out = "";
     for (let row = 0; row < lines.length; row++) {

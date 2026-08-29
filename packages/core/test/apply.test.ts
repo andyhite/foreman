@@ -80,6 +80,8 @@ class FakeLinear implements LinearWriter {
   issuesCalls: IssueQuery[] = [];
   createProjectCalls: Array<{ name: string; teamIds: LinearId[]; description?: string; content?: string }> = [];
   addProjectToInitiativeCalls: Array<{ projectId: LinearId; initiativeId: LinearId }> = [];
+  /** Issue ids for which `updateIssue` throws, for `runApplyPass` isolation tests. */
+  failUpdateForIds = new Set<string>();
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -136,6 +138,7 @@ class FakeLinear implements LinearWriter {
   }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
+    if (this.failUpdateForIds.has(id)) throw new Error(`simulated updateIssue failure for ${id}`);
     const issue = this.byId(id);
     if (input.addedLabelIds) {
       const added = input.addedLabelIds
@@ -202,10 +205,50 @@ describe("proposalCandidates — skip predicates", () => {
     const issue = makeIssue({
       comments: [
         proposalComment(item, proposedAt),
-        { id: "comment-applied", body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1" }, "applied"), createdAt: appliedAt, user: null, parentId: null },
+        {
+          id: "comment-applied",
+          body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1", appliedProposalAt: proposedAt }, "applied"),
+          createdAt: appliedAt,
+          user: null,
+          parentId: null,
+        },
       ],
     });
     expect(hasLaterApplied(issue, proposedAt)).toBe(true);
+    expect(proposalCandidates([issue])).toEqual([]);
+  });
+
+  it("does not treat a plugin dispatch-applied marker as proving the proposal was applied", () => {
+    const item = makeTriageItem();
+    const proposedAt = "2026-01-01T00:00:00.000Z";
+    const dispatchAppliedAt = "2026-01-02T00:00:00.000Z";
+    const issue = makeIssue({
+      comments: [
+        proposalComment(item, proposedAt),
+        {
+          id: "comment-dispatch-applied",
+          body: encodeMarker(MARKER_KIND.dispatchApplied, { dispatchId: "dispatch-1" }, "dispatch applied"),
+          createdAt: dispatchAppliedAt,
+          user: null,
+          parentId: null,
+        },
+      ],
+    });
+    expect(hasLaterApplied(issue, proposedAt)).toBe(false);
+    expect(proposalCandidates([issue])).toHaveLength(1);
+  });
+
+  it("skips an issue with a later reject: reply, case-insensitively including 'rejected:'", () => {
+    const item = makeTriageItem();
+    const proposedAt = "2026-01-01T00:00:00.000Z";
+    const rejectAt = "2026-01-02T00:00:00.000Z";
+    const issue = makeIssue({
+      comments: [
+        proposalComment(item, proposedAt),
+        { id: "comment-reject", body: "Rejected: not worth it", createdAt: rejectAt, user: null, parentId: null },
+      ],
+    });
+    expect(hasLaterReject(issue, proposedAt)).toBe(true);
     expect(proposalCandidates([issue])).toEqual([]);
   });
 
@@ -256,7 +299,7 @@ describe("applyProposal — mutation sequence", () => {
     expect(linear.commentCalls[0]?.body).toContain("Applied the `type:feature` proposal");
   });
 
-  it("creates a duplicate relation and blocker relations", async () => {
+  it("creates a duplicate relation and records each blocker as blocking the proposed issue", async () => {
     const item = makeTriageItem({ duplicateOf: "ENG-2", proposedBlockedBy: ["ENG-3"] });
     const issue = makeIssue({ comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")] });
     const duplicate = makeIssue({ id: "issue-2", identifier: "ENG-2" });
@@ -267,7 +310,7 @@ describe("applyProposal — mutation sequence", () => {
 
     expect(linear.relationCalls).toEqual([
       { issueId: "issue-1", relatedIssueId: "issue-2", type: "duplicate" },
-      { issueId: "issue-1", relatedIssueId: "issue-3", type: "blocks" },
+      { issueId: "issue-3", relatedIssueId: "issue-1", type: "blocks" },
     ]);
   });
 
@@ -323,16 +366,49 @@ describe("findApprovedUnapplied — filter passthrough", () => {
 });
 
 describe("runApplyPass", () => {
-  it("finds and applies every approved candidate", async () => {
+  it("returns applied proposals and no failures when every candidate succeeds", async () => {
     const item = makeTriageItem();
     const issue = makeIssue({ comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")] });
     const linear = new FakeLinear([issue]);
 
-    const applied = await runApplyPass(linear);
+    const result = await runApplyPass(linear);
 
-    expect(applied.length).toBe(1);
-    expect(applied[0]?.identifier).toBe("ENG-1");
+    expect(result.applied).toHaveLength(1);
+    expect(result.applied[0]?.identifier).toBe("ENG-1");
+    expect(result.failures).toEqual([]);
     expect(linear.updateCalls.length).toBeGreaterThan(0);
     expect(linear.commentCalls.length).toBe(1);
+  });
+
+  it("continues after one candidate fails and returns its failure alongside later applications", async () => {
+    const failedItem = makeTriageItem();
+    const succeedingItem = makeTriageItem();
+    const failed = makeIssue({
+      id: "issue-failed",
+      identifier: "ENG-2",
+      comments: [proposalComment(failedItem, "2026-01-01T00:00:00.000Z")],
+    });
+    const succeeding = makeIssue({
+      id: "issue-succeeding",
+      identifier: "ENG-3",
+      comments: [proposalComment(succeedingItem, "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([failed, succeeding]);
+    linear.failUpdateForIds.add(failed.id);
+
+    const result = await runApplyPass(linear);
+
+    expect(result.applied).toEqual([
+      { issueId: succeeding.id, identifier: succeeding.identifier, destination: "Backlog", note: null },
+    ]);
+    expect(result.failures).toEqual([
+      {
+        issueId: failed.id,
+        identifier: failed.identifier,
+        error: `simulated updateIssue failure for ${failed.id}`,
+      },
+    ]);
+    expect(linear.commentCalls).toHaveLength(1);
+    expect(linear.commentCalls[0]?.issueId).toBe(succeeding.id);
   });
 });

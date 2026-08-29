@@ -181,6 +181,7 @@ export async function runTui(argv: readonly string[]): Promise<void> {
     loopIds,
     team,
     onAction: (action) => host.dispatch(action),
+    noStart: args.noStart,
   });
   const views = [overviewView, agentsView, pipelineView, blocksView, proposalsView, logsView, settingsView];
   const host = new TuiHost({

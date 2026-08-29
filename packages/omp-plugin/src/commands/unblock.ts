@@ -5,32 +5,39 @@
  * lands in resume mode.
  */
 
-import type { LinearWriter } from "@foreman/core";
-import { encodeMarker, LABEL_GROUP, labelsInGroup, MARKER_KIND } from "@foreman/core";
+import type { LinearWriter, ResolvedRepoEntry } from "@foreman/core";
+import { assertIssueInScope, encodeMarker, LABEL_GROUP, labelsInGroup, MARKER_KIND } from "@foreman/core";
 
 export interface UnblockResult {
   ok: boolean;
   message: string;
 }
-
-export async function runUnblock(linear: LinearWriter, issueId: string, reply: string): Promise<UnblockResult> {
+export async function runUnblock(
+  linear: LinearWriter,
+  issueId: string,
+  reply: string,
+  entry?: ResolvedRepoEntry,
+): Promise<UnblockResult> {
   if (reply.trim().length === 0) {
     return { ok: false, message: "A non-empty reply is required." };
   }
 
   const issue = await linear.issue(issueId);
   if (!issue) return { ok: false, message: `Unknown issue "${issueId}".` };
+  if (entry) await assertIssueInScope({ linear, entry }, issue);
+
 
   const blockedLabelNames = labelsInGroup(issue, LABEL_GROUP.blocked);
   if (blockedLabelNames.length === 0) {
     return { ok: false, message: `${issueId} carries no blocked:* label; nothing to unblock.` };
   }
 
+  const removedLabelIds = issue.labels.filter((label) => blockedLabelNames.includes(label.name)).map((label) => label.id);
+  // Clear the block only when the reply can be recorded next: a failed comment
+  // leaves the safer blocked state instead of silently making work runnable.
+  await linear.updateIssue(issue.id, { removedLabelIds });
   const body = encodeMarker(MARKER_KIND.unblock, { reply }, `**Operator reply:** ${reply}`);
   await linear.createComment({ issueId: issue.id, body });
-
-  const removedLabelIds = issue.labels.filter((label) => blockedLabelNames.includes(label.name)).map((label) => label.id);
-  await linear.updateIssue(issue.id, { removedLabelIds });
 
   return { ok: true, message: `${issueId} unblocked; the loop will re-dispatch on its next pass.` };
 }

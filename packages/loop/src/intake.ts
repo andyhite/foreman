@@ -12,18 +12,23 @@
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
+import { homedir } from "node:os";
 import {
-  expandHome,
+  ControlServer,
+  HerdrDispatcher,
   INBOX_FILTER,
   INTAKE_LOOP_ID,
   LinearClient,
+  PrintDispatcher,
+  PROPOSALS_FILTER,
+  defaultTheme,
+  emptyBoardCounts,
+  expandHome,
+  findApprovedUnapplied,
+  initiativeIndex,
   loadGlobalConfig,
   loopPaths,
   newDispatchId,
-  PROPOSALS_FILTER,
-  ControlServer,
-  defaultTheme,
-  emptyBoardCounts,
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
@@ -31,8 +36,8 @@ import {
   writeStatusFile,
   type ControlEvent,
   type ControlHandlers,
-  type EmittableEvent,
   type Dispatcher,
+  type EmittableEvent,
   type GlobalConfig,
   type Issue,
   type LinearWriter,
@@ -40,21 +45,16 @@ import {
   type ResolvedRepoEntry,
   type RunState,
 } from "@foreman/core";
-import { HerdrDispatcher, PrintDispatcher } from "@foreman/core";
-import { initiativeIndex } from "@foreman/core";
-import { homedir } from "node:os";
-import { Bookkeeping } from "./bookkeeping.ts";
-import { patchAndWriteGlobalConfig } from "./control.ts";
-import { buildSnapshot } from "./snapshot.ts";
+import { Bookkeeping } from "./bookkeeping";
+import { patchAndWriteGlobalConfig } from "./control";
+import { buildSnapshot } from "./snapshot";
 import {
   bookkeepingPathFor,
   lockPathFor,
   resolveDispatcher,
   SupervisorLock,
 } from "./supervisor.ts";
-
-/** Mirrors `LOOP_VERSION` in `main.ts` — bump both alongside `package.json`'s `version`. */
-const LOOP_VERSION = "0.1.0";
+import { LOOP_VERSION } from "./version.ts";
 
 interface ParsedArgs {
   team: string | null;
@@ -193,6 +193,8 @@ export interface IntakeTickReport {
   proposedCount: number;
   applyPassRan: boolean;
   appliedCount: number;
+  /** Set only in dry-run: how many approved proposals the apply pass would have applied, had it run. */
+  wouldApplyCount: number;
 }
 
 /**
@@ -266,21 +268,44 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
   // scan's cost. `INBOX_FILTER` already encodes exactly that state filter,
   // so it is reused rather than re-declaring the state name.
   //
-  // A single bad proposal (e.g. a Linear 4xx applying one issue) must not
-  // stop this tick's bookkeeping from being saved, so failures are logged
-  // and swallowed here the same way a failed triage dispatch above is.
+  // `--dry-run`/`loop.stage=dry-run` must never mutate Linear (SPEC
+  // §17.9): `runApplyPass` sets state, labels, priority, project,
+  // relations and posts a comment, so dry-run reports the count it would
+  // have applied via the read-only `findApprovedUnapplied` instead of
+  // calling it. A single bad proposal (e.g. a Linear 4xx applying one
+  // issue) must not stop this tick's bookkeeping from being saved, so
+  // failures are logged and swallowed here the same way a failed triage
+  // dispatch above is.
   let appliedCount = 0;
-  try {
-    const applied = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
-    appliedCount = applied.length;
-    if (applied.length === 0) {
-      ctx.log("apply pass: no approvals pending.");
-    } else {
-      const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
-      ctx.log(`apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+  let wouldApplyCount = 0;
+  if (ctx.dryRun) {
+    try {
+      const candidates = await findApprovedUnapplied(ctx.linear, { filter: INBOX_FILTER });
+      wouldApplyCount = candidates.length;
+      ctx.log(
+        wouldApplyCount === 0
+          ? "apply pass (dry run): no approvals pending."
+          : `apply pass (dry run): would apply ${wouldApplyCount} approved proposal(s).`,
+      );
+    } catch (error) {
+      ctx.log(`apply pass (dry run) failed to count approvals: ${String(error)}`);
     }
-  } catch (error) {
-    ctx.log(`apply pass failed: ${String(error)}`);
+  } else {
+    try {
+      const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
+      appliedCount = applied.length;
+      if (applied.length === 0) {
+        ctx.log("apply pass: no approvals pending.");
+      } else {
+        const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
+        ctx.log(`apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+      }
+      for (const failure of failures) {
+        ctx.log(`apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`);
+      }
+    } catch (error) {
+      ctx.log(`apply pass failed: ${String(error)}`);
+    }
   }
 
   ctx.bookkeeping.save();
@@ -292,6 +317,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
     proposedCount,
     applyPassRan: true,
     appliedCount,
+    wouldApplyCount,
   };
 }
 
@@ -380,23 +406,36 @@ function buildIntakeSnapshot(ctx: IntakeContext, runtime: IntakeRuntime, version
   });
 }
 
-function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime, home: string): ControlHandlers {
+/** Atomic write of `status.json`, guarded the way `Supervisor.publishStatus` is: an IO failure is a stale status file, not a crash. No-op when `--no-control`/`--once` never stood up a status path. */
+function publishIntakeStatus(ctx: IntakeContext, runtime: IntakeRuntime, statusPath: string | null): void {
+  if (!statusPath) return;
+  try {
+    writeStatusFile(statusPath, buildIntakeSnapshot(ctx, runtime, LOOP_VERSION));
+  } catch (error) {
+    ctx.log(`failed to publish status.json: ${String(error)}`);
+  }
+}
+
+function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime, home: string, statusPath: string | null): ControlHandlers {
   return {
     snapshot: () => buildIntakeSnapshot(ctx, runtime, LOOP_VERSION),
     pause: () => {
       runtime.runState = "paused";
       runtime.pausedAt = ctx.now().toISOString();
       runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+      publishIntakeStatus(ctx, runtime, statusPath);
     },
     resume: () => {
       runtime.runState = "running";
       runtime.pausedAt = null;
       runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+      publishIntakeStatus(ctx, runtime, statusPath);
     },
     stop: (mode) => {
       runtime.stopMode = mode;
       runtime.runState = "draining";
       runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+      publishIntakeStatus(ctx, runtime, statusPath);
       if (mode === "now") runtime.wake?.();
     },
     tick: () => {
@@ -464,7 +503,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
 
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config),
+      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
       createHerdr: () => new HerdrDispatcher(config),
     },
     log,
@@ -472,6 +511,8 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
 
   const lock = new SupervisorLock(lockPathFor(intakeStateDir));
   lock.acquire(process.pid, new Date());
+
+  const statusPath = args.once || args.noControl ? null : controlPaths.status;
 
   const ctx: IntakeContext = {
     config,
@@ -481,7 +522,13 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     team,
     now: () => new Date(),
     log,
-    dryRun: args.dryRun,
+    // `foreman intake` respects `loop.stage`, not just its own `--dry-run`
+    // (SPEC §17.9): a fresh install's config defaults `loop.stage` to
+    // `"dry-run"`, and `setStage` on this process throws — intake always
+    // runs at the operator's configured autonomy, so a config left at the
+    // safe default must not dispatch live triage agents just because
+    // `--dry-run` itself was never passed.
+    dryRun: args.dryRun || config.loop.stage === "dry-run",
   };
   const runtime = new IntakeRuntime();
 
@@ -499,7 +546,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
       ? null
       : new ControlServer({
           socketPath: controlPaths.socket,
-          handlers: createIntakeControlHandlers(ctx, runtime, home),
+          handlers: createIntakeControlHandlers(ctx, runtime, home, statusPath),
           info: {
             loopId: INTAKE_LOOP_ID,
             kind: "intake",
@@ -520,17 +567,32 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
       log(`control socket listening at ${controlPaths.socket}`);
     }
 
+    // A tick already in flight (`runIntakeTick` awaiting a Linear call) must
+    // finish and save its bookkeeping before the lock is released — an
+    // abrupt exit mid-dispatch would spawn `/foreman-triage` without ever
+    // recording it, leaking a WIP slot the same way the leak this file's
+    // reconcile fix closes on the supervisor side. `draining` makes the
+    // poll loop exit after its current iteration instead of waiting a full
+    // `intakeInterruptibleWait`.
+    let shuttingDown = false;
     const shutdown = (signal: string): void => {
-      log(`received ${signal}, releasing lock and exiting.`);
-      lock.release();
-      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+      if (shuttingDown) return;
+      shuttingDown = true;
+      log(`received ${signal}, finishing any in-flight tick before releasing the lock.`);
+      runtime.stopMode = "graceful";
+      runtime.runState = "draining";
+      runtime.wake?.();
+      if (args.once) {
+        lock.release();
+        void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+      }
     };
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
 
     log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
 
-    if (args.dryRun) {
+    if (ctx.dryRun) {
       const rule = defaultTheme.tone("warn", "─".repeat(62));
       log(rule);
       log(defaultTheme.tone("warn", "DRY RUN — foreman intake will not act on issues."));
@@ -561,7 +623,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
         if (args.verbose && report.skipReason) {
           log(`skip: ${report.skipReason}`);
         }
-        if (controlServer) writeStatusFile(controlPaths.status, buildIntakeSnapshot(ctx, runtime, LOOP_VERSION));
+        publishIntakeStatus(ctx, runtime, statusPath);
         if (runtime.currentRunState() === "draining") break;
         await intakeInterruptibleWait(runtime, 60_000);
       }
@@ -581,7 +643,9 @@ async function intakeInterruptibleWait(runtime: IntakeRuntime, ms: number): Prom
   }
   const { promise, resolve } = Promise.withResolvers<void>();
   runtime.wake = resolve;
-  await Promise.race([promise, new Promise<void>((r) => setTimeout(r, ms))]);
+  const timer = setTimeout(resolve, ms);
+  await Promise.race([promise]);
+  clearTimeout(timer);
   runtime.wake = null;
 }
 

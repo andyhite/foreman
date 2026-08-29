@@ -9,6 +9,7 @@ import {
   IN_FLIGHT_FILTER,
   hasLabel,
   lockState,
+  lockTtlMs,
   readLockComment,
   type BlockedItem,
 } from "@foreman/core";
@@ -28,6 +29,7 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
   // this process cannot see across a restart) is still only reported, not
   // force-cleared, unless it is also past TTL.
   const liveDispatchIds = new Set(ctx.bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
+  const liveIssueIds = new Set(running.map((issue) => issue.identifier));
 
   for (const issue of running) {
     if (!hasLabel(issue, AGENT_LABEL.running)) continue;
@@ -62,7 +64,13 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
     }
 
     skipped.push({
-      stage: "implement",
+      stage: record?.data.agent === "foreman-refine"
+        ? "refine"
+        : record?.data.agent === "foreman-review"
+          ? "review"
+          : record?.data.agent === "foreman-plan"
+            ? "plan"
+            : "implement",
       issueId: issue.identifier,
       code: "lock-orphaned",
       message: classification.reason ?? "Lock past TTL and absent from every liveness source.",
@@ -76,9 +84,9 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
       options: [],
       recommendation: null,
     });
+    liveIssueIds.delete(issue.identifier);
   }
-
-  ctx.bookkeeping.reconcile(new Set(running.map((issue) => issue.identifier)), liveDispatchIds);
+  ctx.bookkeeping.reconcile(liveIssueIds, liveDispatchIds, now, lockTtlMs(ctx.config));
 
   return { worker: "reaper", ranAt: now.toISOString(), dispatched: [], skipped, errors, queues: { blocked } };
 }

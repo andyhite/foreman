@@ -102,7 +102,7 @@ export const proposalsView: View = {
     const snapshot = pane?.snapshot ?? null;
     if (!snapshot) return false;
     const items = snapshot.queues.proposals;
-    const max = items.length;
+    const max = items.length - 1;
 
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: -1, max });
@@ -125,7 +125,7 @@ export const proposalsView: View = {
       return true;
     }
     if (matchesKey(key, "end")) {
-      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max - 1) });
+      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max) });
       return true;
     }
 

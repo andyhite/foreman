@@ -29,7 +29,9 @@ async function runProjectStatus(ctx: WorkerContext): Promise<WorkerReport> {
           status.type,
           issues.map((issue) => issue.state.type),
         );
-        if (next && !ctx.dryRun) {
+        // Native project-status transitions are workflow mutations, not the
+        // comments/labels permitted by the read-only rung.
+        if (next && !ctx.dryRun && ctx.config.loop.stage !== "read-only") {
           await ctx.linear.updateProjectStatus({ projectId: project.id, type: next });
         }
       } catch (error) {

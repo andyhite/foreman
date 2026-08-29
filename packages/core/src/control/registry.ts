@@ -81,15 +81,24 @@ export function readStatusFile(path: string): StatusFile | null {
   }
 }
 
-/** Atomic temp+rename, matching `Bookkeeping.save()`. */
+/** Atomic temp+rename, matching `Bookkeeping.save()`. Validated against the same schema `readStatusFile`
+ * enforces so a bad snapshot never publishes a file every reader then silently treats as "no loop". */
 export function writeStatusFile(path: string, snapshot: LoopSnapshot): void {
+  const statusFile: StatusFile = { schema: 1, writtenAt: new Date().toISOString(), snapshot };
+  if (!Value.Check(StatusFileSchema, statusFile)) {
+    console.error(`refusing to write ${path}: snapshot fails StatusFileSchema validation`);
+    return;
+  }
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
-  const statusFile: StatusFile = { schema: 1, writtenAt: new Date().toISOString(), snapshot };
   const tempPath = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(tempPath, JSON.stringify(statusFile, null, 2), "utf8");
-  renameSync(tempPath, path);
-  if (existsSync(tempPath)) unlinkSync(tempPath);
+  try {
+    writeFileSync(tempPath, JSON.stringify(statusFile, null, 2), "utf8");
+    renameSync(tempPath, path);
+  } catch (error) {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    throw error;
+  }
 }
 
 async function buildHandle(

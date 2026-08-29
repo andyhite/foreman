@@ -129,7 +129,7 @@ export function applyFieldKey(spec: FieldSpec, key: Key, editing: boolean): Fiel
       if (key.name === "backspace") {
         return { spec: { ...spec, value: spec.value.slice(0, -1) }, changed: true, committed: false, cancelled: false };
       }
-      if (key.char) {
+      if (key.char && !key.ctrl && !key.alt) {
         return { spec: { ...spec, value: spec.value + key.char }, changed: true, committed: false, cancelled: false };
       }
       return noResult(spec);

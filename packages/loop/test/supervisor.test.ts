@@ -61,7 +61,7 @@ class FakeDispatcher implements Dispatcher {
   }
 }
 
-function makeConfig(): GlobalConfig {
+function makeConfig(stage: "dry-run" | "read-only" | "full" = "dry-run"): GlobalConfig {
   return {
     repos: {},
     loop: {
@@ -72,7 +72,7 @@ function makeConfig(): GlobalConfig {
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage: "dry-run",
+      stage,
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -215,7 +215,7 @@ function makeStubWorker(): Worker {
 function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
   const stateDir = tempStateDir();
   return new Supervisor({
-    config: makeConfig(),
+    config: makeConfig("full"),
     linear: new NoopLinear() as unknown as LinearWriter,
     dispatcher: new FakeDispatcher("print", true),
     bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),

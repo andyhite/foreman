@@ -26,8 +26,11 @@ flowchart LR
 
 Five workflow agents, each responsible for exactly one edge. None of them can
 spawn another agent, and none of them can write to Linear — the `task` tool and
-Linear's mutation API are both withheld. An agent returns a validated structured
-result; the extension performs the mutation. That split is the design.
+Linear's mutation API are both withheld, and the loop scrubs the Linear API key
+from every dispatched agent's environment. An agent returns a validated
+structured result; the extension performs the mutation. That split is the
+design. (An implement agent still holds `bash` for its actual job, so the
+boundary is defense-in-depth, not a sandbox — issue content is untrusted input.)
 
 | Agent | Edge | Model | Produces |
 | --- | --- | --- | --- |
@@ -159,13 +162,13 @@ foreman loop --stage full                 # the whole pipeline
 ```
 
 `loop.stage` defaults to `dry-run`, so a loop started before you are ready logs
-its intentions instead of acting on them. A dry run prints one line per skip with
-the gate that refused:
+its intentions instead of acting on them. A dry run with `--verbose` prints one
+line per skip with the gate that refused:
 
 ```
 [foreman-loop] refine: 0 dispatched, 43 skipped
 [foreman-loop]   skip refine PLT-21: unprioritized — Priority is None.
-[foreman-loop]   skip implement ENG-9: backpressure — team-wide blocked depth at threshold.
+[foreman-loop]   skip implement ENG-9: backpressure-blocked-queue — team-wide blocked depth at threshold.
 ```
 
 The `foreman-loop` prefix names the long-lived process, not the command — the
@@ -334,7 +337,7 @@ itself is a bundled CLI too — rebuild `@foreman/cli` the same way after editin
 
 ```bash
 bun run typecheck   # tsc --build across the workspace
-bun test            # 570 tests
+bun test            # 597 tests
 bun run contract    # agent/skill/schema wiring check
 bun run schemas     # regenerate output schemas into agent frontmatter
 bun run check       # all three

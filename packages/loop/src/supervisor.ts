@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import {
   IN_FLIGHT_FILTER,
+  lockTtlMs,
   writeStatusFile,
   type AgentStatus,
   type ControlEvent,
@@ -35,10 +36,10 @@ import { buildSnapshot, type WorkerSnapshotInput } from "./snapshot.ts";
 import type { BlockedItem, BoardCounts, ProposalItem, QueueItem } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./workers/types.ts";
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
   const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
+  const timer = setTimeout(resolve, ms);
+  return { promise, cancel: () => clearTimeout(timer) };
 }
 
 // ---- singleton lockfile (SPEC §17.4) -------------------------------------
@@ -87,17 +88,42 @@ export class SupervisorLock {
   }
 
   acquire(pid: number, now: Date, probe: ProcessProbe = nodeProcessProbe): void {
-    if (existsSync(this.#path)) {
-      const info = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
-      if (probe.isAlive(info.pid)) {
-        throw new LoopLockHeldError(info);
-      }
-      // Stale lock: the prior holder's pid is dead. Take it over.
-    }
     mkdirSync(dirname(this.#path), { recursive: true });
     const info: LoopLockInfo = { pid, startedAt: now.toISOString() };
-    writeFileSync(this.#path, JSON.stringify(info, null, 2), "utf8");
-    this.#acquired = true;
+    try {
+      writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx" });
+      this.#acquired = true;
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+    }
+
+    let existing: LoopLockInfo | null = null;
+    try {
+      existing = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
+    } catch {
+      // A truncated lock cannot prove a live owner. Treat it like any stale
+      // lock and retry the exclusive claim below.
+    }
+    if (existing && probe.isAlive(existing.pid)) throw new LoopLockHeldError(existing);
+
+    // Reclaim only after deciding the observed owner is stale; the second
+    // exclusive write closes the race with another supervisor doing the same.
+    try {
+      unlinkSync(this.#path);
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
+    try {
+      writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx" });
+      this.#acquired = true;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+        const held = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
+        throw new LoopLockHeldError(held);
+      }
+      throw error;
+    }
   }
 
   release(): void {
@@ -158,7 +184,7 @@ export interface SupervisorOptions {
   verbose?: boolean;
   /** This loop's control-plane identity (contract §I/§J): who `status.json` and every broadcast event say they are. */
   loopId: LoopId;
-  statusPath: string;
+  statusPath: string | null;
   version: string;
   team: string | null;
 }
@@ -182,7 +208,7 @@ export class Supervisor {
   readonly #verbose: boolean;
   readonly #lock: SupervisorLock;
   readonly #loopId: LoopId;
-  readonly #statusPath: string;
+  readonly #statusPath: string | null;
   readonly #version: string;
   readonly #team: string | null;
   readonly #startedAt: string;
@@ -229,7 +255,7 @@ export class Supervisor {
     this.#version = options.version;
     this.#team = options.team;
     this.#startedAt = this.#now().toISOString();
-    this.#cliDryRun = options.dryRun && options.config.loop.stage !== "dry-run";
+    this.#cliDryRun = options.dryRun;
   }
 
   get bookkeeping(): Bookkeeping {
@@ -282,13 +308,23 @@ export class Supervisor {
     const before = this.#bookkeeping.state.inFlight.length;
     const running = await this.#linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500 });
     const liveIssueIds = new Set(running.map((issue) => issue.identifier));
-    const liveDispatchIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
-    this.#bookkeeping.reconcile(liveIssueIds, liveDispatchIds);
+    const liveDispatchIds = new Set<string>();
+    await Promise.all(
+      [...this.#handles.values()].map(async (handle) => {
+        const status = await this.#dispatcher.status(handle);
+        if (status === "starting" || status === "running") liveDispatchIds.add(handle.dispatchId);
+      }),
+    );
+    this.#bookkeeping.reconcile(liveIssueIds, liveDispatchIds, this.#now(), lockTtlMs(this.#config()));
     const dropped = before - this.#bookkeeping.state.inFlight.length;
     if (dropped > 0) {
       this.#log(`reconciled: dropped ${dropped} stale in-flight record(s)`);
     }
-    this.#bookkeeping.save();
+    try {
+      this.#bookkeeping.save();
+    } catch (error) {
+      this.#log(`failed to save bookkeeping: ${String(error)}`);
+    }
     this.publishStatus();
   }
 
@@ -305,13 +341,13 @@ export class Supervisor {
 
   /** Atomic write of `status.json` (contract §M); IO failures are logged once and otherwise swallowed — a stale status file is a TUI staleness badge, not a crash. */
   publishStatus(): void {
+    if (!this.#statusPath) return;
     try {
       writeStatusFile(this.#statusPath, this.snapshot());
     } catch (error) {
       this.#log(`failed to publish status.json: ${String(error)}`);
     }
   }
-
   snapshot(): LoopSnapshot {
     const workers: WorkerSnapshotInput[] = [...this.#workerMeta.entries()].map(([name, meta]) => ({
       name,
@@ -456,18 +492,25 @@ export class Supervisor {
       : workers;
     const reports: WorkerReport[] = [];
     for (const worker of selected) {
+      // Pause/stop must take effect mid-tick, but a directly-invoked tick (tests,
+      // the control plane's `tick`) may run before `start()` flips "starting" to
+      // "running" — only an operator-requested halt should cut the tick short.
+      const runState = this.#currentRunState();
+      if (runState === "paused" || runState === "draining" || runState === "stopped") break;
       this.#workerMeta.set(worker.name, { cadenceMs: worker.cadenceMs });
       const beforeIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
       this.#runningWorkers.add(worker.name);
       let report: WorkerReport;
       try {
         report = await worker.run(this.#context());
+        const dispatchLabel = this.#dryRun() ? "would dispatch" : "dispatched";
+        const dispatchCount = this.#dryRun() ? 0 : report.dispatched.length;
         this.#log(
-          `${worker.name}: ${report.dispatched.length} dispatched, ${report.skipped.length} skipped` +
+          `${worker.name}: ${this.#dryRun() ? report.dispatched.length : dispatchCount} ${dispatchLabel}, ${report.skipped.length} skipped` +
             (report.errors.length > 0 ? `, ${report.errors.length} error(s)` : ""),
         );
         for (const decision of report.dispatched) {
-          this.#log(`  → ${worker.name} ${decision.issueId ?? "(batch)"}: ${decision.reason}`);
+          this.#log(`  ${this.#dryRun() ? "would dispatch" : "→"} ${worker.name} ${decision.issueId ?? "(batch)"}: ${decision.reason}`);
         }
         if (this.#verbose) {
           for (const skip of report.skipped) {
@@ -494,12 +537,16 @@ export class Supervisor {
       this.#emit({
         event: "tick",
         worker: worker.name,
-        dispatched: report.dispatched.length,
+        dispatched: this.#dryRun() ? 0 : report.dispatched.length,
         skipped: report.skipped.length,
         errors: report.errors.length,
       });
       reports.push(report);
-      this.#bookkeeping.save();
+      try {
+        this.#bookkeeping.save();
+      } catch (error) {
+        this.#log(`failed to save bookkeeping: ${String(error)}`);
+      }
 
       const afterIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
       const newIds = [...afterIds].filter((id) => !beforeIds.has(id));
@@ -514,7 +561,7 @@ export class Supervisor {
 
     this.#ticks += 1;
     this.#lastTickAt = this.#now().toISOString();
-    const totalDispatched = reports.reduce((sum, report) => sum + report.dispatched.length, 0);
+    const totalDispatched = this.#dryRun() ? 0 : reports.reduce((sum, report) => sum + report.dispatched.length, 0);
     this.#dispatchHistory.push(totalDispatched);
     if (this.#dispatchHistory.length > 60) this.#dispatchHistory.splice(0, this.#dispatchHistory.length - 60);
 
@@ -553,6 +600,11 @@ export class Supervisor {
       const state = this.#currentRunState();
       if (state === "draining") break;
       if (state === "paused") {
+        // A "tick now" that arrives while paused must not run — and must not be
+        // left pending, or `#interruptibleWait`'s early-return would spin this
+        // loop without ever yielding to the timer. Discard it; the operator
+        // re-requests after resume.
+        this.#tickRequest = undefined;
         await this.#interruptibleWait(pollMs);
         continue;
       }
@@ -580,9 +632,12 @@ export class Supervisor {
 
   /** `sleep(ms)`, but a pending `#wake` call (from `requestTick`/`requestStop("now")`) resolves it early. */
   async #interruptibleWait(ms: number): Promise<void> {
+    if (this.#tickRequest !== undefined || this.#currentRunState() === "draining") return;
     const { promise, resolve } = Promise.withResolvers<void>();
     this.#wake = resolve;
-    await Promise.race([promise, sleep(ms)]);
+    const timer = sleep(ms);
+    await Promise.race([promise, timer.promise]);
+    timer.cancel();
     this.#wake = null;
   }
 

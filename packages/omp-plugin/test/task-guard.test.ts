@@ -382,3 +382,25 @@ describe("prepareTaskCall — fail-closed on dependency errors", () => {
     expect(decision.reason).toContain("disk full");
   });
 });
+
+describe("prepareTaskCall — batch unwind", () => {
+  it("releases earlier claimed locks and restores their state when a later item is blocked", async () => {
+    const first = makeIssue();
+    const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature)] });
+    const linear = new FakeLinear([first, second]);
+    const input: TaskCallInput = {
+      tasks: [
+        { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-1\n" },
+        { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-2\n" },
+      ],
+    };
+
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+
+    expect(decision.block).toBe(true);
+    expect(first.labels.some((item) => item.name === AGENT_LABEL.running)).toBe(false);
+    expect(first.state.id).toBe(STATE_TODO.id);
+    expect(linear.createCommentCalls).toHaveLength(2);
+    expect(linear.updateCalls.some((call) => call.id === first.id && call.input.removedLabelIds?.includes(label(AGENT_LABEL.running).id))).toBe(true);
+  });
+});

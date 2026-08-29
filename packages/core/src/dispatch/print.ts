@@ -19,6 +19,9 @@ import type {
   DispatchStatus,
 } from "./types.ts";
 
+/** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
+const MAX_LOG_BYTES = 64 * 1024 * 1024;
+
 interface RunningProcess {
   handle: DispatchHandle;
   outcome: Promise<DispatchOutcome>;
@@ -30,10 +33,12 @@ export class PrintDispatcher implements Dispatcher {
   readonly kind = "print" as const;
 
   readonly #config: GlobalConfig;
+  readonly #scrubEnv: readonly string[];
   readonly #running = new Map<string, RunningProcess>();
 
-  constructor(config: GlobalConfig) {
+  constructor(config: GlobalConfig, options?: { scrubEnv?: string[] }) {
     this.#config = config;
+    this.#scrubEnv = options?.scrubEnv ?? [];
   }
 
   async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
@@ -58,20 +63,47 @@ export class PrintDispatcher implements Dispatcher {
       request.command,
     ];
 
+    // FOREMAN-SEC-001: an implement agent has bash and inherits this child's
+    // environment, so a credential this loop resolved for its own Linear
+    // calls (e.g. LINEAR_API_KEY) must not be handed to a prompt-injectable
+    // workflow agent verbatim. Callers pass the configured credential env
+    // var name(s) as `scrubEnv`.
+    const env = { ...process.env };
+    for (const name of this.#scrubEnv) {
+      delete env[name];
+    }
+
     const child = spawn(this.#config.agent.ompBin, argv, {
       cwd: request.cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      env,
     });
 
     handle.pid = child.pid ?? null;
 
-    let stdout = "";
-    let stderr = "";
+    const logChunks: Buffer[] = [];
+    let logSize = 0;
+    const appendCapped = (chunk: Buffer): void => {
+      logChunks.push(chunk);
+      logSize += chunk.length;
+      while (logSize > MAX_LOG_BYTES) {
+        const first = logChunks[0];
+        if (!first) break;
+        const excess = logSize - MAX_LOG_BYTES;
+        if (first.length <= excess) {
+          logChunks.shift();
+          logSize -= first.length;
+        } else {
+          logChunks[0] = first.subarray(excess);
+          logSize -= excess;
+        }
+      }
+    };
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      appendCapped(chunk);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      appendCapped(chunk);
     });
 
     const maxRuntimeMs = this.#config.agent.maxRuntimeMs;
@@ -98,25 +130,30 @@ export class PrintDispatcher implements Dispatcher {
       clearTimeout(killTimer);
       entry.status = "lost";
       entry.settled = true;
-      this.#running.delete(handle.dispatchId);
+      // Retained (not deleted) until `settle()` consumes and prunes it: a
+      // caller that awaits `settle()` after the child has already exited is
+      // the normal case for a short print-mode run, not a race to lose.
+      appendCapped(Buffer.from(`\n${String(error)}`));
       resolveOutcome({
         handle,
         status: "lost",
         exitCode: null,
-        log: `${stdout}${stderr}\n${String(error)}`,
+        log: Buffer.concat(logChunks, logSize).toString("utf8"),
       });
     });
 
-    child.on("exit", (code) => {
+    // `close` (not `exit`) fires once stdio is fully drained, so trailing
+    // output written just before the process exits is not lost.
+    child.on("close", (code) => {
+      if (entry.settled) return;
       clearTimeout(killTimer);
       entry.status = "settled";
       entry.settled = true;
-      this.#running.delete(handle.dispatchId);
       resolveOutcome({
         handle,
         status: "settled",
         exitCode: code,
-        log: `${stdout}${stderr}`,
+        log: Buffer.concat(logChunks, logSize).toString("utf8"),
       });
     });
 
@@ -128,14 +165,16 @@ export class PrintDispatcher implements Dispatcher {
     return entry ? entry.status : "settled";
   }
 
+  /** Awaits and prunes the tracked entry — the one place a settled outcome is released. */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
     const entry = this.#running.get(handle.dispatchId);
     if (!entry) {
-      // Already settled (or never tracked, e.g. a handle from another process);
-      // nothing more can be reported.
+      // Never tracked (e.g. a handle from another process); nothing to report.
       return { handle, status: "settled", exitCode: null, log: "" };
     }
-    return entry.outcome;
+    const outcome = await entry.outcome;
+    this.#running.delete(handle.dispatchId);
+    return outcome;
   }
 
   async available(): Promise<boolean> {
@@ -145,4 +184,5 @@ export class PrintDispatcher implements Dispatcher {
     });
     return promise;
   }
+
 }

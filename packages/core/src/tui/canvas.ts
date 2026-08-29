@@ -21,6 +21,8 @@ export interface Rect {
 import { charWidth } from "./width.ts";
 
 const CONTINUATION = "";
+const ANSI_ESCAPE_RE = /\x1b(?:\][\s\S]*?(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[PX^_][\s\S]*?\x1b\\|[\(\)][0-2A-Z]|[^\[])/g;
+
 
 function clampClip(clip: Rect, width: number, height: number): Rect {
   const x0 = Math.max(0, clip.x);
@@ -74,7 +76,15 @@ export class Canvas {
     this.#sgrs[idx] = sgr;
   }
 
+  /**
+   * Paints plain text into the grid; `sgr` is the single style applied to
+   * every cell, never embedded in `text`. `Canvas` has no ANSI awareness —
+   * a caller that hands it a pre-styled string would silently burn one
+   * cell per escape byte — so escape sequences are stripped here as a
+   * backstop; the real fix is always to pass `sgr` instead.
+   */
   text(x: number, y: number, text: string, sgr = "", clip?: Rect): number {
+    const plain = text.includes("\x1b") ? text.replace(ANSI_ESCAPE_RE, "") : text;
     const bounds = clampClip(clip ?? { x: 0, y: 0, width: this.#width, height: this.#height }, this.#width, this.#height);
     if (bounds.width <= 0 || bounds.height <= 0) return 0;
     if (y < bounds.y || y >= bounds.y + bounds.height) return 0;
@@ -84,7 +94,7 @@ export class Canvas {
     const right = bounds.x + bounds.width;
     let advanced = 0;
 
-    for (const ch of text) {
+    for (const ch of plain) {
       const codePoint = ch.codePointAt(0);
       if (codePoint === undefined) continue;
       const w = charWidth(codePoint);

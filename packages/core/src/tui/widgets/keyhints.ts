@@ -5,21 +5,35 @@
  * list.
  */
 
+import type { Canvas, Rect } from "../canvas.ts";
 import type { Theme } from "../theme.ts";
 import { stringWidth } from "../width.ts";
 
-export function keyHints(theme: Theme, hints: readonly (readonly [string, string])[], width: number): string {
-  if (width <= 0) return "";
+/**
+ * Paints a footer key-hint bar directly into `canvas` at `rect.y`, plain
+ * text plus per-segment `sgr` — never a pre-styled joined string, which
+ * `Canvas.text` would count as one column per escape byte and truncate
+ * hints instead of the whole list fitting.
+ */
+export function keyHints(canvas: Canvas, rect: Rect, theme: Theme, hints: readonly (readonly [string, string])[]): void {
+  if (rect.width <= 0) return;
 
-  const rendered: string[] = [];
+  const segments: Array<{ key: string; label: string }> = [];
   let used = 0;
   for (const [key, label] of hints) {
     const plain = `${key} ${label}`;
-    const separator = rendered.length > 0 ? " · " : "";
+    const separator = segments.length > 0 ? " · " : "";
     const additional = stringWidth(separator) + stringWidth(plain);
-    if (used + additional > width) break;
-    rendered.push(`${separator}${theme.tone("key", key)} ${theme.tone("muted", label)}`);
+    if (used + additional > rect.width) break;
+    segments.push({ key, label });
     used += additional;
   }
-  return rendered.join("");
+
+  let x = rect.x;
+  segments.forEach((segment, index) => {
+    if (index > 0) x += canvas.text(x, rect.y, " · ", theme.sgr());
+    x += canvas.text(x, rect.y, segment.key, theme.toneSgr("key"));
+    x += canvas.text(x, rect.y, " ", theme.sgr());
+    x += canvas.text(x, rect.y, segment.label, theme.toneSgr("muted"));
+  });
 }

@@ -118,7 +118,7 @@ interface WireIssue {
   parent: WireIssueRef | null;
   children: { nodes: WireIssueRef[] };
   relations: { nodes: WireRelation[] };
-  comments?: { nodes: WireComment[] };
+  comments?: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 }
 
 interface GraphQlErrorEntry {
@@ -152,7 +152,7 @@ export class LinearClient implements LinearWriter {
   private readonly endpoint: string;
   private readonly fetchImpl: FetchLike;
   private readonly teamScope: IssueFilter | null;
-  private readonly labelIdCache = new Map<string, LinearId>();
+  private readonly labelIdCache = new Map<string, IssueLabel>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
   private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
@@ -191,7 +191,12 @@ export class LinearClient implements LinearWriter {
     });
 
     if (!response.ok) {
-      if (attempt === 0 && RETRYABLE_STATUS.has(response.status)) {
+      if (attempt < 2 && RETRYABLE_STATUS.has(response.status)) {
+        // Drain the body before backing off: undici keeps the connection's
+        // underlying socket pinned to the pool until the body is consumed
+        // or GC'd, and every retryable status here is precisely the
+        // rate-limit condition that can least afford a leaked connection.
+        await response.text();
         await this.backoff(response);
         return this.requestWithRetry<T>(document, variables, attempt + 1);
       }
@@ -220,13 +225,33 @@ export class LinearClient implements LinearWriter {
     return payload.data;
   }
 
+  /**
+   * `Retry-After` is either delta-seconds or an HTTP-date (RFC 9110 §10.2.3);
+   * Linear has been observed sending both. A date in the past or an
+   * unparseable header falls back to 1s; either form is clamped to 60s so a
+   * misbehaving response header can't stall a caller indefinitely.
+   */
   private async backoff(response: Response): Promise<void> {
     const retryAfter = response.headers.get("Retry-After");
-    const seconds = retryAfter ? Number(retryAfter) : 1;
-    const delayMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 1000;
+    const delayMs = this.retryDelayMs(retryAfter);
     const { promise, resolve } = Promise.withResolvers<void>();
     setTimeout(resolve, delayMs);
     await promise;
+  }
+
+  private retryDelayMs(retryAfter: string | null): number {
+    const MAX_DELAY_MS = 60_000;
+    if (!retryAfter) return 1000;
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) {
+      return seconds > 0 ? Math.min(seconds * 1000, MAX_DELAY_MS) : 1000;
+    }
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) {
+      const delta = dateMs - Date.now();
+      return delta > 0 ? Math.min(delta, MAX_DELAY_MS) : 1000;
+    }
+    return 1000;
   }
 
   private mapStateRef(state: WireStateRef): { id: LinearId; name: string; type: WorkflowState["type"] } {
@@ -311,7 +336,13 @@ export class LinearClient implements LinearWriter {
       ISSUE_BY_ID_QUERY(includeComments),
       { id },
     );
-    return data.issue ? this.mapIssue(data.issue) : null;
+    if (!data.issue) return null;
+    const issue = this.mapIssue(data.issue);
+    const pageInfo = data.issue.comments?.pageInfo;
+    if (includeComments && pageInfo?.hasNextPage && pageInfo.endCursor) {
+      issue.comments = issue.comments.concat(await this.paginateComments(issue.id, pageInfo.endCursor));
+    }
+    return issue;
   }
 
   /**
@@ -336,10 +367,15 @@ export class LinearClient implements LinearWriter {
       }>(ISSUES_QUERY(includeComments), {
         filter,
         after,
-        first: pageSize,
+        first: query.limit !== undefined ? Math.min(pageSize, query.limit - results.length) : pageSize,
       });
       for (const node of data.issues.nodes) {
-        results.push(this.mapIssue(node));
+        const issue = this.mapIssue(node);
+        const pageInfo = node.comments?.pageInfo;
+        if (includeComments && pageInfo?.hasNextPage && pageInfo.endCursor) {
+          issue.comments = issue.comments.concat(await this.paginateComments(issue.id, pageInfo.endCursor));
+        }
+        results.push(issue);
         if (query.limit !== undefined && results.length >= query.limit) {
           return results;
         }
@@ -351,11 +387,32 @@ export class LinearClient implements LinearWriter {
   }
 
   async comments(issueId: string): Promise<Comment[]> {
-    const data = await this.request<{ issue: { comments: { nodes: WireComment[] } } | null }>(
-      COMMENTS_QUERY,
-      { issueId },
-    );
-    return data.issue ? data.issue.comments.nodes.map((comment) => this.mapComment(comment)) : [];
+    return this.paginateComments(issueId, undefined);
+  }
+
+  /**
+   * Pages the comments connection from `after` (or the start, when
+   * undefined) to exhaustion. Every marker the codebase reads — lock,
+   * proposal, applied, review, block — lives in a comment, so a truncated
+   * page silently loses whichever marker fell past Linear's default 50.
+   */
+  private async paginateComments(issueId: string, after: string | undefined): Promise<Comment[]> {
+    const results: Comment[] = [];
+    let cursor = after;
+    for (;;) {
+      const data = await this.request<{
+        issue: {
+          comments: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+        } | null;
+      }>(COMMENTS_QUERY, { issueId, after: cursor, first: 100 });
+      if (!data.issue) break;
+      for (const comment of data.issue.comments.nodes) {
+        results.push(this.mapComment(comment));
+      }
+      if (!data.issue.comments.pageInfo.hasNextPage || !data.issue.comments.pageInfo.endCursor) break;
+      cursor = data.issue.comments.pageInfo.endCursor;
+    }
+    return results;
   }
 
   async project(projectId: string): Promise<Project | null> {
@@ -591,11 +648,17 @@ export class LinearClient implements LinearWriter {
    * `LinearReader` and reserved for a server-side filter once verified.
    */
   private async fetchRawLabels(_teamId?: string): Promise<WireLabel[]> {
-    const data = await this.request<{ issueLabels: { nodes: WireLabel[] } }>(
-      WORKSPACE_LABELS_QUERY,
-      {},
-    );
-    return data.issueLabels.nodes;
+    const results: WireLabel[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const data = await this.request<{
+        issueLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(WORKSPACE_LABELS_QUERY, { after });
+      results.push(...data.issueLabels.nodes);
+      if (!data.issueLabels.pageInfo.hasNextPage || !data.issueLabels.pageInfo.endCursor) break;
+      after = data.issueLabels.pageInfo.endCursor;
+    }
+    return results;
   }
 
   /**
@@ -675,18 +738,24 @@ export class LinearClient implements LinearWriter {
   }
 
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
-    const data = await this.request<{ issueUpdate: { issue: WireIssue } }>(
+    const data = await this.request<{ issueUpdate: { issue: WireIssue | null } }>(
       ISSUE_UPDATE_MUTATION(false),
       { id, input },
     );
+    if (!data.issueUpdate.issue) {
+      throw new LinearApiError(`Failed to update issue ${id}: Linear returned no issue`, null, null);
+    }
     return this.mapIssue(data.issueUpdate.issue);
   }
 
   async createIssue(input: CreateIssueInput): Promise<Issue> {
-    const data = await this.request<{ issueCreate: { issue: WireIssue } }>(
+    const data = await this.request<{ issueCreate: { issue: WireIssue | null } }>(
       ISSUE_CREATE_MUTATION(false),
       { input },
     );
+    if (!data.issueCreate.issue) {
+      throw new LinearApiError(`Failed to create issue "${input.title}": Linear returned no issue`, null, null);
+    }
     return this.mapIssue(data.issueCreate.issue);
   }
 
@@ -703,17 +772,27 @@ export class LinearClient implements LinearWriter {
     relatedIssueId: string;
     type: IssueRelationType;
   }): Promise<void> {
-    await this.request<{ issueRelationCreate: { success: boolean } }>(
+    const data = await this.request<{ issueRelationCreate: { success: boolean } }>(
       ISSUE_RELATION_CREATE_MUTATION,
       { input },
     );
+    if (!data.issueRelationCreate.success) {
+      throw new LinearApiError(
+        `Failed to create ${input.type} relation from ${input.issueId} to ${input.relatedIssueId}`,
+        null,
+        null,
+      );
+    }
   }
 
   async deleteRelation(relationId: LinearId): Promise<void> {
-    await this.request<{ issueRelationDelete: { success: boolean } }>(
+    const data = await this.request<{ issueRelationDelete: { success: boolean } }>(
       ISSUE_RELATION_DELETE_MUTATION,
       { id: relationId },
     );
+    if (!data.issueRelationDelete.success) {
+      throw new LinearApiError(`Failed to delete relation ${relationId}`, null, null);
+    }
   }
 
   async createLabel(input: {
@@ -741,11 +820,11 @@ export class LinearClient implements LinearWriter {
   async ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel> {
     const cacheKey = `${teamId}:${name}`;
     const cached = this.labelIdCache.get(cacheKey);
-    if (cached) return { id: cached, name, parentId: null };
+    if (cached) return cached;
 
     const existing = (await this.labels(teamId)).find((label) => label.name === name);
     if (existing) {
-      this.labelIdCache.set(cacheKey, existing.id);
+      this.labelIdCache.set(cacheKey, existing);
       return existing;
     }
 
@@ -755,7 +834,7 @@ export class LinearClient implements LinearWriter {
 
     const created = await this.createLabel({ name: childName, teamId, parentId });
     const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
-    this.labelIdCache.set(cacheKey, created.id);
+    this.labelIdCache.set(cacheKey, label);
     return label;
   }
 

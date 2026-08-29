@@ -442,7 +442,7 @@ describe("runIntakeTick — apply pass (SPEC §7.1)", () => {
     expect(messages.some((message) => message.includes("no approvals pending"))).toBe(true);
   });
 
-  it("still saves bookkeeping when the apply pass throws", async () => {
+  it("still saves bookkeeping when applying a proposal fails", async () => {
     const config = makeConfig();
     const dispatcher = new FakeDispatcher();
     const item = makeTriageItem();
@@ -456,7 +456,7 @@ describe("runIntakeTick — apply pass (SPEC §7.1)", () => {
 
     const report = await runIntakeTick(ctx);
 
-    expect(messages.some((message) => message.includes("apply pass failed"))).toBe(true);
+    expect(messages.some((message) => message.includes("apply pass: failed to apply"))).toBe(true);
     expect(report.ranAt).toBe(ctx.now().toISOString());
   });
 });

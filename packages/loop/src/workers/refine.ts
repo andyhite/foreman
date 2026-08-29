@@ -30,17 +30,18 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   ]);
 
   const legacyInTodo = todoIssues.filter((issue) => hasLabel(issue, LEGACY_LABEL));
-  const { inScope: backlog, skipped: scopeSkips } = await filterInScope(ctx, "refine", [
-    ...backlogIssues,
-    ...legacyInTodo,
+  const [{ inScope: backlog, skipped: scopeSkips }, { inScope: scopedBlocked }, { inScope: scopedReady }] = await Promise.all([
+    filterInScope(ctx, "refine", [...backlogIssues, ...legacyInTodo]),
+    filterInScope(ctx, "refine", blockedHuman),
+    filterInScope(ctx, "refine", ready),
   ]);
 
   const snapshot: BoardSnapshot = {
     backlog,
     todo: [],
     reviewCandidates: [],
-    blockedHumanCount: blockedHuman.length,
-    readyBufferCount: ready.length,
+    blockedHumanCount: scopedBlocked.length,
+    readyBufferCount: scopedReady.length,
     planCandidates: [],
   };
 
@@ -80,7 +81,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { backlog: backlogIssues.length, readyBuffer: ready.length, blocked: blockedHuman.length },
+    counts: { backlog: backlog.length, readyBuffer: scopedReady.length, blocked: scopedBlocked.length },
     queues: { pipeline: backlog.map(toQueueItem) },
   };
 }

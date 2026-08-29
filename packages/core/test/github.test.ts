@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { GlobalConfig } from "../src/config/schema.ts";
+import { HerdrDispatcher, herdrAgentName } from "../src/dispatch/herdr.ts";
+import { PrintDispatcher } from "../src/dispatch/print.ts";
 import type { CommandRunner } from "../src/git/exec.ts";
-import { GitHubClient } from "../src/github/client.ts";
+import { DirtyWorkingTreeError, GitHubClient } from "../src/github/client.ts";
 
 interface RecordedCall {
   argv: string[];
@@ -40,7 +46,7 @@ describe("GitHubClient.prForBranch", () => {
     expect(result).toBeNull();
   });
 
-  it("parses a found PR", async () => {
+  it("parses a found PR, defaulting to open PRs only", async () => {
     const { runner, calls } = stubRunner(() => ({
       stdout: JSON.stringify([
         {
@@ -65,31 +71,57 @@ describe("GitHubClient.prForBranch", () => {
     });
     expect(calls[0]?.argv).toContain("--head");
     expect(calls[0]?.argv).toContain("eng-142-fix");
+    expect(calls[0]?.argv).toContain("--state");
+    expect(calls[0]?.argv[calls[0]!.argv.indexOf("--state") + 1]).toBe("open");
+  });
+
+  it("passes --state all when asked to find merged PRs", async () => {
+    const { runner, calls } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          number: 7,
+          url: "https://github.com/org/repo/pull/7",
+          headRefOid: "abc123",
+          state: "MERGED",
+          isDraft: false,
+          mergeable: "UNKNOWN",
+        },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    const result = await client.prForBranch("/repo", "eng-142-fix", { state: "all" });
+    expect(result?.state).toBe("MERGED");
+    expect(calls[0]?.argv[calls[0]!.argv.indexOf("--state") + 1]).toBe("all");
   });
 });
 
 describe("GitHubClient.ciStatus", () => {
-  it("maps a fully successful check-run set to success", async () => {
-    const { runner } = stubRunner(() => ({
-      stdout: JSON.stringify({
-        check_runs: [
-          { state: "completed", conclusion: "success" },
-          { state: "completed", conclusion: "neutral" },
-        ],
-      }),
+  it("reads the `status` field, not `state`, from check runs", async () => {
+    const { runner, calls } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          check_runs: [
+            { status: "completed", conclusion: "success" },
+            { status: "completed", conclusion: "neutral" },
+          ],
+        },
+      ]),
     }));
     const client = new GitHubClient({ runner });
     expect(await client.ciStatus("/repo", "abc123")).toBe("success");
+    expect(calls[0]?.argv).toContain("--paginate");
   });
 
   it("maps any failing conclusion to failure", async () => {
     const { runner } = stubRunner(() => ({
-      stdout: JSON.stringify({
-        check_runs: [
-          { state: "completed", conclusion: "success" },
-          { state: "completed", conclusion: "failure" },
-        ],
-      }),
+      stdout: JSON.stringify([
+        {
+          check_runs: [
+            { status: "completed", conclusion: "success" },
+            { status: "completed", conclusion: "failure" },
+          ],
+        },
+      ]),
     }));
     const client = new GitHubClient({ runner });
     expect(await client.ciStatus("/repo", "abc123")).toBe("failure");
@@ -97,12 +129,14 @@ describe("GitHubClient.ciStatus", () => {
 
   it("maps any incomplete run to pending", async () => {
     const { runner } = stubRunner(() => ({
-      stdout: JSON.stringify({
-        check_runs: [
-          { state: "completed", conclusion: "success" },
-          { state: "in_progress", conclusion: null },
-        ],
-      }),
+      stdout: JSON.stringify([
+        {
+          check_runs: [
+            { status: "completed", conclusion: "success" },
+            { status: "in_progress", conclusion: null },
+          ],
+        },
+      ]),
     }));
     const client = new GitHubClient({ runner });
     expect(await client.ciStatus("/repo", "abc123")).toBe("pending");
@@ -110,14 +144,26 @@ describe("GitHubClient.ciStatus", () => {
 
   it("distinguishes 'none' (no checks configured) from pending", async () => {
     const { runner } = stubRunner(() => ({
-      stdout: JSON.stringify({ check_runs: [] }),
+      stdout: JSON.stringify([{ check_runs: [] }]),
     }));
     const client = new GitHubClient({ runner });
     const status = await client.ciStatus("/repo", "abc123");
     expect(status).toBe("none");
     expect(status).not.toBe("pending");
   });
+
+  it("merges check runs across paginated pages", async () => {
+    const { runner } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        { check_runs: [{ status: "completed", conclusion: "success" }] },
+        { check_runs: [{ status: "completed", conclusion: "failure" }] },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    expect(await client.ciStatus("/repo", "abc123")).toBe("failure");
+  });
 });
+
 
 describe("GitHubClient.mergePr", () => {
   it("builds --squash argv for squash strategy", async () => {
@@ -179,5 +225,132 @@ describe("GitHubClient.isMerged", () => {
     const { runner } = stubRunner(() => ({ stdout: JSON.stringify({ state: "OPEN" }) }));
     const client = new GitHubClient({ runner });
     expect(await client.isMerged("/repo", 7)).toBe(false);
+  });
+});
+
+describe("GitHubClient.mergeBranchLocally", () => {
+  it("refuses to merge when the repo has uncommitted changes", async () => {
+    const { runner } = stubRunner((argv) => {
+      if (argv.includes("status")) {
+        return { stdout: " M dirty-file.txt\n" };
+      }
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    await expect(
+      client.mergeBranchLocally("/repo", "eng-142-fix", "main", "merge", false),
+    ).rejects.toThrow(DirtyWorkingTreeError);
+  });
+
+  it("restores the starting ref after merging, even on failure", async () => {
+    const { runner, calls } = stubRunner((argv) => {
+      if (argv.includes("status")) return { stdout: "" };
+      if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
+      if (argv.includes("rebase")) throw new Error("rebase conflict");
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    await expect(
+      client.mergeBranchLocally("/repo", "eng-142-fix", "main", "rebase", false),
+    ).rejects.toThrow();
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.argv).toEqual(["git", "checkout", "feature-branch"]);
+  });
+});
+
+describe("PrintDispatcher", () => {
+  it("scrubs configured credentials and returns the actual settled outcome", async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), "foreman-print-"));
+    const scriptPath = join(scriptDir, "print-env");
+    writeFileSync(scriptPath, "#!/bin/sh\nprintf '%s' \"${FOREMAN_TEST_SCRUB-unset}\"\n");
+    chmodSync(scriptPath, 0o755);
+    const prior = process.env.FOREMAN_TEST_SCRUB;
+    process.env.FOREMAN_TEST_SCRUB = "secret";
+    try {
+      const config = {
+        agent: { ompBin: scriptPath, approvalMode: "full-auto", maxRuntimeMs: 0 },
+      } as GlobalConfig;
+      const dispatcher = new PrintDispatcher(config, { scrubEnv: ["FOREMAN_TEST_SCRUB"] });
+      const handle = await dispatcher.dispatch({
+        agent: "foreman-implement",
+        issueId: "ENG-142",
+        command: "/foreman-implement",
+        dispatchId: "dispatch-1",
+        cwd: scriptDir,
+      });
+
+      const outcome = await dispatcher.settle(handle);
+      expect(outcome).toMatchObject({ status: "settled", exitCode: 0, log: "unset" });
+    } finally {
+      if (prior === undefined) delete process.env.FOREMAN_TEST_SCRUB;
+      else process.env.FOREMAN_TEST_SCRUB = prior;
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("HerdrDispatcher", () => {
+  it("rediscovers existing workspaces and issue tabs after a dispatcher restart", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      async run(argv: string[]) {
+        calls.push(argv);
+        if (argv[1] === "workspace" && argv[2] === "list") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              result: { workspaces: [{ label: "/repo", workspace_id: "w1" }] },
+            }),
+          };
+        }
+        if (argv[1] === "tab" && argv[2] === "list") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              result: { tabs: [{ label: "ENG-142", tab_id: "w1:t2" }] },
+            }),
+          };
+        }
+        if (argv[1] === "pane" && argv[2] === "split") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t2:p2" } } }),
+          };
+        }
+        return { code: 0, stderr: "", stdout: "{}" };
+      },
+    };
+    const config = {
+      agent: {
+        herdrBin: "herdr",
+        approvalMode: "full-auto",
+        maxRuntimeMs: 0,
+        lockTtlMarginMs: 0,
+      },
+    } as GlobalConfig;
+    const dispatcher = new HerdrDispatcher(config, { runner });
+    await dispatcher.dispatch({
+      agent: "foreman-implement",
+      issueId: "ENG-142",
+      command: "/foreman-implement",
+      dispatchId: "dispatch-1",
+      cwd: "/repo",
+    });
+    expect(calls.some((argv) => argv[1] === "workspace" && argv[2] === "create")).toBe(false);
+    expect(calls.some((argv) => argv[1] === "tab" && argv[2] === "create")).toBe(false);
+  });
+});
+
+describe("herdrAgentName", () => {
+  it("retains the random dispatch-id suffix when truncating batch agent names", () => {
+    const first = herdrAgentName("triage-batch-20260829T120000-aaaa1111");
+    const second = herdrAgentName("triage-batch-20260829T120000-bbbb2222");
+    expect(first).not.toBe(second);
+    expect(first).toEndWith("aaaa1111");
+    expect(second).toEndWith("bbbb2222");
+    expect(first.length).toBeLessThanOrEqual(32);
   });
 });

@@ -88,7 +88,13 @@ export class ControlClient {
       return;
     }
     if (typeof record.event === "string") {
-      for (const subscriber of this.#subscribers) subscriber(frame as ControlEvent);
+      for (const subscriber of this.#subscribers) {
+        try {
+          subscriber(frame as ControlEvent);
+        } catch (error) {
+          console.error(`control client subscriber threw: ${(error as Error).message}`);
+        }
+      }
     }
   }
 
@@ -111,7 +117,13 @@ export class ControlClient {
       pending.reject(error ?? new Error(`control socket ${this.#socketPath} closed`));
     }
     this.#pending.clear();
-    for (const handler of this.#closeHandlers) handler(error);
+    for (const handler of this.#closeHandlers) {
+      try {
+        handler(error);
+      } catch (err) {
+        console.error(`control client close handler threw: ${(err as Error).message}`);
+      }
+    }
   }
 
   request<T>(op: ControlOp, params?: Record<string, unknown>): Promise<T> {
@@ -137,8 +149,20 @@ export class ControlClient {
     return promise;
   }
 
-  async subscribe(handler: (event: ControlEvent) => void): Promise<() => void> {
-    await this.request("subscribe");
+  async subscribe(
+    handler: (event: ControlEvent) => void,
+    onSubscribed?: (response: { recentLogs: Array<{ seq: number; at: string; level: string; line: string }> }) => void,
+  ): Promise<() => void> {
+    const response = await this.request<{ recentLogs: Array<{ seq: number; at: string; level: string; line: string }> }>(
+      "subscribe",
+    );
+    if (onSubscribed) {
+      try {
+        onSubscribed(response);
+      } catch (error) {
+        console.error(`control client subscription handler threw: ${(error as Error).message}`);
+      }
+    }
     this.#subscribers.add(handler);
     return () => {
       this.#subscribers.delete(handler);

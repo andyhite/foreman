@@ -56,8 +56,8 @@ describe("issueScope", () => {
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiative"> = {
-        projectInitiative: async () => ({ id: "init-1", name: "Plotroom" }),
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
       };
       const verdict = await issueScope({ linear, entry }, makeIssue());
       expect(verdict).toEqual({ inScope: true, reason: null, initiativeId: "init-1", message: null });
@@ -74,8 +74,8 @@ describe("issueScope", () => {
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiative"> = {
-        projectInitiative: async () => ({ id: "init-1", name: "Plotroom" }),
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
       };
       const verdict = await issueScope({ linear, entry }, makeIssue({ project: null }));
       expect(verdict.inScope).toBe(false);
@@ -94,13 +94,56 @@ describe("issueScope", () => {
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiative"> = {
-        projectInitiative: async () => ({ id: "init-other", name: "Other" }),
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [{ id: "init-other", name: "Other" }],
       };
       const verdict = await issueScope({ linear, entry }, makeIssue());
       expect(verdict.inScope).toBe(false);
       expect(verdict.reason).toBe("initiative-unbound");
       expect(verdict.initiativeId).toBe("init-other");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("gives reason 'project-no-initiative' instead of throwing when the project has no initiative", async () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const entry = resolveRepoEntry(config, "plotroom", home);
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [],
+      };
+      const verdict = await issueScope({ linear, entry }, makeIssue());
+      expect(verdict.inScope).toBe(false);
+      expect(verdict.reason).toBe("project-no-initiative");
+      expect(verdict.initiativeId).toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("gives reason 'project-multiple-initiatives' instead of throwing when the project belongs to several", async () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const entry = resolveRepoEntry(config, "plotroom", home);
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [
+          { id: "init-1", name: "Plotroom" },
+          { id: "init-2", name: "Second" },
+        ],
+      };
+      const verdict = await issueScope({ linear, entry }, makeIssue());
+      expect(verdict.inScope).toBe(false);
+      expect(verdict.reason).toBe("project-multiple-initiatives");
+      expect(verdict.initiativeId).toBeNull();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -116,8 +159,8 @@ describe("assertIssueInScope", () => {
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiative"> = {
-        projectInitiative: async () => ({ id: "init-1", name: "Plotroom" }),
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
       };
       await expect(
         assertIssueInScope({ linear, entry }, makeIssue({ project: null })),
@@ -138,8 +181,8 @@ describe("assertIssueInScope", () => {
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiative"> = {
-        projectInitiative: async () => ({ id: "init-other", name: "Other" }),
+      const linear: Pick<LinearReader, "projectInitiatives"> = {
+        projectInitiatives: async () => [{ id: "init-other", name: "Other" }],
       };
       await expect(assertIssueInScope({ linear, entry }, makeIssue())).rejects.toThrow(ConfigError);
       await expect(assertIssueInScope({ linear, entry }, makeIssue())).rejects.toThrow(/plotroom/);

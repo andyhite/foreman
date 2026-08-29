@@ -31,6 +31,8 @@ export const MARKER_KIND = {
   findings: "findings",
   /** A dispatch failed twice and was converted to a decision (SPEC §17.8). */
   failure: "failure",
+  /** Written by the plugin's dispatch-applied marker (distinct from `applied`, which is the proposal-apply marker). */
+  dispatchApplied: "dispatch-applied",
 } as const;
 
 export type MarkerKind = (typeof MARKER_KIND)[keyof typeof MARKER_KIND];

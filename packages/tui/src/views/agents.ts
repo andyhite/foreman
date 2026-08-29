@@ -165,7 +165,7 @@ export const agentsView: View = {
     const snapshot = pane?.snapshot ?? null;
     if (!snapshot) return false;
     const agents = snapshot.agents;
-    const max = agents.length;
+    const max = agents.length - 1;
 
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       stepCursor(ctx, -1, max);
@@ -188,7 +188,7 @@ export const agentsView: View = {
       return true;
     }
     if (matchesKey(key, "end")) {
-      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max - 1) });
+      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max) });
       return true;
     }
 
@@ -198,11 +198,16 @@ export const agentsView: View = {
     if (matchesKey(key, "enter") || matchesKey(key, "a")) {
       const dispatchId = agent.dispatchId;
       const loopId = pane.id;
-      ctx.suspend(async () => {
-        ctx.command(loopId, "attachAgent", { dispatchId });
-      }).catch(() => {
-        ctx.toast("danger", "attach failed");
-      });
+      ctx
+        .suspend(async () => {
+          await ctx.command(loopId, "attachAgent", { dispatchId });
+        })
+        .then(() => {
+          ctx.toast("info", "requested Herdr pane focus in the loop process; this terminal remains in the TUI");
+        })
+        .catch(() => {
+          ctx.toast("danger", "attach failed");
+        });
       return true;
     }
     if (matchesKey(key, "x")) {

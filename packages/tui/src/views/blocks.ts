@@ -124,7 +124,7 @@ export const blocksView: View = {
     const snapshot = pane?.snapshot ?? null;
     if (!snapshot) return false;
     const items = snapshot.queues.blocked;
-    const max = items.length;
+    const max = items.length - 1;
 
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: -1, max });
@@ -147,21 +147,20 @@ export const blocksView: View = {
       return true;
     }
     if (matchesKey(key, "end")) {
-      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max - 1) });
+      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max) });
       return true;
     }
 
     const item = selectedBlock(ctx, items);
     if ((matchesKey(key, "enter") || matchesKey(key, "u")) && item) {
-      const issueId = item.issueId;
+      const command = `/foreman:unblock ${item.issueId} <reply>`;
       ctx.dispatch({
         type: "openModal",
         modal: {
-          kind: "input",
-          title: `Unblock ${issueId}`,
-          label: "reply",
-          value: "",
-          submit: (_value: string) => ({ type: "toast", kind: "info", message: `unblock queued: ${issueId}` }),
+          kind: "detail",
+          title: `Reply to ${item.issueId}`,
+          rows: [["run in an omp session", command]],
+          body: ["The TUI does not record or send replies to Linear."],
         },
       });
       return true;

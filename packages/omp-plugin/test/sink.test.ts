@@ -29,7 +29,7 @@ describe("extractFromToolResult", () => {
     };
     const captured = extractFromToolResult(payload);
     expect(captured).toEqual([
-      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" } },
+      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" }, aborted: false },
     ]);
   });
 
@@ -58,6 +58,7 @@ describe("extractFromLifecycle", () => {
       dispatchId: "foreman-refine-ENG-2-9",
       agent: "foreman-refine",
       data: { issueId: "ENG-2" },
+      aborted: false,
     });
   });
 
@@ -83,7 +84,7 @@ describe("sink — idempotency", () => {
   it("is a no-op on a second delivery of the same dispatch id", async () => {
     const applied = new Set<string>();
     const calls: CapturedOutput[] = [];
-    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {} };
+    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false };
 
     await sink(captured, makeTracker(applied), async (value) => {
       calls.push(value);

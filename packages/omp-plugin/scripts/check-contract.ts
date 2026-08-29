@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_OUTPUT_SCHEMAS } from "@foreman/core";
+import { stageFor } from "../src/enforce/task-guard.ts";
 
 // Defaults to this plugin. An explicit argument lets the check run against a
 // mutated copy, which is how its own failure paths get tested.
@@ -106,6 +107,12 @@ if (agentFiles.length !== Object.keys(AGENT_OUTPUT_SCHEMAS).length) {
     `agents/ has ${agentFiles.length} definitions but AGENT_OUTPUT_SCHEMAS has ` +
       `${Object.keys(AGENT_OUTPUT_SCHEMAS).length}: every agent needs a validated contract`,
   );
+}
+
+for (const agent of Object.keys(AGENT_OUTPUT_SCHEMAS)) {
+  if (stageFor(agent) === null) {
+    problems.push(`AGENT_OUTPUT_SCHEMAS key "${agent}" has no stageFor branch, so its agent can never dispatch`);
+  }
 }
 
 for (const file of agentFiles.sort()) {
@@ -229,6 +236,21 @@ for (const file of readdirSync(join(pluginRoot, "rules")).filter((f) => f.endsWi
   const label = `rules/${file}`;
   if (!scalars.get("description")) {
     problems.push(`${label}: missing description, so it is excluded from the rulebook`);
+  }
+  const condition = scalars.get("condition");
+  if (condition !== undefined) {
+    const raw = condition.replace(/^["']|["']$/g, "");
+    const insensitive = raw.startsWith("(?i)");
+    try { new RegExp(insensitive ? raw.slice(4) : raw, insensitive ? "i" : ""); }
+    catch (error) { problems.push(`${label}: condition is not a valid regex: ${String(error)}`); }
+  }
+  const scope = scalars.get("scope");
+  if (scope !== undefined) {
+    for (const token of scope.replace(/^["']|["']$/g, "").split(",").map((value) => value.trim())) {
+      if (!/^(text|thinking|tool|toolcall|tool:[A-Za-z][\w-]*\([^)]*\))$/.test(token)) {
+        problems.push(`${label}: invalid scope token "${token}"`);
+      }
+    }
   }
   const hasTrigger =
     scalars.has("condition") || scalars.has("astCondition") || scalars.get("alwaysApply") === "true";

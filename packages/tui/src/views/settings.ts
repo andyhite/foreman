@@ -95,6 +95,35 @@ const SECTIONS: readonly Section[] = [
 
 const ALL_FIELDS: readonly FieldDescriptor[] = SECTIONS.flatMap((section) => section.fields);
 
+// Input handlers receive no rect. Render records the last panel height only;
+// it never dispatches, so changing selection remains the sole source of
+// scroll state changes.
+let lastInnerHeight = 0;
+
+function fieldRowOffset(index: number): number {
+  let fieldIndex = 0;
+  let offset = 0;
+  for (const section of SECTIONS) {
+    offset += 1; // section heading
+    if (index < fieldIndex + section.fields.length) return offset + index - fieldIndex;
+    fieldIndex += section.fields.length;
+    offset += section.fields.length + 1; // fields and the section gap
+  }
+  return 0;
+}
+
+function selectField(ctx: ViewContext, index: number): void {
+  const selected = Math.min(Math.max(index, 0), ALL_FIELDS.length - 1);
+  ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: selected });
+
+  const visibleRows = Math.max(0, lastInnerHeight - 1);
+  if (visibleRows === 0) return;
+  const current = ctx.state.scroll[VIEW_ID] ?? 0;
+  const row = fieldRowOffset(selected);
+  const next = row < current ? row : row >= current + visibleRows ? row - visibleRows + 1 : current;
+  if (next !== current) ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: next });
+}
+
 const WINDOW_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function getPath(obj: unknown, path: string): unknown {
@@ -194,11 +223,9 @@ export const settingsView: View = {
       footer,
       tone: ctx.state.settingsError ? "danger" : undefined,
     });
-
+    lastInnerHeight = inner.height;
     const focusedFieldIndex = ctx.state.cursor[VIEW_ID] ?? 0;
     const focusedDescriptor = ALL_FIELDS[focusedFieldIndex];
-
-    let fieldCursor = 0;
     let y = inner.y - (ctx.state.scroll[VIEW_ID] ?? 0);
     const editing = editingPath(ctx) !== null;
     const labelWidth = 20;
@@ -210,16 +237,6 @@ export const settingsView: View = {
       y += 1;
       for (const descriptor of section.fields) {
         const isFocused = descriptor === focusedDescriptor;
-        if (isFocused) {
-          const rowRect: Rect = { x: inner.x, y, width: inner.width, height: 1 };
-          const targetTop = inner.y;
-          const targetBottom = inner.y + inner.height - 1;
-          if (rowRect.y < targetTop) {
-            ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: Math.max(0, (ctx.state.scroll[VIEW_ID] ?? 0) - (targetTop - rowRect.y)) });
-          } else if (rowRect.y > targetBottom) {
-            ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: (ctx.state.scroll[VIEW_ID] ?? 0) + (rowRect.y - targetBottom) });
-          }
-        }
         if (y >= inner.y && y < inner.y + inner.height) {
           fieldRow(canvas, { x: inner.x, y, width: inner.width, height: 1 }, {
             theme: ctx.theme,
@@ -231,7 +248,6 @@ export const settingsView: View = {
           });
         }
         y += 1;
-        fieldCursor += 1;
       }
       y += 1;
     }
@@ -252,11 +268,10 @@ export const settingsView: View = {
         labelWidth,
       });
     }
-    void fieldCursor;
   },
 
   handleKey(key: Key, ctx: ViewContext): boolean {
-    const max = ALL_FIELDS.length;
+    const max = ALL_FIELDS.length - 1;
     const index = ctx.state.cursor[VIEW_ID] ?? 0;
     const descriptor = ALL_FIELDS[index];
     const path = editingPath(ctx);
@@ -286,27 +301,27 @@ export const settingsView: View = {
     }
 
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
-      ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: -1, max });
+      selectField(ctx, index - 1);
       return true;
     }
     if (matchesKey(key, "down") || matchesKey(key, "j")) {
-      ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: 1, max });
+      selectField(ctx, index + 1);
       return true;
     }
     if (matchesKey(key, "pageup")) {
-      ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: -8, max });
+      selectField(ctx, index - 8);
       return true;
     }
     if (matchesKey(key, "pagedown")) {
-      ctx.dispatch({ type: "moveCursor", view: VIEW_ID, delta: 8, max });
+      selectField(ctx, index + 8);
       return true;
     }
     if (matchesKey(key, "home")) {
-      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: 0 });
+      selectField(ctx, 0);
       return true;
     }
     if (matchesKey(key, "end")) {
-      ctx.dispatch({ type: "setCursor", view: VIEW_ID, index: Math.max(0, max - 1) });
+      selectField(ctx, max);
       return true;
     }
     if (matchesKey(key, "enter") && descriptor) {

@@ -11,13 +11,18 @@
  * root (`~/.foreman/state/<alias>/control.sock`) already eats a third of
  * that before the alias is even chosen. Rather than fail unpredictably once
  * an operator picks a long alias or a deep `stateDir`, `loopPaths` falls back
- * to a short, deterministic path under the OS temp directory whenever the
- * natural one would risk the limit.
+ * to a short, deterministic path under a private per-user runtime directory
+ * whenever the natural one would risk the limit — never the shared, world-
+ * readable OS temp directory (FOREMAN-SEC-003): `$XDG_RUNTIME_DIR` when set
+ * (already 0700 and owned by the caller on Linux), else a `foreman-<uid>`
+ * directory under `tmpdir()` that this module creates at 0700 and verifies
+ * is neither a symlink nor owned by anyone else before trusting it.
  */
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, chmodSync } from "node:fs";
 import type { GlobalConfig } from "../config/schema.ts";
 import { expandHome } from "../config/load.ts";
 
@@ -57,6 +62,29 @@ export function stateRoot(config: GlobalConfig, home?: string): string {
   return expandHome(config.loop.stateDir, home);
 }
 
+/**
+ * A private directory for this user's control sockets when the natural path is too long for
+ * `sun_path`. Prefers `$XDG_RUNTIME_DIR` (already private on Linux); otherwise creates and
+ * verifies a `foreman-<uid>` directory under the OS temp dir so a shared `/tmp` never leaves the
+ * socket in a world-readable location (FOREMAN-SEC-003).
+ */
+function socketRuntimeDir(): string {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg) return xdg;
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const dir = join(tmpdir(), `foreman-${uid}`);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(dir);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`refusing to use ${dir} for the control socket: it is a symlink`);
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error(`refusing to use ${dir} for the control socket: not owned by the current user`);
+  }
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
 /** A conservative ceiling: the kernel caps `sun_path` at 104 bytes on macOS; leave room for a NUL and the basename. */
 const SOCKET_PATH_SAFE_LIMIT = 100;
 
@@ -64,7 +92,7 @@ function socketPathFor(dir: string): string {
   const candidate = join(dir, "control.sock");
   if (candidate.length <= SOCKET_PATH_SAFE_LIMIT) return candidate;
   const digest = createHash("sha1").update(dir).digest("hex").slice(0, 16);
-  return join(tmpdir(), `foreman-${digest}.sock`);
+  return join(socketRuntimeDir(), `foreman-${digest}.sock`);
 }
 
 /** `repo:<alias>` -> `<stateRoot>/<alias>`; `intake` -> `<stateRoot>/intake`. */

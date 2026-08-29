@@ -96,14 +96,19 @@ export class Bookkeeping {
     this.#state = state;
   }
 
-  /** Loads from `path`; a missing file loads as an empty state rather than throwing. */
-  static load(path: string): Bookkeeping {
+  /** Loads from `path`; missing or corrupt non-authoritative state becomes an empty state rather than preventing the loop from starting. */
+  static load(path: string, log: (message: string) => void = console.warn): Bookkeeping {
     if (!existsSync(path)) {
       return new Bookkeeping(path, emptyBookkeepingState());
     }
-    const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw) as Partial<BookkeepingState>;
-    return new Bookkeeping(path, { ...emptyBookkeepingState(), ...parsed });
+    try {
+      const raw = readFileSync(path, "utf8");
+      const parsed = JSON.parse(raw) as Partial<BookkeepingState>;
+      return new Bookkeeping(path, { ...emptyBookkeepingState(), ...parsed });
+    } catch (error) {
+      log(`failed to load corrupt bookkeeping at ${path}; starting with empty state: ${String(error)}`);
+      return new Bookkeeping(path, emptyBookkeepingState());
+    }
   }
 
   get state(): Readonly<BookkeepingState> {
@@ -147,15 +152,27 @@ export class Bookkeeping {
 
   /**
    * Reconciles `inFlight` against Linear (SPEC §11, §17.5): drops any record
-   * whose issue no longer carries `agent:running`, and any batch (triage)
-   * record whose dispatch id is absent from the live omp registry. Called by
-   * the supervisor on start; the worst case of skipping this is one
-   * redundant dispatch, never corrupted Linear state.
+   * whose issue no longer carries `agent:running`. Batch (e.g. `plan`)
+   * records carry no issue to check liveness against — a live dispatch id
+   * set built from bookkeeping's own in-flight list is tautologically
+   * always true, so the only real signal available across a supervisor
+   * restart is age: a batch record older than the lock TTL is treated as
+   * dead and dropped, freeing its WIP slot (SPEC §17.4's own staleness
+   * horizon for the lockfile). Called by the supervisor on start; the worst
+   * case of skipping this is one redundant dispatch, never corrupted Linear
+   * state.
    */
-  reconcile(liveIssueIds: ReadonlySet<string>, liveDispatchIds: ReadonlySet<string>): void {
+  reconcile(
+    liveIssueIds: ReadonlySet<string>,
+    liveDispatchIds: ReadonlySet<string>,
+    now: Date,
+    ttlMs: number,
+  ): void {
     this.#state.inFlight = this.#state.inFlight.filter((entry) => {
       if (entry.issueId) return liveIssueIds.has(entry.issueId);
-      return liveDispatchIds.has(entry.dispatchId);
+      if (liveDispatchIds.has(entry.dispatchId)) return true;
+      const age = now.getTime() - Date.parse(entry.startedAt);
+      return Number.isFinite(age) && age < ttlMs;
     });
   }
 

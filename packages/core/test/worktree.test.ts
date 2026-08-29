@@ -7,6 +7,7 @@ import {
   branchNameFor,
   ensureWorktree,
   listWorktrees,
+  removeWorktree,
   slugify,
   worktreePathFor,
   worktreeStatus,
@@ -56,8 +57,19 @@ describe("slugify", () => {
 describe("branchNameFor", () => {
   it("expands <issue-id>, <ISSUE-ID>, and <slug>", () => {
     const issue = { identifier: "ENG-142", title: "Fix Triage Dedupe" };
-    expect(branchNameFor("<issue-id>-<slug>", issue)).toBe("eng-142-fix-triage-dedupe");
-    expect(branchNameFor("<ISSUE-ID>/<slug>", issue)).toBe("ENG-142/fix-triage-dedupe");
+    expect(branchNameFor("<issue-id>-<slug>", issue, "/Users/dev/code/plotroom")).toBe(
+      "eng-142-fix-triage-dedupe",
+    );
+    expect(branchNameFor("<ISSUE-ID>/<slug>", issue, "/Users/dev/code/plotroom")).toBe(
+      "ENG-142/fix-triage-dedupe",
+    );
+  });
+
+  it("expands <repo> from the repo basename when repoPath is given", () => {
+    const issue = { identifier: "ENG-142", title: "Fix Triage Dedupe" };
+    expect(branchNameFor("<repo>/<issue-id>", issue, "/Users/dev/code/plotroom")).toBe(
+      "plotroom/eng-142",
+    );
   });
 });
 
@@ -75,7 +87,15 @@ describe("worktreePathFor", () => {
     const result = worktreePathFor("../<repo>-<issue-id>", repoPath, issue);
     expect(result).toBe("/Users/dev/code/plotroom-eng-142");
   });
+
+  it("expands <slug> when the issue carries a title", () => {
+    const repoPath = "/Users/dev/code/plotroom";
+    const issue = { identifier: "ENG-142", title: "Fix Triage Dedupe" };
+    const result = worktreePathFor("../<repo>-<slug>", repoPath, issue);
+    expect(result).toBe("/Users/dev/code/plotroom-fix-triage-dedupe");
+  });
 });
+
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -179,5 +199,41 @@ describe("worktree lifecycle against a real repo", () => {
 
     const status = await worktreeStatus(worktreePath, "main");
     expect(status.dirty).toBe(true);
+  });
+
+  it("resumes onto an existing branch after removeWorktree instead of failing on -b", async () => {
+    const worktreePath = join(repoRoot, "repo-eng-142");
+    await ensureWorktree({
+      repoPath,
+      worktreePath,
+      branch: "eng-142-fix",
+      baseBranch: "main",
+    });
+
+    await removeWorktree(repoPath, worktreePath);
+
+    const resumed = await ensureWorktree({
+      repoPath,
+      worktreePath,
+      branch: "eng-142-fix",
+      baseBranch: "main",
+    });
+
+    expect(resumed).toEqual({ created: true, branchExisted: true, worktreePath });
+  });
+
+  it("worktreeStatus degrades gracefully when the base branch has no local ref", async () => {
+    const worktreePath = join(repoRoot, "repo-eng-142");
+    await ensureWorktree({
+      repoPath,
+      worktreePath,
+      branch: "eng-142-fix",
+      baseBranch: "main",
+    });
+
+    const status = await worktreeStatus(worktreePath, "no-such-base-branch");
+    expect(status.commits).toEqual([]);
+    expect(status.dirty).toBe(false);
+    expect(status.headSha).not.toBeNull();
   });
 });

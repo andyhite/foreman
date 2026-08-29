@@ -65,6 +65,36 @@ describe("writeGlobalConfig", () => {
     }
   });
 
+  it("removes renamed repo aliases without clobbering other registry entries", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(
+        {
+          repos: {
+            old: { path: "/repo", initiatives: ["initiative-old"] },
+            other: { path: "/other", initiatives: ["initiative-other"] },
+          },
+        },
+        home,
+      );
+
+      const path = writeGlobalConfig(
+        {
+          repos: { renamed: { path: "/repo", initiatives: ["initiative-old"] } },
+          removeRepos: ["old"],
+        },
+        home,
+      );
+
+      expect(JSON.parse(readFileSync(path, "utf8")).repos).toEqual({
+        other: { path: "/other", initiatives: ["initiative-other"] },
+        renamed: { path: "/repo", initiatives: ["initiative-old"] },
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("throws rather than writing an invalid patch", () => {
     const home = makeHome();
     try {

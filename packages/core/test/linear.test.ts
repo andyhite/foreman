@@ -6,7 +6,9 @@ import {
   acceptanceCriteria,
   hasAcceptanceCriteria,
   incompleteBlockers,
+  openQuestions,
 } from "../src/linear/issue.ts";
+import { renderIssueDescription } from "../src/render/issue-description.ts";
 import type { Issue } from "../src/linear/types.ts";
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -150,6 +152,40 @@ describe("LinearClient errors", () => {
   });
 });
 
+describe("LinearClient mutation payload guards", () => {
+  it("names the operation when updateIssue returns no issue", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issueUpdate: { issue: null } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.updateIssue("issue-1", { title: "Updated" })).rejects.toThrow(
+      /Failed to update issue issue-1/,
+    );
+  });
+
+  it("names the operation when createIssue returns no issue", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issueCreate: { issue: null } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.createIssue({ title: "New issue", teamId: "team-1" })).rejects.toThrow(
+      /Failed to create issue "New issue"/,
+    );
+  });
+
+  it("rejects relation mutations when Linear reports failure", async () => {
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as { query: string };
+      return jsonResponse(200, {
+        data: body.query.includes("IssueRelationCreate")
+          ? { issueRelationCreate: { success: false } }
+          : { issueRelationDelete: { success: false } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(
+      client.createRelation({ issueId: "issue-1", relatedIssueId: "issue-2", type: "blocks" }),
+    ).rejects.toThrow(LinearApiError);
+    await expect(client.deleteRelation("relation-1")).rejects.toThrow(LinearApiError);
+  });
+});
+
 describe("LinearClient retry", () => {
   it("retries once after a 429 and succeeds", async () => {
     let calls = 0;
@@ -172,8 +208,9 @@ describe("LinearClient pagination", () => {
     let calls = 0;
     const fetchStub: FetchLike = async (_url, init) => {
       calls += 1;
-      const body = JSON.parse(init.body) as { variables: { after?: string } };
+      const body = JSON.parse(init.body) as { variables: { after?: string; first?: number } };
       const page = body.variables.after ? "2" : "1";
+      expect(body.variables.first).toBe(page === "1" ? 3 : 1);
       return jsonResponse(200, {
         data: {
           issues: {
@@ -191,6 +228,41 @@ describe("LinearClient pagination", () => {
     expect(issues.length).toBe(3);
     expect(calls).toBe(2);
     expect(issues.map((issue) => issue.identifier)).toEqual(["ENG-1a", "ENG-1b", "ENG-2a"]);
+  });
+
+  it("pages all comments after the inline issue page is exhausted", async () => {
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as { query: string; variables: { after?: string } };
+      if (body.query.includes("query IssueByIdentifier")) {
+        return jsonResponse(200, {
+          data: {
+            issue: baseWireIssue({
+              comments: {
+                nodes: [{ id: "comment-1", body: "first", createdAt: "2026-01-01T00:00:00Z", user: null, parent: null }],
+                pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+              },
+            }),
+          },
+        });
+      }
+      expect(body.query).toContain("query IssueComments");
+      expect(body.variables.after).toBe("cursor-1");
+      return jsonResponse(200, {
+        data: {
+          issue: {
+            comments: {
+              nodes: [{ id: "comment-2", body: "second", createdAt: "2026-01-02T00:00:00Z", user: null, parent: null }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    const issue = await client.issue("ENG-1", { includeComments: true });
+
+    expect(issue?.comments.map((comment) => comment.id)).toEqual(["comment-1", "comment-2"]);
   });
 });
 
@@ -367,7 +439,9 @@ describe("LinearClient ensureLabel", () => {
       const body = JSON.parse(init.body) as { query: string; variables: { input?: { name: string; parentId?: string; isGroup?: boolean } } };
       if (body.query.includes("issueLabels")) {
         labelQueryCalls += 1;
-        return jsonResponse(200, { data: { issueLabels: { nodes: [] } } });
+        return jsonResponse(200, {
+          data: { issueLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+        });
       }
       if (body.query.includes("issueLabelCreate")) {
         const input = body.variables.input!;
@@ -396,8 +470,39 @@ describe("LinearClient ensureLabel", () => {
     expect(label.name).toBe("type:bug");
 
     const cachedCallsBefore = labelQueryCalls;
-    await client.ensureLabel("type:bug", "team-1");
+    const cached = await client.ensureLabel("type:bug", "team-1");
+
     expect(labelQueryCalls).toBe(cachedCallsBefore);
+    expect(cached).toEqual(label);
+  });
+});
+describe("LinearClient workspace label pagination", () => {
+  it("pages workspace labels before mapping them", async () => {
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as { variables: { after?: string } };
+      if (body.variables.after === undefined) {
+        return jsonResponse(200, {
+          data: {
+            issueLabels: {
+              nodes: [{ id: "label-1", name: "Bug", isGroup: false, parent: { id: "group-1", name: "Type" } }],
+              pageInfo: { hasNextPage: true, endCursor: "labels-1" },
+            },
+          },
+        });
+      }
+      expect(body.variables.after).toBe("labels-1");
+      return jsonResponse(200, {
+        data: {
+          issueLabels: {
+            nodes: [{ id: "label-2", name: "Feature", isGroup: false, parent: { id: "group-1", name: "Type" } }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    expect((await client.labels()).map((label) => label.name)).toEqual(["type:bug", "type:feature"]);
   });
 });
 
@@ -490,6 +595,7 @@ describe("LinearClient addProjectToInitiative", () => {
 });
 
 describe("acceptance criteria parsing", () => {
+
   it("returns no criteria when the description is missing entirely", () => {
     expect(hasAcceptanceCriteria(null)).toBe(false);
     expect(acceptanceCriteria(null)).toEqual([]);
@@ -511,5 +617,17 @@ describe("acceptance criteria parsing", () => {
     ].join("\n");
     expect(acceptanceCriteria(description)).toEqual(["First behavior", "Second behavior"]);
     expect(hasAcceptanceCriteria(description)).toBe(true);
+  });
+});
+describe("openQuestions", () => {
+  it("round-trips a freshly rendered description with no open questions as empty", () => {
+    const description = renderIssueDescription({
+      context: "Context",
+      acceptanceCriteria: [],
+      affectedAreas: [],
+      outOfScope: [],
+    });
+
+    expect(openQuestions(description)).toEqual([]);
   });
 });

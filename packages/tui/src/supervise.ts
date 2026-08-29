@@ -10,11 +10,10 @@
  * for the real failure.
  */
 
-import { openSync } from "node:fs";
+import { closeSync, openSync } from "node:fs";
 import { spawn } from "node:child_process";
 import type { GlobalConfig, LoopId } from "@foreman/core";
 import {
-  INTAKE_LOOP_ID,
   loopPaths,
   parseLoopId,
   pidAlive,
@@ -53,17 +52,6 @@ export async function loopRunning(config: GlobalConfig, id: LoopId, home?: strin
   return probeSocket(paths.socket, 500);
 }
 
-export async function killLoop(config: GlobalConfig, id: LoopId, home?: string): Promise<boolean> {
-  const paths = loopPaths(config, id, home);
-  const lock = readLoopLock(paths.lock);
-  if (!lock || !pidAlive(lock.pid)) return false;
-  try {
-    process.kill(lock.pid, "SIGTERM");
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export async function startLoop(
   id: LoopId,
@@ -97,9 +85,14 @@ export async function startLoop(
   try {
     child = spawn(command, args, { detached: true, stdio: ["ignore", fd, fd] });
   } catch (error) {
+    closeSync(fd);
     return { started: false, pid: null, message: `spawn failed: ${String(error)}` };
   }
   child.unref();
+  // Node never closes descriptors it hands to a child through `stdio`; the
+  // child has its own reference to the fd via dup(), so the parent's copy
+  // must be closed explicitly or every `s` press leaks one.
+  closeSync(fd);
 
   const info = await waitForSocket(paths.socket, 15000);
   if (!info) {
@@ -112,7 +105,3 @@ export async function startLoop(
   return { started: true, pid: child.pid ?? null, message: `started (pid ${child.pid ?? "?"})` };
 }
 
-/** Convenience for callers that only have the loop kind, not a parsed id — the intake loop's id is fixed. */
-export function loopIdForKind(kind: "repo" | "intake", alias: string | null): LoopId {
-  return kind === "intake" ? INTAKE_LOOP_ID : `repo:${alias ?? ""}`;
-}

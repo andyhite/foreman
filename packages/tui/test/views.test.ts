@@ -12,11 +12,11 @@
 
 import { describe, expect, it } from "bun:test";
 import { Canvas, createTheme, stripAnsi } from "@foreman/core";
+import { TuiHost } from "../src/app.ts";
 import type { Rect } from "@foreman/core";
 import type { View } from "../src/view.ts";
 import { agentsView } from "../src/views/agents.ts";
 import { blocksView } from "../src/views/blocks.ts";
-import { helpView } from "../src/views/help.ts";
 import { logsView } from "../src/views/logs.ts";
 import { overviewView } from "../src/views/overview.ts";
 import { pipelineView } from "../src/views/pipeline.ts";
@@ -32,7 +32,6 @@ const VIEWS: readonly View[] = [
   proposalsView,
   logsView,
   settingsView,
-  helpView,
 ];
 
 const RECTS: readonly Rect[] = [
@@ -234,17 +233,25 @@ describe("views — content", () => {
     if (hours > 0) expect(text).toContain(`${hours}h`);
   });
 
-  it("help lists at least the core global bindings", () => {
-    const state = makeLiveState();
-    const ctx = makeContext(state);
-    const canvas = canvasFor(CONTENT_RECT);
-    helpView.render(canvas, CONTENT_RECT, ctx);
+});
+
+  it("footer contains every global hint", () => {
+    const canvas = new Canvas(200, 24);
+    const host = new TuiHost({
+      state: makeLiveState(),
+      views: VIEWS,
+      theme: createTheme(true),
+      session: null as never,
+      suspend: async (fn) => fn(),
+      requestRender: () => {},
+      quit: () => {},
+    });
+    host.render({ canvas, rect: { x: 0, y: 0, width: 200, height: 24 }, tick: 0 });
     const text = stripAnsi(canvas.toLines().join("\n"));
-    for (const binding of ["q", "?", "s", "p", "t", "g", "L"]) {
-      expect(text).toContain(binding);
+    for (const label of ["help", "view", "loop", "start", "stop", "pause/resume", "tick", "stage", "quit"]) {
+      expect(text).toContain(label);
     }
   });
-});
 
 describe("views — keys", () => {
   const CURSOR_VIEWS: ReadonlyArray<{ view: View; id: string }> = [
@@ -282,16 +289,16 @@ describe("views — keys", () => {
     expect(ctx.actions.at(-1)).toEqual({ type: "moveCursor", view, delta: -1, max: expect.any(Number) });
   });
 
-  it("settings: down/j and up/k move the field cursor", () => {
+  it("settings: down/j and up/k select the next or previous field", () => {
     const ctx = makeContext(makeLiveState());
     expect(settingsView.handleKey(key("down"), ctx)).toBe(true);
-    expect(ctx.actions.at(-1)).toEqual({ type: "moveCursor", view: "settings", delta: 1, max: expect.any(Number) });
+    expect(ctx.actions.at(-1)).toEqual({ type: "setCursor", view: "settings", index: 1 });
     expect(settingsView.handleKey(key("j"), ctx)).toBe(true);
-    expect(ctx.actions.at(-1)).toEqual({ type: "moveCursor", view: "settings", delta: 1, max: expect.any(Number) });
+    expect(ctx.actions.at(-1)).toEqual({ type: "setCursor", view: "settings", index: 2 });
     expect(settingsView.handleKey(key("up"), ctx)).toBe(true);
-    expect(ctx.actions.at(-1)).toEqual({ type: "moveCursor", view: "settings", delta: -1, max: expect.any(Number) });
+    expect(ctx.actions.at(-1)).toEqual({ type: "setCursor", view: "settings", index: 1 });
     expect(settingsView.handleKey(key("k"), ctx)).toBe(true);
-    expect(ctx.actions.at(-1)).toEqual({ type: "moveCursor", view: "settings", delta: -1, max: expect.any(Number) });
+    expect(ctx.actions.at(-1)).toEqual({ type: "setCursor", view: "settings", index: 0 });
   });
 
   it("agents: enter attaches through suspend/command, x opens a confirm modal", () => {
@@ -349,7 +356,6 @@ describe("views — keys", () => {
     ...CURSOR_VIEWS,
     { view: logsView, id: "logs" },
     { view: settingsView, id: "settings" },
-    { view: helpView, id: "help" },
   ]) {
     it(`${id}: an unbound key returns false`, () => {
       const ctx = makeContext(makeLiveState());

@@ -91,15 +91,20 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     help: false,
   };
 
-  const positionals = argv.filter((arg) => !arg.startsWith("-"));
-  if (positionals[0] === "setup") parsed.command = "setup";
-  else if (positionals[0] === "init") parsed.command = "init";
+  const setCommand = (command: "setup" | "init"): void => {
+    if (parsed.command) {
+      throw new Error(`Multiple commands supplied: "${parsed.command}" and "${command}".`);
+    }
+    parsed.command = command;
+  };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === undefined) continue;
     switch (arg) {
       case "setup":
       case "init":
+        setCommand(arg);
         break;
       case "-y":
       case "--yes":
@@ -149,7 +154,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.help = true;
         break;
       default:
-        throw new Error(`Unrecognized argument: ${arg}`);
+        if (arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg}`);
+        throw new Error(`Unexpected positional argument "${arg}"; expected a command or an option value.`);
     }
   }
   return parsed;
@@ -226,7 +232,7 @@ async function main(): Promise<void> {
         scope: args.scope,
         ompMode: nonInteractive ? (args.ompMode ?? "link") : args.ompMode,
         skipBuild: args.skipBuild,
-        skipLinear: args.skipLinear || nonInteractive,
+        skipLinear: args.skipLinear,
       },
       { prompter, runner: processRunner, log },
     );

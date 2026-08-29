@@ -17,10 +17,10 @@ const MAX_SLUG_LENGTH = 48;
 
 /**
  * Lowercase, ASCII, hyphen-separated identifier safe as a git ref component.
- * Collision-free stability matters more than prettiness: two titles that
- * differ only in punctuation must not collapse to the same slug if that
- * punctuation carried meaning, so we transliterate rather than discard
- * unknown characters outright where a reasonable ASCII fallback exists.
+ * Only Latin diacritics are folded (NFKD decomposition drops combining
+ * marks, e.g. "café" -> "cafe"); other scripts have no ASCII equivalent to
+ * fall back to and collapse to the `"issue"` fallback below rather than a
+ * collision-prone transliteration guess.
  */
 export function slugify(title: string): string {
   const normalized = title
@@ -41,26 +41,36 @@ interface IssueRefLike {
   title: string;
 }
 
-/** Expand a `branchPattern` (SPEC §3.10) against an issue. */
-export function branchNameFor(pattern: string, issue: IssueRefLike): string {
+/** Expand a `branchPattern` (SPEC §3.10) against an issue and its repository. */
+export function branchNameFor(
+  pattern: string,
+  issue: IssueRefLike,
+  repoPath: string,
+): string {
   return pattern
     .replace(/<issue-id>/g, issue.identifier.toLowerCase())
     .replace(/<ISSUE-ID>/g, issue.identifier)
-    .replace(/<slug>/g, slugify(issue.title));
+    .replace(/<slug>/g, slugify(issue.title))
+    .replace(/<repo>/g, basename(repoPath));
 }
 
-/** Expand a `worktreePattern` (SPEC §3.10), resolved relative to `repoPath`. */
+/**
+ * Expand a `worktreePattern` (SPEC §3.10), resolved relative to `repoPath`.
+ * `<slug>` requires the issue's `title`; omitted, it is left unexpanded.
+ */
 export function worktreePathFor(
   pattern: string,
   repoPath: string,
-  issue: Pick<IssueRefLike, "identifier">,
+  issue: Pick<IssueRefLike, "identifier"> & { title?: string },
 ): string {
   const expanded = pattern
     .replace(/<repo>/g, basename(repoPath))
     .replace(/<issue-id>/g, issue.identifier.toLowerCase())
-    .replace(/<ISSUE-ID>/g, issue.identifier);
+    .replace(/<ISSUE-ID>/g, issue.identifier)
+    .replace(/<slug>/g, issue.title !== undefined ? slugify(issue.title) : "<slug>");
   return resolvePath(repoPath, expanded);
 }
+
 
 export interface WorktreeEntry {
   path: string;
@@ -125,9 +135,21 @@ export async function listWorktrees(
   return parsePorcelain(stdout);
 }
 
-async function remoteExists(repoPath: string, runner: CommandRunner): Promise<boolean> {
+/** Returns the first configured remote's name, or `null` when there is none. */
+async function remoteName(repoPath: string, runner: CommandRunner): Promise<string | null> {
   const { stdout } = await runner.run(["git", "remote"], { cwd: repoPath });
-  return stdout.trim().length > 0;
+  const name = stdout.split("\n")[0]?.trim();
+  return name && name.length > 0 ? name : null;
+}
+
+/** True when `ref` resolves in `repoPath` (a local branch or a fetched remote-tracking ref). */
+async function refExists(repoPath: string, ref: string, runner: CommandRunner): Promise<boolean> {
+  try {
+    await runner.run(["git", "rev-parse", "--verify", ref], { cwd: repoPath });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface EnsureWorktreeInput {
@@ -174,14 +196,17 @@ export async function ensureWorktree(
     );
   }
 
-  const hasRemote = await remoteExists(repoPath, runner);
+  const remote = await remoteName(repoPath, runner);
   let baseRef = baseBranch;
-  if (hasRemote) {
-    await runner.run(["git", "fetch", "origin", baseBranch], { cwd: repoPath });
-    baseRef = `origin/${baseBranch}`;
+  if (remote !== null) {
+    await runner.run(["git", "fetch", remote, baseBranch], { cwd: repoPath });
+    baseRef = `${remote}/${baseBranch}`;
   }
 
-  const branchExisted = existing.some((entry) => entry.branch === branch);
+  // Derived from refs, not from the worktree list: a branch left behind by
+  // `removeWorktree` (worktree gone, ref still present) must re-attach via
+  // `worktree add <path> <branch>`, not retry `-b` and fail on "already exists".
+  const branchExisted = await refExists(repoPath, `refs/heads/${branch}`, runner);
   if (branchExisted) {
     await runner.run(["git", "worktree", "add", worktreePath, branch], { cwd: repoPath });
   } else {
@@ -224,33 +249,47 @@ export async function worktreeStatus(
   baseBranch: string,
   runner: CommandRunner = nodeRunner,
 ): Promise<WorktreeStatus> {
+  const remote = await remoteName(worktreePath, runner);
+  const remoteBase = remote !== null ? `${remote}/${baseBranch}` : null;
+  const base =
+    remoteBase !== null && (await refExists(worktreePath, remoteBase, runner))
+      ? remoteBase
+      : baseBranch;
+
+  // A worktree whose base branch has no local ref yet (the usual state right
+  // after `ensureWorktree` created it from a remote base) must degrade, not
+  // reject — this is exactly the data a blocked run's `stateLeftBehind` needs.
   const [logResult, statusResult, headResult] = await Promise.all([
-    runner.run(["git", "log", `${baseBranch}..HEAD`, "--format=%H %s"], {
-      cwd: worktreePath,
-    }),
-    runner.run(["git", "status", "--porcelain"], { cwd: worktreePath }),
+    runner
+      .run(["git", "log", `${base}..HEAD`, "--format=%H %s"], { cwd: worktreePath })
+      .catch(() => null),
+    runner.run(["git", "status", "--porcelain"], { cwd: worktreePath }).catch(() => null),
     runner.run(["git", "rev-parse", "HEAD"], { cwd: worktreePath }).catch(() => null),
   ]);
 
-  const commits = logResult.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const dirty = statusResult.stdout.trim().length > 0;
+  const commits = logResult
+    ? logResult.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+    : [];
+  const dirty = statusResult !== null && statusResult.stdout.trim().length > 0;
   const headSha = headResult ? headResult.stdout.trim() : null;
 
   let pushed = false;
-  try {
-    const branchName = (
-      await runner.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath })
-    ).stdout.trim();
-    const upstream = await runner.run(
-      ["git", "rev-parse", `origin/${branchName}`],
-      { cwd: worktreePath },
-    );
-    pushed = headSha !== null && upstream.stdout.trim() === headSha;
-  } catch {
-    pushed = false;
+  if (remote !== null) {
+    try {
+      const branchName = (
+        await runner.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath })
+      ).stdout.trim();
+      const upstream = await runner.run(
+        ["git", "rev-parse", `${remote}/${branchName}`],
+        { cwd: worktreePath },
+      );
+      pushed = headSha !== null && upstream.stdout.trim() === headSha;
+    } catch {
+      pushed = false;
+    }
   }
 
   return { commits, dirty, ahead: commits.length, pushed, headSha };

@@ -6,6 +6,7 @@
  * with no PR.
  */
 
+import { realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionToolConfig, InferShape, ZodRawShape } from "@oh-my-pi/pi-coding-agent";
 import { getEntry, getGitHub } from "../runtime.ts";
 
@@ -19,7 +20,7 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
     body: pi.zod.string().optional().describe("PR body. Required for op \"create\"."),
     head: pi.zod.string().optional().describe("Head branch. Required for both ops."),
     base: pi.zod.string().optional().describe("Base branch. Required for op \"create\"."),
-    draft: pi.zod.boolean().optional().default(false).describe("Open as a draft PR."),
+    draft: pi.zod.boolean().optional().describe("Open as a draft PR."),
   } satisfies ZodRawShape;
 
   const config: ExtensionToolConfig<typeof shape> = {
@@ -29,16 +30,25 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
     parameters: pi.zod.object(shape),
     approval: "write",
     execute: async (_toolCallId, params: InferShape<typeof shape>) => {
+      const entry = getEntry();
+      let repoPath: string;
+      try {
+        repoPath = realpathSync(params.repoPath);
+      } catch {
+        return errorResult(`repoPath "${params.repoPath}" does not exist.`);
+      }
+      if (repoPath !== realpathSync(entry.repoPath)) {
+        return errorResult(`repoPath must resolve to Foreman's registered repository (${entry.repoPath}).`);
+      }
       const github = getGitHub();
-
       if (params.op === "view") {
         if (!params.head) return errorResult("op \"view\" requires \"head\".");
-        const pr = await github.prForBranch(params.repoPath, params.head);
+        const pr = await github.prForBranch(repoPath, params.head);
         return jsonResult(pr);
       }
 
       // op === "create"
-      const repoSettings = getEntry();
+      const repoSettings = entry;
       if (!repoSettings.pr.required) {
         return errorResult(
           "This repo sets pr.required: false (direct-branch mode). Push the branch instead of opening a PR.",
@@ -48,7 +58,7 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
         return errorResult("op \"create\" requires \"title\", \"body\", \"head\", and \"base\".");
       }
 
-      const pr = await github.createPr(params.repoPath, {
+      const pr = await github.createPr(repoPath, {
         title: params.title,
         body: params.body,
         head: params.head,

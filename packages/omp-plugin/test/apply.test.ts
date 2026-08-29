@@ -286,7 +286,7 @@ describe("applyBlock — dependency (Case A)", () => {
     const linear = new FakeLinear([issue, blocker]);
     await applyBlock(makeDeps(linear), "ENG-1", makeBlockRecord({ type: "dependency", blockedByIssues: ["ENG-2"] }));
 
-    expect(linear.relationCalls).toEqual([{ issueId: issue.id, relatedIssueId: blocker.id, type: "blocks" }]);
+    expect(linear.relationCalls).toEqual([{ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" }]);
     const blockedLabelAdds = linear.updateCalls.filter((call) =>
       call.input.addedLabelIds?.some((id) => [...linear.labelsById.values()].find((l) => l.id === id)?.name.startsWith("blocked:")),
     );
@@ -452,7 +452,7 @@ describe("runApplyCommand — --approve", () => {
       labels: [label(TYPE_LABEL.feature)],
       comments: [
         proposalComment(item, proposedAt),
-        { id: "comment-applied", body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1" }, "applied"), createdAt: appliedAt, user: null, parentId: null },
+        { id: "comment-applied", body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1", appliedProposalAt: proposedAt }, "applied"), createdAt: appliedAt, user: null, parentId: null },
       ],
     });
     const linear = new FakeLinear([issue]);
@@ -524,5 +524,32 @@ describe("runApplyCommand — bare bulk", () => {
     expect(result.mutated).toBe(false);
     expect(linear.updateCalls.length).toBe(0);
     expect(linear.commentCalls.length).toBe(0);
+  });
+});
+
+describe("runApplyCommand — --yes", () => {
+  it("reports successful proposals, notes, and per-issue failures without stopping the pass", async () => {
+    const first = makeIssue({
+      comments: [proposalComment(makeTriageItem({ destinationProject: "Missing Project" }), "2026-01-01T00:00:00.000Z")],
+    });
+    const second = makeIssue({
+      id: "issue-2",
+      identifier: "ENG-2",
+      comments: [proposalComment(makeTriageItem({ issueId: "ENG-2" }), "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([first, second]);
+    const updateIssue = linear.updateIssue.bind(linear);
+    linear.updateIssue = async (id, input) => {
+      if (id === second.id) throw new Error("Linear unavailable");
+      return updateIssue(id, input);
+    };
+
+    const result = await runApplyCommand(linear, ["--yes"]);
+
+    expect(result.ok).toBe(false);
+    expect(result.mutated).toBe(true);
+    expect(result.message).toContain("Applied 1 approved proposal(s).");
+    expect(result.message).toContain("Missing Project");
+    expect(result.message).toContain("ENG-2: failed to apply: Linear unavailable");
   });
 });

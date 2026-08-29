@@ -14,21 +14,27 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
+import { Value } from "@sinclair/typebox/value";
 import {
   type ControlEvent,
   type ControlOp,
   type EmittableEvent,
   type ControlRequest,
+  ControlRequestSchema,
   type ControlResponse,
   encodeFrame,
   FrameDecoder,
+  isLoopStage,
   type LoopSnapshot,
   type LoopStage,
   type ServerInfo,
 } from "./protocol.ts";
 import { probeSocket } from "./client.ts";
+
+/** Cap on a stalled connection's queued-but-unwritten frames; past this the connection is unsalvageable and dropped. */
+const MAX_QUEUED_WRITE_BYTES = 8 * 1024 * 1024;
 
 export interface ControlHandlers {
   snapshot(): Promise<LoopSnapshot> | LoopSnapshot;
@@ -45,6 +51,8 @@ export interface ControlHandlers {
 
 export interface ControlServerOptions {
   socketPath: string;
+  /** Where this loop's `loop.lock` actually lives; defaults to the socket's own directory. Pass this explicitly when the socket path falls back to a shared temp directory (see `paths.ts`), so `describeHolder` still finds the real lock. */
+  lockPath?: string;
   handlers: ControlHandlers;
   info: ServerInfo;
   logBufferSize?: number;
@@ -62,11 +70,14 @@ interface Connection {
   socket: Socket;
   decoder: FrameDecoder;
   subscribed: boolean;
+  /** Frames that couldn't be written synchronously because the socket's send buffer is full; flushed on `drain`. */
+  writeQueue: string[];
+  queuedBytes: number;
+  paused: boolean;
 }
 
-/** Reads the sibling `loop.lock` next to the socket, when one exists, so `listen()` can name the pid holding a live socket. */
-function describeHolder(socketPath: string): string {
-  const lockPath = `${dirname(socketPath)}/loop.lock`;
+/** Reads the loop's `loop.lock`, when one exists, so `listen()` can name the pid holding a live socket. */
+function describeHolder(lockPath: string): string {
   if (!existsSync(lockPath)) return "another process";
   try {
     const info = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: number };
@@ -78,6 +89,7 @@ function describeHolder(socketPath: string): string {
 
 export class ControlServer {
   readonly #socketPath: string;
+  readonly #lockPath: string;
   readonly #handlers: ControlHandlers;
   readonly #info: ServerInfo;
   readonly #logBufferSize: number;
@@ -89,6 +101,7 @@ export class ControlServer {
 
   constructor(options: ControlServerOptions) {
     this.#socketPath = options.socketPath;
+    this.#lockPath = options.lockPath ?? `${dirname(options.socketPath)}/loop.lock`;
     this.#handlers = options.handlers;
     this.#info = options.info;
     this.#logBufferSize = options.logBufferSize ?? 500;
@@ -99,13 +112,11 @@ export class ControlServer {
     if (existsSync(this.#socketPath)) {
       const alive = await probeSocket(this.#socketPath);
       if (alive) {
-        throw new Error(
-          `control socket ${this.#socketPath} is already held by ${describeHolder(this.#socketPath)}`,
-        );
+        throw new Error(`control socket ${this.#socketPath} is already held by ${describeHolder(this.#lockPath)}`);
       }
       unlinkSync(this.#socketPath);
     }
-    mkdirSync(dirname(this.#socketPath), { recursive: true });
+    mkdirSync(dirname(this.#socketPath), { recursive: true, mode: 0o700 });
     const server = createServer((socket) => this.#handleConnection(socket));
     this.#server = server;
     const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -115,7 +126,11 @@ export class ControlServer {
       resolve();
     });
     await promise;
+    // Owner-only after bind: `listen()` creates the socket file honoring the process umask, which
+    // a collaborative `umask 002` would leave group-writable (FOREMAN-SEC-002).
+    chmodSync(this.#socketPath, 0o600);
   }
+
 
   async close(): Promise<void> {
     for (const connection of this.#connections) {
@@ -137,8 +152,7 @@ export class ControlServer {
     const frame = encodeFrame(stamped);
     for (const connection of this.#connections) {
       if (!connection.subscribed) continue;
-      const ok = connection.socket.write(frame);
-      if (!ok) connection.socket.destroy();
+      this.#send(connection, frame);
     }
   }
 
@@ -149,8 +163,7 @@ export class ControlServer {
     const frame = encodeFrame({ event: "log", ...record });
     for (const connection of this.#connections) {
       if (!connection.subscribed) continue;
-      const ok = connection.socket.write(frame);
-      if (!ok) connection.socket.destroy();
+      this.#send(connection, frame);
     }
   }
 
@@ -169,7 +182,14 @@ export class ControlServer {
   #handleConnection(socket: Socket): void {
     socket.setEncoding("utf8");
     if (typeof socket.setNoDelay === "function") socket.setNoDelay(true);
-    const connection: Connection = { socket, decoder: new FrameDecoder(), subscribed: false };
+    const connection: Connection = {
+      socket,
+      decoder: new FrameDecoder(),
+      subscribed: false,
+      writeQueue: [],
+      queuedBytes: 0,
+      paused: false,
+    };
     this.#connections.add(connection);
     socket.on("data", (chunk: string) => {
       const frames = connection.decoder.push(chunk);
@@ -183,18 +203,69 @@ export class ControlServer {
     });
   }
 
+  /**
+   * Writes a frame, or queues it when the kernel send buffer is full. `socket.write() === false`
+   * is ordinary backpressure, not an error — destroying the connection on it (the prior behavior)
+   * dropped the payload outright on any snapshot or broadcast above the socket buffer size. The
+   * queue is bounded so a client that stops reading entirely still gets dropped eventually.
+   */
+  #send(connection: Connection, frame: string): void {
+    if (connection.paused) {
+      this.#enqueue(connection, frame);
+      return;
+    }
+    const ok = connection.socket.write(frame);
+    if (!ok) {
+      connection.paused = true;
+      connection.socket.once("drain", () => this.#drain(connection));
+    }
+  }
+
+  #enqueue(connection: Connection, frame: string): void {
+    connection.writeQueue.push(frame);
+    connection.queuedBytes += Buffer.byteLength(frame);
+    if (connection.queuedBytes > MAX_QUEUED_WRITE_BYTES) {
+      connection.socket.destroy();
+    }
+  }
+
+  #drain(connection: Connection): void {
+    connection.paused = false;
+    while (connection.writeQueue.length > 0) {
+      const frame = connection.writeQueue.shift() as string;
+      connection.queuedBytes -= Buffer.byteLength(frame);
+      const ok = connection.socket.write(frame);
+      if (!ok) {
+        connection.paused = true;
+        connection.socket.once("drain", () => this.#drain(connection));
+        return;
+      }
+    }
+  }
+
   #handleFrame(connection: Connection, frame: unknown): void {
-    const request = frame as Partial<ControlRequest>;
-    if (typeof request.id !== "number" || typeof request.op !== "string") return;
-    void this.#dispatch(connection, request as ControlRequest);
+    if (!Value.Check(ControlRequestSchema, frame)) {
+      // protocol.ts's contract: a malformed frame fails loudly, never silently misrenders. Answer
+      // with an error when the frame at least carries an id the caller can match; otherwise there
+      // is nothing to address the response to.
+      const id = (frame as { id?: unknown } | null)?.id;
+      if (typeof id === "number") {
+        this.#send(
+          connection,
+          encodeFrame({ id, ok: false, error: { code: "invalid-frame", message: "malformed control request" } }),
+        );
+      }
+      return;
+    }
+    void this.#dispatch(connection, frame);
   }
 
   async #dispatch(connection: Connection, request: ControlRequest): Promise<void> {
     const response = await this.#run(connection, request.op, request.params);
     const payload: ControlResponse = { id: request.id, ...response } as ControlResponse;
-    const ok = connection.socket.write(encodeFrame(payload));
-    if (!ok) connection.socket.destroy();
+    this.#send(connection, encodeFrame(payload));
   }
+
 
   async #run(
     connection: Connection,
@@ -224,9 +295,14 @@ export class ControlServer {
         case "tick":
           await this.#handlers.tick(params?.workers as readonly string[] | undefined);
           return { ok: true };
-        case "setStage":
-          await this.#handlers.setStage(params?.stage as LoopStage);
+        case "setStage": {
+          const stage = params?.stage;
+          if (!isLoopStage(stage)) {
+            return { ok: false, error: { code: "invalid-params", message: `invalid stage: ${String(stage)}` } };
+          }
+          await this.#handlers.setStage(stage);
           return { ok: true };
+        }
         case "patchConfig":
           await this.#handlers.patchConfig(params?.patch);
           return { ok: true };

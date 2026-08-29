@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   defaultAndValidateGlobalConfig,
+  isLoopStage,
   loadGlobalConfig,
   type ControlHandlers,
   type LoopStage,
@@ -89,11 +90,15 @@ export function createControlHandlers(options: ControlHandlersOptions): ControlH
 
     tick: (workers) => supervisor.requestTick(workers),
 
-    setStage: (stage: LoopStage) => supervisor.setStage(stage),
+    setStage: (stage: LoopStage) => {
+      if (!isLoopStage(stage)) throw new Error(`invalid loop stage: ${String(stage)}`);
+      supervisor.setStage(stage);
+    },
 
     patchConfig: (patch) => {
       patchAndWriteGlobalConfig(patch, home);
       const { config } = loadGlobalConfig({ home });
+      if (!isLoopStage(config.loop.stage)) throw new Error(`invalid loop stage: ${String(config.loop.stage)}`);
       supervisor.reloadConfig(config);
       options.onConfigReloaded?.();
     },
@@ -115,19 +120,17 @@ export function createControlHandlers(options: ControlHandlersOptions): ControlH
     killAgent: async (dispatchId: string) => {
       const handle = supervisor.handleFor(dispatchId);
       const { dispatcher } = supervisor;
-      try {
-        if (handle && dispatcher.kind === "print") {
-          if (handle.pid !== null) process.kill(handle.pid, "SIGTERM");
-        } else if (handle && dispatcher.kind === "herdr") {
-          throw new Error(
-            `herdr dispatches are not killable from here — run \`herdr agent kill ${handle.herdr?.agentName ?? dispatchId}\` directly`,
-          );
-        }
-      } finally {
-        supervisor.bookkeeping.clearDispatch(dispatchId);
-        supervisor.forgetHandle(dispatchId);
-        supervisor.bookkeeping.save();
+      if (!handle) throw new Error(`no dispatch handle for ${dispatchId} (not in flight, or this loop restarted since it was dispatched)`);
+      if (dispatcher.kind === "herdr") {
+        throw new Error(
+          `herdr dispatches are not killable from here — run \`herdr agent kill ${handle.herdr?.agentName ?? dispatchId}\` directly`,
+        );
       }
+      if (handle.pid === null) throw new Error(`print dispatch ${dispatchId} has no process id to kill`);
+      process.kill(handle.pid, "SIGTERM");
+      supervisor.bookkeeping.clearDispatch(dispatchId);
+      supervisor.forgetHandle(dispatchId);
+      supervisor.bookkeeping.save();
     },
   };
 }

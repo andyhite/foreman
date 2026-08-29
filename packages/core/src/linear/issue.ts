@@ -94,5 +94,5 @@ export function openQuestions(description: string | null): string[] {
   return body
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("<"));
+    .filter((line) => line.length > 0 && !line.startsWith("<") && line !== "_none_");
 }

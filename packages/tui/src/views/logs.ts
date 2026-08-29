@@ -7,6 +7,7 @@
  * what the operator wants to read together.
  */
 import type { Canvas, Key, Rect } from "@foreman/core";
+import type { LogViewLine } from "@foreman/core";
 import { logView, matchesKey, panel } from "@foreman/core";
 import { focusedPane } from "../store.ts";
 import { shortIso } from "../format.ts";
@@ -30,15 +31,20 @@ function toneFor(level: "info" | "warn" | "error"): "danger" | "warn" | undefine
   return undefined;
 }
 
-function visibleLines(ctx: ViewContext, focusedLoopId: string | null): string[] {
+function visibleLines(ctx: ViewContext, focusedLoopId: string | null): LogViewLine[] {
   const all = showAllLoops(ctx);
   const lines = ctx.state.logs.filter((line) => all || line.loopId === focusedLoopId);
   return lines.map((line) => {
-    const prefix = ctx.theme.tone("muted", shortIso(line.at));
     const tone = toneFor(line.level);
-    const levelText = tone ? ctx.theme.tone(tone, line.level.padEnd(5)) : line.level.padEnd(5);
-    const loopText = all ? `${ctx.theme.tone("accent", line.loopId)} ` : "";
-    return `${prefix} ${levelText} ${loopText}${line.line}`;
+    const segments: LogViewLine = [
+      { text: shortIso(line.at), sgr: ctx.theme.toneSgr("muted") },
+      { text: " " },
+      { text: line.level.padEnd(5), sgr: tone ? ctx.theme.toneSgr(tone) : "" },
+      { text: " " },
+      ...(all ? [{ text: `${line.loopId} `, sgr: ctx.theme.toneSgr("accent") }] : []),
+      { text: line.line },
+    ];
+    return segments;
   });
 }
 
@@ -56,13 +62,18 @@ export const logsView: View = {
     const lines = visibleLines(ctx, pane?.id ?? null);
     const title = showAllLoops(ctx) ? "logs — both loops" : `logs — ${pane?.label ?? "—"}`;
     const inner = panel(canvas, rect, { theme: ctx.theme, title, focused: true });
-    logView(canvas, inner, {
+    const stored = ctx.state.scroll[VIEW_ID] ?? 0;
+    const result = logView(canvas, inner, {
       theme: ctx.theme,
       lines,
-      scroll: ctx.state.scroll[VIEW_ID] ?? 0,
+      scroll: stored,
       follow: ctx.state.logFollow,
       filter: ctx.state.logFilter || undefined,
     });
+    // Clamping is idempotent (same input always clamps to the same
+    // output), so this dispatch only fires once per out-of-range scroll —
+    // unlike settings' render-time dispatch it cannot oscillate.
+    if (result.scroll !== stored) ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: result.scroll });
   },
 
   handleKey(key: Key, ctx: ViewContext): boolean {

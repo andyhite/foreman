@@ -1,6 +1,6 @@
 import { loadGlobalConfig } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
@@ -141,6 +141,45 @@ describe("runInit", () => {
         plotroom: { path: "/repos/plotroom", initiatives: ["i1", "i2"] },
       });
       expect(logs.some((line) => line.includes("already registered"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("matches an existing home-relative path and atomically renames its alias", async () => {
+    const home = makeTempHome();
+    const repoRoot = join(home, "repos", "plotroom");
+    try {
+      const configDir = join(home, ".foreman");
+      mkdirSync(configDir);
+      writeFileSync(
+        join(configDir, "config.json"),
+        JSON.stringify({ repos: { old: { path: "~/repos/plotroom", initiatives: ["i1"] } } }),
+      );
+      const git = new FakeGit(defaultGitResponses(repoRoot));
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Registry alias for this repo"] = "new";
+
+      await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: () => {} });
+
+      expect(readConfig(home).repos).toEqual({
+        new: { path: repoRoot, initiatives: ["i1"] },
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects duplicate initiative ids before writing the config", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i1";
+
+      await expect(runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} })).rejects.toThrow(
+        /both "plotroom" and "plotroom"/,
+      );
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

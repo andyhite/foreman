@@ -41,6 +41,8 @@ export interface SessionOptions {
   loopIds: readonly LoopId[];
   onAction: (action: Action) => void;
   team: string | null;
+  /** "Attach only; never spawn a loop process" — honored for the whole session, not just startup. */
+  noStart?: boolean;
 }
 
 export class Session {
@@ -49,6 +51,7 @@ export class Session {
   #loopIds: readonly LoopId[];
   #onAction: (action: Action) => void;
   #team: string | null;
+  #noStart: boolean;
   #connections = new Map<LoopId, LoopConnection>();
 
   constructor(options: SessionOptions) {
@@ -57,6 +60,7 @@ export class Session {
     this.#loopIds = options.loopIds;
     this.#onAction = options.onAction;
     this.#team = options.team;
+    this.#noStart = options.noStart ?? false;
   }
 
   start(): void {
@@ -78,13 +82,18 @@ export class Session {
   }
 
   async ensureRunning(id: LoopId): Promise<void> {
+    const connection = this.#connections.get(id);
+    if (connection?.client?.connected) return;
+    if (this.#noStart) {
+      this.#onAction({ type: "toast", kind: "warn", message: `${id}: --no-start is set, not spawning a loop process` });
+      return;
+    }
     const result = await startLoop(id, { config: this.#config, home: this.#home, team: this.#team });
     this.#onAction({
       type: "toast",
       kind: result.started ? "ok" : result.pid ? "info" : "warn",
       message: `${id}: ${result.message}`,
     });
-    const connection = this.#connections.get(id);
     if (connection) this.#connect(connection);
   }
 
@@ -125,22 +134,46 @@ export class Session {
 
   #connect(connection: LoopConnection): void {
     if (connection.closed) return;
+    // Reconnecting must never leave the previous client subscribed —
+    // otherwise the server keeps broadcasting to both and every log line
+    // arrives twice, tripling on the next reconnect.
+    connection.unsubscribe?.();
+    connection.unsubscribe = null;
+    connection.client?.close();
     const paths = loopPaths(this.#config, connection.id, this.#home);
     const client = new ControlClient({ socketPath: paths.socket });
     connection.client = client;
     client
       .connect()
       .then(async () => {
+        if (connection.closed || connection.client !== client) {
+          client.close();
+          return;
+        }
         connection.reconnectAttempt = 0;
         this.#onAction({ type: "connection", loopId: connection.id, connection: "live" });
-        connection.unsubscribe = await client.subscribe((event) => this.#handleEvent(connection, event));
+        connection.unsubscribe = await client.subscribe(
+          (event) => this.#handleEvent(connection, event),
+          (response) => {
+            if (response.recentLogs.length === 0) return;
+            this.#onAction({
+              type: "log",
+              lines: response.recentLogs.map((line) => ({
+                ...line,
+                level: line.level === "warn" || line.level === "error" ? line.level : ("info" as const),
+                loopId: connection.id,
+              })),
+            });
+          },
+        );
         client.onClose(() => {
-          if (connection.closed) return;
+          if (connection.closed || connection.client !== client) return;
           this.#fallbackToFile(connection);
           this.#scheduleReconnect(connection);
         });
       })
       .catch(() => {
+        if (connection.closed || connection.client !== client) return;
         this.#fallbackToFile(connection);
         this.#scheduleReconnect(connection);
       });

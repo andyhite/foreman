@@ -36,7 +36,7 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
       .optional()
       .describe("Saved view name, required when op is \"view\"."),
     includeComments: pi.zod.boolean().optional().describe("Include comments on the returned issue(s)."),
-    limit: pi.zod.number().int().positive().optional().describe("Max issues to return for \"issues\" or \"view\"."),
+    limit: pi.zod.number().int().positive().optional().default(50).describe("Max issues to return for \"issues\" or \"view\"."),
   } satisfies ZodRawShape;
 
   const config: ExtensionToolConfig<typeof shape> = {

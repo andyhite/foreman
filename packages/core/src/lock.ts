@@ -80,7 +80,10 @@ export function lockState(record: LockRecord | null, options: LockStateOptions):
   }
 
   const expiresAt = new Date(record.takenAt).getTime() + record.ttlMs;
-  const expired = options.now.getTime() > expiresAt;
+  // A malformed/absent `takenAt` or `ttlMs` makes `expiresAt` NaN, and
+  // `now > NaN` is always false — treating the lock as held forever, the
+  // exact failure mode the orphan classification exists to prevent.
+  const expired = !Number.isFinite(expiresAt) || options.now.getTime() > expiresAt;
 
   if (!expired) {
     return { held: true, expired: false, orphaned: false, reason: "Lock is held and within TTL." };

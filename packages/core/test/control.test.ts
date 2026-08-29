@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultAndValidateGlobalConfig } from "../src/config/load.ts";
 import type { GlobalConfig } from "../src/config/schema.ts";
 import { ControlClient, probeSocket, waitForSocket } from "../src/control/client.ts";
 import { discoverLoops, readStatusFile, writeStatusFile } from "../src/control/registry.ts";
-import { FrameDecoder, emptyBoardCounts } from "../src/control/protocol.ts";
+import { FrameDecoder, LOOP_STAGES, emptyBoardCounts, isLoopStage } from "../src/control/protocol.ts";
 import type { ControlOp, LoopSnapshot, LoopStage, ServerInfo } from "../src/control/protocol.ts";
 import { ControlServer, type ControlHandlers } from "../src/control/server.ts";
-import { INTAKE_LOOP_ID, repoLoopId } from "../src/control/paths.ts";
+import { INTAKE_LOOP_ID, loopPaths, repoLoopId } from "../src/control/paths.ts";
 
 const cleanupDirs: string[] = [];
 
@@ -368,5 +368,163 @@ describe("discoverLoops", () => {
     }
     expect(handles[2]?.kind).toBe("intake");
     expect(handles[2]?.label).toBe("intake");
+  });
+});
+
+describe("ControlServer / ControlClient backpressure and frame validation", () => {
+  it("round-trips a snapshot response above the socket write-buffer size instead of destroying the connection", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    // A single `queues.pipeline` entry pads the payload well past 64 KiB (the historical socket
+    // buffer threshold that used to trigger `destroy()` on `write() === false`) once repeated.
+    const bigSnapshot = makeSnapshot({
+      queues: {
+        blocked: [],
+        proposals: [],
+        decisions: [],
+        pipeline: Array.from({ length: 400 }, (_, i) => ({
+          issueId: `ENG-${i}`,
+          title: "x".repeat(300),
+          state: "Backlog",
+          priority: 3,
+          estimate: null,
+          labels: [],
+          assignee: null,
+          updatedAt: "2026-08-29T00:00:00.000Z",
+          url: `https://linear.app/example/issue/ENG-${i}`,
+        })),
+      },
+    });
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(bigSnapshot, []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      const received = await client.request<LoopSnapshot>("snapshot");
+      expect(JSON.stringify(received).length).toBeGreaterThan(64 * 1024);
+      expect(received).toEqual(bigSnapshot);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
+  it("rejects setStage with a non-LoopStage value instead of forwarding it to the handler", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const snapshot = makeSnapshot();
+    const calls: HandlerCall[] = [];
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(snapshot, calls), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      await expect(client.request("setStage", { stage: "full-autonomy" })).rejects.toThrow();
+      expect(calls).toEqual([]);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+});
+
+describe("isLoopStage / LOOP_STAGES", () => {
+  it("accepts every declared stage and rejects everything else", () => {
+    for (const stage of LOOP_STAGES) {
+      expect(isLoopStage(stage)).toBe(true);
+    }
+    expect(isLoopStage("full-autonomy")).toBe(false);
+    expect(isLoopStage(null)).toBe(false);
+    expect(isLoopStage(undefined)).toBe(false);
+    expect(isLoopStage(3)).toBe(false);
+  });
+});
+
+describe("ControlServer.listen permissions", () => {
+  it("creates the socket's parent directory at 0700 and chmods the socket to 0600", async () => {
+    const dir = tempDir();
+    const nested = join(dir, "nested");
+    const socketPath = join(nested, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    try {
+      expect(statSync(nested).mode & 0o777).toBe(0o700);
+      expect(statSync(socketPath).mode & 0o777).toBe(0o600);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe("ControlClient resilience", () => {
+  it("a throwing subscriber does not break delivery to a later subscriber, and does not crash the client", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      const { promise: gotIt, resolve: resolveGotIt } = Promise.withResolvers<void>();
+      await client.subscribe(() => {
+        throw new Error("subscriber blew up");
+      });
+      await client.subscribe((event) => {
+        if (event.event === "log" && event.line === "ping") resolveGotIt();
+      });
+      server.publishLog("info", "ping");
+      await gotIt;
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
+  it("a throwing close handler does not prevent a later close handler from running", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    await client.connect();
+    const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>();
+    client.onClose(() => {
+      throw new Error("close handler blew up");
+    });
+    client.onClose(() => resolveClosed());
+    await server.close();
+    await closed;
+  });
+});
+
+describe("writeStatusFile validation", () => {
+  it("refuses to write a snapshot that fails StatusFileSchema validation, leaving any prior file intact", () => {
+    const dir = tempDir();
+    const statusPath = join(dir, "status.json");
+    const good = makeSnapshot();
+    writeStatusFile(statusPath, good);
+    const invalid = { ...good, runtime: { ...good.runtime, stage: "not-a-real-stage" } } as unknown as LoopSnapshot;
+    writeStatusFile(statusPath, invalid);
+    const statusFile = readStatusFile(statusPath);
+    expect(statusFile?.snapshot).toEqual(good);
+  });
+});
+
+describe("loopPaths socket fallback", () => {
+  it("moves the socket into a private 0700 per-user runtime directory, not directly into the shared tmpdir, for a long alias", () => {
+    const home = tempDir();
+    const config = defaultAndValidateGlobalConfig(
+      { loop: { stateDir: join(home, "a".repeat(60), "deeply", "nested", "state", "root") }, repos: {} },
+      "test fixture",
+    );
+    const paths = loopPaths(config, repoLoopId("x".repeat(60)), home);
+    expect(paths.socket.length).toBeLessThanOrEqual(104);
+    if (!process.env.XDG_RUNTIME_DIR) {
+      const uid = process.getuid?.() ?? 0;
+      const runtimeDir = join(tmpdir(), `foreman-${uid}`);
+      expect(paths.socket.startsWith(`${runtimeDir}/`)).toBe(true);
+      expect(paths.socket).not.toBe(join(tmpdir(), `foreman-${uid}.sock`));
+      expect(statSync(runtimeDir).mode & 0o777).toBe(0o700);
+    }
   });
 });

@@ -10,6 +10,7 @@ class ScriptedPrompter implements Prompter {
   confirmCalls: string[] = [];
   multiSelectResult: string[] | null = null;
   textAnswers: Record<string, string> = {};
+  secretAnswer = "";
   private confirmScript: boolean[];
 
   constructor(confirmScript: boolean[] = []) {
@@ -31,7 +32,7 @@ class ScriptedPrompter implements Prompter {
   }
 
   secret(_question: string): Promise<string> {
-    return Promise.resolve("");
+    return Promise.resolve(this.secretAnswer);
   }
 
   multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
@@ -182,6 +183,47 @@ describe("runWizard", () => {
     } finally {
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a whitespace-only Linear API key without writing a key file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_KEY;
+    try {
+      const prompter = new ScriptedPrompter([true]);
+      prompter.secretAnswer = "   ";
+      const logs: string[] = [];
+      await runWizard(
+        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
+        { prompter, runner: new RecordingRunner(), log: (message) => logs.push(message) },
+      );
+
+      expect(logs.some((line) => line.includes("no key entered"))).toBe(true);
+      expect(() => readFileSync(join(home, ".foreman", "linear-api-key"), "utf8")).toThrow();
+    } finally {
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the plugin when omp is absent and explains why", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const runner = new RecordingRunner({ missing: ["omp"] });
+      const logs: string[] = [];
+      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: (message) => logs.push(message),
+      });
+
+      expect(runner.calls.map((call) => call.bin)).not.toContain("omp");
+      expect(runner.calls.map((call) => call.bin)).not.toContain("bun");
+      expect(logs.some((line) => line.includes("omp is not installed") && line.includes("skipped"))).toBe(true);
+    } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });

@@ -26,13 +26,16 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
 
-  const { inScope: todo, skipped: scopeSkips } = await filterInScope(ctx, "implement", todoIssues);
+  const [{ inScope: todo, skipped: scopeSkips }, { inScope: scopedBlocked }] = await Promise.all([
+    filterInScope(ctx, "implement", todoIssues),
+    filterInScope(ctx, "implement", blockedHuman),
+  ]);
 
   const snapshot: BoardSnapshot = {
     backlog: [],
     todo,
     reviewCandidates: [],
-    blockedHumanCount: blockedHuman.length,
+    blockedHumanCount: scopedBlocked.length,
     readyBufferCount: 0,
     planCandidates: [],
   };
@@ -61,6 +64,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "implement",
         });
+        ctx.bookkeeping.resetAttempts("implement", decision.issueId);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
         const pending = ctx.bookkeeping.recordAttemptFailure(
@@ -69,7 +73,10 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
           ctx.config.loop.retryCap,
           now,
         );
-        if (pending) errors.push(...(await applyPendingDecisions(ctx, [pending])));
+        if (pending) {
+          errors.push(...(await applyPendingDecisions(ctx, [pending])));
+          ctx.bookkeeping.drainPendingDecisions();
+        }
       }
     }
   }
@@ -81,7 +88,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { todo: todoIssues.length },
+    counts: { todo: todo.length, blocked: scopedBlocked.length },
     queues: { pipeline: todo.map(toQueueItem) },
   };
 }

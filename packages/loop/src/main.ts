@@ -45,14 +45,7 @@ import { reaperWorker } from "./workers/reaper.ts";
 import { mergeDetectWorker } from "./workers/merge-detect.ts";
 import { projectStatusWorker } from "./workers/project-status.ts";
 import type { Worker } from "./workers/types.ts";
-
-/**
- * Hardcoded rather than imported from `package.json`: this file already
- * avoids a build step (it runs as source, per `packages/loop/package.json`
- * `exports`), and importing JSON here would be the only place in the
- * package that does. Bump this alongside `package.json`'s `version`.
- */
-const LOOP_VERSION = "0.1.0";
+import { LOOP_VERSION } from "./version.ts";
 
 interface ParsedArgs {
   dryRun: boolean;
@@ -242,7 +235,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
 
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config),
+      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
       createHerdr: () => new HerdrDispatcher(config),
     },
     log,
@@ -255,11 +248,14 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     bookkeeping,
     stateDir,
     entry,
-    dryRun: args.dryRun || config.loop.stage === "dry-run",
+    // Preserve the raw CLI flag independently from the effective stage:
+    // `setStage("full")` must never turn a process launched with
+    // `--dry-run` into a mutating loop.
+    dryRun: args.dryRun,
     verbose: args.verbose,
     log,
     loopId: repoLoopId(entry.alias),
-    statusPath: controlPaths.status,
+    statusPath: args.once || args.noControl ? null : controlPaths.status,
     version: LOOP_VERSION,
     team,
   });
@@ -307,14 +303,23 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       log(`control socket listening at ${controlPaths.socket}`);
     }
 
+    let shuttingDown = false;
     const shutdown = (signal: string): void => {
-      log(`received ${signal}, releasing lock and exiting.`);
-      supervisor.stop();
-      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+      if (shuttingDown) return;
+      shuttingDown = true;
+      log(`received ${signal}, finishing any in-flight tick before releasing the lock.`);
+      supervisor.requestStop("graceful");
+      // When polling, `runForever` reaches its own cleanup immediately after
+      // the active tick. `--once` has no poll loop to observe the request.
+      if (args.once) {
+        supervisor.stop();
+        void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+      }
     };
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
 
+    const cadenceMs = config.loop.cadenceMinutes * 60_000;
     const allWorkers: Worker[] = [
       reaperWorker,
       planWorker,
@@ -323,7 +328,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       reviewWorker,
       mergeDetectWorker,
       projectStatusWorker,
-    ];
+    ].map((worker) => ({ ...worker, cadenceMs }));
     const selected = args.workerNames.length > 0
       ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))
       : allWorkers;

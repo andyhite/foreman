@@ -55,6 +55,7 @@ export class TuiRuntime {
   #rejectStart: ((error: unknown) => void) | null = null;
   #unsubscribeKey: (() => void) | null = null;
   #unsubscribeResize: (() => void) | null = null;
+  #pendingResize: { columns: number; rows: number } | null = null;
 
   constructor(host: TuiHost, options: TuiRuntimeOptions = {}) {
     this.#host = host;
@@ -92,10 +93,9 @@ export class TuiRuntime {
       });
 
       this.#unsubscribeResize = this.#screen.onResize((columns, rows) => {
-        this.#canvas.resize(columns, rows);
-        this.#host.onResize?.(columns, rows);
+        this.#pendingResize = { columns, rows };
         this.#screen.invalidate();
-        this.#renderNow();
+        this.requestRender();
       });
 
       this.#startTickTimer();
@@ -143,6 +143,12 @@ export class TuiRuntime {
 
   #renderNow(): void {
     if (this.#settled) return;
+    const resize = this.#pendingResize;
+    this.#pendingResize = null;
+    if (resize) {
+      this.#canvas.resize(resize.columns, resize.rows);
+      this.#host.onResize?.(resize.columns, resize.rows);
+    }
     const rect: Rect = { x: 0, y: 0, width: this.#canvas.width, height: this.#canvas.height };
     this.#canvas.clear();
     try {

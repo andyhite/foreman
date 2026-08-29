@@ -19,6 +19,7 @@ import { nextActions } from "../routing.ts";
 import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
+import { applyPendingDecisions } from "./decisions.ts";
 
 async function buildReviewCandidates(
   ctx: WorkerContext,
@@ -36,18 +37,24 @@ async function buildReviewCandidates(
   const repoPath = ctx.entry.repoPath;
   const candidates: ReviewCandidate[] = [];
   for (const issue of inReview) {
-    const branch = branchNameFor(ctx.entry.branchPattern, issue);
+    const branch = branchNameFor(ctx.entry.branchPattern, issue, repoPath);
 
     let prOpen = false;
     let headSha = "";
     if (ctx.entry.pr.required) {
-      const pr = await github.prForBranch(repoPath, branch);
-      if (!pr) continue;
-      prOpen = pr.state === "OPEN";
-      headSha = pr.headSha;
+      try {
+        const pr = await github.prForBranch(repoPath, branch);
+        if (!pr) {
+          skipped.push({ stage: "review", issueId: issue.identifier, code: "pr-not-open", message: "No open PR for this issue." });
+          continue;
+        }
+        prOpen = pr.state === "OPEN";
+        headSha = pr.headSha;
+      } catch (error) {
+        skipped.push({ stage: "review", issueId: issue.identifier, code: "pr-not-open", message: `PR lookup failed: ${String(error)}` });
+        continue;
+      }
     } else {
-      // Direct-branch mode: the pushed branch itself is the review target
-      // (SPEC §3.10), so its presence stands in for "PR open".
       try {
         const { stdout } = await nodeRunner.run(
           ["git", "rev-parse", `origin/${branch}`],
@@ -65,7 +72,10 @@ async function buildReviewCandidates(
         continue;
       }
     }
-    if (!headSha) continue;
+    if (!headSha) {
+      skipped.push({ stage: "review", issueId: issue.identifier, code: "pr-not-open", message: "PR has no head SHA." });
+      continue;
+    }
     const review = latestMarker<{ headSha: string }>(MARKER_KIND.review, issue.comments);
     const hasReviewForHead = review?.data.headSha === headSha;
 
@@ -84,12 +94,13 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
     buildReviewCandidates(ctx, github, candidateSkips),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
+  const { inScope: scopedBlocked } = await filterInScope(ctx, "review", blockedHuman);
 
   const snapshot: BoardSnapshot = {
     backlog: [],
     todo: [],
     reviewCandidates,
-    blockedHumanCount: blockedHuman.length,
+    blockedHumanCount: scopedBlocked.length,
     readyBufferCount: 0,
     planCandidates: [],
   };
@@ -119,6 +130,15 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "review",
         });
+        const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
+        if (previousSha !== null && previousSha !== candidate.headSha) {
+          const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
+          if (pending) {
+            errors.push(...(await applyPendingDecisions(ctx, [pending])));
+            ctx.bookkeeping.drainPendingDecisions();
+            continue;
+          }
+        }
         ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);

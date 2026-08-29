@@ -22,6 +22,19 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["init", "--path"])).toThrow(/missing value for --path/);
   });
 
+  it("finds a command after flags while skipping their consumed values", () => {
+    const args = parseArgs(["--repo", "/tmp/setup", "--scope", "project", "setup"]);
+    expect(args.command).toBe("setup");
+    expect(args.repoPath).toBe("/tmp/setup");
+    expect(args.scope).toBe("project");
+  });
+
+  it("reports misplaced positionals and duplicate commands with their cause", () => {
+    expect(() => parseArgs(["setup", "extra"])).toThrow(/Unexpected positional argument "extra"/);
+    expect(() => parseArgs(["setup", "init"])).toThrow(/Multiple commands supplied/);
+    expect(parseArgs(["--repo", "setup"]).command).toBeNull();
+  });
+
   it("defaults githubRepo and every mode to unset", () => {
     const args = parseArgs(["setup"]);
     expect(args.githubRepo).toBe("andyhite/foreman");
@@ -77,7 +90,7 @@ describe("foreman loop delegation", () => {
    * teaching it both vocabularies would put every loop flag in two places.
    */
   it("cannot parse the subcommand or the supervisor's flags", () => {
-    expect(() => parseArgs(["loop"])).toThrow(/Unrecognized argument: loop/);
+    expect(() => parseArgs(["loop"])).toThrow(/Unexpected positional argument "loop"/);
     expect(() => parseArgs(["--dry-run"])).toThrow(/Unrecognized argument: --dry-run/);
     expect(() => parseArgs(["--stage", "full"])).toThrow(/Unrecognized argument: --stage/);
   });

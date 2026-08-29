@@ -16,14 +16,16 @@
  * is the same action taken deliberately for one issue.
  */
 
-import type { LinearWriter, TriageItem } from "@foreman/core";
+import type { LinearWriter, ResolvedRepoEntry, TriageItem } from "@foreman/core";
 import {
   AGENT_LABEL,
   applyProposal,
+  assertIssueInScope,
   findApprovedUnapplied,
   hasLaterApplied,
   hasLaterReject,
   latestProposal,
+  runApplyPass,
 } from "@foreman/core";
 
 export interface ApplyPlanEntry {
@@ -39,7 +41,11 @@ export interface ApplyCommandResult {
 }
 
 /** `/foreman:apply` — dispatches to the shape named by `argv` (already tokenized, without the leading slash-command name). */
-export async function runApplyCommand(linear: LinearWriter, argv: string[]): Promise<ApplyCommandResult> {
+export async function runApplyCommand(
+  linear: LinearWriter,
+  argv: string[],
+  entry?: ResolvedRepoEntry,
+): Promise<ApplyCommandResult> {
   const usage = [
     "Usage:",
     "  /foreman:apply",
@@ -63,11 +69,15 @@ export async function runApplyCommand(linear: LinearWriter, argv: string[]): Pro
   }
 
   if (argv.length === 1 && argv[0] === "--yes") {
-    const candidates = await findApprovedUnapplied(linear);
-    for (const candidate of candidates) {
-      await applyProposal(linear, candidate);
+    const { applied, failures } = await runApplyPass(linear);
+    const lines = [`Applied ${applied.length} approved proposal(s).`];
+    for (const proposal of applied) {
+      if (proposal.note) lines.push(`- ${proposal.identifier}: ${proposal.note}`);
     }
-    return { ok: true, mutated: true, message: `Applied ${candidates.length} approved proposal(s).` };
+    for (const failure of failures) {
+      lines.push(`- ${failure.identifier}: failed to apply: ${failure.error}`);
+    }
+    return { ok: failures.length === 0, mutated: applied.length > 0, message: lines.join("\n") };
   }
 
   const [issueId, flag, ...rest] = argv;
@@ -75,6 +85,8 @@ export async function runApplyCommand(linear: LinearWriter, argv: string[]): Pro
 
   const issue = await linear.issue(issueId, { includeComments: true });
   if (!issue) return { ok: false, mutated: false, message: `Unknown issue "${issueId}".` };
+  if (entry) await assertIssueInScope({ linear, entry }, issue);
+
 
   if (flag === "--approve" && rest.length === 0) {
     const found = latestProposal(issue);
@@ -90,7 +102,12 @@ export async function runApplyCommand(linear: LinearWriter, argv: string[]): Pro
     if (proposedLabel) {
       await linear.updateIssue(issue.id, { removedLabelIds: [proposedLabel.id] });
     }
-    await applyProposal(linear, { issue, item: found.data, proposedAt: found.createdAt });
+    try {
+      await applyProposal(linear, { issue, item: found.data, proposedAt: found.createdAt });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, mutated: false, message: `Could not apply ${issueId}: ${message}` };
+    }
     return { ok: true, mutated: true, message: `Approved and applied ${issueId}.` };
   }
 

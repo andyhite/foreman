@@ -40,7 +40,12 @@ export interface WizardDeps {
   log: (message: string) => void;
 }
 
-async function preflight(deps: WizardDeps): Promise<boolean> {
+interface PreflightResult {
+  missingGh: boolean;
+  hasOmp: boolean;
+}
+
+async function preflight(deps: WizardDeps): Promise<PreflightResult> {
   printSection(deps.log, "Checking tools");
   const required: Array<[string, string]> = [
     ["bun", "https://bun.sh"],
@@ -60,15 +65,11 @@ async function preflight(deps: WizardDeps): Promise<boolean> {
     const mark = found ? style("green", "✓") : style("yellow", "!");
     deps.log(`  ${mark} ${bin}: ${found ? "found" : `not found (${note})`}`);
   }
-  const optional: Array<[string, string]> = [
-    ["omp", "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi"],
-  ];
-  for (const [bin, note] of optional) {
-    const found = await deps.runner.exists(bin);
-    const mark = found ? style("green", "✓") : style("dim", "○");
-    deps.log(`  ${mark} ${bin}: ${found ? "found" : `not found (${note})`}`);
-  }
-  return missingGh;
+  const hasOmp = await deps.runner.exists("omp");
+  const mark = hasOmp ? style("green", "✓") : style("dim", "○");
+  const note = "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi";
+  deps.log(`  ${mark} omp: ${hasOmp ? "found" : `not found (${note})`}`);
+  return { missingGh, hasOmp };
 }
 
 /** Masks all but the last four characters, e.g. `lin_api_****************abcd`. */
@@ -108,7 +109,7 @@ async function resolveLinearApiKey(
     log("  skipping — set $LINEAR_API_KEY, or linear.apiKeyFile in the config, before starting the loop.");
     return { apiKey: null, apiKeyFile: null };
   }
-  const apiKey = await prompter.secret("Paste your Linear API key (input hidden): ");
+  const apiKey = (await prompter.secret("Paste your Linear API key (input hidden): ")).trim();
   if (apiKey.length === 0) {
     log("  no key entered; set $LINEAR_API_KEY yourself before starting the loop.");
     return { apiKey: null, apiKeyFile: null };
@@ -216,14 +217,22 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
 
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
-  const missingGh = await preflight(deps);
+  const { missingGh, hasOmp } = await preflight(deps);
   await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
 
-  const ompMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "link");
+  const requestedOmpMode = await resolvePluginMode(
+    deps.prompter,
+    "omp plugin (agents, commands, gates)",
+    options.ompMode,
+    "link",
+  );
+  const ompMode = hasOmp ? requestedOmpMode : "skip";
+  if (!hasOmp && requestedOmpMode !== "skip") {
+    deps.log("  omp is not installed, so the omp plugin was skipped. Install omp and re-run `foreman setup` to add it.");
+  }
 
   const needsBuild = ompMode === "link";
   await buildRepo(deps, options.repoRoot, options.skipBuild || !needsBuild);
-
   await setupOmpPlugin(deps, options, ompMode);
 
   printSection(deps.log, "Done");

@@ -152,9 +152,11 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
       description: discovered.description,
       projectId: issue.project?.id,
     });
+    // `blocks` means "the discovered issue blocks this one" (SPEC schema
+    // wording), the orientation `blockedByRelations` reads as incoming.
     await deps.linear.createRelation({
-      issueId: discovered.relation === "blocks" ? issue.id : created.id,
-      relatedIssueId: discovered.relation === "blocks" ? created.id : issue.id,
+      issueId: discovered.relation === "blocks" ? created.id : issue.id,
+      relatedIssueId: discovered.relation === "blocks" ? issue.id : created.id,
       type: discovered.relation,
     });
   }
@@ -230,6 +232,9 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
   for (const blockerId of block.blockedByIssues) {
     const blocker = await deps.linear.issue(blockerId);
     if (!blocker) continue;
+    // The blocker blocks THIS issue — `blockedByRelations` (core) reads
+    // "blocked by" as `direction === "incoming"`, which only holds when the
+    // relation is written {issueId: blocker, relatedIssueId: issue}.
     const alreadyRelated = issue.relations.some(
       (relation) =>
         relation.type === "blocks" &&
@@ -238,8 +243,8 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
     );
     if (!alreadyRelated) {
       await deps.linear.createRelation({
-        issueId: issue.id,
-        relatedIssueId: blocker.id,
+        issueId: blocker.id,
+        relatedIssueId: issue.id,
         type: "blocks",
       });
     }
@@ -280,11 +285,11 @@ export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockR
   }
 }
 
-/** Marks a dispatch id as applied (SPEC contract item 3's idempotency mechanism). */
+/** Marks a dispatch id as applied (SPEC contract item 3's idempotency mechanism). Uses its own marker kind, distinct from `MARKER_KIND.applied` (the triage-proposal apply marker `hasLaterApplied` scans), so the two dedup mechanisms never collide. */
 export async function markApplied(deps: ApplyDeps, issueId: string, dispatchId: string): Promise<void> {
   const issue = await deps.linear.issue(issueId);
   if (!issue) return;
-  const body = encodeMarker(MARKER_KIND.applied, { dispatchId }, `Applied dispatch \`${dispatchId}\`.`);
+  const body = encodeMarker(MARKER_KIND.dispatchApplied, { dispatchId }, `Applied dispatch \`${dispatchId}\`.`);
   await deps.linear.createComment({ issueId: issue.id, body });
 }
 

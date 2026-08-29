@@ -89,6 +89,12 @@ describe("lockState", () => {
     expect(state.expired).toBe(true);
     expect(state.orphaned).toBe(true);
   });
+
+  it("treats a malformed timestamp as expired and orphanable rather than held forever", () => {
+    const record = makeRecord({ takenAt: "not-a-timestamp" });
+    const state = lockState(record, { now, liveDispatchIds: [] });
+    expect(state).toMatchObject({ held: true, expired: true, orphaned: true });
+  });
 });
 
 describe("verifyLockOwnership", () => {

@@ -18,6 +18,7 @@ import {
   LinearApiError,
   LinearClient,
   boundInitiativeIds,
+  expandHome,
   loadGlobalConfig,
   resolveLinearApiKey,
   type RepoEntry,
@@ -69,9 +70,11 @@ function deriveAlias(repoPath: string): string {
 function findEntryByPath(
   repos: Record<string, RepoEntry>,
   repoRoot: string,
+  home: string,
 ): { alias: string; entry: RepoEntry } | null {
+  const expandedRoot = expandHome(repoRoot, home);
   for (const [alias, entry] of Object.entries(repos)) {
-    if (entry.path === repoRoot) return { alias, entry };
+    if (expandHome(entry.path, home) === expandedRoot) return { alias, entry };
   }
   return null;
 }
@@ -202,7 +205,7 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
 
   const repoRoot = await resolveRepoRoot(options.cwd, deps.git);
   const existing = readGlobalConfig(options.home);
-  const existingByPath = findEntryByPath(existing.repos, repoRoot);
+  const existingByPath = findEntryByPath(existing.repos, repoRoot, options.home);
 
   const defaultAlias = existingByPath?.alias ?? deriveAlias(repoRoot);
   const aliasInput = await deps.prompter.text("Registry alias for this repo", defaultAlias);
@@ -219,10 +222,9 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   const boundIds = new Set(existingEntry ? boundInitiativeIds(existingEntry) : []);
   const boundElsewhere = new Map<string, string>();
   for (const [otherAlias, entry] of Object.entries(existing.repos)) {
-    if (otherAlias === alias) continue;
+    if (otherAlias === alias || otherAlias === existingByPath?.alias) continue;
     for (const id of boundInitiativeIds(entry)) boundElsewhere.set(id, otherAlias);
   }
-
   const apiKey = await resolveConfiguredApiKey(options);
   const picked = apiKey
     ? await pickInitiativeIds(deps, apiKey, boundIds, boundElsewhere)
@@ -260,7 +262,24 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     ...(baseBranch !== "main" ? { baseBranch } : {}),
   };
 
-  const configPath = writeGlobalConfig({ repos: { [alias]: entry } }, options.home);
+  const removeRepos = existingByPath && existingByPath.alias !== alias ? [existingByPath.alias] : [];
+  const candidateRepos = { ...existing.repos, [alias]: entry };
+  for (const obsoleteAlias of removeRepos) delete candidateRepos[obsoleteAlias];
+  const initiativeOwners = new Map<string, string>();
+  for (const [repoAlias, candidate] of Object.entries(candidateRepos)) {
+    for (const initiativeId of boundInitiativeIds(candidate)) {
+      const owner = initiativeOwners.get(initiativeId);
+      if (owner) {
+        throw new Error(
+          `Linear initiative "${initiativeId}" would be registered to both "${owner}" and "${repoAlias}". ` +
+            "Each initiative must belong to exactly one repo.",
+        );
+      }
+      initiativeOwners.set(initiativeId, repoAlias);
+    }
+  }
+
+  const configPath = writeGlobalConfig({ repos: { [alias]: entry }, removeRepos }, options.home);
   deps.log(`  wrote ${configPath}`);
   deps.log(`  ${style("green", "✓")} registered "${alias}" → ${repoRoot}`);
   const nameList = bindings

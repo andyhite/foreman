@@ -36,45 +36,44 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
 
   const repoPath = ctx.entry.repoPath;
   for (const issue of inReview) {
-    const branch = branchNameFor(ctx.entry.branchPattern, issue);
-
-    let merged = false;
+    const branch = branchNameFor(ctx.entry.branchPattern, issue, repoPath);
     try {
+      let merged = false;
       if (ctx.entry.pr.required) {
-        const pr = await github.prForBranch(repoPath, branch);
+        const pr = await github.prForBranch(repoPath, branch, { state: "all" });
         merged = pr ? await github.isMerged(repoPath, pr.number) : false;
       } else {
         const mergedBranches = await github.mergedBranches(repoPath, ctx.entry.baseBranch, [branch]);
         merged = mergedBranches.includes(branch);
       }
+
+      if (!merged) {
+        skipped.push({
+          stage: "review",
+          issueId: issue.identifier,
+          code: "not-merged",
+          message: "Branch/PR not yet merged.",
+        });
+        continue;
+      }
+
+      if (ctx.dryRun || ctx.config.loop.stage === "read-only") {
+        skipped.push({
+          stage: "review",
+          issueId: issue.identifier,
+          code: ctx.dryRun ? "dry-run-merge-detected" : "read-only-merge-detected",
+          message: "Merge detected; would move to Done outside read-only mode.",
+        });
+        continue;
+      }
+
+      const states = await ctx.linear.workflowStates(issue.team.id);
+      const done = resolveState("done", states);
+      await ctx.linear.updateIssue(issue.id, { stateId: done.id });
+      ctx.bookkeeping.resetReviewCycles(issue.identifier);
     } catch (error) {
-      errors.push(`merge check failed for ${issue.identifier}: ${String(error)}`);
-      continue;
+      errors.push(`merge check/transition failed for ${issue.identifier}: ${String(error)}`);
     }
-
-    if (!merged) {
-      skipped.push({
-        stage: "review",
-        issueId: issue.identifier,
-        code: "not-merged",
-        message: "Branch/PR not yet merged.",
-      });
-      continue;
-    }
-
-    if (ctx.dryRun) {
-      skipped.push({
-        stage: "review",
-        issueId: issue.identifier,
-        code: "dry-run-merge-detected",
-        message: "Would move to Done: merge detected.",
-      });
-      continue;
-    }
-
-    const states = await ctx.linear.workflowStates(issue.team.id);
-    const done = resolveState("done", states);
-    await ctx.linear.updateIssue(issue.id, { stateId: done.id });
   }
 
   return { worker: "merge-detect", ranAt: now.toISOString(), dispatched: [], skipped, errors };

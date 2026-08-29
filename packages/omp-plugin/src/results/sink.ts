@@ -22,6 +22,8 @@ export interface CapturedOutput {
   dispatchId: string;
   agent: string;
   data: unknown;
+  /** The lifecycle-reported abort flag (SPEC §17.8) — set when the dispatch hit its budget mid-run rather than yielding cleanly. */
+  aborted: boolean;
 }
 
 /** Recovers `agent`/`dispatchId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
@@ -39,6 +41,12 @@ function taskTextOf(entry: unknown): string {
 function agentOf(entry: unknown): string | null {
   if (!isRecord(entry)) return null;
   return typeof entry.agent === "string" ? entry.agent : null;
+}
+
+/** Reads the lifecycle-reported `aborted` flag off a raw entry, defaulting to false when absent. */
+function abortedOf(entry: unknown): boolean {
+  if (!isRecord(entry)) return false;
+  return entry.aborted === true;
 }
 
 /**
@@ -67,7 +75,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
     const { dispatchId } = extractDispatchInfo(taskTextOf(tasks[index]));
     if (!agent || !dispatchId) continue;
 
-    captured.push({ dispatchId, agent, data: structuredOutput.data });
+    captured.push({ dispatchId, agent, data: structuredOutput.data, aborted: abortedOf(single) || abortedOf(payload.result) });
   }
   return captured;
 }
@@ -91,7 +99,7 @@ export function extractFromLifecycle(payload: unknown): CapturedOutput | null {
   const finalDispatchId = explicitDispatchId ?? dispatchId;
   if (!agent || !finalDispatchId) return null;
 
-  return { dispatchId: finalDispatchId, agent, data: structuredOutput.data };
+  return { dispatchId: finalDispatchId, agent, data: structuredOutput.data, aborted: abortedOf(payload) };
 }
 
 /** Marks a dispatch as applied, and checks whether it already was. Backed by Linear markers (`results/apply.ts` writes them). */

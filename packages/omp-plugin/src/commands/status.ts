@@ -4,23 +4,24 @@
  * registry, loop state. Blocked queue first (SPEC §9).
  */
 
-import { join } from "node:path";
 import type { AgentRegistryEntry, AgentStatus, BackpressureState, Issue, LinearWriter, LoopState, StatusState, WorkerLoopState } from "@foreman/core";
 import {
   BLOCKED_HUMAN_FILTER,
   IN_FLIGHT_FILTER,
   LABEL_GROUP,
+  labelsInGroup,
   PROPOSALS_FILTER,
   decodeMarker,
-  expandHome,
-  labelsInGroup,
+  loopPaths,
   lockState,
   MARKER_KIND,
   readLockComment,
   readStatusFile,
   renderStatusConsole,
 } from "@foreman/core";
-import { getConfig, getEntry } from "../runtime.ts";
+import { getConfig, getEntry, liveDispatchIds } from "../runtime.ts";
+
+const STATUS_STALE_AFTER_MS = 90_000;
 
 /** `AgentStatus` (contract §J) has no `"idle"`/`"parked"`/`"aborted"` distinction; this is the closest honest mapping onto the older registry vocabulary `/foreman:status` already renders. */
 const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
@@ -31,10 +32,17 @@ const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
   unknown: "idle",
 };
 
-function readLoopState(stateDir: string): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
-  const status = readStatusFile(join(stateDir, "status.json"));
+export function readLoopState(statusPath: string, now: Date): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
+  const status = readStatusFile(statusPath);
   if (!status) {
     return { loop: { stage: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
+  }
+  if (now.getTime() - new Date(status.writtenAt).getTime() > STATUS_STALE_AFTER_MS) {
+    return {
+      loop: { stage: "stopped/stale", workers: [] },
+      backpressure: { tripped: false, reason: "Last loop status is older than 90 seconds." },
+      agents: [],
+    };
   }
   const { snapshot } = status;
   const workers: WorkerLoopState[] = snapshot.workers.map((worker) => ({
@@ -81,7 +89,7 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
     .map((issue) => {
       const found = readLockComment(issue.comments);
       if (!found) return null;
-      const state = lockState(found.data, { now, liveDispatchIds: [] });
+      const state = lockState(found.data, { now, liveDispatchIds: liveDispatchIds() });
       return {
         issueId: issue.identifier,
         agent: found.data.agent,
@@ -92,7 +100,7 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const { loop, backpressure, agents } = readLoopState(stateDir);
+  const { loop, backpressure, agents } = readLoopState(stateDir, now);
 
   return {
     blocked,
@@ -106,7 +114,6 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
 
 export async function renderStatus(linear: LinearWriter): Promise<string> {
   const config = getConfig();
-  const stateDir = join(expandHome(config.loop.stateDir), getEntry().alias);
-  const state = await buildStatusState(linear, stateDir);
+  const state = await buildStatusState(linear, loopPaths(config, getEntry().alias).status);
   return renderStatusConsole(state);
 }

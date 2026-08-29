@@ -36,8 +36,9 @@ const ISSUE_FIELDS = `
 `;
 
 const ISSUE_FIELDS_WITH_COMMENTS = `${ISSUE_FIELDS}
-  comments {
+  comments(first: 100) {
     nodes { id body createdAt user { id name displayName } parent { id } }
+    pageInfo { hasNextPage endCursor }
   }
 `;
 
@@ -65,10 +66,11 @@ export const ISSUES_QUERY = (includeComments: boolean): string => `
 `;
 
 export const COMMENTS_QUERY = `
-  query IssueComments($issueId: String!) {
+  query IssueComments($issueId: String!, $after: String, $first: Int) {
     issue(id: $issueId) {
-      comments {
+      comments(first: $first, after: $after) {
         nodes { id body createdAt user { id name displayName } parent { id } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -162,9 +164,10 @@ export const LABELS_QUERY = `
 `;
 
 export const WORKSPACE_LABELS_QUERY = `
-  query WorkspaceLabels {
-    issueLabels {
+  query WorkspaceLabels($after: String) {
+    issueLabels(first: 250, after: $after) {
       nodes { id name isGroup parent { id name } }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
@@ -282,9 +285,7 @@ export const PROJECT_STATUS_QUERY = `
 export const PROJECT_STATUSES_QUERY = `
   query ProjectStatuses {
     projectStatuses {
-      id
-      name
-      type
+      nodes { id name type }
     }
   }
 `;

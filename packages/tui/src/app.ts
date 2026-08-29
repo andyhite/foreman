@@ -15,7 +15,7 @@
 import type { Canvas, Key, Rect, Theme } from "@foreman/core";
 import { keyHints, kvRows, matchesKey, modal, splitVertical, tabsBar, wrapText } from "@foreman/core";
 import type { Action, AppState, LoopPane, Toast } from "./store.ts";
-import { cursorFor, focusedPane, reduce } from "./store.ts";
+import { focusedPane, reduce, scrollFor } from "./store.ts";
 import type { View, ViewContext } from "./view.ts";
 import type { Session } from "./session.ts";
 
@@ -31,6 +31,25 @@ const GLOBAL_HINTS: ReadonlyArray<readonly [string, string]> = [
   ["q", "quit"],
 ];
 
+const HELP_HINTS: ReadonlyArray<readonly [string, string]> = [
+  ["?", "toggle help"],
+  ["q / ctrl-c", "quit"],
+  ["1-7", "jump to view"],
+  ["tab / shift-tab", "next / previous view"],
+  ["L", "cycle focused loop"],
+  ["r", "refresh snapshot"],
+  ["s / S", "start / stop focused loop"],
+  ["p / t", "pause-resume / tick focused loop"],
+  ["g", "cycle autonomy stage"],
+  ["agents", "↑↓ select · enter attach · x kill · o open"],
+  ["overview", "↑↓ worker · enter skips"],
+  ["pipeline", "↑↓ select · enter detail · o open · / filter"],
+  ["blocks", "↑↓ select · enter reply command"],
+  ["proposals", "↑↓ select · enter detail · y approve · n reject"],
+  ["logs", "f follow · / filter · A focused/all loops"],
+  ["settings", "enter edit · ←/→ adjust · space toggle · ctrl-s save"],
+];
+
 export class TuiHost {
   #state: AppState;
   #views: readonly View[];
@@ -38,6 +57,7 @@ export class TuiHost {
   #session: Session;
   #dispatch: (action: Action) => void;
   #tick = 0;
+  #lastClockTick = -1;
   #suspend: <T>(fn: () => Promise<T>) => Promise<T>;
   #requestRender: () => void;
   #quit: (code?: number) => void;
@@ -79,9 +99,7 @@ export class TuiHost {
       theme: this.#theme,
       tick: this.#tick,
       dispatch: this.#dispatch,
-      command: (loopId, op, params) => {
-        void this.#session.send(loopId, op, params);
-      },
+      command: (loopId, op, params) => this.#session.send(loopId, op, params),
       startLoop: (loopId) => {
         void this.#session.ensureRunning(loopId);
       },
@@ -89,16 +107,27 @@ export class TuiHost {
       suspend: this.#suspend,
       requestRender: this.#requestRender,
       openUrl: (url) => {
-        void Bun.spawn(["open", url]).exited.catch(() => {});
+        const opener = process.platform === "darwin" ? "open" : "xdg-open";
+        try {
+          const child = Bun.spawn([opener, url]);
+          void child.exited.then((exitCode) => {
+            if (exitCode !== 0) this.#dispatch({ type: "toast", kind: "danger", message: `${opener} failed to open URL` });
+          });
+        } catch {
+          this.#dispatch({ type: "toast", kind: "danger", message: `${opener} is unavailable; cannot open URL` });
+        }
       },
     };
   }
 
   render(frame: { canvas: Canvas; rect: Rect; tick: number }): void {
     this.#tick = frame.tick;
+    if (frame.tick !== this.#lastClockTick) {
+      this.#lastClockTick = frame.tick;
+      this.#state = reduce(this.#state, { type: "clock", now: Date.now() });
+    }
     const { canvas, rect } = frame;
     const ctx = this.#context();
-    canvas.clear();
 
     const [header, tabs, body, footer] = splitVertical(rect, [
       { fixed: 1 },
@@ -122,20 +151,27 @@ export class TuiHost {
   #renderHeader(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const theme = this.#theme;
     const pane = focusedPane(this.#state);
-    const parts = [theme.tone("header", "foreman")];
-    if (this.#state.repoAlias) parts.push(this.#state.repoAlias);
-    if (this.#state.team) parts.push(this.#state.team);
+    const segments: Array<{ text: string; tone?: "header" | "warn" }> = [{ text: "foreman", tone: "header" }];
+    if (this.#state.repoAlias) segments.push({ text: this.#state.repoAlias });
+    if (this.#state.team) segments.push({ text: this.#state.team });
     if (pane) {
-      parts.push(pane.label);
+      segments.push({ text: pane.label });
       const runtime = pane.snapshot?.runtime;
       if (runtime) {
-        parts.push(runtime.dispatcher);
+        segments.push({ text: runtime.dispatcher });
         if (runtime.state === "paused" || runtime.state === "stopped") {
-          parts.push(theme.tone("warn", runtime.state));
+          segments.push({ text: runtime.state, tone: "warn" });
         }
       }
     }
-    canvas.text(1, rect.y, parts.join("  "), theme.sgr());
+    // Paint each segment as plain text plus its own sgr — a pre-styled
+    // joined string would burn one canvas column per escape byte and
+    // shift every segment after it (and the clock) left.
+    let x = 1;
+    segments.forEach((segment, index) => {
+      if (index > 0) x += 2;
+      x += canvas.text(x, rect.y, segment.text, segment.tone ? theme.toneSgr(segment.tone) : theme.sgr());
+    });
     const clock = new Date(this.#state.now).toTimeString().slice(0, 8);
     canvas.text(Math.max(1, rect.width - clock.length - 1), rect.y, clock, theme.toneSgr("muted"));
   }
@@ -148,8 +184,7 @@ export class TuiHost {
 
   #renderFooter(canvas: Canvas, rect: Rect, ctx: ViewContext, view: View | undefined): void {
     const hints = [...(view?.hints(ctx) ?? []), ...GLOBAL_HINTS];
-    const text = keyHints(this.#theme, hints, rect.width);
-    canvas.text(1, rect.y, text, this.#theme.sgr());
+    keyHints(canvas, { x: 1, y: rect.y, width: rect.width - 1, height: 1 }, this.#theme, hints);
   }
 
   #renderToasts(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
@@ -172,11 +207,8 @@ export class TuiHost {
     const theme = this.#theme;
 
     if (modalState.kind === "help") {
-      const inner = modal(canvas, rect, { theme, title: "keymap", width: 60, height: 20, footer: "esc close" });
-      kvRows(canvas, inner, {
-        theme,
-        entries: GLOBAL_HINTS.map(([key, label]) => [key, label] as const),
-      });
+      const inner = modal(canvas, rect, { theme, title: "keymap", width: 78, height: 20, footer: "esc close" });
+      kvRows(canvas, inner, { theme, entries: HELP_HINTS });
       return;
     }
 
@@ -207,7 +239,7 @@ export class TuiHost {
         Rect,
         Rect,
       ];
-      kvRows(canvas, rowsArea, { theme, entries: modalState.rows, scroll: cursorFor(this.#state, "modal") });
+      kvRows(canvas, rowsArea, { theme, entries: modalState.rows, scroll: scrollFor(this.#state, "modal") });
       if (modalState.body) {
         modalState.body.forEach((line, index) => canvas.text(bodyArea.x, bodyArea.y + index, line, theme.toneSgr("muted")));
       }
@@ -387,9 +419,9 @@ export class TuiHost {
       if (matchesKey(key, "escape") || matchesKey(key, "enter")) {
         this.#dispatch({ type: "closeModal" });
       } else if (matchesKey(key, "up")) {
-        this.#dispatch({ type: "setScroll", view: "modal", scroll: Math.max(0, cursorFor(this.#state, "modal") - 1) });
+        this.#dispatch({ type: "setScroll", view: "modal", scroll: Math.max(0, scrollFor(this.#state, "modal") - 1) });
       } else if (matchesKey(key, "down")) {
-        this.#dispatch({ type: "setScroll", view: "modal", scroll: cursorFor(this.#state, "modal") + 1 });
+        this.#dispatch({ type: "setScroll", view: "modal", scroll: scrollFor(this.#state, "modal") + 1 });
       }
       void ctx;
     }

@@ -56,6 +56,16 @@ const nodeHerdrRunner: HerdrRunner = {
   },
 };
 
+interface HerdrWorkspaceListResult {
+  result: {
+    workspaces: { label: string; workspace_id: string }[];
+  };
+}
+interface HerdrTabListResult {
+  result: {
+    tabs: { label: string; tab_id: string }[];
+  };
+}
 interface HerdrTabResult {
   result: { tab: { tab_id: string } };
 }
@@ -66,9 +76,14 @@ interface HerdrMoveResult {
   result: { move_result: { pane: { pane_id: string }; previous_pane_id: string } };
 }
 
-/** Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. */
+/**
+ * Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents.
+ * Keep the tail when truncating: batch dispatch ids carry their random suffix
+ * there, while their common timestamp-heavy prefix is not distinguishing.
+ */
 export function herdrAgentName(issueId: string): string {
-  return `foreman-${issueId}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 32);
+  const suffix = issueId.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  return `foreman-${suffix.slice(-(32 - "foreman-".length))}`;
 }
 
 let seqCounter = 0;
@@ -78,11 +93,6 @@ export class HerdrDispatcher implements Dispatcher {
 
   readonly #config: GlobalConfig;
   readonly #runner: HerdrRunner;
-  /** issueId -> tab id, so a second dispatch for the same issue reuses the tab. */
-  readonly #tabByIssue = new Map<string, string>();
-  /** repo path -> workspace id. */
-  readonly #workspaceByRepo = new Map<string, string>();
-  readonly #paneByDispatch = new Map<string, string>();
 
   constructor(config: GlobalConfig, options?: { runner?: HerdrRunner }) {
     this.#config = config;
@@ -97,11 +107,22 @@ export class HerdrDispatcher implements Dispatcher {
       return false;
     }
   }
-
   async #ensureWorkspace(repoPath: string): Promise<string> {
-    const cached = this.#workspaceByRepo.get(repoPath);
-    if (cached) return cached;
+    // Maps save a little parsing within one process, but are insufficient for
+    // a loop restarted around existing Herdr state. Re-read Herdr's own list
+    // first so "one workspace per repo" holds across process lifetimes.
     const { stdout } = await this.#runner.run([
+      this.#config.agent.herdrBin,
+      "workspace",
+      "list",
+    ]);
+    const listed = JSON.parse(stdout) as HerdrWorkspaceListResult;
+    const existing = listed.result.workspaces.find((workspace) => workspace.label === repoPath);
+    if (existing) {
+      return existing.workspace_id;
+    }
+
+    const created = await this.#runner.run([
       this.#config.agent.herdrBin,
       "workspace",
       "create",
@@ -109,16 +130,29 @@ export class HerdrDispatcher implements Dispatcher {
       repoPath,
       "--no-focus",
     ]);
-    const parsed = JSON.parse(stdout) as { result: { workspace_id: string } };
+    const parsed = JSON.parse(created.stdout) as { result: { workspace_id: string } };
     const workspaceId = parsed.result.workspace_id;
-    this.#workspaceByRepo.set(repoPath, workspaceId);
     return workspaceId;
   }
 
   async #ensureTab(workspaceId: string, label: string, cwd: string): Promise<string> {
-    const cached = this.#tabByIssue.get(label);
-    if (cached) return cached;
+    // Like workspaces, tabs outlive this dispatcher instance. A process restart
+    // must locate the prior tab by its stable issue label rather than create a
+    // duplicate for every resumed dispatch.
     const { stdout } = await this.#runner.run([
+      this.#config.agent.herdrBin,
+      "tab",
+      "list",
+      "--workspace",
+      workspaceId,
+    ]);
+    const listed = JSON.parse(stdout) as HerdrTabListResult;
+    const existing = listed.result.tabs.find((tab) => tab.label === label);
+    if (existing) {
+      return existing.tab_id;
+    }
+
+    const created = await this.#runner.run([
       this.#config.agent.herdrBin,
       "tab",
       "create",
@@ -130,9 +164,8 @@ export class HerdrDispatcher implements Dispatcher {
       label,
       "--no-focus",
     ]);
-    const parsed = JSON.parse(stdout) as HerdrTabResult;
+    const parsed = JSON.parse(created.stdout) as HerdrTabResult;
     const tabId = parsed.result.tab.tab_id;
-    this.#tabByIssue.set(label, tabId);
     return tabId;
   }
 
@@ -197,7 +230,6 @@ export class HerdrDispatcher implements Dispatcher {
       String(this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs),
     ]);
 
-    this.#paneByDispatch.set(request.dispatchId, paneId);
 
     return {
       dispatchId: request.dispatchId,

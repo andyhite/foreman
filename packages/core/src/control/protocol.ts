@@ -32,6 +32,14 @@ const LoopStageSchema = Type.Union([
   Type.Literal("read-only"),
   Type.Literal("full"),
 ]);
+
+/** Every valid `LoopStage`, in the order the loop escalates through them. */
+export const LOOP_STAGES: readonly LoopStage[] = ["dry-run", "read-only", "full"];
+
+/** Narrows an arbitrary value (e.g. a control-request param) to a `LoopStage`, rejecting everything else. */
+export function isLoopStage(value: unknown): value is LoopStage {
+  return typeof value === "string" && (LOOP_STAGES as readonly string[]).includes(value);
+}
 const RunStateSchema = Type.Union([
   Type.Literal("starting"),
   Type.Literal("running"),

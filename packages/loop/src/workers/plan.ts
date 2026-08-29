@@ -7,10 +7,10 @@
  */
 
 import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inProject, newDispatchId } from "@foreman/core";
-import type { PlanCandidate } from "../routing.ts";
+import type { BoardSnapshot, PlanCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
-import type { BoardSnapshot } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
+import { filterInScope } from "./types.ts";
 
 async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> {
   const candidates: PlanCandidate[] = [];
@@ -33,12 +33,13 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
     findPlanCandidates(ctx),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
+  const { inScope: scopedBlocked } = await filterInScope(ctx, "plan", blockedHuman);
 
   const snapshot: BoardSnapshot = {
     backlog: [],
     todo: [],
     reviewCandidates: [],
-    blockedHumanCount: blockedHuman.length,
+    blockedHumanCount: scopedBlocked.length,
     readyBufferCount: 0,
     planCandidates,
   };
@@ -77,7 +78,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { blocked: blockedHuman.length },
+    counts: { blocked: scopedBlocked.length },
   };
 }
 

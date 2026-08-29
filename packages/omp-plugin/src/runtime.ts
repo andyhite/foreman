@@ -41,6 +41,20 @@ interface Runtime {
   entry: ResolvedRepoEntry | null;
 }
 
+const activeDispatchIds = new Set<string>();
+
+export function registerLiveDispatch(dispatchId: string): void {
+  activeDispatchIds.add(dispatchId);
+}
+
+export function releaseLiveDispatch(dispatchId: string): void {
+  activeDispatchIds.delete(dispatchId);
+}
+
+export function liveDispatchIds(): readonly string[] {
+  return [...activeDispatchIds];
+}
+
 let runtime: Runtime | null = null;
 
 function productDigest(initiative: Initiative | null): string {
@@ -138,9 +152,10 @@ export function getEntry(): ResolvedRepoEntry {
  */
 export function isRepoRegistered(cwd: string = process.cwd()): boolean {
   const rt = requireRuntime();
-  if (rt.entry) return true;
+  if (cwd === process.cwd() && rt.entry) return true;
   try {
-    rt.entry = entryForCwd(rt.config, cwd);
+    const entry = entryForCwd(rt.config, cwd);
+    if (cwd === process.cwd()) rt.entry = entry;
     return true;
   } catch (error) {
     if (error instanceof ConfigError) return false;
@@ -163,18 +178,6 @@ export function getGitHub(): GitHubClient {
   return requireRuntime().github;
 }
 
-export function getLockTtlMs(): number {
-  return requireRuntime().lockTtlMs;
-}
-
-export async function getTeamStates(teamId: string): Promise<WorkflowState[]> {
-  const rt = requireRuntime();
-  const cached = rt.stateCache.get(teamId);
-  if (cached) return cached;
-  const states = await getLinear().workflowStates(teamId);
-  rt.stateCache.set(teamId, states);
-  return states;
-}
 
 /**
  * Returns the cached two-layer Context digest for `projectId`, fetching and
@@ -194,10 +197,9 @@ export async function getContextDigest(projectId: string): Promise<string> {
 
   const linear = getLinear();
   const project = await linear.project(projectId);
+
   if (!project) {
-    const digest = "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
-    rt.contextDigestCache.set(projectId, digest);
-    return digest;
+    return "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
   }
 
   let initiative: Initiative | null = null;
@@ -216,4 +218,5 @@ export async function getContextDigest(projectId: string): Promise<string> {
 /** Test/session-teardown seam: forces the next accessor call to throw until `initRuntime` runs again. */
 export function resetRuntime(): void {
   runtime = null;
+  activeDispatchIds.clear();
 }

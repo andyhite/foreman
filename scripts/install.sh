@@ -29,13 +29,34 @@ command -v bun >/dev/null 2>&1 || die "bun is required — https://bun.sh"
 
 printf '\n\033[1mForeman installer\033[0m\n\n'
 
-if [ -d "$FOREMAN_INSTALL_DIR/.git" ]; then
+if [ -e "$FOREMAN_INSTALL_DIR" ]; then
+  [ -d "$FOREMAN_INSTALL_DIR" ] || die "$FOREMAN_INSTALL_DIR exists but is not a directory; choose an empty install path with FOREMAN_INSTALL_DIR."
+  git -C "$FOREMAN_INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "$FOREMAN_INSTALL_DIR exists but is not a git checkout; move it aside or choose another FOREMAN_INSTALL_DIR."
+
+  if [ -n "$(git -C "$FOREMAN_INSTALL_DIR" status --porcelain)" ]; then
+    die "$FOREMAN_INSTALL_DIR has uncommitted changes; commit, stash, or discard them before updating."
+  fi
+  if ! git -C "$FOREMAN_INSTALL_DIR" fetch --quiet origin; then
+    die "could not fetch origin for $FOREMAN_INSTALL_DIR; check network access and the origin remote."
+  fi
+  if ! git -C "$FOREMAN_INSTALL_DIR" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    die "$FOREMAN_INSTALL_DIR has no upstream branch; configure one or choose a fresh FOREMAN_INSTALL_DIR."
+  fi
+  if ! git -C "$FOREMAN_INSTALL_DIR" merge-base --is-ancestor HEAD '@{u}'; then
+    die "$FOREMAN_INSTALL_DIR has local commits that cannot be fast-forwarded; push them or reset it before updating."
+  fi
+
   info "updating existing checkout at $FOREMAN_INSTALL_DIR"
-  git -C "$FOREMAN_INSTALL_DIR" pull --quiet --ff-only
+  if ! git -C "$FOREMAN_INSTALL_DIR" pull --quiet --ff-only; then
+    die "could not fast-forward $FOREMAN_INSTALL_DIR; update or reset the checkout, then re-run the installer."
+  fi
 else
   info "cloning $FOREMAN_REPO_URL to $FOREMAN_INSTALL_DIR"
   mkdir -p "$(dirname "$FOREMAN_INSTALL_DIR")"
-  git clone --quiet "$FOREMAN_REPO_URL" "$FOREMAN_INSTALL_DIR"
+  if ! git clone --quiet "$FOREMAN_REPO_URL" "$FOREMAN_INSTALL_DIR"; then
+    die "could not clone $FOREMAN_REPO_URL; check the repository URL, credentials, and network connection."
+  fi
 fi
 
 info "bun install && bun run build"

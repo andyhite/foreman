@@ -21,6 +21,8 @@ import { dirname, join } from "node:path";
  */
 export interface ConfigPatch {
   repos?: Record<string, RepoEntry>;
+  /** Registry aliases to remove in the same validated write as a repos patch. */
+  removeRepos?: string[];
   linear?: {
     apiKeyFile?: string | null;
   };
@@ -52,8 +54,11 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
 function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
   const merged = { ...existing };
 
-  if (patch.repos && Object.keys(patch.repos).length > 0) {
-    merged.repos = { ...(existing.repos as Record<string, RepoEntry> | undefined), ...patch.repos };
+  if (patch.repos || patch.removeRepos) {
+    const repos = { ...(existing.repos as Record<string, RepoEntry> | undefined), ...patch.repos };
+    for (const alias of patch.removeRepos ?? []) delete repos[alias];
+    if (Object.keys(repos).length > 0) merged.repos = repos;
+    else delete merged.repos;
   }
 
   const existingLinear = (existing.linear as Record<string, unknown> | undefined) ?? {};

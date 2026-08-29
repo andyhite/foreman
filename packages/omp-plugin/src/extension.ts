@@ -6,18 +6,20 @@
  * capture), and `session_shutdown` (clear timers).
  */
 
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallDecision, ToolCallEvent, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
-import type { BlockRecord } from "@foreman/core";
+import type { BlockRecord, LinearWriter } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   ConfigError,
+  decodeMarker,
   ensureMaintenanceProjects,
   ensureWorktree,
   isBudgetTruncation,
+  MARKER_KIND,
   newDispatchId,
   parseAgentOutput,
   resolveTeamKey,
@@ -35,29 +37,46 @@ import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
 import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome } from "./results/apply.ts";
 import { extractFromLifecycle, extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
-import { getConfig, getEntry, getGitHub, getLinear, getContextDigest, initRuntime, isRepoRegistered, resetRuntime } from "./runtime.ts";
+import {
+  getConfig,
+  getEntry,
+  getGitHub,
+  getLinear,
+  getContextDigest,
+  initRuntime,
+  isRepoRegistered,
+  liveDispatchIds,
+  registerLiveDispatch,
+  releaseLiveDispatch,
+  resetRuntime,
+} from "./runtime.ts";
 
 const REAPER_INTERVAL_MS = 5 * 60 * 1000;
-
-function liveDispatchIds(): readonly string[] {
-  return [];
-}
+const appliedDispatchIds = new Set<string>();
+const reviewDiffDirs = new Map<string, string>();
 
 function toApplyDeps(): ApplyDeps {
   return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry() };
 }
 
-function toGuardDeps(pluginRoot: string): TaskGuardDeps {
+function toGuardDeps(): TaskGuardDeps {
   return {
     linear: getLinear(),
     github: getGitHub(),
     config: getConfig(),
     entry: getEntry(),
     now: () => new Date(),
-    newDispatchId: (agent, issueId, now) => newDispatchId(agent, issueId, now),
+    newDispatchId: (agent, issueId, now) => {
+      const dispatchId = newDispatchId(agent, issueId, now);
+      registerLiveDispatch(dispatchId);
+      return dispatchId;
+    },
     ensureWorktree: (input) => ensureWorktree(input),
     writeDiffFile: async (issueId, diff) => {
+      const prior = reviewDiffDirs.get(issueId);
+      if (prior) rmSync(prior, { recursive: true, force: true });
       const dir = mkdtempSync(join(tmpdir(), `foreman-review-${issueId}-`));
+      reviewDiffDirs.set(issueId, dir);
       const path = join(dir, "diff.patch");
       writeFileSync(path, diff);
       return path;
@@ -70,57 +89,22 @@ function toGuardDeps(pluginRoot: string): TaskGuardDeps {
 function markerAppliedTracker(): AppliedTracker {
   return {
     wasApplied: async (dispatchId: string) => {
-      const linear = getLinear();
-      // A dispatch id is greppable, so its `foreman:applied` marker is found
-      // by scanning the issue named in its own `FOREMAN-ISSUE` marker; the
-      // sink only has the dispatch id, so this reads it back off the issue
-      // whose identifier is embedded in the dispatch id itself
-      // (`<agent>-<ISSUE-ID>-<timestamp>-<suffix>`, per `newDispatchId`).
       const match = /^foreman-[a-z]+-(\S+)-\d{8}T\d{6}Z-\w+$/.exec(dispatchId);
       const issueId = match?.[1];
       if (!issueId) return false;
-      const issue = await linear.issue(issueId, { includeComments: true });
-      if (!issue) return false;
-      return issue.comments.some((comment) => comment.body.includes(`"dispatchId":"${dispatchId}"`));
+      const issue = await getLinear().issue(issueId, { includeComments: true });
+      return issue?.comments.some(
+        (comment) => decodeMarker<{ dispatchId?: unknown }>(MARKER_KIND.dispatchApplied, comment.body)?.dispatchId === dispatchId,
+      ) ?? false;
     },
   };
 }
 
-/** Converts a raw agent yield into the `AgentOutcome` union `applyOutcome` consumes. */
-function toOutcome(agentName: ForemanAgentName, data: unknown): AgentOutcome | null {
-  if (agentName === "foreman-triage") {
-    const parsed = parseAgentOutput(agentName, data);
-    if (parsed.kind === "invalid") return null;
-    if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
-    return { kind: "result", agent: agentName, result: parsed.result };
-  }
-  if (agentName === "foreman-refine") {
-    const parsed = parseAgentOutput(agentName, data);
-    if (parsed.kind === "invalid") return null;
-    if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
-    return { kind: "result", agent: agentName, result: parsed.result };
-  }
-  if (agentName === "foreman-implement") {
-    const parsed = parseAgentOutput(agentName, data);
-    if (parsed.kind === "invalid") return null;
-    if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
-    return { kind: "result", agent: agentName, result: parsed.result };
-  }
-  if (agentName === "foreman-plan") {
-    const parsed = parseAgentOutput(agentName, data);
-    if (parsed.kind === "invalid") return null;
-    if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
-    return { kind: "result", agent: agentName, result: parsed.result };
-  }
-  const parsed = parseAgentOutput(agentName, data);
-  if (parsed.kind === "invalid") return null;
-  if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
-  return { kind: "result", agent: agentName, result: parsed.result };
-}
-
+/** Wraps a `BlockRecord` in the `AgentOutcome` union `applyOutcome` consumes. */
 function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord): AgentOutcome {
   return { kind: "blocked", agent: agentName, block, issueId: block.blockedByIssues[0] ?? "" };
 }
+
 
 /**
  * The marker-tracking issue for an outcome. Triage yields one proposal per
@@ -145,19 +129,55 @@ function isForemanAgentName(agent: string): agent is ForemanAgentName {
   return agent in AGENT_OUTPUT_SCHEMAS;
 }
 
-async function handleCaptured(dispatchId: string, agent: string, data: unknown): Promise<void> {
-  if (!isForemanAgentName(agent)) return;
-  const agentName = agent;
-
-  const tracker = markerAppliedTracker();
-  await sink({ dispatchId, agent: agentName, data }, tracker, async (captured) => {
-    const outcome = toOutcome(agentName, captured.data);
-    if (!outcome) return;
+async function handleCaptured(
+  dispatchId: string,
+  agent: string,
+  data: unknown,
+  aborted: boolean,
+  notify: (message: string, level: "warn" | "error") => void,
+): Promise<void> {
+  if (!isForemanAgentName(agent) || appliedDispatchIds.has(dispatchId)) return;
+  appliedDispatchIds.add(dispatchId);
+  try {
+    const parsed = parseAgentOutput(agent, data);
     const deps = toApplyDeps();
-    await applyOutcome(deps, outcome);
-    const issueId = issueIdOf(outcome);
-    if (issueId) await markApplied(deps, issueId, captured.dispatchId);
-  });
+    if (parsed.kind === "invalid") {
+      if (isBudgetTruncation({ aborted, problems: parsed.problems })) {
+        const match = /^foreman-[a-z]+-(\S+)-/.exec(dispatchId);
+        const issueId = match?.[1];
+        if (issueId) {
+          await applyOutcome(deps, blockedOutcome(agent, {
+            blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
+            whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
+            options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
+            costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [issueId],
+          }));
+        }
+      } else {
+        const match = /^foreman-[a-z]+-(\S+)-/.exec(dispatchId);
+        const issueId = match?.[1];
+        const issue = issueId ? await deps.linear.issue(issueId, { includeComments: true }) : null;
+        if (issue) {
+          await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
+          const running = issue.labels.find((label) => label.name === "agent:running");
+          if (running) await deps.linear.updateIssue(issue.id, { removedLabelIds: [running.id] });
+        }
+        notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
+      }
+      return;
+    }
+    await sink({ dispatchId, agent, data, aborted }, markerAppliedTracker(), async (captured) => {
+      const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
+      await applyOutcome(deps, outcome);
+      const issueId = issueIdOf(outcome);
+      if (issueId) await markApplied(deps, issueId, captured.dispatchId);
+    });
+  } finally {
+    releaseLiveDispatch(dispatchId);
+    const issueId = /^foreman-review-(\S+)-/.exec(dispatchId)?.[1];
+    const dir = issueId ? reviewDiffDirs.get(issueId) : undefined;
+    if (dir && issueId) { rmSync(dir, { recursive: true, force: true }); reviewDiffDirs.delete(issueId); }
+  }
 }
 
 /**
@@ -177,68 +197,73 @@ export default function createForemanExtension(pi: ExtensionAPI) {
   registerGitHubPrTool(pi);
 
   const commandName = (key: keyof typeof COMMAND_NAMES): string => COMMAND_NAMES[key];
+  const runCommand = async (
+    customType: string,
+    work: (linear: LinearWriter) => Promise<string>,
+  ): Promise<void> => {
+    try {
+      if (!isRepoRegistered()) {
+        await pi.sendMessage(
+          {
+            customType,
+            content: "This repository is not registered with Foreman. Run `foreman init` here first.",
+            display: true,
+            attribution: "assistant",
+          },
+          { triggerTurn: false },
+        );
+        return;
+      }
+      const content = await work(getLinear());
+      await pi.sendMessage({ customType, content, display: true, attribution: "assistant" }, { triggerTurn: false });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const content = message.startsWith("No Linear API key resolved")
+        ? "No Linear API key resolved for this repo. Foreman's Linear tools and commands will fail until one is configured."
+        : `Foreman command failed: ${message}`;
+      await pi.sendMessage({ customType, content, display: true, attribution: "assistant" }, { triggerTurn: false });
+    }
+  };
+
 
   pi.registerCommand(commandName("status"), {
     description: "Foreman operator console: blocked queue, locks, proposals, agents, loop state.",
-    handler: async (_args, ctx: ExtensionContext) => {
-      const text = await renderStatus(getLinear());
-      await pi.sendMessage({ customType: "foreman.status", content: text, display: true, attribution: "assistant" }, { triggerTurn: false });
-    },
+    handler: async () =>
+      runCommand("foreman.status", async (linear) => renderStatus(linear)),
   });
 
   pi.registerCommand(commandName("apply"), {
     description: "Apply approved triage proposals, or approve/reject one by issue id.",
-    handler: async (args: string) => {
-      const argv = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
-      const result = await runApplyCommand(getLinear(), argv);
-      const lines = [result.message];
-      if (result.plan) {
-        for (const entry of result.plan) lines.push(`- ${entry.issueId}: ${entry.item.type} → ${entry.item.destination}`);
-      }
-      await pi.sendMessage(
-        { customType: "foreman.apply", content: lines.join("\n"), display: true, attribution: "assistant" },
-        { triggerTurn: false },
-      );
-    },
+    handler: async (args: string) =>
+      runCommand("foreman.apply", async (linear) => {
+        const argv = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
+        const result = await runApplyCommand(linear, argv, getEntry());
+        const lines = [result.message];
+        if (result.plan) {
+          for (const entry of result.plan) lines.push(`- ${entry.issueId}: ${entry.item.type} → ${entry.item.destination}`);
+        }
+        return lines.join("\n");
+      }),
   });
 
   pi.registerCommand(commandName("merge"), {
     description: "Merge one issue's PR (or branch) once the review gate passes. Operator-invoked only.",
-    handler: async (args: string) => {
-      const issueId = args.trim();
-      if (!issueId) {
-        await pi.sendMessage(
-          { customType: "foreman.merge", content: "Usage: /foreman:merge <ISSUE-ID>", display: true, attribution: "assistant" },
-          { triggerTurn: false },
-        );
-        return;
-      }
-      const result = await runMerge(getLinear(), getGitHub(), issueId);
-      await pi.sendMessage(
-        { customType: "foreman.merge", content: result.message, display: true, attribution: "assistant" },
-        { triggerTurn: false },
-      );
-    },
+    handler: async (args: string) =>
+      runCommand("foreman.merge", async (linear) => {
+        const issueId = args.trim();
+        return (await runMerge(linear, getGitHub(), issueId)).message;
+      }),
   });
 
   pi.registerCommand(commandName("unblock"), {
     description: "Record the operator's reply to a blocked issue and clear its blocked:* label.",
-    handler: async (args: string) => {
-      const [issueId, ...replyParts] = args.trim().split(/\s+/);
-      const reply = replyParts.join(" ");
-      if (!issueId) {
-        await pi.sendMessage(
-          { customType: "foreman.unblock", content: "Usage: /foreman:unblock <ISSUE-ID> <reply>", display: true, attribution: "assistant" },
-          { triggerTurn: false },
-        );
-        return;
-      }
-      const result = await runUnblock(getLinear(), issueId, reply);
-      await pi.sendMessage(
-        { customType: "foreman.unblock", content: result.message, display: true, attribution: "assistant" },
-        { triggerTurn: false },
-      );
-    },
+    handler: async (args: string) =>
+      runCommand("foreman.unblock", async (linear) => {
+        const [issueId, ...replyParts] = args.trim().split(/\s+/);
+        const reply = replyParts.join(" ");
+        if (!issueId) return "Usage: /foreman:unblock <ISSUE-ID> <reply>";
+        return (await runUnblock(linear, issueId, reply, getEntry())).message;
+      }),
   });
 
   let reaperTimer: unknown = null;
@@ -339,21 +364,29 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     // error — so an unregistered cwd must not intercept `task` calls at all;
     // `toGuardDeps` calls `getEntry()`, which throws on an unregistered cwd.
     if (!isRepoRegistered()) return;
-    const guardDeps = toGuardDeps(PLUGIN_ROOT);
+    const guardDeps = toGuardDeps();
     const decision = await prepareTaskCall(event.input as TaskCallInput, guardDeps);
     if (decision.block) return { block: true, reason: decision.reason };
     return { input: decision.input };
   });
 
-  pi.on("tool_result", async (event: ToolResultEvent) => {
+  const reportFailure = (ctx: ExtensionContext) => (error: unknown) => {
+    const message = `Foreman could not apply an agent result: ${String(error)}`;
+    pi.logger.error(message);
+    ctx.ui.notify(message, "error");
+  };
+  pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (event.toolName !== "task") return;
-    const captured = extractFromToolResult(event);
-    for (const item of captured) await handleCaptured(item.dispatchId, item.agent, item.data);
+    for (const item of extractFromToolResult(event)) {
+      try { await handleCaptured(item.dispatchId, item.agent, item.data, item.aborted, ctx.ui.notify); }
+      catch (error) { reportFailure(ctx)(error); }
+    }
   });
-
-  const lifecycleHandler = async (payload: unknown) => {
+  const lifecycleHandler = async (payload: unknown, ctx: ExtensionContext) => {
     const captured = extractFromLifecycle(payload);
-    if (captured) await handleCaptured(captured.dispatchId, captured.agent, captured.data);
+    if (!captured) return;
+    try { await handleCaptured(captured.dispatchId, captured.agent, captured.data, captured.aborted, ctx.ui.notify); }
+    catch (error) { reportFailure(ctx)(error); }
   };
   pi.on("task:subagent:lifecycle", lifecycleHandler);
   pi.on("task:subagent:progress", lifecycleHandler);

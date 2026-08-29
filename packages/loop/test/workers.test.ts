@@ -148,7 +148,7 @@ class FakeDispatcher implements Dispatcher {
   }
 }
 
-/** Minimal `LinearWriter` stub: only `issues` and `projectInitiative` are exercised. */
+/** Minimal `LinearWriter` stub: only `issues` and the initiative lookups are exercised. */
 class FakeLinear implements LinearWriter {
   constructor(
     private readonly issueList: Issue[],
@@ -170,8 +170,8 @@ class FakeLinear implements LinearWriter {
   async projectStatus(): Promise<null> {
     return null;
   }
-  async projectInitiatives(): Promise<InitiativeRef[]> {
-    throw new Error("not used in these tests");
+  async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
+    return [await this.initiativeResolver(projectId)];
   }
   async projectInitiative(projectId: string): Promise<InitiativeRef> {
     return this.initiativeResolver(projectId);
