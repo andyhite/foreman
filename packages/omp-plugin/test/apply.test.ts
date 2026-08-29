@@ -9,7 +9,11 @@ import type {
   IssueMutation,
   IssueRelationType,
   LinearWriter,
+  PlanResult,
+  Project,
   RefineResult,
+  ResolvedRepoEntry,
+  TeamRef,
   TriageItem,
   TriageProposal,
   WorkflowState,
@@ -60,7 +64,10 @@ class FakeLinear implements LinearWriter {
   issuesById = new Map<string, Issue>();
   labelsById = new Map<string, IssueLabel>();
   projectsList: { id: string; name: string }[] = [];
+  projectRecord: Project | null = null;
+  teamsList: TeamRef[] = [];
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
+  updateProjectStatusCalls: Array<{ projectId: string; type: string }> = [];
   commentCalls: Array<{ issueId: string; body: string }> = [];
   createIssueCalls: CreateIssueInput[] = [];
   relationCalls: Array<{ issueId: string; relatedIssueId: string; type: IssueRelationType }> = [];
@@ -85,6 +92,9 @@ class FakeLinear implements LinearWriter {
     return [];
   }
   async project() {
+    return this.projectRecord;
+  }
+  async projectStatus() {
     return null;
   }
   async projectInitiatives() {
@@ -109,7 +119,7 @@ class FakeLinear implements LinearWriter {
     return [...this.labelsById.values()];
   }
   async teams() {
-    return [];
+    return this.teamsList;
   }
   async projects() {
     return this.projectsList;
@@ -142,6 +152,9 @@ class FakeLinear implements LinearWriter {
     return { id: `project-created-${input.name}`, name: input.name };
   }
   async addProjectToInitiative() {}
+  async updateProjectStatus(input: { projectId: string; type: string }) {
+    this.updateProjectStatusCalls.push(input);
+  }
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.commentCalls.push(input);
     return { id: `comment-${this.commentCalls.length}`, body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };
@@ -162,8 +175,8 @@ class FakeLinear implements LinearWriter {
   }
 }
 
-function makeDeps(linear: FakeLinear): ApplyDeps {
-  return { linear, github: new GitHubClient(), now: () => new Date("2026-01-01T00:00:00.000Z") };
+function makeDeps(linear: FakeLinear, entry?: Pick<ResolvedRepoEntry, "team">): ApplyDeps {
+  return { linear, github: new GitHubClient(), now: () => new Date("2026-01-01T00:00:00.000Z"), entry };
 }
 
 function makeTriageProposal(overrides: Partial<TriageProposal["items"][number]> = {}): TriageProposal {
@@ -317,6 +330,86 @@ describe("applyOutcome — implement", () => {
     });
     expect(linear.createIssueCalls.length).toBe(2);
     expect(linear.relationCalls.length).toBe(2);
+  });
+});
+
+function makePlanResult(overrides: Partial<PlanResult> = {}): PlanResult {
+  return {
+    projectId: "project-1",
+    proposedIssues: [
+      {
+        title: "Wire the search index",
+        type: TYPE_LABEL.feature,
+        description: "## Context\nBuild the index.",
+        acceptanceCriteria: ["Search returns results for a known query"],
+        proposedPriority: PRIORITY.Medium,
+        proposedEstimate: 2,
+      },
+    ],
+    outOfScope: ["Ranking tuning"],
+    fullyPlanned: false,
+    rationale: "One slice covers the brief's first milestone.",
+    ...overrides,
+  };
+}
+
+describe("applyOutcome — plan", () => {
+  it("creates one Backlog issue per proposedIssue, tagged with its type label", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    await applyOutcome(makeDeps(linear, { team: "ENG" }), {
+      kind: "result",
+      agent: "foreman-plan",
+      result: makePlanResult(),
+    });
+
+    expect(linear.createIssueCalls).toHaveLength(1);
+    const call = linear.createIssueCalls[0];
+    expect(call?.title).toBe("Wire the search index");
+    expect(call?.teamId).toBe("team-1");
+    expect(call?.projectId).toBe("project-1");
+    expect(call?.priority).toBe(PRIORITY.Medium);
+    expect(call?.estimate).toBe(2);
+    const typeLabel = [...linear.labelsById.values()].find((entry) => call?.labelIds?.includes(entry.id));
+    expect(typeLabel?.name).toBe(TYPE_LABEL.feature);
+    expect(linear.updateProjectStatusCalls).toEqual([{ projectId: "project-1", type: "planned" }]);
+  });
+
+  it("leaves the project status untouched when proposedIssues is empty", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    await applyOutcome(makeDeps(linear, { team: "ENG" }), {
+      kind: "result",
+      agent: "foreman-plan",
+      result: makePlanResult({ proposedIssues: [], fullyPlanned: true }),
+    });
+    expect(linear.updateProjectStatusCalls).toEqual([]);
+  });
+
+  it("creates nothing when proposedIssues is empty", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    await applyOutcome(makeDeps(linear, { team: "ENG" }), {
+      kind: "result",
+      agent: "foreman-plan",
+      result: makePlanResult({ proposedIssues: [], fullyPlanned: true }),
+    });
+    expect(linear.createIssueCalls).toHaveLength(0);
+  });
+
+  it("throws when the project no longer exists", async () => {
+    const linear = new FakeLinear([]);
+    await expect(
+      applyOutcome(makeDeps(linear, { team: "ENG" }), { kind: "result", agent: "foreman-plan", result: makePlanResult() }),
+    ).rejects.toThrow("unknown project");
+  });
+
+  it("a blocked plan outcome with no issueId is a documented no-op, not a throw", async () => {
+    const linear = new FakeLinear([]);
+    await applyOutcome(makeDeps(linear), { kind: "blocked", agent: "foreman-plan", block: makeBlockRecord(), issueId: "" });
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
   });
 });
 

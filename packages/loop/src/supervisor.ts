@@ -103,24 +103,18 @@ export interface DispatcherFactory {
 }
 
 /**
- * Chooses the dispatcher from `loop.dispatcher`, falling back to print when
- * herdr is configured but its server is unreachable (SPEC §17.2: "Foreman
+ * Auto-detects herdr: tries it first and uses it when its server is
+ * reachable, so agent workers land in real, attachable panes whenever herdr
+ * is running. Falls back to print mode otherwise (SPEC §17.2: "Foreman
  * should degrade to print mode when the server isn't there rather than
  * stalling the loop"). Logs the fallback so it is visible, not silent.
  */
-export async function resolveDispatcher(
-  config: GlobalConfig,
-  factory: DispatcherFactory,
-  log: (message: string) => void,
-): Promise<Dispatcher> {
-  if (config.loop.dispatcher !== "herdr") {
-    return factory.createPrint();
-  }
+export async function resolveDispatcher(factory: DispatcherFactory, log: (message: string) => void): Promise<Dispatcher> {
   const herdr = factory.createHerdr();
   if (await herdr.available()) {
     return herdr;
   }
-  log("herdr dispatcher configured but unavailable; falling back to PrintDispatcher.");
+  log("herdr unavailable; falling back to PrintDispatcher.");
   return factory.createPrint();
 }
 

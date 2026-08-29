@@ -26,18 +26,15 @@ describe("parseArgs", () => {
     const args = parseArgs(["setup"]);
     expect(args.githubRepo).toBe("andyhite/foreman");
     expect(args.ompMode).toBeNull();
-    expect(args.herdrMode).toBeNull();
     expect(args.scope).toBeNull();
   });
 
-  it("parses --yes, --omp, --herdr, --scope, --repo-source, --repo, --home", () => {
+  it("parses --yes, --omp, --scope, --repo-source, --repo, --home", () => {
     const args = parseArgs([
       "setup",
       "--yes",
       "--omp",
       "install",
-      "--herdr",
-      "link",
       "--scope",
       "project",
       "--repo-source",
@@ -49,7 +46,6 @@ describe("parseArgs", () => {
     ]);
     expect(args.yes).toBe(true);
     expect(args.ompMode).toBe("install");
-    expect(args.herdrMode).toBe("link");
     expect(args.scope).toBe("project");
     expect(args.githubRepo).toBe("someone/fork");
     expect(args.repoPath).toBe("/tmp/checkout");

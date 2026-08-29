@@ -1,7 +1,7 @@
 /**
  * Locates the Foreman checkout that a `foreman setup` invocation is running
- * from — the source of the omp-plugin and herdr-plugin directories that dev
- * mode links and that `bun run build` builds.
+ * from — the source of the omp-plugin directory that dev mode links and that
+ * `bun run build` builds.
  *
  * Walks up from this module's own location (inside `packages/cli`) rather
  * than `process.cwd()`, so `foreman setup` works the same whether it is run
@@ -18,7 +18,7 @@ export class RepoNotFoundError extends Error {
     super(
       "Could not locate the foreman repo root. `foreman setup` needs to run from " +
         "inside a clone of https://github.com/andyhite/foreman (or pass --repo <path>) " +
-        "to find packages/omp-plugin and packages/herdr-plugin.",
+        "to find packages/omp-plugin.",
     );
     this.name = "RepoNotFoundError";
   }

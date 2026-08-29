@@ -13,7 +13,7 @@
     "check": "bun run typecheck && bun run test && bun run contract",
     "contract": "bun run packages/omp-plugin/scripts/check-contract.ts",
     "schemas": "bun run packages/core/scripts/emit-schemas.ts",
-    "setup": "bun run packages/cli/src/main.ts setup --omp link --herdr link",
+    "setup": "bun run packages/cli/src/main.ts setup --omp link",
     "test": "bun test",
     "typecheck": "tsc --build --force"
   },

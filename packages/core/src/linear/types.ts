@@ -25,6 +25,19 @@ export interface WorkflowState {
   position: number;
 }
 
+/**
+ * Linear's project-level status (distinct from `WorkflowStateType`, which is
+ * per-issue). `type` is the fixed enum every workspace shares; `name` is the
+ * workspace's label for it, customizable but irrelevant to Foreman logic.
+ */
+export type ProjectStatusType = "backlog" | "planned" | "started" | "paused" | "completed" | "canceled";
+
+export interface ProjectStatus {
+  id: LinearId;
+  name: string;
+  type: ProjectStatusType;
+}
+
 export interface IssueLabel {
   id: LinearId;
   name: string;

@@ -10,7 +10,7 @@ import type { Bookkeeping } from "../bookkeeping.ts";
 import type { DispatchDecision, SkipRecord, StageName } from "../routing.ts";
 
 export interface WorkerReport {
-  worker: StageName | "reaper" | "merge-detect";
+  worker: StageName | "reaper" | "merge-detect" | "project-status";
   ranAt: string;
   dispatched: DispatchDecision[];
   skipped: SkipRecord[];

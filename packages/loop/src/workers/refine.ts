@@ -40,6 +40,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
     reviewCandidates: [],
     blockedHumanCount: blockedHuman.length,
     readyBufferCount: ready.length,
+    planCandidates: [],
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);

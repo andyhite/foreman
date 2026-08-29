@@ -14,7 +14,8 @@ the board you already look at is the whole system state.
 
 ```mermaid
 flowchart LR
-    T[Triage] -->|foreman-triage| B[Backlog]
+    N[New project, no issues] -->|foreman-plan| B[Backlog]
+    T[Triage] -->|foreman-triage| B
     T -->|foreman-triage| X[Canceled / Duplicate]
     B -->|foreman-refine| R[Todo]
     R -->|claim at dispatch| P[In Progress]
@@ -23,7 +24,7 @@ flowchart LR
     V -->|foreman-review| P
 ```
 
-Four workflow agents, each responsible for exactly one edge. None of them can
+Five workflow agents, each responsible for exactly one edge. None of them can
 spawn another agent, and none of them can write to Linear — the `task` tool and
 Linear's mutation API are both withheld. An agent returns a validated structured
 result; the extension performs the mutation. That split is the design.
@@ -31,6 +32,7 @@ result; the extension performs the mutation. That split is the design.
 | Agent | Edge | Model | Produces |
 | --- | --- | --- | --- |
 | `foreman-triage` | Triage → Backlog / Canceled / Duplicate | `@smol` | A priority, a `type:` label, dedupe findings |
+| `foreman-plan` | New project (zero issues) → Backlog | session | A first slate of draft issues from the project brief |
 | `foreman-refine` | Backlog → Todo | session | Acceptance criteria, a Fibonacci estimate, a split proposal |
 | `foreman-implement` | In Progress → In Review | session | A branch, tests, a PR, per-criterion evidence |
 | `foreman-review` | In Review → Done / In Progress | `@slow` | Findings by severity against the diff |
@@ -80,8 +82,7 @@ GitHub rather than linking back to this checkout. Drop `--yes` to be walked
 through the prompts interactively instead:
 
 `--scope user` (the default) installs the omp plugin across every repo you
-work in; `--scope project` scopes it to the current repo. The herdr board is
-optional — add `--herdr install` to register it too, or answer its prompt.
+work in; `--scope project` scopes it to the current repo.
 Run `setup --help` for the full flag list, including `--repo-source` to point
 at a fork. `setup` without `--yes` is equivalent to running these by hand:
 
@@ -187,35 +188,10 @@ Slash commands, inside any omp session:
 Four dispatch commands run one agent by hand: `/foreman:triage`,
 `/foreman:refine`, `/foreman:implement`, `/foreman:review`.
 
-If you use [herdr](https://github.com/andyhite/herdr), the board ships as a
-plugin with four screens — the blocked drain, proposal review, the board, and
-live agent detail. Requires herdr 0.8.0 or newer. `foreman setup --herdr install`
-installs it from GitHub; by hand:
-
-```bash
-herdr plugin install andyhite/foreman/packages/herdr-plugin
-```
-
-(See [Development](#development) for `herdr plugin link` — the dev-mode path.)
-
-Installing registers four actions and, via its `[[startup]]` hook, ensures a
-long-lived `foreman-loop` pane in a workspace labelled `foreman` — reusing yours
-if you already have one. Bind the screens you want in
-`~/.config/herdr/config.toml`; an action is the only thing a keybinding can
-address, so each screen is reached through one:
-
-```toml
-[[keys.command]]
-key = "ctrl+shift+b"
-type = "plugin_action"
-command = "andyhite.foreman.open-blocked"
-description = "Foreman: open the blocked drain"
-```
-
-The other three are `open-proposals`, `open-board`, and `open-agents`. To run
-agents in real panes you can attach to instead of headless children, set
-`loop.dispatcher` to `"herdr"`; if the server is unreachable the loop logs a
-fallback and continues in print mode rather than stalling.
+When [herdr](https://github.com/andyhite/herdr) is available and its server is
+reachable, the loop automatically dispatches agents into real herdr panes
+instead of headless processes — no config flag needed; it falls back to
+print mode automatically otherwise.
 
 ## Configuration
 
@@ -226,7 +202,7 @@ config. Defaults are chosen so that an empty config is a safe config.
 | --- | --- | --- |
 | `loop.stage` | `dry-run` | Autonomy rung: `dry-run`, `read-only`, `full` |
 | `loop.wipGlobal` | `3` | Hard cap on concurrent agents, per instance |
-| `loop.wip` | `2/3/2` | Per-stage caps: refine, implement, review (triage is not a loop worker) |
+| `loop.wip` | `1/2/3/2` | Per-stage caps: plan, refine, implement, review (triage is not a loop worker) |
 | `loop.backpressureThreshold` | `5` | Team-wide blocked depth at which all dispatch stops |
 | `loop.readyBufferTarget` | `5` | How deep refine keeps the Todo buffer |
 | `loop.reviewCycleCap` | `2` | Review round trips before it escalates to you |
@@ -257,20 +233,18 @@ a gate or a worker predicate.
 packages/
   core/          Linear client, config, gate validators, lock protocol, schemas
   omp-plugin/    The plugin: agents, skills, commands, rules, extension
-  loop/           The supervisor and its six workers
-  herdr-plugin/   The board: four TUI panes over the same core
+  loop/           The supervisor and its seven workers
   cli/            The foreman CLI — setup, init, and delegates `loop` to packages/loop
 ```
 
-`packages/core` is the single source of truth for every contract. The four agent
+`packages/core` is the single source of truth for every contract. The five agent
 output schemas are defined once in TypeBox there and generated into each agent's
 frontmatter — CI fails if the two drift.
 
 ## Development
 
 Same clone as above, but link instead of install: `foreman setup --omp link`
-symlinks `packages/omp-plugin` in place so edits show up without reinstalling,
-and `--herdr link` does the same for `packages/herdr-plugin`.
+symlinks `packages/omp-plugin` in place so edits show up without reinstalling.
 
 ```bash
 git clone https://github.com/andyhite/foreman
@@ -279,17 +253,16 @@ bun install && bun run build
 bun run setup
 ```
 
-`bun run setup` runs `setup --omp link --herdr link` straight from source
-(no prebuilt `@foreman/cli` needed); everything after `setup` still prompts,
-so it's the same tool-preflight-and-Linear-key walkthrough as the top-level
-install, just wired to link both plugins back to this checkout instead of
-installing from GitHub. Run `bun run packages/cli/src/main.ts init` inside
-each repo you want to register, same as with a built CLI.
+`bun run setup` runs `setup --omp link` straight from source (no prebuilt
+`@foreman/cli` needed); everything after `setup` still prompts, so it's the
+same tool-preflight-and-Linear-key walkthrough as the top-level install, just
+wired to link the plugin back to this checkout instead of installing from
+GitHub. Run `bun run packages/cli/src/main.ts init` inside each repo you
+want to register, same as with a built CLI.
 
-`omp plugin link` and `herdr plugin link` register the checkout but skip its
-build step, so every source change needs `bun run build` (or `bun run --filter
-'@foreman/omp-plugin' build`/`--filter '@foreman/herdr-plugin' build` for one
-package) before `/reload-plugins` or a herdr restart picks it up. `foreman`
+`omp plugin link` registers the checkout but skips its build step, so every
+source change needs `bun run build` (or `bun run --filter '@foreman/omp-plugin'
+build` for one package) before `/reload-plugins` picks it up. `foreman`
 itself is a bundled CLI too — rebuild `@foreman/cli` the same way after editing
 `packages/cli`, or run it straight from source with `bun run packages/cli/src/main.ts`.
 

@@ -18,6 +18,8 @@ import type {
   LinearId,
   Project,
   ProjectRef,
+  ProjectStatus,
+  ProjectStatusType,
   TeamRef,
   WorkflowState,
 } from "./types.ts";
@@ -71,6 +73,8 @@ export interface LinearReader {
    * query, not a scan of `projects()` filtered by membership.
    */
   initiativeProjects(initiativeId: string): Promise<ProjectRef[]>;
+  /** A project's current native status (`backlog`/`planned`/.../`canceled`). Null when the project itself is absent. */
+  projectStatus(projectId: string): Promise<ProjectStatus | null>;
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
@@ -126,6 +130,13 @@ export interface LinearWriter extends LinearReader {
    * handle the window between them.
    */
   addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void>;
+  /**
+   * Advances a project's native status by semantic `type`, not a raw id —
+   * callers never see `statusId`s, which are workspace-specific and would
+   * otherwise leak into every gate and worker that wants to set one. The
+   * implementation resolves `type` to the workspace's matching status.
+   */
+  updateProjectStatus(input: { projectId: LinearId; type: ProjectStatusType }): Promise<void>;
   createComment(input: {
     issueId: string;
     body: string;

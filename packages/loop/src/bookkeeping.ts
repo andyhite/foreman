@@ -26,6 +26,8 @@ export interface AttemptRecord {
 export interface DispatchRecordEntry {
   agent: ForemanAgentName;
   issueId: string | null;
+  /** Set only for `plan` dispatches, which target a project rather than an issue. */
+  projectId?: string | null;
   dispatchId: string;
   startedAt: string;
   stage: StageName;
@@ -69,7 +71,7 @@ export function emptyBookkeepingState(): BookkeepingState {
     reviewedSha: {},
     inFlight: [],
     pendingDecisions: [],
-    lastRunAt: { refine: null, implement: null, review: null, intake: null },
+    lastRunAt: { refine: null, implement: null, review: null, plan: null, intake: null },
   };
 }
 
@@ -128,6 +130,15 @@ export class Bookkeeping {
 
   countInFlight(stage: StageName): number {
     return this.#state.inFlight.filter((entry) => entry.stage === stage).length;
+  }
+
+  /** Project ids among the current in-flight `plan` dispatches — the gap `reconcile` alone doesn't close between two ticks of the same live supervisor. */
+  inFlightProjectIds(stage: StageName): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of this.#state.inFlight) {
+      if (entry.stage === stage && entry.projectId) ids.add(entry.projectId);
+    }
+    return ids;
   }
 
   totalInFlight(): number {

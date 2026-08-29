@@ -78,7 +78,7 @@ at build step 6 and the installer nowhere. Two installed binaries whose names
 differ by a hyphen is not a surface an operator can hold, so the supervisor is
 the `loop` subcommand of `foreman`, which owns every argument after it. What
 keeps the `foreman-loop` spelling is the log prefix and the herdr pane label
-(§17.4, §17.5) — those name a long-lived process, which is exactly what §17
+(§17.3, §17.5) — those name a long-lived process, which is exactly what §17
 describes, and the pane label is what the startup guard matches on.
 
 ## Verified runtime facts worth keeping

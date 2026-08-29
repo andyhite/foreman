@@ -39,6 +39,23 @@ const validReviewResult = {
   verdict: "approve",
 };
 
+const validPlanResult = {
+  projectId: "project-1",
+  proposedIssues: [
+    {
+      title: "Wire the search index",
+      type: "type:feature",
+      description: "## Context\nBuild the index.",
+      acceptanceCriteria: ["Search returns results for a known query"],
+      proposedPriority: 3,
+      proposedEstimate: 2,
+    },
+  ],
+  outOfScope: ["Ranking tuning"],
+  fullyPlanned: false,
+  rationale: "One slice covers the brief's first milestone.",
+};
+
 const validBlock = {
   blocked: true,
   type: "needs-decision",
@@ -80,6 +97,36 @@ describe("parseAgentOutput", () => {
       block: null,
     });
     expect(parsed.kind).toBe("result");
+  });
+
+  it("parses a valid plan result envelope to kind: result", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: validPlanResult,
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("parses a valid block envelope for plan to kind: blocked", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: true,
+      result: null,
+      block: validBlock,
+    });
+    expect(parsed.kind).toBe("blocked");
+  });
+
+  it("rejects a plan proposedIssue with an out-of-scale estimate", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [{ ...validPlanResult.proposedIssues[0], proposedEstimate: 4 }],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
   });
 
   it("parses a valid block envelope to kind: blocked", () => {

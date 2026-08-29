@@ -14,7 +14,7 @@
  * four workers racing four separate reads of the same limit.
  */
 
-import type { GlobalConfig, Issue } from "@foreman/core";
+import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
 import {
   AGENT_LABEL,
   LABEL_GROUP,
@@ -25,19 +25,22 @@ import {
 } from "@foreman/core";
 import type { Bookkeeping } from "./bookkeeping.ts";
 
-export type StageName = "refine" | "implement" | "review";
+export type StageName = "refine" | "implement" | "review" | "plan";
 
-export type ForemanAgentName = "foreman-refine" | "foreman-implement" | "foreman-review";
+export type ForemanAgentName = "foreman-refine" | "foreman-implement" | "foreman-review" | "foreman-plan";
 
 const AGENT_BY_STAGE: Record<StageName, ForemanAgentName> = {
   refine: "foreman-refine",
   implement: "foreman-implement",
   review: "foreman-review",
+  plan: "foreman-plan",
 };
 
 export interface DispatchDecision {
   agent: ForemanAgentName;
   issueId: string | null;
+  /** Set only for `plan` decisions, which target a project rather than an issue. */
+  projectId?: string | null;
   command: string;
   reason: string;
 }
@@ -50,6 +53,8 @@ export interface DispatchDecision {
 export interface SkipRecord {
   stage: StageName;
   issueId: string | null;
+  /** Set only for `plan` skips, which target a project rather than an issue. */
+  projectId?: string | null;
   code: string;
   message: string;
 }
@@ -82,6 +87,13 @@ export interface BoardSnapshot {
   blockedHumanCount: number;
   /** Current depth of the Ready buffer (SPEC §17.6). */
   readyBufferCount: number;
+  /** In-scope, non-Maintenance projects that currently have zero issues (SPEC §7.6). */
+  planCandidates: PlanCandidate[];
+}
+
+/** A bare project: in scope, not the standing Maintenance project, zero issues in any state. */
+export interface PlanCandidate {
+  project: ProjectRef;
 }
 
 export interface RoutingResult {
@@ -138,10 +150,16 @@ interface RoutingContext {
   stageRemaining: Record<StageName, number>;
   loop: GlobalConfig["loop"];
   loopStage: GlobalConfig["loop"]["stage"];
+  /** Project ids that already have a `plan` dispatch in flight (SPEC §7.6) — prevents a second dispatch before the first's issues land. */
+  planInFlightProjectIds: ReadonlySet<string>;
 }
 
 function pushSkip(ctx: RoutingContext, stage: StageName, issueId: string | null, code: string, message: string): void {
   ctx.skipped.push({ stage, issueId, code, message });
+}
+
+function pushProjectSkip(ctx: RoutingContext, stage: StageName, projectId: string, code: string, message: string): void {
+  ctx.skipped.push({ stage, issueId: null, projectId, code, message });
 }
 
 /**
@@ -286,6 +304,49 @@ function routeReview(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
   }
 }
 
+/**
+ * A project becomes a candidate the moment it is in scope, not the standing
+ * Maintenance project, and carries zero issues in any state (SPEC §7.6) — a
+ * bare project can't ship anything. Once `foreman-plan` creates its first
+ * issue the project drops out of `planCandidates` on the next tick, so no
+ * separate "fully planned" flag is needed; Linear's own state is the stop
+ * condition. `planInFlightProjectIds` covers the one gap that leaves: a
+ * dispatch already running whose issues haven't landed yet.
+ */
+function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTripped: boolean): void {
+  for (const candidate of snapshot.planCandidates) {
+    const { project } = candidate;
+    if (ctx.planInFlightProjectIds.has(project.id)) {
+      pushProjectSkip(ctx, "plan", project.id, "already-in-flight", `"${project.name}" already has a plan dispatch in flight.`);
+      continue;
+    }
+    if (backpressureTripped) {
+      pushProjectSkip(ctx, "plan", project.id, "backpressure-blocked-queue", "Blocked-human queue exceeds the backpressure threshold.");
+      continue;
+    }
+    if (!stagePermitted("plan", ctx.loopStage)) {
+      pushProjectSkip(ctx, "plan", project.id, "stage-not-permitted", `Loop stage "${ctx.loopStage}" does not permit plan dispatch.`);
+      continue;
+    }
+    if (ctx.globalRemaining <= 0) {
+      pushProjectSkip(ctx, "plan", project.id, "wip-global-full", "Global WIP cap reached.");
+      continue;
+    }
+    if (ctx.stageRemaining.plan <= 0) {
+      pushProjectSkip(ctx, "plan", project.id, "wip-stage-full", `plan WIP cap (${ctx.loop.wip.plan}) reached.`);
+      continue;
+    }
+    ctx.decisions.push({
+      agent: "foreman-plan",
+      issueId: null,
+      projectId: project.id,
+      command: `/foreman-plan ${project.id}`,
+      reason: `"${project.name}" has no issues yet.`,
+    });
+    admitDecision(ctx, "plan");
+  }
+}
+
 
 /**
  * The heart of the loop (SPEC §17.1). Every decision here is a predicate over
@@ -304,6 +365,7 @@ export function nextActions(
     refine: Math.max(0, loop.wip.refine - bookkeeping.countInFlight("refine")),
     implement: Math.max(0, loop.wip.implement - bookkeeping.countInFlight("implement")),
     review: Math.max(0, loop.wip.review - bookkeeping.countInFlight("review")),
+    plan: Math.max(0, loop.wip.plan - bookkeeping.countInFlight("plan")),
   };
   const ctx: RoutingContext = {
     decisions: [],
@@ -312,11 +374,13 @@ export function nextActions(
     stageRemaining,
     loop,
     loopStage: loop.stage,
+    planInFlightProjectIds: bookkeeping.inFlightProjectIds("plan"),
   };
 
   routeRefine(ctx, snapshot, backpressureTripped);
   routeImplement(ctx, snapshot, backpressureTripped);
   routeReview(ctx, snapshot, backpressureTripped);
+  routePlan(ctx, snapshot, backpressureTripped);
 
   return { decisions: ctx.decisions, skipped: ctx.skipped };
 }

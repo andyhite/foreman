@@ -272,8 +272,7 @@ export function initiativeIndex(config: GlobalConfig): Record<string, string> {
 /**
  * Resolves the Linear API key: the env var named by `config.linear.apiKeyEnv`
  * first, then the trimmed first line of `config.linear.apiKeyFile` (SPEC
- * §3.10, §17.4 — the herdr-hosted board reads from the file when the env var
- * is unset).
+ * §3.10) when the env var is unset.
  */
 export function resolveLinearApiKey(config: GlobalConfig, env: Record<string, string | undefined> = process.env): string {
   const fromEnv = env[config.linear.apiKeyEnv];

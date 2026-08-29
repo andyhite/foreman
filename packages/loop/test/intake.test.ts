@@ -34,14 +34,13 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
     repos: {},
     loop: {
       wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2 },
+      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage: "full",
-      dispatcher: "print",
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -165,6 +164,9 @@ class FakeLinear implements LinearWriter {
   async project(): Promise<Project | null> {
     return null;
   }
+  async projectStatus(): Promise<null> {
+    return null;
+  }
   async projectInitiatives(): Promise<InitiativeRef[]> {
     throw new Error("not used in these tests");
   }
@@ -212,6 +214,7 @@ class FakeLinear implements LinearWriter {
     throw new Error("not used in these tests");
   }
   async addProjectToInitiative(): Promise<void> {}
+  async updateProjectStatus(): Promise<void> {}
   async createRelation(): Promise<void> {}
   async deleteRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {

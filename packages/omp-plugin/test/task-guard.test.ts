@@ -82,6 +82,9 @@ class FakeLinear implements LinearWriter {
   async project() {
     return null;
   }
+  async projectStatus() {
+    return null;
+  }
   async projectInitiatives(projectId: string) {
     return this.initiativesByProject.get(projectId) ?? [{ id: "initiative-1", name: "Foreman" }];
   }
@@ -137,6 +140,7 @@ class FakeLinear implements LinearWriter {
     return { id: `project-created-${input.name}`, name: input.name };
   }
   async addProjectToInitiative() {}
+  async updateProjectStatus() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.createCommentCalls.push(input);
     return { id: "comment-1", body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };
@@ -166,7 +170,7 @@ function makeConfig(): GlobalConfig {
     },
     loop: {
       wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2 },
+      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,

@@ -104,6 +104,9 @@ class FakeLinear implements LinearWriter {
   async project() {
     return null;
   }
+  async projectStatus() {
+    return null;
+  }
   async projectInitiatives() {
     return [];
   }
@@ -160,6 +163,7 @@ class FakeLinear implements LinearWriter {
   async addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void> {
     this.addProjectToInitiativeCalls.push(input);
   }
+  async updateProjectStatus() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.commentCalls.push(input);
     return { id: `comment-${this.commentCalls.length}`, body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };

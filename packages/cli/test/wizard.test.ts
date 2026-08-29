@@ -71,7 +71,6 @@ function baseOptions(overrides: Partial<WizardOptions>, home: string, repoRoot: 
     githubRepo: "andyhite/foreman",
     scope: "user",
     ompMode: null,
-    herdrMode: null,
     skipBuild: false,
     skipLinear: true,
     ...overrides,
@@ -79,10 +78,10 @@ function baseOptions(overrides: Partial<WizardOptions>, home: string, repoRoot: 
 }
 
 describe("runWizard", () => {
-  it("links the omp plugin, skips herdr when not installed, and builds first", async () => {
+  it("links the omp plugin and builds first", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
-      const runner = new RecordingRunner({ missing: ["herdr"] });
+      const runner = new RecordingRunner();
       const logs: string[] = [];
       await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
         prompter: new ScriptedPrompter(),
@@ -94,8 +93,6 @@ describe("runWizard", () => {
       expect(binSeq).toContain("bun install");
       expect(binSeq).toContain("bun run build");
       expect(binSeq).toContain("omp plugin link /repo/packages/omp-plugin --scope user");
-      expect(binSeq.some((entry) => entry.startsWith("herdr"))).toBe(false);
-      expect(logs.some((line) => line.includes("herdr is not on PATH"))).toBe(false);
 
       const configPath = join(home, ".foreman", "config.json");
       expect(JSON.parse(readFileSync(configPath, "utf8"))).toBeTruthy();
@@ -104,11 +101,11 @@ describe("runWizard", () => {
     }
   });
 
-  it("installs from GitHub for both plugins and skips the local build", async () => {
+  it("installs from GitHub and skips the local build", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
       const runner = new RecordingRunner();
-      await runWizard(baseOptions({ ompMode: "install", herdrMode: "install" }, home, "/repo"), {
+      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner,
         log: () => {
@@ -121,7 +118,6 @@ describe("runWizard", () => {
       expect(binSeq).not.toContain("bun run build");
       expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
       expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
-      expect(binSeq).toContain("herdr plugin install andyhite/foreman/packages/herdr-plugin");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -153,7 +149,7 @@ describe("runWizard", () => {
     try {
       const prompter = new ScriptedPrompter();
       await runWizard(
-        baseOptions({ ompMode: "skip", herdrMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
+        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
         { prompter, runner: new RecordingRunner(), log: () => {} },
       );
 
@@ -176,7 +172,7 @@ describe("runWizard", () => {
     try {
       const prompter = new ScriptedPrompter([false]);
       await runWizard(
-        baseOptions({ ompMode: "skip", herdrMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
+        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
         { prompter, runner: new RecordingRunner(), log: () => {} },
       );
 
@@ -194,7 +190,7 @@ describe("runWizard", () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
       const logs: string[] = [];
-      await runWizard(baseOptions({ ompMode: "skip", herdrMode: "skip" }, home, "/repo"), {
+      await runWizard(baseOptions({ ompMode: "skip" }, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
         log: (message) => logs.push(message),

@@ -311,7 +311,6 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(intakeStateDir));
 
   const dispatcher = await resolveDispatcher(
-    config,
     {
       createPrint: () => new PrintDispatcher(config),
       createHerdr: () => new HerdrDispatcher(config),

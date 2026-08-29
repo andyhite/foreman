@@ -44,7 +44,7 @@ function liveDispatchIds(): readonly string[] {
 }
 
 function toApplyDeps(): ApplyDeps {
-  return { linear: getLinear(), github: getGitHub(), now: () => new Date() };
+  return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry() };
 }
 
 function toGuardDeps(pluginRoot: string): TaskGuardDeps {
@@ -106,6 +106,12 @@ function toOutcome(agentName: ForemanAgentName, data: unknown): AgentOutcome | n
     if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
     return { kind: "result", agent: agentName, result: parsed.result };
   }
+  if (agentName === "foreman-plan") {
+    const parsed = parseAgentOutput(agentName, data);
+    if (parsed.kind === "invalid") return null;
+    if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
+    return { kind: "result", agent: agentName, result: parsed.result };
+  }
   const parsed = parseAgentOutput(agentName, data);
   if (parsed.kind === "invalid") return null;
   if (parsed.kind === "blocked") return blockedOutcome(agentName, parsed.block);
@@ -125,6 +131,13 @@ function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord): AgentO
 function issueIdOf(outcome: AgentOutcome): string {
   if (outcome.kind === "blocked") return outcome.issueId;
   if (outcome.agent === "foreman-triage") return outcome.result.items[0]?.issueId ?? "";
+  // A plan result creates issues rather than referencing one — there is no
+  // pre-existing anchor for the applied-marker dedup, so it is skipped
+  // (`handleCaptured` no-ops `markApplied` on an empty string). Duplicate
+  // application risk is bounded upstream: routing only ever dispatches
+  // `foreman-plan` at a bare (zero-issue) project, and a project stops being
+  // a candidate the moment its first issue lands.
+  if (outcome.agent === "foreman-plan") return "";
   return outcome.result.issueId;
 }
 

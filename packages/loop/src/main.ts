@@ -36,10 +36,12 @@ import { join } from "node:path";
 import { Bookkeeping } from "./bookkeeping.ts";
 import { Supervisor, bookkeepingPathFor, resolveDispatcher } from "./supervisor.ts";
 import { refineWorker } from "./workers/refine.ts";
+import { planWorker } from "./workers/plan.ts";
 import { implementWorker } from "./workers/implement.ts";
 import { reviewWorker } from "./workers/review.ts";
 import { reaperWorker } from "./workers/reaper.ts";
 import { mergeDetectWorker } from "./workers/merge-detect.ts";
+import { projectStatusWorker } from "./workers/project-status.ts";
 import type { Worker } from "./workers/types.ts";
 
 interface ParsedArgs {
@@ -221,7 +223,6 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   };
 
   const dispatcher = await resolveDispatcher(
-    config,
     {
       createPrint: () => new PrintDispatcher(config),
       createHerdr: () => new HerdrDispatcher(config),
@@ -253,10 +254,12 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
 
   const allWorkers: Worker[] = [
     reaperWorker,
+    planWorker,
     refineWorker,
     implementWorker,
     reviewWorker,
     mergeDetectWorker,
+    projectStatusWorker,
   ];
   const selected = args.workerNames.length > 0
     ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))

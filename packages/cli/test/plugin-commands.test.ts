@@ -1,7 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-  herdrInstallArgv,
-  herdrLinkArgv,
   marketplaceNameFor,
   ompInstallArgv,
   ompLinkArgv,
@@ -36,20 +34,6 @@ describe("omp argv builders", () => {
       "foreman@foreman",
       "--scope",
       "project",
-    ]);
-  });
-});
-
-describe("herdr argv builders", () => {
-  it("builds a link command", () => {
-    expect(herdrLinkArgv("/repo/packages/herdr-plugin")).toEqual(["plugin", "link", "/repo/packages/herdr-plugin"]);
-  });
-
-  it("builds an install command with the subdir appended", () => {
-    expect(herdrInstallArgv("andyhite/foreman", "packages/herdr-plugin")).toEqual([
-      "plugin",
-      "install",
-      "andyhite/foreman/packages/herdr-plugin",
     ]);
   });
 });

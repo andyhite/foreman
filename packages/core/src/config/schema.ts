@@ -81,6 +81,8 @@ export const LoopSettingsSchema = Type.Object(
         refine: Type.Integer({ default: 2, minimum: 1 }),
         implement: Type.Integer({ default: 3, minimum: 1 }),
         review: Type.Integer({ default: 2, minimum: 1 }),
+        /** Planning is coarser and rarer than the other three stages — one project decomposition at a time by default. */
+        plan: Type.Integer({ default: 1, minimum: 1 }),
       },
       { additionalProperties: false, default: {} },
     ),
@@ -106,9 +108,6 @@ export const LoopSettingsSchema = Type.Object(
       ],
       { default: "dry-run" },
     ),
-    dispatcher: Type.Union([Type.Literal("print"), Type.Literal("herdr")], {
-      default: "print",
-    }),
     /**
      * Poll merged PRs and move issues to Done. Required when `pr.required` is
      * false, and on by default regardless: Linear's GitHub integration only
@@ -143,9 +142,8 @@ export const LinearSettingsSchema = Type.Object(
     /** Env var holding the personal API key. Checked first. */
     apiKeyEnv: Type.String({ default: "LINEAR_API_KEY", minLength: 1 }),
     /**
-     * File holding the key, one line. Checked when the env var is unset — this is
-     * where a herdr-hosted board reads it from, since `HERDR_PLUGIN_CONFIG_DIR`
-     * survives a plugin reinstall and the managed checkout does not (SPEC §17.4).
+     * File holding the key, one line. Checked when the env var is unset —
+     * useful for a config-file-only deployment where the env var isn't set.
      */
     apiKeyFile: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
       default: null,

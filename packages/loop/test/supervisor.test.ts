@@ -60,19 +60,18 @@ class FakeDispatcher implements Dispatcher {
   }
 }
 
-function makeConfig(dispatcher: GlobalConfig["loop"]["dispatcher"]): GlobalConfig {
+function makeConfig(): GlobalConfig {
   return {
     repos: {},
     loop: {
       wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2 },
+      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage: "dry-run",
-      dispatcher,
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -151,25 +150,8 @@ describe("SupervisorLock", () => {
 });
 
 describe("resolveDispatcher", () => {
-  it("uses print mode when loop.dispatcher is \"print\"", async () => {
-    const config = makeConfig("print");
-    const logs: string[] = [];
+  it("uses herdr when available", async () => {
     const dispatcher = await resolveDispatcher(
-      config,
-      {
-        createPrint: () => new FakeDispatcher("print", true),
-        createHerdr: () => new FakeDispatcher("herdr", true),
-      },
-      (message) => logs.push(message),
-    );
-    expect(dispatcher.kind).toBe("print");
-    expect(logs).toHaveLength(0);
-  });
-
-  it("uses herdr when configured and available", async () => {
-    const config = makeConfig("herdr");
-    const dispatcher = await resolveDispatcher(
-      config,
       {
         createPrint: () => new FakeDispatcher("print", true),
         createHerdr: () => new FakeDispatcher("herdr", true),
@@ -179,11 +161,9 @@ describe("resolveDispatcher", () => {
     expect(dispatcher.kind).toBe("herdr");
   });
 
-  it("falls back to print when herdr is configured but unavailable, and logs the fallback", async () => {
-    const config = makeConfig("herdr");
+  it("falls back to print when herdr is unavailable, and logs the fallback", async () => {
     const logs: string[] = [];
     const dispatcher = await resolveDispatcher(
-      config,
       {
         createPrint: () => new FakeDispatcher("print", true),
         createHerdr: () => new FakeDispatcher("herdr", false),
@@ -234,7 +214,7 @@ function makeStubWorker(): Worker {
 function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
   const stateDir = tempStateDir();
   return new Supervisor({
-    config: makeConfig("print"),
+    config: makeConfig(),
     linear: new NoopLinear() as unknown as LinearWriter,
     dispatcher: new FakeDispatcher("print", true),
     bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),

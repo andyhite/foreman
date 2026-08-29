@@ -3,7 +3,7 @@
  * `foreman` CLI entrypoint.
  *
  * Two installer commands with disjoint scope: `setup` is per-machine (Linear
- * credential, omp plugin, optional herdr board) and `init` is per-repo (writes
+ * credential, omp plugin) and `init` is per-repo (writes
  * one `config.repos` entry). They were one command with `init` as an alias,
  * which meant installing a plugin and registering a repo could not be done
  * independently — re-running to add a repo re-ran the whole installer.
@@ -28,7 +28,6 @@ interface ParsedArgs {
   yes: boolean;
   scope: OmpScope | null;
   ompMode: PluginMode | null;
-  herdrMode: PluginMode | null;
   githubRepo: string;
   repoPath: string | null;
   path: string | null;
@@ -43,7 +42,7 @@ const HELP_TEXT = `foreman — Foreman CLI
 Usage: foreman <command> [options]
 
 Commands:
-  setup                    Per-machine install: Linear credential, omp plugin, herdr board.
+  setup                    Per-machine install: Linear credential, omp plugin.
   init                     Per-repo: register this directory in the repos registry.
   loop                     Run the supervisor; \`foreman loop --help\` for its flags.
   intake                   Run the team-level triage process; \`foreman intake --help\` for its flags.
@@ -53,7 +52,6 @@ Run \`setup\` once per machine, \`init\` once per repo, then \`loop\` per repo.
 Options for setup:
   --scope <user|project>     omp plugin install scope (default: prompted, "user").
   --omp <link|install|skip>  omp plugin mode; "link" symlinks this checkout ("dev mode").
-  --herdr <link|install|skip> herdr board mode; defaults to skip when herdr isn't installed.
   --repo-source <owner/repo>  GitHub source for "install" modes (default: ${DEFAULT_GITHUB_REPO}).
   --repo <path>              Path to the foreman checkout (default: auto-detected).
   --skip-build                Skip \`bun install && bun run build\`.
@@ -81,7 +79,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     yes: false,
     scope: null,
     ompMode: null,
-    herdrMode: null,
     githubRepo: DEFAULT_GITHUB_REPO,
     repoPath: null,
     path: null,
@@ -117,10 +114,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--omp":
         if (argv[i + 1] === undefined) throw new Error("missing value for --omp");
         parsed.ompMode = parseMode("--omp", argv[++i]);
-        break;
-      case "--herdr":
-        if (argv[i + 1] === undefined) throw new Error("missing value for --herdr");
-        parsed.herdrMode = parseMode("--herdr", argv[++i]);
         break;
       case "--repo-source": {
         if (argv[i + 1] === undefined) throw new Error("missing value for --repo-source");
@@ -219,7 +212,6 @@ async function main(): Promise<void> {
         githubRepo: args.githubRepo,
         scope: args.scope,
         ompMode: nonInteractive ? (args.ompMode ?? "link") : args.ompMode,
-        herdrMode: nonInteractive ? (args.herdrMode ?? "skip") : args.herdrMode,
         skipBuild: args.skipBuild,
         skipLinear: args.skipLinear || nonInteractive,
       },

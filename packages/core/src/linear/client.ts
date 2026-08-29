@@ -17,6 +17,8 @@ import type {
   LinearId,
   Project,
   ProjectRef,
+  ProjectStatus,
+  ProjectStatusType,
   TeamRef,
   WorkflowState,
 } from "./types.ts";
@@ -49,6 +51,9 @@ import {
   PROJECT_INITIATIVES_QUERY,
   PROJECT_QUERY_OBJECT_CONTENT,
   PROJECT_QUERY_SCALAR_CONTENT,
+  PROJECT_STATUS_QUERY,
+  PROJECT_STATUSES_QUERY,
+  PROJECT_UPDATE_MUTATION,
   PROJECTS_QUERY,
   TEAMS_QUERY,
   WORKFLOW_STATES_QUERY,
@@ -150,6 +155,8 @@ export class LinearClient implements LinearWriter {
   private readonly labelIdCache = new Map<string, LinearId>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
   private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
+  /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
+  private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
   /** Once the working project-document content shape is discovered, reuse it. */
   private projectContentShape: "scalar" | "object" | null = null;
   /** Once the working initiative-document content shape is discovered, reuse it. */
@@ -457,6 +464,48 @@ export class LinearClient implements LinearWriter {
     const ref: InitiativeRef = { id: first.id, name: first.name };
     this.projectInitiativeCache.set(projectId, ref);
     return ref;
+  }
+
+  /** A project's current native status. Null when the project itself is absent. */
+  async projectStatus(projectId: string): Promise<ProjectStatus | null> {
+    const data = await this.request<{
+      project: { id: string; status: { id: string; name: string; type: string } } | null;
+    }>(PROJECT_STATUS_QUERY, { projectId });
+    if (!data.project) return null;
+    return {
+      id: data.project.status.id,
+      name: data.project.status.name,
+      type: data.project.status.type as ProjectStatusType,
+    };
+  }
+
+  /** Resolves `type` to the workspace's matching `ProjectStatus.id`, fetching the list once and caching every type found. */
+  private async resolveProjectStatusId(type: ProjectStatusType): Promise<LinearId> {
+    const cached = this.projectStatusIdCache.get(type);
+    if (cached) return cached;
+    const data = await this.request<{ projectStatuses: { nodes: Array<{ id: string; type: string }> } }>(
+      PROJECT_STATUSES_QUERY,
+      {},
+    );
+    for (const status of data.projectStatuses.nodes) {
+      this.projectStatusIdCache.set(status.type as ProjectStatusType, status.id);
+    }
+    const resolved = this.projectStatusIdCache.get(type);
+    if (!resolved) {
+      throw new LinearApiError(`Workspace has no project status of type "${type}"`, null, null);
+    }
+    return resolved;
+  }
+
+  async updateProjectStatus(input: { projectId: LinearId; type: ProjectStatusType }): Promise<void> {
+    const statusId = await this.resolveProjectStatusId(input.type);
+    const data = await this.request<{ projectUpdate: { success: boolean } }>(PROJECT_UPDATE_MUTATION, {
+      id: input.projectId,
+      input: { statusId },
+    });
+    if (!data.projectUpdate.success) {
+      throw new LinearApiError(`Failed to update project ${input.projectId} to status "${input.type}"`, null, null);
+    }
   }
 
   /** Every initiative in the workspace — the setup wizard's picker (SPEC §3.10). */

@@ -33,6 +33,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
     reviewCandidates: [],
     blockedHumanCount: blockedHuman.length,
     readyBufferCount: 0,
+    planCandidates: [],
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);

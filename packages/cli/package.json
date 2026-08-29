@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "foreman setup — installs the config file and the omp/herdr plugins",
+  "description": "foreman setup — installs the config file and the omp plugin",
   "bin": {
     "foreman": "./dist/main.js"
   },

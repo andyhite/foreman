@@ -2,10 +2,10 @@
  * `@foreman/core` — the one place the Linear client, the output schemas, and the
  * gate validators exist.
  *
- * Foreman is three consumers over this core (SPEC §3.1): the omp plugin
- * extension, the loop supervisor, and the herdr board. Duplicating a validator
- * between them is how the workers and the agents start disagreeing about whether
- * an issue is ready, so nothing here is re-implemented downstream.
+ * Foreman is two consumers over this core (SPEC §3.1): the omp plugin
+ * extension and the loop supervisor. Duplicating a validator between them is
+ * how the workers and the agents start disagreeing about whether an issue is
+ * ready, so nothing here is re-implemented downstream.
  */
 
 export * from "./apply/index.ts";

@@ -268,6 +268,35 @@ export const PROJECT_CREATE_MUTATION = `
   }
 `;
 
+/** A project's own native status — `projectStatus` worker's read (SPEC §7.6a). */
+export const PROJECT_STATUS_QUERY = `
+  query ProjectStatus($projectId: String!) {
+    project(id: $projectId) {
+      id
+      status { id name type }
+    }
+  }
+`;
+
+/** The workspace's configured project statuses — used once per unseen `type` to resolve a `statusId`. */
+export const PROJECT_STATUSES_QUERY = `
+  query ProjectStatuses {
+    projectStatuses {
+      id
+      name
+      type
+    }
+  }
+`;
+
+export const PROJECT_UPDATE_MUTATION = `
+  mutation ProjectUpdate($id: String!, $input: ProjectUpdateInput!) {
+    projectUpdate(id: $id, input: $input) {
+      success
+    }
+  }
+`;
+
 export const INITIATIVE_TO_PROJECT_CREATE_MUTATION = `
   mutation InitiativeToProjectCreate($input: InitiativeToProjectCreateInput!) {
     initiativeToProjectCreate(input: $input) {

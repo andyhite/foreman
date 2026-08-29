@@ -12,7 +12,9 @@ import type {
   Issue,
   ImplementResult,
   LinearWriter,
+  PlanResult,
   RefineResult,
+  ResolvedRepoEntry,
   ReviewResult,
   TriageProposal,
 } from "@foreman/core";
@@ -28,11 +30,13 @@ import {
   renderReviewComment,
   renderSpikeIssue,
   resolveState,
+  resolveTeamKey,
 } from "@foreman/core";
 
 /** The discriminated union `parseAgentOutput` returns per agent, narrowed to `result | block`. */
 export type AgentOutcome =
   | { kind: "result"; agent: "foreman-triage"; result: TriageProposal }
+  | { kind: "result"; agent: "foreman-plan"; result: PlanResult }
   | { kind: "result"; agent: "foreman-refine"; result: RefineResult }
   | { kind: "result"; agent: "foreman-implement"; result: ImplementResult }
   | { kind: "result"; agent: "foreman-review"; result: ReviewResult }
@@ -43,7 +47,10 @@ export interface ApplyDeps {
   linear: LinearWriter;
   github: GitHubClient;
   now: () => Date;
+  /** Only `applyPlan` needs this, to resolve the team a new issue must carry (SPEC §7.6). */
+  entry?: Pick<ResolvedRepoEntry, "team">;
 }
+
 
 async function releaseLock(deps: ApplyDeps, issue: Issue): Promise<void> {
   if (!issue.labels.some((label) => label.name === AGENT_LABEL.running)) return;
@@ -165,6 +172,44 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 }
 
 /**
+ * SPEC §7.6: creates each `proposedIssue` as a new Backlog issue under the
+ * project. Nothing else — plan never claims `agent:running`, so there is no
+ * lock to release, and it never touches an existing issue's state.
+ */
+async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
+  const project = await deps.linear.project(result.projectId);
+  if (!project) throw new Error(`PlanResult references unknown project ${result.projectId}.`);
+  if (result.proposedIssues.length === 0) return;
+  if (!deps.entry) throw new Error("applyPlan requires deps.entry to resolve the team.");
+
+  const teams = await deps.linear.teams();
+  const teamKey = await resolveTeamKey({ linear: { teams: async () => teams }, entryTeam: deps.entry.team });
+  const teamRef = teams.find((candidate) => candidate.key === teamKey);
+  if (!teamRef) throw new Error(`Team "${teamKey}" was not found while applying a plan result.`);
+
+  for (const proposed of result.proposedIssues) {
+    const description = renderIssueDescription({
+      context: proposed.description,
+      acceptanceCriteria: proposed.acceptanceCriteria,
+      affectedAreas: [],
+      outOfScope: result.outOfScope,
+    });
+    const typeLabel = await deps.linear.ensureLabel(proposed.type, teamRef.id);
+    await deps.linear.createIssue({
+      teamId: teamRef.id,
+      title: proposed.title,
+      description,
+      priority: proposed.proposedPriority,
+      estimate: proposed.proposedEstimate ?? undefined,
+      projectId: result.projectId,
+      labelIds: [typeLabel.id],
+    });
+  }
+
+  await deps.linear.updateProjectStatus({ projectId: result.projectId, type: "planned" });
+}
+
+/**
  * SPEC §13.4/§19: comment the rendering; a `blocking` finding writes a
  * `foreman:findings` marker and leaves the issue for the fix cycle. A clean
  * result leaves merging entirely to the operator — no auto-merge, ever.
@@ -243,14 +288,23 @@ export async function markApplied(deps: ApplyDeps, issueId: string, dispatchId: 
   await deps.linear.createComment({ issueId: issue.id, body });
 }
 
-/** Dispatches one `AgentOutcome` to the matching applier. */
+/**
+ * Dispatches one `AgentOutcome` to the matching applier. A blocked outcome
+ * with no `issueId` (only possible for `foreman-plan`, which operates on a
+ * project rather than an issue) has nothing to write to — Linear has no
+ * project-level `blocked:*` surface — so it is a documented no-op; the block
+ * is still visible in the loop's own log and `/foreman-status`.
+ */
 export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome): Promise<void> {
   if (outcome.kind === "blocked") {
+    if (!outcome.issueId) return;
     await applyBlock(deps, outcome.issueId, outcome.block);
     return;
   }
   if (outcome.agent === "foreman-triage") {
     await applyTriage(deps, outcome.result);
+  } else if (outcome.agent === "foreman-plan") {
+    await applyPlan(deps, outcome.result);
   } else if (outcome.agent === "foreman-refine") {
     await applyRefine(deps, outcome.result);
   } else if (outcome.agent === "foreman-implement") {

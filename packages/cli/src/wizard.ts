@@ -2,11 +2,11 @@
  * `foreman setup` wizard body (SPEC §3.10, §3.1, §17.4).
  *
  * Three steps, each skippable independently: preflight tool checks, the
- * Linear API key, and the omp plugin plus optional herdr board. Nothing
- * here is a hard failure except a missing `bun` — everything else degrades
- * to a printed instruction so a partial environment still finishes with a
- * usable config. This wizard is global only: it never touches the `repos`
- * registry — run `foreman init` inside a repo to register it.
+ * Linear API key, and the omp plugin. Nothing here is a hard failure except
+ * a missing `bun` — everything else degrades to a printed instruction so a
+ * partial environment still finishes with a usable config. This wizard is
+ * global only: it never touches the `repos` registry — run `foreman init`
+ * inside a repo to register it.
  */
 
 import { join } from "node:path";
@@ -14,8 +14,6 @@ import type { Runner } from "./exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import {
   DEFAULT_OMP_PLUGIN_NAME,
-  herdrInstallArgv,
-  herdrLinkArgv,
   type OmpScope,
   ompInstallArgv,
   ompLinkArgv,
@@ -32,7 +30,6 @@ export interface WizardOptions {
   githubRepo: string;
   scope: OmpScope | null;
   ompMode: PluginMode | null;
-  herdrMode: PluginMode | null;
   skipBuild: boolean;
   skipLinear: boolean;
 }
@@ -65,7 +62,6 @@ async function preflight(deps: WizardDeps): Promise<boolean> {
   }
   const optional: Array<[string, string]> = [
     ["omp", "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi"],
-    ["herdr", "only needed for the optional board — https://github.com/andyhite/herdr"],
   ];
   for (const [bin, note] of optional) {
     const found = await deps.runner.exists(bin);
@@ -218,61 +214,17 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
   deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo} (scope: ${scope})`);
 }
 
-async function setupHerdrPlugin(deps: WizardDeps, options: WizardOptions, mode: PluginMode): Promise<void> {
-  printSection(deps.log, "herdr board (optional)");
-  if (mode === "skip") {
-    deps.log("  skipped.");
-    return;
-  }
-  if (!(await deps.runner.exists("herdr"))) {
-    deps.log("  herdr is not on PATH — install it first: https://github.com/andyhite/herdr");
-    return;
-  }
-
-  if (mode === "link") {
-    const pluginDir = join(options.repoRoot, "packages", "herdr-plugin");
-    const argv = herdrLinkArgv(pluginDir);
-    const code = await deps.runner.run("herdr", argv);
-    if (code !== 0) {
-      throw new Error(
-        `herdr plugin link failed (exit ${code}): \`herdr ${argv.join(" ")}\`. The command's output is above. ` +
-          "Common causes: herdr isn't installed correctly, or another plugin is already linked there.",
-      );
-    }
-    deps.log(`  ${style("green", "✓")} linked ${pluginDir}`);
-    return;
-  }
-
-  const herdrArgv = herdrInstallArgv(options.githubRepo, "packages/herdr-plugin");
-  const code = await deps.runner.run("herdr", herdrArgv);
-  if (code !== 0) {
-    throw new Error(
-      `herdr plugin install failed (exit ${code}): \`herdr ${herdrArgv.join(" ")}\`. ` +
-        "The command's output is above. Common causes: no network, or the repo isn't reachable on GitHub.",
-    );
-  }
-  deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo}/packages/herdr-plugin`);
-}
-
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
   const missingGh = await preflight(deps);
   await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
 
-  const herdrFound = await deps.runner.exists("herdr");
   const ompMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "link");
-  const herdrMode = await resolvePluginMode(
-    deps.prompter,
-    "herdr board (blocked drain, proposal review, board, agent detail)",
-    options.herdrMode,
-    herdrFound ? "link" : "skip",
-  );
 
-  const needsBuild = ompMode === "link" || herdrMode === "link";
+  const needsBuild = ompMode === "link";
   await buildRepo(deps, options.repoRoot, options.skipBuild || !needsBuild);
 
   await setupOmpPlugin(deps, options, ompMode);
-  await setupHerdrPlugin(deps, options, herdrMode);
 
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Global setup complete.`);

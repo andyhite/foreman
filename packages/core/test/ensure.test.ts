@@ -10,6 +10,7 @@ import type {
   IssueLabel,
   Project,
   ProjectRef,
+  ProjectStatus,
   TeamRef,
   WorkflowState,
 } from "../src/linear/types.ts";
@@ -35,6 +36,9 @@ class FakeLinear implements LinearWriter {
     return [];
   }
   async project(): Promise<Project | null> {
+    return null;
+  }
+  async projectStatus(): Promise<ProjectStatus | null> {
     return null;
   }
   async projectInitiatives(): Promise<InitiativeRef[]> {
@@ -78,6 +82,7 @@ class FakeLinear implements LinearWriter {
     this.addProjectToInitiativeCalls.push(input);
     if (this.failAttach) throw new Error("initiativeToProjectCreate failed");
   }
+  async updateProjectStatus(): Promise<void> {}
   async createComment(): Promise<Comment> {
     throw new Error("not used in these tests");
   }

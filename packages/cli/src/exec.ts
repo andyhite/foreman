@@ -3,8 +3,8 @@
  *
  * Distinct from `@foreman/core`'s `nodeRunner`: that one captures output for
  * programmatic parsing (git/gh plumbing). Setup runs interactive, long-lived
- * commands the operator needs to watch — `bun install`, `omp plugin install`,
- * `herdr plugin install` — so this inherits stdio instead of buffering it.
+ * commands the operator needs to watch — `bun install`, `omp plugin install` —
+ * so this inherits stdio instead of buffering it.
  */
 
 import { execFile, spawn } from "node:child_process";

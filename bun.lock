@@ -28,16 +28,6 @@
         "@sinclair/typebox": "^0.34.48",
       },
     },
-    "packages/herdr-plugin": {
-      "name": "@foreman/herdr-plugin",
-      "version": "0.1.0",
-      "bin": {
-        "foreman-board": "./dist/board.js",
-      },
-      "dependencies": {
-        "@foreman/core": "workspace:*",
-      },
-    },
     "packages/loop": {
       "name": "@foreman/loop",
       "version": "0.1.0",
@@ -57,8 +47,6 @@
     "@foreman/cli": ["@foreman/cli@workspace:packages/cli"],
 
     "@foreman/core": ["@foreman/core@workspace:packages/core"],
-
-    "@foreman/herdr-plugin": ["@foreman/herdr-plugin@workspace:packages/herdr-plugin"],
 
     "@foreman/loop": ["@foreman/loop@workspace:packages/loop"],
 

@@ -1,23 +1,22 @@
 import { describe, expect, it } from "bun:test";
-import type { GlobalConfig, Issue } from "@foreman/core";
+import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
 import { AGENT_LABEL, BLOCKED_LABEL, LEGACY_LABEL, TYPE_LABEL } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { nextActions } from "../src/routing.ts";
-import type { BoardSnapshot, ReviewCandidate } from "../src/routing.ts";
+import type { BoardSnapshot, PlanCandidate, ReviewCandidate } from "../src/routing.ts";
 
 // ---- fixtures --------------------------------------------------------------
 
 function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig {
   const defaultLoop: GlobalConfig["loop"] = {
     wipGlobal: 3,
-    wip: { refine: 2, implement: 3, review: 2 },
+    wip: { refine: 2, implement: 3, review: 2, plan: 1 },
     readyBufferTarget: 5,
     backpressureThreshold: 5,
     retryCap: 2,
     reviewCycleCap: 2,
     cadenceMinutes: 5,
     stage: "full",
-    dispatcher: "print",
     mergeDetection: true,
     stateDir: "~/.foreman/state",
   };
@@ -87,6 +86,7 @@ function emptySnapshot(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
     reviewCandidates: [],
     blockedHumanCount: 0,
     readyBufferCount: 0,
+    planCandidates: [],
     ...overrides,
   };
 }
@@ -111,6 +111,14 @@ function makeReviewCandidate(overrides: Partial<ReviewCandidate> = {}): ReviewCa
     hasReviewForHead: false,
     ...overrides,
   };
+}
+
+function makeProject(overrides: Partial<ProjectRef> = {}): ProjectRef {
+  return { id: "project-1", name: "Search revamp", ...overrides };
+}
+
+function makePlanCandidate(overrides: Partial<PlanCandidate> = {}): PlanCandidate {
+  return { project: makeProject(), ...overrides };
 }
 
 const NOW = new Date("2026-06-01T12:00:00.000Z");
@@ -242,7 +250,7 @@ describe("nextActions — global backpressure", () => {
 
 describe("nextActions — WIP", () => {
   it("wipGlobal reached by implement alone starves refine (SPEC §17.6: correct)", () => {
-    const config = makeConfig({ wipGlobal: 3, wip: { refine: 2, implement: 3, review: 2 } });
+    const config = makeConfig({ wipGlobal: 3, wip: { refine: 2, implement: 3, review: 2, plan: 1 } });
     const bookkeeping = freshBookkeeping();
     bookkeeping.recordDispatch({ agent: "foreman-implement", issueId: "ENG-900", dispatchId: "d1", startedAt: NOW.toISOString(), stage: "implement" });
     bookkeeping.recordDispatch({ agent: "foreman-implement", issueId: "ENG-901", dispatchId: "d2", startedAt: NOW.toISOString(), stage: "implement" });
@@ -255,7 +263,7 @@ describe("nextActions — WIP", () => {
   });
 
   it("per-stage sub-limit caps a stage independently of the global cap", () => {
-    const config = makeConfig({ wipGlobal: 10, wip: { refine: 1, implement: 3, review: 2 } });
+    const config = makeConfig({ wipGlobal: 10, wip: { refine: 1, implement: 3, review: 2, plan: 1 } });
     const bookkeeping = freshBookkeeping();
     bookkeeping.recordDispatch({ agent: "foreman-refine", issueId: "ENG-800", dispatchId: "d1", startedAt: NOW.toISOString(), stage: "refine" });
 
@@ -319,7 +327,7 @@ describe("nextActions — stage permission", () => {
 
 describe("nextActions — ordering by priority then age", () => {
   it("higher priority (lower rank value) goes first within a stage", () => {
-    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2 }, wipGlobal: 10 });
+    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2, plan: 1 }, wipGlobal: 10 });
     const low = makeIssue({ identifier: "ENG-10", priority: 4, createdAt: "2026-01-01T00:00:00.000Z" });
     const urgent = makeIssue({ identifier: "ENG-11", priority: 1, createdAt: "2026-01-02T00:00:00.000Z" });
     const snapshot = emptySnapshot({ backlog: [low, urgent] });
@@ -330,7 +338,7 @@ describe("nextActions — ordering by priority then age", () => {
   });
 
   it("older issues go first at equal priority", () => {
-    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2 }, wipGlobal: 10 });
+    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2, plan: 1 }, wipGlobal: 10 });
     const newer = makeIssue({ identifier: "ENG-20", priority: 2, createdAt: "2026-03-01T00:00:00.000Z" });
     const older = makeIssue({ identifier: "ENG-21", priority: 2, createdAt: "2026-01-01T00:00:00.000Z" });
     const snapshot = emptySnapshot({ backlog: [newer, older] });
@@ -340,7 +348,7 @@ describe("nextActions — ordering by priority then age", () => {
   });
 
   it("unprioritized (None) issues never get picked ahead of a prioritized one", () => {
-    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2 }, wipGlobal: 10 });
+    const config = makeConfig({ wip: { refine: 1, implement: 3, review: 2, plan: 1 }, wipGlobal: 10 });
     const none = makeIssue({ identifier: "ENG-30", priority: 0, createdAt: "2026-01-01T00:00:00.000Z" });
     const low = makeIssue({ identifier: "ENG-31", priority: 4, createdAt: "2026-06-01T00:00:00.000Z" });
     const snapshot = emptySnapshot({ backlog: [none, low] });
@@ -365,5 +373,90 @@ describe("nextActions — never produces a merge decision", () => {
       expect(decision.command.toLowerCase()).not.toContain("merge");
       expect(String(decision.agent).toLowerCase()).not.toContain("merge");
     }
+  });
+});
+
+// ---- plan: bare-project decomposition ------------------------------------------
+
+describe("nextActions — plan", () => {
+  it("dispatches foreman-plan at a bare (zero-issue) project", () => {
+    const config = makeConfig();
+    const candidate = makePlanCandidate();
+    const snapshot = emptySnapshot({ planCandidates: [candidate] });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      agent: "foreman-plan",
+      issueId: null,
+      projectId: candidate.project.id,
+      command: `/foreman-plan ${candidate.project.id}`,
+    });
+  });
+
+  it("skips a project that already has a plan dispatch in flight", () => {
+    const config = makeConfig();
+    const candidate = makePlanCandidate();
+    const bookkeeping = freshBookkeeping();
+    bookkeeping.recordDispatch({
+      agent: "foreman-plan",
+      issueId: null,
+      projectId: candidate.project.id,
+      dispatchId: "d1",
+      startedAt: NOW.toISOString(),
+      stage: "plan",
+    });
+    const snapshot = emptySnapshot({ planCandidates: [candidate] });
+    const { decisions, skipped } = nextActions(snapshot, config, bookkeeping);
+    expect(decisions).toHaveLength(0);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ stage: "plan", projectId: candidate.project.id, code: "already-in-flight" }),
+    );
+  });
+
+  it("backpressure stops plan alongside the other three stages", () => {
+    const config = makeConfig({ backpressureThreshold: 5 });
+    const candidate = makePlanCandidate();
+    const snapshot = emptySnapshot({ planCandidates: [candidate], blockedHumanCount: 6 });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(0);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ stage: "plan", code: "backpressure-blocked-queue" }),
+    );
+  });
+
+  it("read-only stage permits only review, never plan", () => {
+    const config = makeConfig({ stage: "read-only" });
+    const candidate = makePlanCandidate();
+    const snapshot = emptySnapshot({ planCandidates: [candidate] });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(0);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ stage: "plan", code: "stage-not-permitted" }),
+    );
+  });
+
+  it("plan WIP cap of 1 (default) admits only one of two bare projects in the same pass", () => {
+    const config = makeConfig();
+    const first = makePlanCandidate({ project: makeProject({ id: "project-1" }) });
+    const second = makePlanCandidate({ project: makeProject({ id: "project-2" }) });
+    const snapshot = emptySnapshot({ planCandidates: [first, second] });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(1);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ stage: "plan", projectId: second.project.id, code: "wip-stage-full" }),
+    );
+  });
+
+  it("the Maintenance project never appears as a candidate (worker-level, not routing — documented here for discoverability)", () => {
+    // routePlan itself has no Maintenance special-case: exclusion happens in
+    // workers/plan.ts's candidate discovery, before a snapshot ever reaches
+    // nextActions. A project named "Maintenance" passed in here would still
+    // be dispatched — this test documents that boundary rather than
+    // asserting routing behavior that doesn't exist.
+    const config = makeConfig();
+    const maintenance = makePlanCandidate({ project: makeProject({ name: "Maintenance" }) });
+    const snapshot = emptySnapshot({ planCandidates: [maintenance] });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(1);
   });
 });
