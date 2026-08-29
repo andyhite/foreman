@@ -19,21 +19,23 @@
 
 import {
   ConfigError,
+  ControlServer,
   defaultTheme,
   ensureMaintenanceProjects,
   HerdrDispatcher,
   LinearClient,
+  loopPaths,
   PrintDispatcher,
+  repoLoopId,
   entryForCwd,
-  expandHome,
   loadGlobalConfig,
   lockTtlMs,
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
 } from "@foreman/core";
-import { join } from "node:path";
 import { Bookkeeping } from "./bookkeeping.ts";
+import { createControlHandlers } from "./control.ts";
 import { Supervisor, bookkeepingPathFor, resolveDispatcher } from "./supervisor.ts";
 import { refineWorker } from "./workers/refine.ts";
 import { planWorker } from "./workers/plan.ts";
@@ -44,6 +46,14 @@ import { mergeDetectWorker } from "./workers/merge-detect.ts";
 import { projectStatusWorker } from "./workers/project-status.ts";
 import type { Worker } from "./workers/types.ts";
 
+/**
+ * Hardcoded rather than imported from `package.json`: this file already
+ * avoids a build step (it runs as source, per `packages/loop/package.json`
+ * `exports`), and importing JSON here would be the only place in the
+ * package that does. Bump this alongside `package.json`'s `version`.
+ */
+const LOOP_VERSION = "0.1.0";
+
 interface ParsedArgs {
   dryRun: boolean;
   stage: "dry-run" | "read-only" | "full" | null;
@@ -53,6 +63,7 @@ interface ParsedArgs {
   team: string | null;
   homePath: string | null;
   verbose: boolean;
+  noControl: boolean;
   help: boolean;
 }
 
@@ -68,6 +79,7 @@ Usage: foreman loop [options]
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
   --home <path>            Home directory containing .foreman/config.json (default: real home).
   --verbose                Log every skip, not just dispatch counts.
+  --no-control             Skip the control-plane socket/status.json; --once already implies this.
   --help                   Show this text.
 
 Stages (loop.stage in ~/.foreman/config.json; --stage overrides):
@@ -89,8 +101,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     team: null,
     homePath: null,
     verbose: false,
+    noControl: false,
     help: false,
   };
+
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     switch (arg) {
@@ -139,6 +153,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       case "--verbose":
         parsed.verbose = true;
+        break;
+      case "--no-control":
+        parsed.noControl = true;
         break;
       case "--help":
       case "-h":
@@ -215,7 +232,8 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   }
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
 
-  const stateDir = join(expandHome(config.loop.stateDir), entry.alias);
+  const controlPaths = loopPaths(config, repoLoopId(entry.alias), args.homePath ?? undefined);
+  const stateDir = controlPaths.dir;
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));
 
   const log = (message: string): void => {
@@ -240,86 +258,130 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     dryRun: args.dryRun || config.loop.stage === "dry-run",
     verbose: args.verbose,
     log,
+    loopId: repoLoopId(entry.alias),
+    statusPath: controlPaths.status,
+    version: LOOP_VERSION,
+    team,
   });
 
   supervisor.acquireLock();
 
-  const shutdown = (signal: string): void => {
-    log(`received ${signal}, releasing lock and exiting.`);
-    supervisor.stop();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-
-  const allWorkers: Worker[] = [
-    reaperWorker,
-    planWorker,
-    refineWorker,
-    implementWorker,
-    reviewWorker,
-    mergeDetectWorker,
-    projectStatusWorker,
-  ];
-  const selected = args.workerNames.length > 0
-    ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))
-    : allWorkers;
-
   /*
-   * Before `reconcile()`, which is the first Linear call. An operator debugging
-   * a 401 needs to know which instance, repo, and team they just started; a
-   * raw API error with no identity above it is unreadable once several
-   * instances are running (SPEC §3.11).
+   * Everything past `acquireLock` runs holding the singleton lock and, once
+   * the server is listening, an open unix socket — so it all has to sit
+   * inside one `finally`.
+   *
+   * The ensure pass below used to `return` past the cleanup on a `ConfigError`
+   * (a 401 from `linear.teams()` is the common case). The listening socket
+   * then kept the event loop alive with `process.exitCode` set but nothing
+   * left to run: the loop became a zombie holding `loop.lock`, and every
+   * later `foreman loop` in that repo failed with `LoopLockHeldError`.
    */
-  log(
-    `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
-      `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
-      `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
-  );
-
-  if (config.loop.stage === "dry-run") {
-    const rule = defaultTheme.tone("warn", "─".repeat(62));
-    log(rule);
-    log(defaultTheme.tone("warn", "DRY RUN — stage=dry-run. No agent will be dispatched."));
-    log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-    log(defaultTheme.tone("warn", "or pass --stage full, to let workers act."));
-    log(rule);
-  }
-
-  // Ensure pass (SPEC §3.11): every bound initiative must exist and have its
-  // standing Maintenance project before reconcile's first board read, so
-  // refine/implement never race a missing project. `team` here is a team
-  // *key*; `createProject` needs the UUID, so resolve it the same way the
-  // rest of this file resolves other Linear ids — via `teams()`.
+  let controlServer: ControlServer | null = null;
   try {
-    const teams = await linear.teams();
-    const teamRef = teams.find((candidate) => candidate.key === team);
-    if (!teamRef) {
-      throw new ConfigError(`Team "${team}" was not found for the ensure pass`, [
-        "the resolved team key no longer matches a team the credential can reach",
-      ]);
+    // The control server has nothing to supervise once `--once` exits right
+    // after its single tick, and an operator can opt out entirely with
+    // `--no-control` (SPEC §17).
+    controlServer = args.once || args.noControl
+      ? null
+      : new ControlServer({
+          socketPath: controlPaths.socket,
+          handlers: createControlHandlers({ supervisor }),
+          info: {
+            loopId: repoLoopId(entry.alias),
+            kind: "repo",
+            pid: process.pid,
+            startedAt: new Date().toISOString(),
+            version: LOOP_VERSION,
+            protocol: 1,
+          },
+          log,
+        });
+    if (controlServer) {
+      const server = controlServer;
+      supervisor.onEvent((event) => {
+        if (event.event === "log") server.publishLog(event.level, event.line);
+        else server.broadcast(event);
+      });
+      await server.listen();
+      log(`control socket listening at ${controlPaths.socket}`);
     }
-    const ensureReports = await ensureMaintenanceProjects(linear, {
-      initiativeIds: entry.initiativeIds,
-      teamId: teamRef.id,
-    });
-    for (const report of ensureReports) {
-      log(
-        `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
-          `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
-      );
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) {
-      console.error(`[foreman-loop] ${error.message}`);
-      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
-  }
 
-  try {
+    const shutdown = (signal: string): void => {
+      log(`received ${signal}, releasing lock and exiting.`);
+      supervisor.stop();
+      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    };
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+    const allWorkers: Worker[] = [
+      reaperWorker,
+      planWorker,
+      refineWorker,
+      implementWorker,
+      reviewWorker,
+      mergeDetectWorker,
+      projectStatusWorker,
+    ];
+    const selected = args.workerNames.length > 0
+      ? allWorkers.filter((worker) => args.workerNames.includes(worker.name))
+      : allWorkers;
+
+    /*
+     * Before `reconcile()`, which is the first Linear call. An operator debugging
+     * a 401 needs to know which instance, repo, and team they just started; a
+     * raw API error with no identity above it is unreadable once several
+     * instances are running (SPEC §3.11).
+     */
+    log(
+      `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
+        `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
+        `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
+    );
+
+    if (config.loop.stage === "dry-run") {
+      const rule = defaultTheme.tone("warn", "─".repeat(62));
+      log(rule);
+      log(defaultTheme.tone("warn", "DRY RUN — stage=dry-run. No agent will be dispatched."));
+      log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+      log(defaultTheme.tone("warn", "or pass --stage full, to let workers act."));
+      log(rule);
+    }
+
+    // Ensure pass (SPEC §3.11): every bound initiative must exist and have its
+    // standing Maintenance project before reconcile's first board read, so
+    // refine/implement never race a missing project. `team` here is a team
+    // *key*; `createProject` needs the UUID, so resolve it the same way the
+    // rest of this file resolves other Linear ids — via `teams()`.
+    try {
+      const teams = await linear.teams();
+      const teamRef = teams.find((candidate) => candidate.key === team);
+      if (!teamRef) {
+        throw new ConfigError(`Team "${team}" was not found for the ensure pass`, [
+          "the resolved team key no longer matches a team the credential can reach",
+        ]);
+      }
+      const ensureReports = await ensureMaintenanceProjects(linear, {
+        initiativeIds: entry.initiativeIds,
+        teamId: teamRef.id,
+      });
+      for (const report of ensureReports) {
+        log(
+          `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
+            `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof ConfigError) {
+        console.error(`[foreman-loop] ${error.message}`);
+        for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+
     await supervisor.reconcile();
 
     if (args.once) {
@@ -329,5 +391,6 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     }
   } finally {
     supervisor.stop();
+    await controlServer?.close();
   }
 }

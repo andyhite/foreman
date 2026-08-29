@@ -12,9 +12,11 @@
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { nodeRunner } from "@foreman/core";
 import { runIntake, runLoop } from "@foreman/loop";
+import { runTui } from "@foreman/tui";
 import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { DEFAULT_GITHUB_REPO, type OmpScope } from "./plugin-commands.ts";
@@ -46,6 +48,7 @@ Commands:
   init                     Per-repo: register this directory in the repos registry.
   loop                     Run the supervisor; \`foreman loop --help\` for its flags.
   intake                   Run the team-level triage process; \`foreman intake --help\` for its flags.
+  tui                      Open the command center for this repo's loop and intake.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`loop\` per repo.
 
@@ -175,6 +178,16 @@ async function main(): Promise<void> {
     return;
   }
 
+  /*
+   * `tui` owns every argument after it, same rationale as `loop`/`intake`:
+   * the command center keeps its own flags (`--repo`, `--no-start`) without
+   * this parser having to know any of them.
+   */
+  if (argv[0] === "tui") {
+    await runTui(argv.slice(1));
+    return;
+  }
+
   const args = parseArgs(argv);
   if (args.help || !args.command) {
     process.stdout.write(HELP_TEXT);
@@ -222,7 +235,15 @@ async function main(): Promise<void> {
   }
 }
 
-const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+/*
+ * Compares against the *resolved* argv[1] path: Node does not resolve
+ * symlinks when populating argv[1] (Bun does), so invoking this file
+ * through a symlinked `foreman` binary — the normal install shape — left
+ * argv[1] pointing at the symlink while `import.meta.url` already reflects
+ * the real path underneath. The mismatch silently skipped `main()` (exit 0,
+ * no output) with no built-in signal, so this must resolve argv[1] first.
+ */
+const isMainModule = process.argv[1] && import.meta.url === `file://${realpathSync(process.argv[1])}`;
 if (isMainModule) {
   main().catch((error) => {
     console.error(`[foreman] fatal: ${String(error)}`);

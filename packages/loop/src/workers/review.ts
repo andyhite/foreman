@@ -16,6 +16,7 @@ import {
 } from "@foreman/core";
 import type { BoardSnapshot, ReviewCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
+import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
 
@@ -126,7 +127,15 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   ctx.bookkeeping.setLastRun("review", now);
-  return { worker: "review", ranAt: now.toISOString(), dispatched: decisions, skipped, errors };
+  return {
+    worker: "review",
+    ranAt: now.toISOString(),
+    dispatched: decisions,
+    skipped,
+    errors,
+    counts: { inReview: reviewCandidates.length },
+    queues: { pipeline: reviewCandidates.map((candidate) => toQueueItem(candidate.issue)) },
+  };
 }
 
 export const reviewWorker: Worker = {

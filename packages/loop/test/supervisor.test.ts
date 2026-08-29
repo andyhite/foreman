@@ -12,6 +12,7 @@ import type {
   LinearWriter,
   ResolvedRepoEntry,
 } from "@foreman/core";
+import { repoLoopId } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import {
   LoopLockHeldError,
@@ -224,6 +225,10 @@ function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
     log: (message) => logs.push(message),
     dryRun: false,
     verbose,
+    loopId: repoLoopId("acme"),
+    statusPath: join(stateDir, "status.json"),
+    version: "0.1.0-test",
+    team: "ENG",
   });
 }
 

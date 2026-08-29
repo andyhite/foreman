@@ -12,6 +12,7 @@ import {
 } from "@foreman/core";
 import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
+import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
 import { applyPendingDecisions } from "./decisions.ts";
@@ -74,7 +75,15 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   ctx.bookkeeping.setLastRun("implement", now);
-  return { worker: "implement", ranAt: now.toISOString(), dispatched: decisions, skipped, errors };
+  return {
+    worker: "implement",
+    ranAt: now.toISOString(),
+    dispatched: decisions,
+    skipped,
+    errors,
+    counts: { todo: todoIssues.length },
+    queues: { pipeline: todo.map(toQueueItem) },
+  };
 }
 export const implementWorker: Worker = {
   name: "implement",

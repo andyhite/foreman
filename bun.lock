@@ -19,6 +19,7 @@
       "dependencies": {
         "@foreman/core": "workspace:*",
         "@foreman/loop": "workspace:*",
+        "@foreman/tui": "workspace:*",
       },
     },
     "packages/core": {
@@ -42,6 +43,14 @@
         "@foreman/core": "workspace:*",
       },
     },
+    "packages/tui": {
+      "name": "@foreman/tui",
+      "version": "0.1.0",
+      "dependencies": {
+        "@foreman/core": "workspace:*",
+        "@foreman/loop": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@foreman/cli": ["@foreman/cli@workspace:packages/cli"],
@@ -51,6 +60,8 @@
     "@foreman/loop": ["@foreman/loop@workspace:packages/loop"],
 
     "@foreman/omp-plugin": ["@foreman/omp-plugin@workspace:packages/omp-plugin"],
+
+    "@foreman/tui": ["@foreman/tui@workspace:packages/tui"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.52", "", {}, "sha512-XiMQh7qqVlxZzcVD+kkGMNGMzcTrDMLWI7S4x7z1MkCkbDPrekpZXEUK0eZqZFMuHQg2a2DZOcDIh9o5v3Gonw=="],
 

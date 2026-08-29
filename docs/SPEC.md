@@ -1799,3 +1799,126 @@ that dispatches confidently into a routing bug.
 - Config keys that can disable gates, WIP limits, backpressure, the lock
   protocol, or propose-before-apply — config tunes parameters, never removes
   invariants (§3.10)
+
+---
+
+## 20. The command center and control plane
+
+### 20.1 Two loop kinds, one control surface
+
+Every long-lived Foreman process — a per-repo loop (§3.11) or the team-level
+intake process (§3.12) — is a *loop* for the purposes of this section, and
+each exposes the same control surface under an id: `repo:<alias>` for a
+per-repo loop, `intake` for the singleton intake process. The id is also the
+state directory name: `~/.foreman/state/<id>/` (the bookkeeping file of
+§17.5 lives one level inside it). Two files live there for control purposes:
+
+| Path | What |
+|---|---|
+| `<stateDir>/<id>/control.sock` | A unix socket, live while the loop holds its lock (§11) |
+| `<stateDir>/<id>/status.json` | A `LoopSnapshot`, written atomically after every `reconcile()` and after every tick |
+
+The socket is the control channel. The file is the fallback: a client that
+cannot reach the socket — the loop process is down, or a client asks before
+the loop has ever registered a control server — still gets a truthful "last
+known state" by reading `status.json` instead of an error. This is what lets
+the command center (§20.4) render a stopped loop's board without special-casing
+it, and it is why the write happens at exactly the two moments state can have
+changed: `reconcile()` and each tick, never on a timer of its own.
+
+`foreman loop --no-control` disables the socket for a given process and skips
+straight to writing `status.json` — an escape hatch for running a loop where a
+listening socket is unwanted, not the normal path.
+
+### 20.2 Wire protocol
+
+Newline-delimited JSON over the unix socket, one connection per client,
+request/response with an out-of-band event channel for `subscribe`:
+
+- **Request** — `{ op, id, ...params }`. `id` is chosen by the client and
+  echoed back so a client with several in-flight requests can match replies.
+- **Response** — `{ id, ok: true, result }` or `{ id, ok: false, error }`.
+- **Event** — `{ seq, at, ...}`, pushed unprompted to a subscribed connection
+  after a successful `subscribe`. `seq` is per-connection and monotonic;
+  a client that sees a gap knows it missed events and should re-`snapshot`.
+
+Ops: `hello` (handshake — protocol version, loop id), `snapshot` (the current
+`LoopSnapshot`, the same shape `status.json` holds), `subscribe` (start
+receiving events), `pause` / `resume` (stop or resume dispatch without
+releasing the lock), `stop` (graceful shutdown), `tick` (run one scheduling
+pass immediately, outside the cadence), `setStage` (change `loop.stage`),
+`patchConfig` (merge a partial config document and hot-reload it), `reload`
+(re-read config from disk without a patch), `attachAgent` / `killAgent`
+(herdr-pane operations, §17.3 — a no-op reply naming the print-mode fallback
+when there is no herdr pane to attach to), and `logs` (tail the loop's own
+log, not an agent's).
+
+A `LoopSnapshot`, by field group rather than a full type dump: identity (loop
+id, stage, paused/running), the per-worker table from §17.5 (last run,
+in-flight count, next scheduled run), the WIP and backpressure numbers of
+§17.6–§17.7 as measured right now, the blocked and proposed queues (issue ids
+and labels, not full issue bodies — the client fetches those from Linear
+directly if it needs them), and recent log lines for the overview view. It is
+deliberately the read side only: nothing in the shape is round-tripped back
+through a write op except `setStage` and `patchConfig`, and those go through
+their own named ops rather than a general "set snapshot field" verb.
+
+### 20.3 The control plane adds no new authority
+
+Every op in §20.2 is either a read (`hello`, `snapshot`, `subscribe`, `logs`)
+or a call to a state transition the loop already makes on its own schedule
+(`pause`/`resume` stop and start the same dispatch loop the cadence drives;
+`tick` runs the same scheduling pass early; `stop` is the same shutdown path
+as `SIGTERM`). `setStage` and `patchConfig` write to
+`~/.foreman/config.json` (§3.10) exactly as hand-editing the file and letting
+the config loader's `session_start` validation pick it up would — they tune
+parameters, never invariants. There is no op that creates, transitions, or
+comments on a Linear issue, approves a proposal, or claims a lock (§11) on the
+control plane's behalf: those actions have exactly one path each, the ones
+§10 and §9 already define, and the control plane is not a second one. A
+client with a live socket connection has exactly the leverage an operator
+editing the config file and sending `SIGHUP` would have — nothing more.
+
+### 20.4 The command center (`foreman tui`)
+
+`foreman tui`, run inside a repo registered per §3.11, is the interactive,
+full-screen counterpart to the `/foreman:*` commands of §9. It attaches to —
+or, unless started with `--no-start`, launches — two loops: the repo's own
+(`repo:<alias>`) and the shared intake process (`id: intake`, §3.12), each
+over the control channel of §20.1. Seven views, cycled with `tab`/`shift-tab`
+or jumped to directly with `1`–`7`:
+
+| View | Shows |
+|---|---|
+| `overview` | Both loops' identity, stage, and recent log lines at a glance |
+| `agents` | In-flight dispatches; `enter` attaches the herdr pane (§17.3), `x` kills one |
+| `pipeline` | The per-worker table of §17.5 — last run, in-flight, next run |
+| `blocks` | The `blocked:*` queue of §9 |
+| `proposals` | The `agent:proposed` queue awaiting `/foreman:apply` |
+| `logs` | The tailed loop log, filterable |
+| `settings` | The config table of §3.10, edited live |
+
+Global keys: `q` quits the TUI without touching either loop, `?` opens a help
+modal, `L` cycles which loop has focus for the operations below, `r` refreshes
+the current view's data, `s` starts the focused loop, `S` stops it after a
+confirmation, `p` pauses or resumes it, `t` requests an immediate `tick`, and
+`g` cycles `loop.stage` through `dry-run → read-only → full` (§17.9),
+confirming before the move to `full`. Every one of these is a `patchConfig` or
+direct op call from §20.2 — the TUI holds no path to Linear or to a loop's
+internals that a `/foreman:*` command or a hand-edited config file lacks.
+
+**`blocks` and `proposals` never mutate Linear.** They render the same queues
+`/foreman:status` does and name the exact command that acts — `/foreman:unblock
+<id> <reply>` for a block, `/foreman:apply <id> --approve` or `--reject` for a
+proposal — rather than offering a keypress that approves or answers in place.
+This is the same split that governs the agents themselves (§2, principle 9):
+the loop process is not a Linear writer, so the surface built on top of it
+isn't one either. Making an exception for the interactive client would mean
+two write paths into Linear instead of one, which is the exact failure mode
+§10 and §13 exist to prevent.
+
+`--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop` and
+`foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
+`--no-start` attaches to already-running loops and exits rather than starting
+them if neither is up; `--no-color` disables the 16-color SGR output for
+terminals or recordings that can't take it.

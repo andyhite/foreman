@@ -4,7 +4,8 @@
  * predicate by calling into `routing.ts` rather than re-deriving selection.
  */
 
-import type { Dispatcher, GlobalConfig, Issue, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
+import type { BlockedItem, Dispatcher, GlobalConfig, Issue, LinearWriter, ProposalItem, QueueItem, ResolvedRepoEntry } from "@foreman/core";
+import type { BoardCounts } from "@foreman/core";
 import { issueScope } from "@foreman/core";
 import type { Bookkeeping } from "../bookkeeping.ts";
 import type { DispatchDecision, SkipRecord, StageName } from "../routing.ts";
@@ -15,6 +16,18 @@ export interface WorkerReport {
   dispatched: DispatchDecision[];
   skipped: SkipRecord[];
   errors: string[];
+  /**
+   * Board counts this worker already fetched while deciding what to
+   * dispatch (SPEC §17 "no extra Linear queries" for the TUI) — merged by
+   * the supervisor into the snapshot's `board` rather than re-queried.
+   */
+  counts?: Partial<BoardCounts>;
+  /** Same rationale as `counts`, but for the raw queue rows the TUI lists rather than just their totals. */
+  queues?: {
+    blocked?: BlockedItem[];
+    proposals?: ProposalItem[];
+    pipeline?: QueueItem[];
+  };
 }
 
 export interface WorkerContext {

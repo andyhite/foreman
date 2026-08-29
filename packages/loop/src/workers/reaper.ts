@@ -10,6 +10,7 @@ import {
   hasLabel,
   lockState,
   readLockComment,
+  type BlockedItem,
 } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 
@@ -17,6 +18,7 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
   const skipped: WorkerReport["skipped"] = [];
+  const blocked: BlockedItem[] = [];
 
   const running = await ctx.linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500, includeComments: true });
 
@@ -65,11 +67,20 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
       code: "lock-orphaned",
       message: classification.reason ?? "Lock past TTL and absent from every liveness source.",
     });
+    blocked.push({
+      issueId: issue.identifier,
+      title: issue.title,
+      type: "needsInput",
+      question: classification.reason ?? "Lock past TTL and absent from every liveness source.",
+      detectedAt: now.toISOString(),
+      options: [],
+      recommendation: null,
+    });
   }
 
   ctx.bookkeeping.reconcile(new Set(running.map((issue) => issue.identifier)), liveDispatchIds);
 
-  return { worker: "reaper", ranAt: now.toISOString(), dispatched: [], skipped, errors };
+  return { worker: "reaper", ranAt: now.toISOString(), dispatched: [], skipped, errors, queues: { blocked } };
 }
 
 export const reaperWorker: Worker = {

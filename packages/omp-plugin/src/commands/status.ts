@@ -4,9 +4,8 @@
  * registry, loop state. Blocked queue first (SPEC §9).
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentRegistryEntry, BackpressureState, Issue, LinearWriter, LoopState, StatusState } from "@foreman/core";
+import type { AgentRegistryEntry, AgentStatus, BackpressureState, Issue, LinearWriter, LoopState, StatusState, WorkerLoopState } from "@foreman/core";
 import {
   BLOCKED_HUMAN_FILTER,
   IN_FLIGHT_FILTER,
@@ -18,31 +17,41 @@ import {
   lockState,
   MARKER_KIND,
   readLockComment,
+  readStatusFile,
   renderStatusConsole,
 } from "@foreman/core";
 import { getConfig, getEntry } from "../runtime.ts";
 
-/**
- * The loop's bookkeeping file this command reads read-only, tolerating
- * absence. NOTE: this reads `loop-state.json`, but the loop (per SPEC §17.5)
- * writes `bookkeeping.json` — a pre-existing filename mismatch, out of scope
- * for this migration; left as-is rather than fixed as a side quest.
- */
-interface LoopBookkeeping {
-  stage: string;
-  workers: Array<{ worker: string; lastRunAt: string | null; dispatchCount: number }>;
-  backpressure: { tripped: boolean; reason: string | null };
-  agents: Array<{ agent: string; state: "running" | "idle" | "parked" | "aborted"; issueId: string | null }>;
-}
+/** `AgentStatus` (contract §J) has no `"idle"`/`"parked"`/`"aborted"` distinction; this is the closest honest mapping onto the older registry vocabulary `/foreman:status` already renders. */
+const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
+  starting: "idle",
+  running: "running",
+  settled: "parked",
+  lost: "aborted",
+  unknown: "idle",
+};
 
-function readLoopBookkeeping(stateDir: string): LoopBookkeeping | null {
-  const path = join(stateDir, "loop-state.json");
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as LoopBookkeeping;
-  } catch {
-    return null;
+function readLoopState(stateDir: string): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
+  const status = readStatusFile(join(stateDir, "status.json"));
+  if (!status) {
+    return { loop: { stage: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
   }
+  const { snapshot } = status;
+  const workers: WorkerLoopState[] = snapshot.workers.map((worker) => ({
+    worker: worker.name,
+    lastRunAt: worker.lastRunAt,
+    dispatchCount: worker.dispatched,
+  }));
+  const agents: AgentRegistryEntry[] = snapshot.agents.map((agent) => ({
+    agent: agent.agent,
+    state: AGENT_REGISTRY_STATE[agent.status],
+    issueId: agent.issueId,
+  }));
+  return {
+    loop: { stage: snapshot.runtime.stage, workers },
+    backpressure: { tripped: snapshot.backpressure.tripped, reason: snapshot.backpressure.reason },
+    agents,
+  };
 }
 
 function questionFor(issue: Issue): string {
@@ -83,12 +92,7 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const bookkeeping = readLoopBookkeeping(stateDir);
-  const loop: LoopState = bookkeeping
-    ? { stage: bookkeeping.stage, workers: bookkeeping.workers }
-    : { stage: "unknown (no loop bookkeeping found)", workers: [] };
-  const backpressure: BackpressureState = bookkeeping?.backpressure ?? { tripped: false, reason: null };
-  const agents: AgentRegistryEntry[] = bookkeeping?.agents ?? [];
+  const { loop, backpressure, agents } = readLoopState(stateDir);
 
   return {
     blocked,

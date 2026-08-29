@@ -71,7 +71,14 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   ctx.bookkeeping.setLastRun("plan", now);
-  return { worker: "plan", ranAt: now.toISOString(), dispatched: decisions, skipped, errors };
+  return {
+    worker: "plan",
+    ranAt: now.toISOString(),
+    dispatched: decisions,
+    skipped,
+    errors,
+    counts: { blocked: blockedHuman.length },
+  };
 }
 
 export const planWorker: Worker = {

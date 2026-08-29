@@ -172,6 +172,66 @@ The `foreman-loop` prefix names the long-lived process, not the command — the
 same spelling herdr uses for its pane. The loop is a singleton: a second one
 refuses to start while the first holds the lock.
 
+### Control plane
+
+Each loop process — a repo's `foreman loop` and the team-level `foreman
+intake` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
+speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
+after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
+`subscribe`, `pause`, `resume`, `stop`, `tick`, `setStage`, `patchConfig`,
+`reload`, `attachAgent`, `killAgent`, `logs`. The socket is live control; the
+file is the fallback a client reads when nothing is listening, which is what
+lets `foreman tui` (below) render a stopped loop's last-known state instead of
+an error. Run `foreman loop --no-control` to skip the socket entirely.
+
+## Command center
+
+```bash
+foreman tui
+```
+
+Run it inside a repo already registered with `foreman init`. It attaches to
+— or, unless started with `--no-start`, launches — two loops: this repo's
+own (`repo:<alias>`) and the shared, team-wide `foreman intake` process
+(above), each over the control plane described above. Seven views, cycled
+with `tab`/`shift-tab` or jumped to directly with `1`-`7`:
+
+| View | Shows |
+| --- | --- |
+| `overview` | Both loops side by side: run state, stage, WIP gauges, board counts, dispatch sparkline, and the per-worker table of last run, next run, dispatched, skipped, errors |
+| `agents` | In-flight dispatches with age and lock TTL; `enter` attaches the herdr pane, `x` kills one |
+| `pipeline` | The board — Backlog, Todo, In Progress, In Review depth, and the issues behind them |
+| `blocks` | The `blocked:*` queue, with each `BlockRecord`'s question, options, and recommendation |
+| `proposals` | The `agent:proposed` queue awaiting approval |
+| `logs` | The merged event and log stream from the focused loop |
+| `settings` | The config table below, edited live |
+
+| Key | Does |
+| --- | --- |
+| `q` | Quit — loops keep running |
+| `?` | Help modal |
+| `1`-`7` | Jump to a view |
+| `tab` / `shift-tab` | Cycle views |
+| `L` | Cycle which loop has focus |
+| `r` | Refresh |
+| `s` | Start the focused loop |
+| `S` | Stop the focused loop (confirm) |
+| `p` | Pause / resume |
+| `t` | Tick now |
+| `g` | Cycle stage `dry-run → read-only → full` (confirm on `full`) |
+
+Flags: `--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop`
+and `foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
+`--no-start` attaches to already-running loops instead of starting them;
+`--no-color` disables the 16-color output.
+
+`blocks` and `proposals` never mutate Linear. They show the queue and name
+the exact command that acts — `/foreman:unblock` or `/foreman:apply` — rather
+than offering a keypress that answers or approves in place. This is by
+design: the loop process holds no operator-write path to Linear, the same
+split the agents themselves live under (above), so the interactive surface
+built on top of it doesn't get one either.
+
 ## Operator surface
 
 Slash commands, inside any omp session:
@@ -192,6 +252,10 @@ When [herdr](https://github.com/andyhite/herdr) is available and its server is
 reachable, the loop automatically dispatches agents into real herdr panes
 instead of headless processes — no config flag needed; it falls back to
 print mode automatically otherwise.
+
+`foreman tui` (above) is the interactive counterpart to these commands.
+`/foreman:status` reads the same published `status.json` the control plane
+writes.
 
 ## Configuration
 
@@ -231,9 +295,11 @@ a gate or a worker predicate.
 
 ```
 packages/
-  core/          Linear client, config, gate validators, lock protocol, schemas
+  core/          Linear client, config, gate validators, lock protocol, schemas,
+                 the control-plane contract, and the terminal toolkit
   omp-plugin/    The plugin: agents, skills, commands, rules, extension
   loop/           The supervisor and its seven workers
+  tui/           The command center
   cli/            The foreman CLI — setup, init, and delegates `loop` to packages/loop
 ```
 
@@ -268,7 +334,7 @@ itself is a bundled CLI too — rebuild `@foreman/cli` the same way after editin
 
 ```bash
 bun run typecheck   # tsc --build across the workspace
-bun test            # 268 tests
+bun test            # 570 tests
 bun run contract    # agent/skill/schema wiring check
 bun run schemas     # regenerate output schemas into agent frontmatter
 bun run check       # all three

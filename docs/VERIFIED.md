@@ -131,3 +131,44 @@ describes, and the pane label is what the startup guard matches on.
 - **`Initiative.projects: ProjectConnection` is a direct edge**, symmetric with
   `Project.initiatives` (above): reading an initiative's projects is one
   query, no fan-out needed.
+
+## Verified building the command center and control plane
+
+- **macOS caps a unix socket path at 104 bytes.** A `stateDir` nested a few
+  levels deep (a long home directory, a long repo alias) can push
+  `<stateDir>/<loop>/control.sock` past that limit, and `bind()` fails outright
+  rather than truncating. `loopPaths` checks the length up front and falls back
+  to a hashed path under `os.tmpdir()` when the natural path would exceed it.
+- **TypeScript does not keep a narrowing on a class field or object property
+  across an `await`, including through get/set accessors.** A run-state check
+  before an `await` and another one after it compare as two unrelated literal
+  types, and the second comparison is flagged dead code even though the field
+  can genuinely have changed underneath the `await`. Both `Supervisor` and
+  `IntakeRuntime` read their run state through a method call
+  (`currentRunState()`) instead of a field or accessor read, because a method
+  call is a boundary the narrower won't cross — it has no way to know the
+  method returns a stored value rather than computing one. An accessor pair
+  (`get`/`set`) was tried first and does not fix it; the narrowing still
+  collapses across the `await`.
+- **`Omit<T, K>` does not distribute over a union.** `Omit<ControlEvent, "seq"
+  | "at">`, where `ControlEvent` is a discriminated union whose members carry
+  different extra fields (`runtime`, `line`, `agent`, ...), collapses to the
+  intersection of keys every member shares and then rejects any of those
+  member-specific fields. The protocol instead exports a distributive
+  `EmittableEvent` type — an `Omit` applied inside a conditional type that
+  distributes over the union — so each member keeps its own fields minus
+  `seq`/`at`.
+- **A listening unix socket keeps Bun's event loop alive**, so setting
+  `process.exitCode` on a fatal startup path is not enough to make the process
+  exit — an open server handle is still a live event-loop reference. This was
+  observed as a real zombie: a loop that failed during the ensure pass (a 401
+  from a stale Linear key) kept running because its control server was still
+  listening, holding `loop.lock` (§11) and making every subsequent `foreman
+  loop` fail with `LoopLockHeldError` until the process was killed by hand.
+  `runLoop` and `runIntake` now wrap everything after lock acquisition in one
+  `try/finally` that stops the supervisor and closes the control server, so a
+  fatal error always releases both.
+- **`/foreman:status` read `<stateDir>/loop-state.json`, which no code ever
+  wrote.** Nothing had produced that file since the command was written; it
+  always read as absent. The command now reads the `status.json` the control
+  plane publishes (§20.1), which is a file something actually writes.

@@ -1,3 +1,5 @@
+import { stringWidth } from "./width.ts";
+
 /**
  * Shared terminal styling for every Foreman surface that renders to a real
  * TTY (the herdr board, `foreman loop`'s console output, `foreman setup`).
@@ -23,7 +25,24 @@ const CODES = {
 
 export type StyleName = keyof typeof CODES;
 
-export type ToneName = "title" | "muted" | "selected" | "danger" | "warn" | "ok" | "accent";
+export type ToneName =
+  | "title"
+  | "muted"
+  | "selected"
+  | "danger"
+  | "warn"
+  | "ok"
+  | "accent"
+  | "header"
+  | "border"
+  | "borderFocus"
+  | "key"
+  | "info"
+  | "badgeOk"
+  | "badgeWarn"
+  | "badgeDanger"
+  | "badgeMuted"
+  | "chrome";
 
 const TONES: Record<ToneName, readonly StyleName[]> = {
   title: ["bold"],
@@ -33,13 +52,28 @@ const TONES: Record<ToneName, readonly StyleName[]> = {
   warn: ["yellow"],
   ok: ["green"],
   accent: ["cyan"],
+  header: ["bold", "cyan"],
+  border: ["gray"],
+  borderFocus: ["cyan"],
+  key: ["bold", "cyan"],
+  info: ["blue"],
+  badgeOk: ["green"],
+  badgeWarn: ["yellow"],
+  badgeDanger: ["red"],
+  badgeMuted: ["gray"],
+  chrome: ["reverse"],
 };
 
 export interface Theme {
   readonly enabled: boolean;
   style(name: StyleName, text: string): string;
   tone(name: ToneName, text: string): string;
+  /** Raw SGR prefix for the given styles, "" when disabled. No reset. For Canvas cell styling. */
+  sgr(...names: readonly StyleName[]): string;
+  /** Raw SGR prefix for a tone, "" when disabled. */
+  toneSgr(name: ToneName): string;
 }
+
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
@@ -48,9 +82,9 @@ export function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, "");
 }
 
-/** Length of `text` as it will actually occupy on screen, ignoring escape bytes. */
+/** Length of `text` as it will actually occupy on screen, ignoring escape bytes and accounting for wide/zero-width code points. */
 export function visibleWidth(text: string): number {
-  return stripAnsi(text).length;
+  return stringWidth(text);
 }
 
 /** Builds a `Theme`. When `enabled` is false, `style`/`tone` return `text` untouched. */
@@ -65,6 +99,16 @@ export function createTheme(enabled: boolean): Theme {
       if (!enabled) return text;
       const codes = TONES[name].map((styleName) => CODES[styleName]).join(";");
       return `\x1b[${codes}m${text}\x1b[0m`;
+    },
+    sgr(...names) {
+      if (!enabled || names.length === 0) return "";
+      const codes = names.map((styleName) => CODES[styleName]).join(";");
+      return `\x1b[${codes}m`;
+    },
+    toneSgr(name) {
+      if (!enabled) return "";
+      const codes = TONES[name].map((styleName) => CODES[styleName]).join(";");
+      return `\x1b[${codes}m`;
     },
   };
 }

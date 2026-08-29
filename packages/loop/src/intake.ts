@@ -15,24 +15,37 @@
 import {
   expandHome,
   INBOX_FILTER,
+  INTAKE_LOOP_ID,
   LinearClient,
   loadGlobalConfig,
+  loopPaths,
   newDispatchId,
   PROPOSALS_FILTER,
+  ControlServer,
   defaultTheme,
+  emptyBoardCounts,
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
   runApplyPass,
+  writeStatusFile,
+  type ControlEvent,
+  type ControlHandlers,
+  type EmittableEvent,
   type Dispatcher,
   type GlobalConfig,
   type Issue,
   type LinearWriter,
+  type LoopSnapshot,
   type ResolvedRepoEntry,
+  type RunState,
 } from "@foreman/core";
 import { HerdrDispatcher, PrintDispatcher } from "@foreman/core";
 import { initiativeIndex } from "@foreman/core";
+import { homedir } from "node:os";
 import { Bookkeeping } from "./bookkeeping.ts";
+import { patchAndWriteGlobalConfig } from "./control.ts";
+import { buildSnapshot } from "./snapshot.ts";
 import {
   bookkeepingPathFor,
   lockPathFor,
@@ -40,12 +53,16 @@ import {
   SupervisorLock,
 } from "./supervisor.ts";
 
+/** Mirrors `LOOP_VERSION` in `main.ts` — bump both alongside `package.json`'s `version`. */
+const LOOP_VERSION = "0.1.0";
+
 interface ParsedArgs {
   team: string | null;
   once: boolean;
   dryRun: boolean;
   verbose: boolean;
   configPath: string | null;
+  noControl: boolean;
   help: boolean;
 }
 
@@ -58,6 +75,7 @@ Usage: foreman intake [options]
   --dry-run               Log what would be dispatched; dispatch nothing.
   --verbose               Log every skip, not just dispatch counts.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
+  --no-control            Skip the control-plane socket/status.json; --once already implies this.
   --help                  Show this text.
 
 Team-level: one process per team, not per repo. Per-repo work is
@@ -71,6 +89,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     dryRun: false,
     verbose: false,
     configPath: null,
+    noControl: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -91,6 +110,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--verbose":
         parsed.verbose = true;
+        break;
+      case "--no-control":
+        parsed.noControl = true;
         break;
       case "--home": {
         if (i + 1 >= argv.length) throw new Error("missing value for --home");
@@ -273,6 +295,135 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
   };
 }
 
+/**
+ * The intake process's control-plane state (SPEC §17, contract §I–§M):
+ * everything `createIntakeControlHandlers`/`buildIntakeSnapshot` need that
+ * isn't already on `IntakeContext`. Kept as one small mutable class rather
+ * than folding into `IntakeContext` itself, so `runIntakeTick` — the unit
+ * this file already tests — stays a pure function of `IntakeContext` with
+ * no control-plane awareness.
+ */
+class IntakeRuntime {
+  runState: RunState = "starting";
+  pausedAt: string | null = null;
+  ticks = 0;
+  lastTickAt: string | null = null;
+  lastReport: IntakeTickReport | null = null;
+  wake: (() => void) | null = null;
+  tickRequested = false;
+  stopMode: "graceful" | "now" | null = null;
+  stopped = false;
+  readonly startedAt = new Date().toISOString();
+  readonly listeners = new Set<(event: ControlEvent) => void>();
+  #seq = 0;
+
+  /**
+   * The run state, read through a call rather than the field.
+   *
+   * `runState = "running"` before the poll loop narrows the property to that
+   * literal for the rest of the block, and TypeScript keeps the narrowing
+   * across every `await` in the loop body — so a later `=== "draining"` is
+   * reported as a comparison between non-overlapping literals even though
+   * `stop` writes exactly that value from another turn. A call boundary
+   * returns the declared type and stays honest. `Supervisor` reads its own
+   * state the same way, for the same reason.
+   */
+  currentRunState(): RunState {
+    return this.runState;
+  }
+
+  emit(event: EmittableEvent, now: () => Date): void {
+    this.#seq += 1;
+    const full = { ...event, seq: this.#seq, at: now().toISOString() } as ControlEvent;
+    for (const listener of this.listeners) listener(full);
+  }
+}
+
+function buildIntakeSnapshot(ctx: IntakeContext, runtime: IntakeRuntime, version: string): LoopSnapshot {
+  return buildSnapshot({
+    loopId: INTAKE_LOOP_ID,
+    kind: "intake",
+    label: "intake",
+    alias: null,
+    team: ctx.team,
+    repoPath: null,
+    initiativeIds: [],
+    pid: process.pid,
+    startedAt: runtime.startedAt,
+    version,
+    config: ctx.config,
+    runState: runtime.runState,
+    dryRun: ctx.dryRun,
+    dispatcherKind: ctx.dispatcher.kind,
+    pausedAt: runtime.pausedAt,
+    lastTickAt: runtime.lastTickAt,
+    ticks: runtime.ticks,
+    now: ctx.now(),
+    workers: [
+      {
+        name: "intake",
+        cadenceMs: 60_000,
+        lastRunAt: ctx.bookkeeping.state.lastRunAt.intake,
+        running: false,
+        lastReport: null,
+      },
+    ],
+    bookkeeping: ctx.bookkeeping.state,
+    agentStatuses: new Map(),
+    boardCounts: {
+      ...emptyBoardCounts(),
+      proposals: runtime.lastReport?.proposedCount ?? 0,
+      triageInbox: 0,
+    },
+    linear: { ok: true, lastPollAt: runtime.lastTickAt, lastError: null, requests: 0 },
+    dispatchHistory: [],
+  });
+}
+
+function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime, home: string): ControlHandlers {
+  return {
+    snapshot: () => buildIntakeSnapshot(ctx, runtime, LOOP_VERSION),
+    pause: () => {
+      runtime.runState = "paused";
+      runtime.pausedAt = ctx.now().toISOString();
+      runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+    },
+    resume: () => {
+      runtime.runState = "running";
+      runtime.pausedAt = null;
+      runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+    },
+    stop: (mode) => {
+      runtime.stopMode = mode;
+      runtime.runState = "draining";
+      runtime.emit({ event: "state", runtime: buildIntakeSnapshot(ctx, runtime, LOOP_VERSION).runtime }, ctx.now);
+      if (mode === "now") runtime.wake?.();
+    },
+    tick: () => {
+      runtime.tickRequested = true;
+      runtime.wake?.();
+    },
+    setStage: () => {
+      throw new Error("intake has no stage — it always runs at the operator's configured autonomy; see loop.stage for a repo loop instead");
+    },
+    patchConfig: (patch) => {
+      patchAndWriteGlobalConfig(patch, home);
+      const { config } = loadGlobalConfig({ home });
+      ctx.config = config;
+    },
+    reload: () => {
+      const { config } = loadGlobalConfig({ home });
+      ctx.config = config;
+    },
+    attachAgent: () => {
+      throw new Error("foreman intake dispatches only the shared triage batch; there is no per-agent pane to attach");
+    },
+    killAgent: () => {
+      throw new Error("foreman intake dispatches only the shared triage batch; there is no per-agent process to kill");
+    },
+  };
+}
+
 export async function runIntake(argv: readonly string[]): Promise<void> {
   const args = parseArgs(argv);
   if (args.help) {
@@ -307,7 +458,8 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
 
-  const intakeStateDir = `${expandHome(config.loop.stateDir)}/intake`;
+  const controlPaths = loopPaths(config, INTAKE_LOOP_ID, args.configPath ?? undefined);
+  const intakeStateDir = controlPaths.dir;
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(intakeStateDir));
 
   const dispatcher = await resolveDispatcher(
@@ -321,14 +473,6 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const lock = new SupervisorLock(lockPathFor(intakeStateDir));
   lock.acquire(process.pid, new Date());
 
-  const shutdown = (signal: string): void => {
-    log(`received ${signal}, releasing lock and exiting.`);
-    lock.release();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-
   const ctx: IntakeContext = {
     config,
     linear,
@@ -339,36 +483,106 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     log,
     dryRun: args.dryRun,
   };
+  const runtime = new IntakeRuntime();
 
-  log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
-
-  if (args.dryRun) {
-    const rule = defaultTheme.tone("warn", "─".repeat(62));
-    log(rule);
-    log(defaultTheme.tone("warn", "DRY RUN — foreman intake will not act on issues."));
-    log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-    log(defaultTheme.tone("warn", "or omit --dry-run, to let it dispatch."));
-    log(rule);
-  }
-
+  /*
+   * The lock is held from here on, and the control socket keeps the event
+   * loop alive once it is listening — so both live inside one `finally`.
+   * `controlServer.listen()` rejecting when another intake already holds the
+   * socket must still release the lock, or the next run fails on a lock whose
+   * owner never started. Same reasoning as `main.ts`.
+   */
+  let controlServer: ControlServer | null = null;
   try {
+    const home = args.configPath ?? homedir();
+    controlServer = args.once || args.noControl
+      ? null
+      : new ControlServer({
+          socketPath: controlPaths.socket,
+          handlers: createIntakeControlHandlers(ctx, runtime, home),
+          info: {
+            loopId: INTAKE_LOOP_ID,
+            kind: "intake",
+            pid: process.pid,
+            startedAt: runtime.startedAt,
+            version: LOOP_VERSION,
+            protocol: 1,
+          },
+          log,
+        });
+    if (controlServer) {
+      const server = controlServer;
+      runtime.listeners.add((event) => {
+        if (event.event === "log") server.publishLog(event.level, event.line);
+        else server.broadcast(event);
+      });
+      await server.listen();
+      log(`control socket listening at ${controlPaths.socket}`);
+    }
+
+    const shutdown = (signal: string): void => {
+      log(`received ${signal}, releasing lock and exiting.`);
+      lock.release();
+      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    };
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+    log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
+
+    if (args.dryRun) {
+      const rule = defaultTheme.tone("warn", "─".repeat(62));
+      log(rule);
+      log(defaultTheme.tone("warn", "DRY RUN — foreman intake will not act on issues."));
+      log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+      log(defaultTheme.tone("warn", "or omit --dry-run, to let it dispatch."));
+      log(rule);
+    }
+
+    runtime.runState = "running";
     if (args.once) {
       const report = await runIntakeTick(ctx);
       if (args.verbose && report.skipReason) {
         log(`skip: ${report.skipReason}`);
       }
     } else {
-      for (;;) {
+      while (!runtime.stopped) {
+        const state = runtime.currentRunState();
+        if (state === "draining") break;
+        if (state === "paused") {
+          await intakeInterruptibleWait(runtime, 60_000);
+          continue;
+        }
+        runtime.tickRequested = false;
         const report = await runIntakeTick(ctx);
+        runtime.lastReport = report;
+        runtime.ticks += 1;
+        runtime.lastTickAt = ctx.now().toISOString();
         if (args.verbose && report.skipReason) {
           log(`skip: ${report.skipReason}`);
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, 60_000));
+        if (controlServer) writeStatusFile(controlPaths.status, buildIntakeSnapshot(ctx, runtime, LOOP_VERSION));
+        if (runtime.currentRunState() === "draining") break;
+        await intakeInterruptibleWait(runtime, 60_000);
       }
     }
   } finally {
+    runtime.runState = "stopped";
     lock.release();
+    await controlServer?.close();
   }
+}
+
+/** `sleep(ms)`, but a pending `wake` call (`tick`/`stop("now")`) resolves it early — mirrors `Supervisor#interruptibleWait`. */
+async function intakeInterruptibleWait(runtime: IntakeRuntime, ms: number): Promise<void> {
+  if (runtime.tickRequested) {
+    runtime.tickRequested = false;
+    return;
+  }
+  const { promise, resolve } = Promise.withResolvers<void>();
+  runtime.wake = resolve;
+  await Promise.race([promise, new Promise<void>((r) => setTimeout(r, ms))]);
+  runtime.wake = null;
 }
 
 // Re-exported so callers building repo-aware intake tooling need not import

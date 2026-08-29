@@ -14,6 +14,7 @@ import {
 } from "@foreman/core";
 import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
+import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
 
@@ -73,7 +74,15 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   ctx.bookkeeping.setLastRun("refine", now);
-  return { worker: "refine", ranAt: now.toISOString(), dispatched: decisions, skipped, errors };
+  return {
+    worker: "refine",
+    ranAt: now.toISOString(),
+    dispatched: decisions,
+    skipped,
+    errors,
+    counts: { backlog: backlogIssues.length, readyBuffer: ready.length, blocked: blockedHuman.length },
+    queues: { pipeline: backlog.map(toQueueItem) },
+  };
 }
 
 export const refineWorker: Worker = {

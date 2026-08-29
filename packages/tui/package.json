@@ -1,0 +1,15 @@
+{
+  "name": "@foreman/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Foreman command center: monitor and control a repo loop and the team intake loop, reached as `foreman tui`",
+  "dependencies": {
+    "@foreman/core": "workspace:*",
+    "@foreman/loop": "workspace:*"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
