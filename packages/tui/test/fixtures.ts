@@ -455,6 +455,7 @@ export function makeContext(state: AppState, theme?: Theme): RecordingContext {
     },
     async command(loopId, op) {
       calls.push(`command:${loopId}:${op}`);
+      return true;
     },
     startLoop(loopId) {
       calls.push(`startLoop:${loopId}`);

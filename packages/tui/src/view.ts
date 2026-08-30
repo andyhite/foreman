@@ -17,8 +17,8 @@ export interface ViewContext {
   readonly theme: Theme;
   readonly tick: number;
   dispatch(action: Action): void;
-  /** Sends a control op to a loop, showing a toast on failure and clearing `busy` when it settles. */
-  command(loopId: LoopId, op: ControlOp, params?: Record<string, unknown>): Promise<void>;
+  /** Sends a control op to a loop, showing a toast on failure and clearing `busy` when it settles. Resolves `false` on failure so a caller can gate a follow-up action on success. */
+  command(loopId: LoopId, op: ControlOp, params?: Record<string, unknown>): Promise<boolean>;
   /** Starts the loop's process if it is not running, then attaches. */
   startLoop(loopId: LoopId): void;
   toast(kind: Toast["kind"], message: string): void;

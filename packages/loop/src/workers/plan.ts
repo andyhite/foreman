@@ -10,7 +10,6 @@ import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inProject, newDispatchI
 import type { BoardSnapshot, PlanCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
-import { filterInScope } from "./types.ts";
 
 async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> {
   const candidates: PlanCandidate[] = [];
@@ -33,13 +32,12 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
     findPlanCandidates(ctx),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
-  const { inScope: scopedBlocked } = await filterInScope(ctx, "plan", blockedHuman);
 
   const snapshot: BoardSnapshot = {
     backlog: [],
     todo: [],
     reviewCandidates: [],
-    blockedHumanCount: scopedBlocked.length,
+    blockedHumanCount: blockedHuman.length,
     readyBufferCount: 0,
     planCandidates,
   };
@@ -65,6 +63,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "plan",
         });
+        ctx.watchSettle(handle, "plan");
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }
@@ -78,7 +77,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { blocked: scopedBlocked.length },
+    counts: { blocked: blockedHuman.length },
   };
 }
 

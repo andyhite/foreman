@@ -99,6 +99,10 @@ export interface AppState {
   logs: LogLine[];
   logFollow: boolean;
   logFilter: string;
+  /** Whether `logs` merges both loops or shows only the focused one — view-local UI state, not config. */
+  logsAllLoops: boolean;
+  /** The `pipeline` view's id/title substring filter — view-local UI state, not config. */
+  pipelineFilter: string;
   settingsEdits: Record<string, string | number | boolean>;
   settingsError: string | null;
   config: GlobalConfig;
@@ -131,7 +135,10 @@ export type Action =
   | { type: "modalInput"; value: string }
   | { type: "setLogFollow"; follow: boolean }
   | { type: "setLogFilter"; filter: string }
+  | { type: "setLogsAllLoops"; value: boolean }
+  | { type: "setPipelineFilter"; filter: string }
   | { type: "editSetting"; key: string; value: string | number | boolean }
+  | { type: "deleteSettingEdit"; key: string }
   | { type: "clearSettingEdits" }
   | { type: "settingsError"; message: string | null }
   | { type: "config"; config: GlobalConfig }
@@ -162,6 +169,8 @@ export function initialState(input: {
     logs: [],
     logFollow: true,
     logFilter: "",
+    logsAllLoops: false,
+    pipelineFilter: "",
     settingsEdits: {},
     settingsError: null,
     config: input.config,
@@ -318,8 +327,21 @@ export function reduce(state: AppState, action: Action): AppState {
     case "setLogFilter":
       return { ...state, logFilter: action.filter };
 
+    case "setLogsAllLoops":
+      return { ...state, logsAllLoops: action.value };
+
+    case "setPipelineFilter":
+      return { ...state, pipelineFilter: action.filter };
+
     case "editSetting":
       return { ...state, settingsEdits: { ...state.settingsEdits, [action.key]: action.value } };
+
+    case "deleteSettingEdit": {
+      if (!(action.key in state.settingsEdits)) return state;
+      const settingsEdits = { ...state.settingsEdits };
+      delete settingsEdits[action.key];
+      return { ...state, settingsEdits };
+    }
 
     case "clearSettingEdits":
       return { ...state, settingsEdits: {}, settingsError: null };

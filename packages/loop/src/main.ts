@@ -236,7 +236,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   const dispatcher = await resolveDispatcher(
     {
       createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
-      createHerdr: () => new HerdrDispatcher(config),
+      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
     },
     log,
   );
@@ -370,11 +370,14 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       const ensureReports = await ensureMaintenanceProjects(linear, {
         initiativeIds: entry.initiativeIds,
         teamId: teamRef.id,
+        dryRun: config.loop.stage !== "full",
       });
       for (const report of ensureReports) {
         log(
-          `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
-            `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
+          report.projectId === null
+            ? `ensure: initiative=${report.initiativeName} (${report.initiativeId}) would create a Maintenance project (stage=${config.loop.stage})`
+            : `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
+                `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
         );
       }
     } catch (error) {

@@ -112,6 +112,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
       affectedAreas: [],
       outOfScope: [],
     });
+    const subTypeLabel = await deps.linear.ensureLabel(subIssue.type, issue.team.id);
     await deps.linear.createIssue({
       teamId: issue.team.id,
       title: subIssue.title,
@@ -119,6 +120,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
       estimate: subIssue.estimate,
       parentId: issue.id,
       projectId: issue.project?.id,
+      labelIds: [subTypeLabel.id],
     });
   }
 
@@ -137,7 +139,8 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
     });
   }
 
-  await moveToState(deps, issue, "todo");
+  if (result.readyForImplementation) await moveToState(deps, issue, "todo");
+  await releaseLock(deps, issue);
 }
 
 /** SPEC §7.3: move to In Review, file `discoveredWork` as new Backlog issues with native relations, comment the result, release the lock. */
@@ -146,11 +149,13 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
   if (!issue) throw new Error(`ImplementResult references unknown issue ${result.issueId}.`);
 
   for (const discovered of result.discoveredWork) {
+    const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue.team.id);
     const created = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: discovered.title,
       description: discovered.description,
       projectId: issue.project?.id,
+      labelIds: [discoveredTypeLabel.id],
     });
     // `blocks` means "the discovered issue blocks this one" (SPEC schema
     // wording), the orientation `blockedByRelations` reads as incoming.
@@ -212,19 +217,22 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
 }
 
 /**
- * SPEC §13.4/§19: comment the rendering; a `blocking` finding writes a
- * `foreman:findings` marker and leaves the issue for the fix cycle. A clean
- * result leaves merging entirely to the operator — no auto-merge, ever.
+ * SPEC §13.4/§19: always comment the rendering and write a `review` marker
+ * so `hasReviewForHead` detects completion. A `blocking` finding routes the
+ * issue back to Todo for the fix cycle; a clean result leaves merging
+ * entirely to the operator — no auto-merge, ever. The lock is released
+ * either way: review is a terminal result.
  */
 async function applyReview(deps: ApplyDeps, result: ReviewResult): Promise<void> {
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`ReviewResult references unknown issue ${result.issueId}.`);
 
   const human = renderReviewComment(result);
-  const blocking = result.findings.filter((finding) => finding.severity === "blocking");
-  const body =
-    blocking.length > 0 ? encodeMarker(MARKER_KIND.findings, result, human) : human;
+  const body = encodeMarker(MARKER_KIND.review, result, human);
   await deps.linear.createComment({ issueId: issue.id, body });
+  const blocking = result.findings.filter((finding) => finding.severity === "blocking");
+  if (blocking.length > 0) await moveToState(deps, issue, "todo");
+  await releaseLock(deps, issue);
 }
 
 /** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no `blocked:*` label, back to Todo. */

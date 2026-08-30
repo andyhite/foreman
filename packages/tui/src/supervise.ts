@@ -10,7 +10,7 @@
  * for the real failure.
  */
 
-import { closeSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync } from "node:fs";
 import { spawn } from "node:child_process";
 import type { GlobalConfig, LoopId } from "@foreman/core";
 import {
@@ -74,6 +74,7 @@ export async function startLoop(
 
   let fd: number;
   try {
+    mkdirSync(paths.dir, { recursive: true });
     fd = openSync(paths.log, "a");
   } catch (error) {
     return { started: false, pid: null, message: `could not open log file ${paths.log}: ${String(error)}` };
@@ -88,11 +89,23 @@ export async function startLoop(
     closeSync(fd);
     return { started: false, pid: null, message: `spawn failed: ${String(error)}` };
   }
+  // `spawn` reports most launch failures (unresolvable binary, EACCES) through
+  // the child's `error` event, not a thrown exception — with no listener that
+  // is an uncaught exception that takes the whole TUI process down.
+  const spawnError = new Promise<Error | null>((resolve) => {
+    child.once("error", resolve);
+    child.once("spawn", () => resolve(null));
+  });
   child.unref();
   // Node never closes descriptors it hands to a child through `stdio`; the
   // child has its own reference to the fd via dup(), so the parent's copy
   // must be closed explicitly or every `s` press leaks one.
   closeSync(fd);
+
+  const failure = await spawnError;
+  if (failure) {
+    return { started: false, pid: null, message: `spawn failed: ${String(failure)}` };
+  }
 
   const info = await waitForSocket(paths.socket, 15000);
   if (!info) {

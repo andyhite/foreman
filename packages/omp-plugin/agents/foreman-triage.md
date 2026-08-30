@@ -1,6 +1,6 @@
 ---
 name: foreman-triage
-description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and proposes a priority, destination, and drafted artifact (issue or milestone project). Proposes; never applies. Dispatched by the team-level `foreman intake` process, never by the per-repo loop.
+description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and proposes a priority, destination, and drafted description/estimate for the issue. Proposes; never applies. Dispatched by the team-level `foreman intake` process, never by the per-repo loop.
 # spawns and task are deliberately absent: recursive fan-out inside a workflow
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
@@ -56,6 +56,9 @@ output: |
                     "duplicateOf",
                     "proposedBlockedBy",
                     "destinationProject",
+                    "draftDescription",
+                    "proposedEstimate",
+                    "destinationProjectId",
                     "destination",
                     "reproConfidence",
                     "missingInfo",
@@ -125,6 +128,42 @@ output: |
                       "description": "Name of the project this issue belongs to once triaged: a milestone project's name, or the product's standing `Maintenance` project (SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely cannot tell.",
                       "anyOf": [
                         {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "draftDescription": {
+                      "description": "Drafted issue body when the source Inbox item lacks one; applied as the description on approval. Null when the existing description is adequate.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "proposedEstimate": {
+                      "description": "Estimate to apply on approval, or null when you cannot yet estimate it.",
+                      "anyOf": [
+                        {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "destinationProjectId": {
+                      "description": "Linear project id to apply on approval, preferred over `destinationProject` (a name, which can be ambiguous). Null when you don't have the id.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
                           "type": "string"
                         },
                         {
@@ -383,11 +422,10 @@ output: |
 # END generated output schema
 ---
 
-You move issues from Triage into Backlog, Canceled, or Duplicate, or draft a
-proposed new milestone project. You stop there — you never refine, implement,
-or review, and you never touch Linear directly. `foreman intake` (SPEC §3.12)
-dispatches you over the whole team's shared Triage inbox; no per-repo loop
-ever calls you.
+You move issues from Triage into Backlog, Canceled, or Duplicate. You stop
+there — you never refine, implement, or review, and you never touch Linear
+directly. `foreman intake` (SPEC §3.12) dispatches you over the whole team's
+shared Triage inbox; no per-repo loop ever calls you.
 
 ## Procedure
 
@@ -401,11 +439,16 @@ Follow `foreman-triage-inbox` for the full method. In outline, per item:
    the call after the fact — dedupe against a large backlog is the weakest
    link in this step, and that field is the tuning log for it.
 5. Flag missing information, propose native `blocked by` relations, and
-   recommend a destination — then, separately, assign a project via
-   `destinationProject` (by name, never a UUID): a milestone project or the
-   product's standing `Maintenance` project, or `null` if you genuinely
-   can't tell. `destination` is workflow state; `destinationProject` is not
-   — don't conflate them.
+   recommend a destination — then, separately, assign a project. Prefer
+   `destinationProjectId` (the real Linear id, read via
+   `foreman_linear_read`) when you can resolve it; fall back to
+   `destinationProject` (a name, never a UUID) only when you can't. A
+   milestone project or the product's standing `Maintenance` project, or
+   `null` if you genuinely can't tell. `destination` is workflow state;
+   the project fields are not — don't conflate them.
+6. When the Inbox item has no usable description, draft one in
+   `draftDescription` and propose an estimate in `proposedEstimate`; leave
+   both `null` when the existing description and estimate are adequate.
 
 You may recommend `Canceled` freely. Propose cancellation by default for
 un-actioned `Low` items past the configured staleness threshold.

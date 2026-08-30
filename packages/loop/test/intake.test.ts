@@ -19,7 +19,7 @@ import type {
   TriageItem,
   WorkflowState,
 } from "@foreman/core";
-import { encodeMarker, INBOX_FILTER as INBOX, MARKER_KIND, PROPOSALS_FILTER as PROPOSED, PRIORITY, TYPE_LABEL } from "@foreman/core";
+import { DISPATCH_COMMAND, encodeMarker, INBOX_FILTER as INBOX, MARKER_KIND, PROPOSALS_FILTER as PROPOSED, PRIORITY, TYPE_LABEL } from "@foreman/core";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,7 +44,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
@@ -161,6 +161,9 @@ class FakeLinear implements LinearWriter {
   async comments(): Promise<never[]> {
     return [];
   }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
   async project(): Promise<Project | null> {
     return null;
   }
@@ -246,6 +249,9 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
     reproConfidence: "not-attempted",
     missingInfo: [],
     triageLabel: null,
+    draftDescription: null,
+    proposedEstimate: null,
+    destinationProjectId: null,
     ...overrides,
   };
 }
@@ -269,12 +275,23 @@ function makeContext(overrides: Partial<IntakeContext> & { config: GlobalConfig;
 
 describe("pastIntakeWindow — window guard (SPEC §3.12)", () => {
   it("is false before the configured window", () => {
-    expect(pastIntakeWindow("06:00", new Date("2026-06-01T05:59:00.000Z"))).toBe(false);
+    expect(pastIntakeWindow("06:00", new Date("2026-06-01T05:59:00.000Z"), "UTC")).toBe(false);
   });
 
   it("is true at and after the configured window", () => {
-    expect(pastIntakeWindow("06:00", new Date("2026-06-01T06:00:00.000Z"))).toBe(true);
-    expect(pastIntakeWindow("06:00", new Date("2026-06-01T12:00:00.000Z"))).toBe(true);
+    expect(pastIntakeWindow("06:00", new Date("2026-06-01T06:00:00.000Z"), "UTC")).toBe(true);
+    expect(pastIntakeWindow("06:00", new Date("2026-06-01T12:00:00.000Z"), "UTC")).toBe(true);
+  });
+
+  it("compares in the configured zone, not the host's, for a fixed instant", () => {
+    // 2026-06-01T10:00:00Z is 06:00 in America/New_York (EDT, UTC-4) and
+    // 19:00 in Asia/Tokyo — the window guard must follow the configured
+    // zone, giving a different answer for the same instant in each.
+    const instant = new Date("2026-06-01T10:00:00.000Z");
+    expect(pastIntakeWindow("06:00", instant, "America/New_York")).toBe(true);
+    expect(pastIntakeWindow("18:00", instant, "America/New_York")).toBe(false);
+    expect(pastIntakeWindow("06:00", instant, "Asia/Tokyo")).toBe(true);
+    expect(pastIntakeWindow("20:00", instant, "Asia/Tokyo")).toBe(false);
   });
 });
 
@@ -300,7 +317,8 @@ describe("runIntakeTick — window guard", () => {
   it("dispatches once the window has passed and the batch has not already run today", async () => {
     const config = makeConfig();
     const dispatcher = new FakeDispatcher();
-    const linear = new FakeLinear([makeIssue()], []);
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue], []);
     const ctx = makeContext({
       config,
       linear,
@@ -313,6 +331,7 @@ describe("runIntakeTick — window guard", () => {
     expect(report.dispatched).toBe(true);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]?.agent).toBe("foreman-triage");
+    expect(dispatcher.calls[0]?.command).toBe(`${DISPATCH_COMMAND.triage} ${issue.identifier}`);
   });
 
   it("does not dispatch a second batch the same calendar day", async () => {

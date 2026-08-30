@@ -131,6 +131,8 @@ export const IntakeSettingsSchema = Type.Object(
     staleLowDays: Type.Integer({ default: 90, minimum: 1 }),
     /** Inbox items handed to one triage batch. */
     batchSize: Type.Integer({ default: 20, minimum: 1 }),
+    /** IANA zone name `pastIntakeWindow` compares `window` against. Defaults to the host zone at load time. */
+    timezone: Type.String({ default: Intl.DateTimeFormat().resolvedOptions().timeZone, minLength: 1 }),
   },
   { additionalProperties: false, default: {} },
 );
@@ -171,7 +173,10 @@ export const AgentSettingsSchema = Type.Object(
      * print-mode parent is a second interrupt surface and stalls headless at
      * defaults (SPEC §17.2, §17.3).
      */
-    approvalMode: Type.String({ default: "yolo", minLength: 1 }),
+    approvalMode: Type.Union(
+      [Type.Literal("always-ask"), Type.Literal("write"), Type.Literal("yolo")],
+      { default: "yolo" },
+    ),
     herdrBin: Type.String({ default: "herdr", minLength: 1 }),
   },
   { additionalProperties: false, default: {} },

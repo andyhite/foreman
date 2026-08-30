@@ -36,8 +36,8 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
   if (inner.width <= 0 || inner.height <= 0) return;
 
   const snapshot = pane.snapshot;
-  if (!snapshot || pane.connection === "offline") {
-    const message = pane.connection === "offline" ? "not running" : "connecting…";
+  if (!pane.handle.running || !snapshot || pane.connection === "offline") {
+    const message = !pane.handle.running ? "not running" : pane.connection === "offline" ? "not running" : "connecting…";
     canvas.text(inner.x + 1, inner.y + Math.floor(inner.height / 2), message, theme.toneSgr("muted"));
     canvas.text(inner.x + 1, inner.y + Math.floor(inner.height / 2) + 1, "press s to start", theme.toneSgr("muted"));
     return;

@@ -68,12 +68,12 @@ export function stateRoot(config: GlobalConfig, home?: string): string {
  * verifies a `foreman-<uid>` directory under the OS temp dir so a shared `/tmp` never leaves the
  * socket in a world-readable location (FOREMAN-SEC-003).
  */
-function socketRuntimeDir(): string {
-  const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg) return xdg;
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const dir = join(tmpdir(), `foreman-${uid}`);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+/**
+ * Rejects a runtime directory that is a symlink or not owned by the current user, matching the
+ * check the tmpdir fallback below always ran; `$XDG_RUNTIME_DIR` is trusted by callers unverified
+ * elsewhere, but it is still a path an environment variable can point anywhere.
+ */
+function assertPrivateRuntimeDir(dir: string): void {
   const stat = lstatSync(dir);
   if (stat.isSymbolicLink()) {
     throw new Error(`refusing to use ${dir} for the control socket: it is a symlink`);
@@ -81,6 +81,18 @@ function socketRuntimeDir(): string {
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
     throw new Error(`refusing to use ${dir} for the control socket: not owned by the current user`);
   }
+}
+
+function socketRuntimeDir(): string {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg) {
+    assertPrivateRuntimeDir(xdg);
+    return xdg;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const dir = join(tmpdir(), `foreman-${uid}`);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertPrivateRuntimeDir(dir);
   chmodSync(dir, 0o700);
   return dir;
 }

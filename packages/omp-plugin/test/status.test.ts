@@ -23,9 +23,23 @@ describe("readLoopState", () => {
     const path = join(directory, "status.json");
     try {
       writeFileSync(path, JSON.stringify({ schema: 1, writtenAt: "2026-01-01T00:00:00.000Z", snapshot }));
-      const state = readLoopState(path, new Date("2026-01-01T00:01:31.000Z"));
+      // cadenceMinutes 1 -> threshold = 1*2*60_000 + 30_000 = 150s; 151s later is past it.
+      const state = readLoopState(path, new Date("2026-01-01T00:02:31.000Z"), 1);
       expect(state.loop.stage).toBe("stopped/stale");
       expect(state.agents).toEqual([]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a stale but paused loop as paused, not stale", () => {
+    const directory = mkdtempSync(join(tmpdir(), "foreman-status-"));
+    const path = join(directory, "status.json");
+    try {
+      const pausedSnapshot: LoopSnapshot = { ...snapshot, runtime: { ...snapshot.runtime, state: "paused" } };
+      writeFileSync(path, JSON.stringify({ schema: 1, writtenAt: "2026-01-01T00:00:00.000Z", snapshot: pausedSnapshot }));
+      const state = readLoopState(path, new Date("2026-01-01T00:02:31.000Z"), 1);
+      expect(state.loop.stage).toBe("paused");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

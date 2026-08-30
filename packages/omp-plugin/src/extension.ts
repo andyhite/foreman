@@ -15,10 +15,11 @@ import type { BlockRecord, LinearWriter } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   ConfigError,
-  decodeMarker,
+  findMarkers,
   ensureMaintenanceProjects,
   ensureWorktree,
   isBudgetTruncation,
+  issueIdFromDispatchId,
   MARKER_KIND,
   newDispatchId,
   parseAgentOutput,
@@ -55,6 +56,11 @@ const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 const appliedDispatchIds = new Set<string>();
 const reviewDiffDirs = new Map<string, string>();
 
+/** Test-only seam: clears the in-process applied-dispatch dedup set between test cases. */
+export function __resetAppliedDispatchIdsForTest(): void {
+  appliedDispatchIds.clear();
+}
+
 function toApplyDeps(): ApplyDeps {
   return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry() };
 }
@@ -82,6 +88,7 @@ function toGuardDeps(): TaskGuardDeps {
       return path;
     },
     liveDispatchIds,
+    releaseLiveDispatch,
     contextDigest: async (projectId) => (projectId ? getContextDigest(projectId) : ""),
   };
 }
@@ -89,20 +96,31 @@ function toGuardDeps(): TaskGuardDeps {
 function markerAppliedTracker(): AppliedTracker {
   return {
     wasApplied: async (dispatchId: string) => {
-      const match = /^foreman-[a-z]+-(\S+)-\d{8}T\d{6}Z-\w+$/.exec(dispatchId);
-      const issueId = match?.[1];
+      const issueId = issueIdFromDispatchId(dispatchId);
       if (!issueId) return false;
       const issue = await getLinear().issue(issueId, { includeComments: true });
-      return issue?.comments.some(
-        (comment) => decodeMarker<{ dispatchId?: unknown }>(MARKER_KIND.dispatchApplied, comment.body)?.dispatchId === dispatchId,
-      ) ?? false;
+      if (!issue) return false;
+      // Fail closed on unverifiable authorship: a forged `dispatch-applied`
+      // marker from another user must never mask a genuine unapplied
+      // dispatch, so an unresolved viewer id means "not applied yet"
+      // (worst case: a redundant apply attempt, never a bypassed dedup).
+      let viewerId: string | null;
+      try {
+        viewerId = await getLinear().viewerId();
+      } catch {
+        viewerId = null;
+      }
+      if (viewerId === null) return false;
+      return findMarkers<{ dispatchId?: unknown }>(MARKER_KIND.dispatchApplied, issue.comments, {
+        authoredBy: viewerId,
+      }).some((marker) => marker.data.dispatchId === dispatchId);
     },
   };
 }
 
-/** Wraps a `BlockRecord` in the `AgentOutcome` union `applyOutcome` consumes. */
-function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord): AgentOutcome {
-  return { kind: "blocked", agent: agentName, block, issueId: block.blockedByIssues[0] ?? "" };
+/** Wraps a `BlockRecord` in the `AgentOutcome` union `applyOutcome` consumes, targeting the issue the dispatch's lock was taken against. */
+export function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord, target: string | null): AgentOutcome {
+  return { kind: "blocked", agent: agentName, block, issueId: target ?? "" };
 }
 
 
@@ -129,54 +147,116 @@ function isForemanAgentName(agent: string): agent is ForemanAgentName {
   return agent in AGENT_OUTPUT_SCHEMAS;
 }
 
-async function handleCaptured(
+/**
+ * Applies an `AgentOutcome` after verifying it targets the issue this
+ * dispatch's lock was actually taken against (Step 4): a result naming a
+ * different issue than the dispatch's `FOREMAN-ISSUE` line is rejected
+ * without mutating either issue, comments on the locked issue, releases its
+ * lock, and notifies the operator, instead of silently applying an
+ * agent-supplied identifier. Triage and plan are exempt — they operate on a
+ * batch or a project respectively, not the single issue a dispatch locks.
+ */
+export async function applyBoundResult(
+  deps: ApplyDeps,
+  agent: string,
+  outcome: AgentOutcome,
+  target: string | null,
+  dispatchId: string,
+  notify: (message: string, level: "warn" | "error") => void,
+): Promise<void> {
+  if (
+    outcome.kind === "result" &&
+    target &&
+    agent !== "foreman-plan" &&
+    agent !== "foreman-triage" &&
+    "issueId" in outcome.result &&
+    outcome.result.issueId !== target
+  ) {
+    const reported = outcome.result.issueId;
+    await deps.linear.createComment({
+      issueId: target,
+      body: `Foreman rejected this dispatch result: it reported issue ${reported}, but this dispatch locked ${target}.`,
+    });
+    const lockedIssue = await deps.linear.issue(target);
+    const running = lockedIssue?.labels.find((label) => label.name === "agent:running");
+    if (running) await deps.linear.updateIssue(lockedIssue!.id, { removedLabelIds: [running.id] });
+    notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
+    return;
+  }
+  await applyOutcome(deps, outcome);
+  const issueId = issueIdOf(outcome);
+  if (issueId) await markApplied(deps, issueId, dispatchId);
+}
+
+/**
+ * Applies one captured dispatch result. Exported (with an injectable `deps`
+ * and `tracker`, defaulting to the module's live `toApplyDeps()` and
+ * `markerAppliedTracker()`) so tests can exercise the invalid-result state
+ * restore and the `appliedDispatchIds` failure-recovery behavior without a
+ * full runtime.
+ */
+export async function handleCaptured(
   dispatchId: string,
   agent: string,
   data: unknown,
   aborted: boolean,
+  lockedIssueId: string | null,
+  previousStateId: string | null,
   notify: (message: string, level: "warn" | "error") => void,
+  deps: ApplyDeps = toApplyDeps(),
+  tracker: AppliedTracker = markerAppliedTracker(),
 ): Promise<void> {
   if (!isForemanAgentName(agent) || appliedDispatchIds.has(dispatchId)) return;
-  appliedDispatchIds.add(dispatchId);
+  const target = lockedIssueId ?? issueIdFromDispatchId(dispatchId);
   try {
     const parsed = parseAgentOutput(agent, data);
-    const deps = toApplyDeps();
     if (parsed.kind === "invalid") {
       if (isBudgetTruncation({ aborted, problems: parsed.problems })) {
-        const match = /^foreman-[a-z]+-(\S+)-/.exec(dispatchId);
-        const issueId = match?.[1];
-        if (issueId) {
+        if (target) {
           await applyOutcome(deps, blockedOutcome(agent, {
             blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
             whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
             options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
-            costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [issueId],
-          }));
+            costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
+          }, target));
         }
       } else {
-        const match = /^foreman-[a-z]+-(\S+)-/.exec(dispatchId);
-        const issueId = match?.[1];
-        const issue = issueId ? await deps.linear.issue(issueId, { includeComments: true }) : null;
+        const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
         if (issue) {
           await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
           const running = issue.labels.find((label) => label.name === "agent:running");
-          if (running) await deps.linear.updateIssue(issue.id, { removedLabelIds: [running.id] });
+          const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
+          if (running) mutation.removedLabelIds = [running.id];
+          // The guard already moved this issue Todo → In Progress (implement
+          // only); removing `agent:running` alone would strand it there with
+          // no live agent and no retry, since `routeImplement` only selects
+          // Todo. Restore the dispatch's recorded pre-claim state — a no-op
+          // for refine/review, which never move state (Step 5 item 1).
+          if (previousStateId && issue.state.id !== previousStateId) mutation.stateId = previousStateId;
+          if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
         }
         notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
       }
+      appliedDispatchIds.add(dispatchId);
       return;
     }
-    await sink({ dispatchId, agent, data, aborted }, markerAppliedTracker(), async (captured) => {
-      const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-      await applyOutcome(deps, outcome);
-      const issueId = issueIdOf(outcome);
-      if (issueId) await markApplied(deps, issueId, captured.dispatchId);
+    await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
+      const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
+      await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, notify);
     });
+    // Recorded only after the sink callback (applyOutcome + markApplied)
+    // resolves: if either throws, the id must not stay poisoned in the set,
+    // or a redelivery of the same result through the other subscribed
+    // channel is dropped with no durable marker ever written (Step 5 item
+    // 2). The Linear-backed `markerAppliedTracker` remains the durable dedup.
+    appliedDispatchIds.add(dispatchId);
+  } catch (error) {
+    appliedDispatchIds.delete(dispatchId);
+    throw error;
   } finally {
     releaseLiveDispatch(dispatchId);
-    const issueId = /^foreman-review-(\S+)-/.exec(dispatchId)?.[1];
-    const dir = issueId ? reviewDiffDirs.get(issueId) : undefined;
-    if (dir && issueId) { rmSync(dir, { recursive: true, force: true }); reviewDiffDirs.delete(issueId); }
+    const dir = target ? reviewDiffDirs.get(target) : undefined;
+    if (dir && target) { rmSync(dir, { recursive: true, force: true }); reviewDiffDirs.delete(target); }
   }
 }
 
@@ -378,14 +458,14 @@ export default function createForemanExtension(pi: ExtensionAPI) {
   pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (event.toolName !== "task") return;
     for (const item of extractFromToolResult(event)) {
-      try { await handleCaptured(item.dispatchId, item.agent, item.data, item.aborted, ctx.ui.notify); }
+      try { await handleCaptured(item.dispatchId, item.agent, item.data, item.aborted, item.issueId, item.previousStateId, ctx.ui.notify); }
       catch (error) { reportFailure(ctx)(error); }
     }
   });
   const lifecycleHandler = async (payload: unknown, ctx: ExtensionContext) => {
     const captured = extractFromLifecycle(payload);
     if (!captured) return;
-    try { await handleCaptured(captured.dispatchId, captured.agent, captured.data, captured.aborted, ctx.ui.notify); }
+    try { await handleCaptured(captured.dispatchId, captured.agent, captured.data, captured.aborted, captured.issueId, captured.previousStateId, ctx.ui.notify); }
     catch (error) { reportFailure(ctx)(error); }
   };
   pi.on("task:subagent:lifecycle", lifecycleHandler);

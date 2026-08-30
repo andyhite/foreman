@@ -12,7 +12,10 @@ import {
   GitHubClient,
   branchNameFor,
   inState,
+  latestMarker,
+  MARKER_KIND,
   resolveState,
+  type MergedRecord,
 } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
@@ -30,7 +33,20 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   }
 
   const github = new GitHubClient();
-  const inReviewIssues = await ctx.linear.issues({ filter: inState("In Review"), limit: 500 });
+  let viewerId: string | null;
+  try {
+    viewerId = await ctx.linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  const inReviewIssues = await ctx.linear.issues({
+    filter: inState("In Review"),
+    limit: 500,
+    includeComments: true,
+  });
+  if (inReviewIssues.length >= 500) {
+    ctx.log(`merge-detect: query returned a full page of 500 In Review issues; some may not have been checked this pass.`);
+  }
   const { inScope: inReview, skipped: scopeSkips } = await filterInScope(ctx, "review", inReviewIssues);
   skipped.push(...scopeSkips);
 
@@ -40,11 +56,19 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
     try {
       let merged = false;
       if (ctx.entry.pr.required) {
-        const pr = await github.prForBranch(repoPath, branch, { state: "all" });
-        merged = pr ? await github.isMerged(repoPath, pr.number) : false;
+        const pr = await github.prForBranch(repoPath, branch, { state: "all", base: ctx.entry.baseBranch });
+        merged = pr !== null && pr.baseBranch === ctx.entry.baseBranch && (await github.isMerged(repoPath, pr.number));
       } else {
-        const mergedBranches = await github.mergedBranches(repoPath, ctx.entry.baseBranch, [branch]);
-        merged = mergedBranches.includes(branch);
+        const mergedMarker =
+          viewerId !== null
+            ? latestMarker<MergedRecord>(MARKER_KIND.merged, issue.comments, { authoredBy: viewerId })
+            : null;
+        if (mergedMarker && mergedMarker.data.branch === branch && mergedMarker.data.baseBranch === ctx.entry.baseBranch) {
+          merged = true;
+        } else {
+          const mergedBranches = await github.mergedBranches(repoPath, ctx.entry.baseBranch, [branch]);
+          merged = mergedBranches.includes(branch);
+        }
       }
 
       if (!merged) {

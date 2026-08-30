@@ -94,6 +94,39 @@ function assertInitiativesUnique(config: GlobalConfig, describeFor: string): voi
   }
 }
 
+/** Rejects a `repos` alias that is empty, whitespace-only, or contains a path/label-hostile character (SPEC §3.10): the alias is also the `--repo` argument, the herdr workspace label, and a state-directory segment. */
+function assertRepoAliasesValid(config: GlobalConfig, describeFor: string): void {
+  const problems: string[] = [];
+  for (const alias of Object.keys(config.repos)) {
+    if (alias.trim().length === 0) {
+      problems.push(`repos key ${JSON.stringify(alias)} must not be empty or whitespace-only`);
+    } else if (/[:/\\]/.test(alias)) {
+      problems.push(`repos key ${JSON.stringify(alias)} must not contain ":", "/", or "\\"`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
+  }
+}
+
+/** Rejects `loop.mergeDetection: false` when any resolved repo entry has `pr.required: false` (SPEC §3.10): with no PR and no merge detection there is no path to Done at all. */
+function assertMergeDetectionReachable(config: GlobalConfig, describeFor: string): void {
+  if (config.loop.mergeDetection) return;
+  const problems: string[] = [];
+  for (const alias of Object.keys(config.repos)) {
+    const entry = config.repos[alias]!;
+    const merged = mergeRepoSettings(config.repoDefaults, entry);
+    if (!merged.pr.required) {
+      problems.push(
+        `repos.${alias} has pr.required=false with loop.mergeDetection=false; there would be no path to Done`,
+      );
+    }
+  }
+  if (problems.length > 0) {
+    throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
+  }
+}
+
 /** `~` expands to `home` (default `os.homedir()`); any other path is returned unchanged. */
 export function expandHome(p: string, home: string = homedir()): string {
   if (p === "~") return home;
@@ -142,7 +175,11 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
     const problems = formatValidationErrors(GlobalConfigSchema, defaulted);
     throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, problems);
   }
-  return defaulted as GlobalConfig;
+  const config = defaulted as GlobalConfig;
+  assertRepoAliasesValid(config, describeFor);
+  assertInitiativesUnique(config, describeFor);
+  assertMergeDetectionReachable(config, describeFor);
+  return config;
 }
 
 /**
@@ -170,7 +207,6 @@ export function loadGlobalConfig(options?: {
   }
 
   const config = defaultAndValidateGlobalConfig(parsed, path);
-  assertInitiativesUnique(config, path);
   if (Object.keys(config.repos).length === 0) {
     warnings.push("No entries in config.repos; no repo is Foreman-managed yet.");
   }

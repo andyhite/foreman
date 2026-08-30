@@ -13,12 +13,10 @@
 
 export const DEFAULT_GITHUB_REPO = "andyhite/foreman";
 export const DEFAULT_OMP_PLUGIN_NAME = "foreman";
+/** Marketplace id the catalog at `.omp-plugin/marketplace.json` declares. Fixed rather than derived from
+ * the repo name, so a fork whose copied catalog still declares `foreman` still installs correctly. */
+export const FOREMAN_MARKETPLACE_NAME = "foreman";
 export type OmpScope = "user" | "project";
-
-/** Marketplace id omp assigns a GitHub-sourced marketplace: the repo's own name. */
-export function marketplaceNameFor(githubRepo: string): string {
-  return githubRepo.split("/").at(-1) ?? githubRepo;
-}
 
 export function ompLinkArgv(pluginDir: string, scope: OmpScope): string[] {
   return ["plugin", "link", pluginDir, "--scope", scope];
@@ -28,7 +26,7 @@ export function ompMarketplaceAddArgv(githubRepo: string): string[] {
   return ["plugin", "marketplace", "add", githubRepo];
 }
 
-export function ompInstallArgv(pluginName: string, githubRepo: string, scope: OmpScope): string[] {
-  return ["plugin", "install", `${pluginName}@${marketplaceNameFor(githubRepo)}`, "--scope", scope];
+export function ompInstallArgv(pluginName: string, scope: OmpScope): string[] {
+  return ["plugin", "install", `${pluginName}@${FOREMAN_MARKETPLACE_NAME}`, "--scope", scope];
 }
 

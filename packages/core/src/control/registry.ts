@@ -50,6 +50,14 @@ export interface DiscoverOptions {
   staleAfterMs?: number;
 }
 
+/** How old `status.json` may be before it's treated as a dead loop rather than
+ * a healthy one between poll ticks — two cadences plus a margin, since a
+ * fixed threshold shorter than the loop's own publish interval reports a
+ * healthy loop as stale for most of every cycle. */
+export function statusStaleThresholdMs(cadenceMinutes: number): number {
+  return cadenceMinutes * 2 * 60_000 + 30_000;
+}
+
 /** Mirrors `nodeProcessProbe` in `packages/loop/src/supervisor.ts` — the two must agree on what "alive" means for the same lock files. */
 export function pidAlive(pid: number): boolean {
   try {
@@ -136,7 +144,7 @@ async function buildHandle(
 /** Every registry alias plus the intake loop, in that order, repo aliases sorted. */
 export async function discoverLoops(config: GlobalConfig, options: DiscoverOptions = {}): Promise<LoopHandle[]> {
   const home = options.home;
-  const resolved = { probe: options.probe ?? true, staleAfterMs: options.staleAfterMs ?? 90_000 };
+  const resolved = { probe: options.probe ?? true, staleAfterMs: options.staleAfterMs ?? statusStaleThresholdMs(config.loop.cadenceMinutes) };
   const aliases = Object.keys(config.repos).sort();
   const handles = await Promise.all([
     ...aliases.map((alias) => {
@@ -154,7 +162,7 @@ export async function loopHandle(
   id: LoopId,
   options: DiscoverOptions = {},
 ): Promise<LoopHandle> {
-  const resolved = { probe: options.probe ?? true, staleAfterMs: options.staleAfterMs ?? 90_000 };
+  const resolved = { probe: options.probe ?? true, staleAfterMs: options.staleAfterMs ?? statusStaleThresholdMs(config.loop.cadenceMinutes) };
   if (id === INTAKE_LOOP_ID) {
     return buildHandle(config, id, "intake", null, null, resolved, options.home);
   }

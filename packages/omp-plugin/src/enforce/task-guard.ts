@@ -81,12 +81,22 @@ export interface TaskGuardDeps {
   writeDiffFile: (issueId: string, diff: string) => Promise<string>;
   /** Dispatch IDs the extension currently believes are live, for lock-collision checks. */
   liveDispatchIds: () => readonly string[];
+  /** Unregisters a dispatch id from the live registry — called for every claim `unwindPrepared` unwinds, even when the Linear rollback itself fails. */
+  releaseLiveDispatch: (dispatchId: string) => void;
   /** The two-layer product/project Context digest (SPEC §4.7) to append to the shared `context` string. */
   contextDigest: (projectId: string | null) => Promise<string>;
 }
 
 const FOREMAN_PREFIX = "foreman-";
 const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
+
+// The extension mints a dispatch id and hands it to the child via
+// `FOREMAN_DISPATCH_ID` (print) or `--env` (herdr) so the guard's claim uses
+// the same id the caller is already tracking (SPEC §11, Step 6 item 3) —
+// otherwise the guard mints a second id and the reaper's liveness
+// cross-reference can never match. Taken once per process and cleared: a
+// session that prepares several items must not reuse one inherited id.
+let inheritedDispatchId: string | null = process.env.FOREMAN_DISPATCH_ID ?? null;
 
 type Stage = "triage" | "plan" | "refine" | "implement" | "review";
 
@@ -113,9 +123,26 @@ async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Iss
   return issue;
 }
 
-function checkLockFree(deps: TaskGuardDeps, issue: Issue): GateResult {
+async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateResult> {
   if (!hasLabel(issue, AGENT_LABEL.running)) return { ok: true, failures: [] };
-  const found = readLockComment(issue.comments);
+  let viewerId: string | null;
+  try {
+    viewerId = await deps.linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  if (viewerId === null) {
+    return {
+      ok: false,
+      failures: [
+        {
+          code: "agent-running",
+          message: `\`${AGENT_LABEL.running}\` held and lock authorship could not be verified (viewer id unavailable); refusing to dispatch.`,
+        },
+      ],
+    };
+  }
+  const found = readLockComment(issue.comments, viewerId);
   const state = lockState(found?.data ?? null, {
     now: deps.now(),
     liveDispatchIds: deps.liveDispatchIds(),
@@ -234,7 +261,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   if (blockedLabels.length > 0) {
     throw new Error(`${identifier} carries \`${blockedLabels.join("`, `")}\`; dispatch refused.`);
   }
-  const lockFree = checkLockFree(deps, issue);
+  const lockFree = await checkLockFree(deps, issue);
   if (!lockFree.ok) {
     throw new Error(`${identifier}: ${gateSummary("implementation", lockFree)}`);
   }
@@ -246,7 +273,8 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   }
 
   const now = deps.now();
-  const dispatchId = deps.newDispatchId(agent, identifier, now);
+  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, identifier, now);
+  inheritedDispatchId = null;
   const ttlMs = lockTtlMs(deps.config);
 
   let worktreePath: string | null = null;
@@ -287,6 +315,12 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     "FOREMAN-BRANCH": branch ?? undefined,
     "FOREMAN-DIFF": diffPath ?? undefined,
     "FOREMAN-BASE": baseBranch ?? undefined,
+    // Only implement dispatches move state (Todo → In Progress); refine and
+    // review never do, so there is nothing to restore for them and the
+    // marker is omitted. Read back by the extension at invalid-result
+    // handling time (Step 5 item 1) to avoid stranding the issue In
+    // Progress with no live agent and no retry.
+    "FOREMAN-PREV-STATE": stage === "implement" ? previousStateId : undefined,
   });
 
   return {
@@ -334,6 +368,11 @@ async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGu
       } catch {
         // Preserve the original preparation failure. A reaper can recover a
         // cleanup that fails because Linear itself is unavailable.
+      } finally {
+        // A failed Linear rollback above must still drop this id from the
+        // live registry, or the reaper treats an already-unwound claim as
+        // live forever (Step 5 item 4).
+        deps.releaseLiveDispatch(cleanup.dispatchId);
       }
     }),
   );

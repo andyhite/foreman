@@ -14,6 +14,7 @@
 
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { nodeRunner } from "@foreman/core";
 import { runIntake, runLoop } from "@foreman/loop";
 import { runTui } from "@foreman/tui";
@@ -29,7 +30,8 @@ interface ParsedArgs {
   command: "setup" | "init" | null;
   yes: boolean;
   scope: OmpScope | null;
-  ompMode: PluginMode | null;
+  link: boolean;
+  ompMode: "install" | "skip" | null;
   githubRepo: string;
   repoPath: string | null;
   path: string | null;
@@ -53,9 +55,10 @@ Commands:
 Run \`setup\` once per machine, \`init\` once per repo, then \`loop\` per repo.
 
 Options for setup:
+  --link                     Dev mode: link the omp plugin and the foreman CLI to this checkout's source (no rebuild-to-see-changes).
   --scope <user|project>     omp plugin install scope (default: prompted, "user").
-  --omp <link|install|skip>  omp plugin mode; "link" symlinks this checkout ("dev mode").
-  --repo-source <owner/repo>  GitHub source for "install" modes (default: ${DEFAULT_GITHUB_REPO}).
+  --omp <install|skip>       omp plugin mode when not using --link (default: prompted, "install").
+  --repo-source <owner/repo>  GitHub source for "install" mode (default: ${DEFAULT_GITHUB_REPO}).
   --repo <path>              Path to the foreman checkout (default: auto-detected).
   --skip-build                Skip \`bun install && bun run build\`.
 
@@ -69,9 +72,9 @@ Options for both:
   --help, -h                  Show this text.
 `;
 
-function parseMode(name: string, value: string | undefined): PluginMode {
-  if (value !== "link" && value !== "install" && value !== "skip") {
-    throw new Error(`${name} must be one of link|install|skip, got "${value ?? ""}"`);
+function parseMode(name: string, value: string | undefined): "install" | "skip" {
+  if (value !== "install" && value !== "skip") {
+    throw new Error(`${name} must be one of install|skip, got "${value ?? ""}"`);
   }
   return value;
 }
@@ -81,6 +84,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     command: null,
     yes: false,
     scope: null,
+    link: false,
     ompMode: null,
     githubRepo: DEFAULT_GITHUB_REPO,
     repoPath: null,
@@ -119,6 +123,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.scope = value;
         break;
       }
+      case "--link":
+        parsed.link = true;
+        break;
       case "--omp":
         if (argv[i + 1] === undefined) throw new Error("missing value for --omp");
         parsed.ompMode = parseMode("--omp", argv[++i]);
@@ -157,6 +164,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         if (arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg}`);
         throw new Error(`Unexpected positional argument "${arg}"; expected a command or an option value.`);
     }
+  }
+  if (parsed.link && parsed.ompMode) {
+    throw new Error("--link and --omp are mutually exclusive; --link already links the omp plugin.");
   }
   return parsed;
 }
@@ -224,13 +234,14 @@ async function main(): Promise<void> {
     }
 
     const repoRoot = resolveRepoRoot(args.repoPath);
+    const requestedMode: PluginMode | null = args.link ? "link" : args.ompMode;
     await runWizard(
       {
         home: args.home ?? homedir(),
         repoRoot,
         githubRepo: args.githubRepo,
         scope: args.scope,
-        ompMode: nonInteractive ? (args.ompMode ?? "link") : args.ompMode,
+        ompMode: nonInteractive ? (requestedMode ?? "link") : requestedMode,
         skipBuild: args.skipBuild,
         skipLinear: args.skipLinear,
       },
@@ -242,14 +253,16 @@ async function main(): Promise<void> {
 }
 
 /*
- * Compares against the *resolved* argv[1] path: Node does not resolve
- * symlinks when populating argv[1] (Bun does), so invoking this file
+ * Compares against the *resolved* argv[1] path, encoded via `pathToFileURL`
+ * rather than a hand-built `file://` prefix: a space, `#`, or `%` anywhere in
+ * the install directory needs URL-escaping that `import.meta.url` already
+ * carries, and a naive template-string prefix never does. Node also does not
+ * resolve symlinks when populating argv[1] (Bun does), so invoking this file
  * through a symlinked `foreman` binary — the normal install shape — left
  * argv[1] pointing at the symlink while `import.meta.url` already reflects
- * the real path underneath. The mismatch silently skipped `main()` (exit 0,
- * no output) with no built-in signal, so this must resolve argv[1] first.
+ * the real path underneath; `realpathSync` closes that gap too.
  */
-const isMainModule = process.argv[1] && import.meta.url === `file://${realpathSync(process.argv[1])}`;
+const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
 if (isMainModule) {
   main().catch((error) => {
     console.error(`[foreman] fatal: ${String(error)}`);

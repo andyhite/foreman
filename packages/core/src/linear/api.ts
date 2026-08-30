@@ -33,7 +33,7 @@ import type {
  */
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body: string },
+  init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
 ) => Promise<Response>;
 
 /** A Linear `IssueFilter`, passed through to GraphQL untouched. */
@@ -79,6 +79,8 @@ export interface LinearReader {
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
   projects(): Promise<ProjectRef[]>;
+  /** The Linear user id the API key belongs to. Used to bind marker trust to the credential's own authorship. */
+  viewerId(): Promise<string>;
 }
 
 export interface IssueMutation {

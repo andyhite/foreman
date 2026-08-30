@@ -12,6 +12,7 @@ export * from "./apply/index.ts";
 export * from "./config/index.ts";
 export * from "./control/index.ts";
 export * from "./dispatch/index.ts";
+export * from "./domain/commands.ts";
 export * from "./domain/labels.ts";
 export * from "./domain/priority.ts";
 export * from "./domain/states.ts";

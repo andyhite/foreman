@@ -19,6 +19,7 @@ import {
   LABEL_GROUP,
   lockTtlMs,
   MARKER_KIND,
+  resolveRepoEntry,
   worktreePathFor,
   type AgentStatus,
   type AgentView,
@@ -171,13 +172,16 @@ export function buildSnapshot(input: BuildSnapshotInput): LoopSnapshot {
   const nextTickAt = candidateNextTicks[0] ?? null;
 
   const ttlMs = lockTtlMs(input.config);
+  const worktreePattern = input.alias && input.config.repos[input.alias]
+    ? resolveRepoEntry(input.config, input.alias).worktreePattern
+    : input.config.repoDefaults.worktreePattern;
   const agents: AgentView[] = input.bookkeeping.inFlight.map((entry) => {
     const started = new Date(entry.startedAt).getTime();
     const ageMs = nowMs - started;
     const snapshot = input.agentStatuses.get(entry.dispatchId) ?? null;
     const worktree =
       entry.issueId && input.repoPath
-        ? worktreePathFor(input.config.repoDefaults.worktreePattern, input.repoPath, { identifier: entry.issueId })
+        ? worktreePathFor(worktreePattern, input.repoPath, { identifier: entry.issueId })
         : null;
     return {
       dispatchId: entry.dispatchId,

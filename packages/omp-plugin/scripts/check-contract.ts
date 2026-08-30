@@ -50,11 +50,13 @@ const WRONG_TOOL_NAMES: Record<string, string> = {
 interface Frontmatter {
   scalars: Map<string, string>;
   blocks: Map<string, string>;
+  sequences: Map<string, string[]>;
 }
 
 /**
- * Minimal frontmatter reader: top-level `key: value` scalars plus `key: |`
- * block scalars. Deliberately not a YAML parser — the plugin has no runtime
+ * Minimal frontmatter reader: top-level `key: value` scalars, `key: |`
+ * block scalars, and `key:` followed by a `- item` block sequence.
+ * Deliberately not a YAML parser — the plugin has no runtime
  * dependencies and this only has to read files this repo generates and owns.
  */
 function readFrontmatter(path: string): Frontmatter {
@@ -66,6 +68,7 @@ function readFrontmatter(path: string): Frontmatter {
   const lines = text.slice(4, close).split("\n");
   const scalars = new Map<string, string>();
   const blocks = new Map<string, string>();
+  const sequences = new Map<string, string[]>();
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index] as string;
@@ -84,9 +87,56 @@ function readFrontmatter(path: string): Frontmatter {
       blocks.set(key, collected.join("\n"));
       continue;
     }
+    if (rest === "") {
+      const items: string[] = [];
+      while (index + 1 < lines.length) {
+        const seqMatch = /^\s*-\s*(.*)$/.exec(lines[index + 1] as string);
+        if (!seqMatch) break;
+        items.push(decodeYamlScalar((seqMatch[1] as string).trim()));
+        index++;
+      }
+      if (items.length > 0) {
+        sequences.set(key, items);
+        continue;
+      }
+    }
     scalars.set(key, rest.trim());
   }
-  return { scalars, blocks };
+  return { scalars, blocks, sequences };
+}
+
+/** Decodes a YAML flow scalar: strips a single/double-quote wrapper and
+ * resolves the escapes that form legitimately implies, rather than only
+ * stripping the surrounding quote characters. */
+function decodeYamlScalar(raw: string): string {
+  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+    const escapes: Record<string, string> = { n: "\n", t: "\t", '"': '"', "\\": "\\" };
+    return raw.slice(1, -1).replace(/\\(.)/g, (_, ch: string) => escapes[ch] ?? ch);
+  }
+  if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1).replace(/''/g, "'");
+  }
+  return raw;
+}
+
+/** Splits a comma-separated list on commas that sit outside `()`/`{}`, so a
+ * brace glob like `tool:edit({a,b}.ts)` survives as one token. */
+function splitOutsideParens(input: string): string[] {
+  const tokens: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of input) {
+    if (ch === "(" || ch === "{") depth++;
+    else if (ch === ")" || ch === "}") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
+      tokens.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  tokens.push(current.trim());
+  return tokens.filter((token) => token.length > 0);
 }
 
 function parseFlowList(raw: string | undefined): string[] {
@@ -221,8 +271,16 @@ for (const dir of skillDirs) {
     problems.push(`skills/${dir}/: no SKILL.md`);
     continue;
   }
-  if (!readFrontmatter(path).scalars.get("description")) {
+  const { scalars } = readFrontmatter(path);
+  if (!scalars.get("description")) {
     problems.push(`skills/${dir}/SKILL.md: missing description, which providers require`);
+  }
+  const declaredName = scalars.get("name");
+  if (declaredName !== dir) {
+    problems.push(
+      `skills/${dir}/SKILL.md: frontmatter name "${declaredName}" does not match its directory — ` +
+        "provider resolution looks up skills by name, so a mismatch fails to resolve",
+    );
   }
 }
 
@@ -232,21 +290,32 @@ for (const file of readdirSync(join(pluginRoot, "commands")).filter((f) => f.end
 }
 
 for (const file of readdirSync(join(pluginRoot, "rules")).filter((f) => f.endsWith(".md"))) {
-  const { scalars } = readFrontmatter(join(pluginRoot, "rules", file));
+  const { scalars, sequences } = readFrontmatter(join(pluginRoot, "rules", file));
   const label = `rules/${file}`;
   if (!scalars.get("description")) {
     problems.push(`${label}: missing description, so it is excluded from the rulebook`);
   }
   const condition = scalars.get("condition");
   if (condition !== undefined) {
-    const raw = condition.replace(/^["']|["']$/g, "");
-    const insensitive = raw.startsWith("(?i)");
-    try { new RegExp(insensitive ? raw.slice(4) : raw, insensitive ? "i" : ""); }
+    let pattern = decodeYamlScalar(condition);
+    let flags = "";
+    let stripped = true;
+    while (stripped) {
+      stripped = false;
+      for (const [prefix, flag] of [["(?i)", "i"], ["(?m)", "m"], ["(?s)", "s"]] as const) {
+        if (pattern.startsWith(prefix)) {
+          if (!flags.includes(flag)) flags += flag;
+          pattern = pattern.slice(prefix.length);
+          stripped = true;
+        }
+      }
+    }
+    try { new RegExp(pattern, flags); }
     catch (error) { problems.push(`${label}: condition is not a valid regex: ${String(error)}`); }
   }
-  const scope = scalars.get("scope");
-  if (scope !== undefined) {
-    for (const token of scope.replace(/^["']|["']$/g, "").split(",").map((value) => value.trim())) {
+  const scopeTokens = sequences.get("scope") ?? (scalars.has("scope") ? splitOutsideParens(decodeYamlScalar(scalars.get("scope") as string)) : undefined);
+  if (scopeTokens) {
+    for (const token of scopeTokens) {
       if (!/^(text|thinking|tool|toolcall|tool:[A-Za-z][\w-]*\([^)]*\))$/.test(token)) {
         problems.push(`${label}: invalid scope token "${token}"`);
       }

@@ -93,10 +93,21 @@ export class HerdrDispatcher implements Dispatcher {
 
   readonly #config: GlobalConfig;
   readonly #runner: HerdrRunner;
+  readonly #scrubEnv: readonly string[];
 
-  constructor(config: GlobalConfig, options?: { runner?: HerdrRunner }) {
+  constructor(config: GlobalConfig, options?: { runner?: HerdrRunner; scrubEnv?: string[] }) {
     this.#config = config;
     this.#runner = options?.runner ?? nodeHerdrRunner;
+    this.#scrubEnv = options?.scrubEnv ?? [];
+  }
+
+  /** Runs an herdr command and throws with its stderr when it exits non-zero. */
+  async #runChecked(argv: string[]): Promise<{ stdout: string }> {
+    const { stdout, stderr, code } = await this.#runner.run(argv);
+    if (code !== 0) {
+      throw new Error(`herdr ${argv.slice(1).join(" ")} failed (exit ${code}): ${stderr.trim()}`);
+    }
+    return { stdout };
   }
 
   async available(): Promise<boolean> {
@@ -111,7 +122,7 @@ export class HerdrDispatcher implements Dispatcher {
     // Maps save a little parsing within one process, but are insufficient for
     // a loop restarted around existing Herdr state. Re-read Herdr's own list
     // first so "one workspace per repo" holds across process lifetimes.
-    const { stdout } = await this.#runner.run([
+    const { stdout } = await this.#runChecked([
       this.#config.agent.herdrBin,
       "workspace",
       "list",
@@ -122,7 +133,7 @@ export class HerdrDispatcher implements Dispatcher {
       return existing.workspace_id;
     }
 
-    const created = await this.#runner.run([
+    const created = await this.#runChecked([
       this.#config.agent.herdrBin,
       "workspace",
       "create",
@@ -139,7 +150,7 @@ export class HerdrDispatcher implements Dispatcher {
     // Like workspaces, tabs outlive this dispatcher instance. A process restart
     // must locate the prior tab by its stable issue label rather than create a
     // duplicate for every resumed dispatch.
-    const { stdout } = await this.#runner.run([
+    const { stdout } = await this.#runChecked([
       this.#config.agent.herdrBin,
       "tab",
       "list",
@@ -152,7 +163,7 @@ export class HerdrDispatcher implements Dispatcher {
       return existing.tab_id;
     }
 
-    const created = await this.#runner.run([
+    const created = await this.#runChecked([
       this.#config.agent.herdrBin,
       "tab",
       "create",
@@ -174,7 +185,13 @@ export class HerdrDispatcher implements Dispatcher {
     const workspaceId = await this.#ensureWorkspace(request.cwd);
     const tabId = await this.#ensureTab(workspaceId, label, request.cwd);
 
-    const paneResult = await this.#runner.run([
+    const envArgs: string[] = [];
+    for (const name of this.#scrubEnv) {
+      envArgs.push("--env", `${name}=`);
+    }
+    envArgs.push("--env", `FOREMAN_DISPATCH_ID=${request.dispatchId}`);
+
+    const paneResult = await this.#runChecked([
       this.#config.agent.herdrBin,
       "pane",
       "split",
@@ -184,6 +201,7 @@ export class HerdrDispatcher implements Dispatcher {
       "down",
       "--cwd",
       request.cwd,
+      ...envArgs,
     ]);
     const parsedPane = JSON.parse(paneResult.stdout) as HerdrPaneResult;
     const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
@@ -192,28 +210,33 @@ export class HerdrDispatcher implements Dispatcher {
     }
 
     const agentName = herdrAgentName(request.issueId ?? request.dispatchId);
-    await this.#runner.run([
-      this.#config.agent.herdrBin,
-      "agent",
-      "start",
-      agentName,
-      "--kind",
-      "omp",
-      "--pane",
-      paneId,
-      "--timeout",
-      "30000",
-      "--",
-      "-p",
-      "--approval-mode",
-      this.#config.agent.approvalMode,
-      "--cwd",
-      request.cwd,
-      request.command,
-    ]);
+    try {
+      await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        "omp",
+        "--pane",
+        paneId,
+        "--timeout",
+        "30000",
+        "--",
+        "-p",
+        "--approval-mode",
+        this.#config.agent.approvalMode,
+        "--cwd",
+        request.cwd,
+        request.command,
+      ]);
+    } catch (error) {
+      await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
+      throw error;
+    }
 
     seqCounter += 1;
-    await this.#runner.run([
+    await this.#runChecked([
       this.#config.agent.herdrBin,
       "pane",
       "report-metadata",
@@ -240,6 +263,7 @@ export class HerdrDispatcher implements Dispatcher {
       herdr: { paneId, agentName },
     };
   }
+
 
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
     if (!handle.herdr) return "lost";

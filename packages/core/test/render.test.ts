@@ -180,6 +180,9 @@ describe("renderProposalComment", () => {
     reproConfidence: "confirmed",
     missingInfo: [],
     triageLabel: null,
+    draftDescription: null,
+    proposedEstimate: null,
+    destinationProjectId: null,
     destinationProject: "Maintenance",
   };
 

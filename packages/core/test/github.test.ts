@@ -56,6 +56,7 @@ describe("GitHubClient.prForBranch", () => {
           state: "OPEN",
           isDraft: false,
           mergeable: "MERGEABLE",
+          baseRefName: "main",
         },
       ]),
     }));
@@ -68,6 +69,7 @@ describe("GitHubClient.prForBranch", () => {
       state: "OPEN",
       isDraft: false,
       mergeable: true,
+      baseBranch: "main",
     });
     expect(calls[0]?.argv).toContain("--head");
     expect(calls[0]?.argv).toContain("eng-142-fix");
@@ -85,6 +87,7 @@ describe("GitHubClient.prForBranch", () => {
           state: "MERGED",
           isDraft: false,
           mergeable: "UNKNOWN",
+          baseRefName: "main",
         },
       ]),
     }));
@@ -94,6 +97,7 @@ describe("GitHubClient.prForBranch", () => {
     expect(calls[0]?.argv[calls[0]!.argv.indexOf("--state") + 1]).toBe("all");
   });
 });
+
 
 describe("GitHubClient.ciStatus", () => {
   it("reads the `status` field, not `state`, from check runs", async () => {
@@ -268,7 +272,7 @@ describe("PrintDispatcher", () => {
     process.env.FOREMAN_TEST_SCRUB = "secret";
     try {
       const config = {
-        agent: { ompBin: scriptPath, approvalMode: "full-auto", maxRuntimeMs: 0 },
+        agent: { ompBin: scriptPath, approvalMode: "yolo", maxRuntimeMs: 0 },
       } as GlobalConfig;
       const dispatcher = new PrintDispatcher(config, { scrubEnv: ["FOREMAN_TEST_SCRUB"] });
       const handle = await dispatcher.dispatch({
@@ -326,7 +330,7 @@ describe("HerdrDispatcher", () => {
     const config = {
       agent: {
         herdrBin: "herdr",
-        approvalMode: "full-auto",
+        approvalMode: "yolo",
         maxRuntimeMs: 0,
         lockTtlMarginMs: 0,
       },
@@ -341,6 +345,102 @@ describe("HerdrDispatcher", () => {
     });
     expect(calls.some((argv) => argv[1] === "workspace" && argv[2] === "create")).toBe(false);
     expect(calls.some((argv) => argv[1] === "tab" && argv[2] === "create")).toBe(false);
+  });
+
+  it("appends --env args scrubbing credentials and carrying the dispatch id", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      async run(argv: string[]) {
+        calls.push(argv);
+        if (argv[1] === "workspace" && argv[2] === "list") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspaces: [] } }) };
+        }
+        if (argv[1] === "workspace" && argv[2] === "create") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspace_id: "w1" } }) };
+        }
+        if (argv[1] === "tab" && argv[2] === "list") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tabs: [] } }) };
+        }
+        if (argv[1] === "tab" && argv[2] === "create") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }) };
+        }
+        if (argv[1] === "pane" && argv[2] === "split") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t1:p1" } } }) };
+        }
+        return { code: 0, stderr: "", stdout: "{}" };
+      },
+    };
+    const config = {
+      agent: {
+        herdrBin: "herdr",
+        approvalMode: "yolo",
+        maxRuntimeMs: 0,
+        lockTtlMarginMs: 0,
+      },
+    } as GlobalConfig;
+    const dispatcher = new HerdrDispatcher(config, { runner, scrubEnv: ["LINEAR_API_KEY"] });
+    await dispatcher.dispatch({
+      agent: "foreman-implement",
+      issueId: "ENG-142",
+      command: "/foreman-implement",
+      dispatchId: "dispatch-1",
+      cwd: "/repo",
+    });
+    const splitCall = calls.find((argv) => argv[1] === "pane" && argv[2] === "split");
+    expect(splitCall).toContain("--env");
+    const envIndex = splitCall!.indexOf("--env");
+    expect(splitCall).toEqual(
+      expect.arrayContaining(["--env", "LINEAR_API_KEY=", "--env", "FOREMAN_DISPATCH_ID=dispatch-1"]),
+    );
+    expect(envIndex).toBeGreaterThan(-1);
+  });
+
+  it("rejects and closes the pane when agent start exits non-zero", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      async run(argv: string[]) {
+        calls.push(argv);
+        if (argv[1] === "workspace" && argv[2] === "list") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspaces: [] } }) };
+        }
+        if (argv[1] === "workspace" && argv[2] === "create") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspace_id: "w1" } }) };
+        }
+        if (argv[1] === "tab" && argv[2] === "list") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tabs: [] } }) };
+        }
+        if (argv[1] === "tab" && argv[2] === "create") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }) };
+        }
+        if (argv[1] === "pane" && argv[2] === "split") {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t1:p1" } } }) };
+        }
+        if (argv[1] === "agent" && argv[2] === "start") {
+          return { code: 1, stderr: "agent name collision", stdout: "" };
+        }
+        return { code: 0, stderr: "", stdout: "{}" };
+      },
+    };
+    const config = {
+      agent: {
+        herdrBin: "herdr",
+        approvalMode: "yolo",
+        maxRuntimeMs: 0,
+        lockTtlMarginMs: 0,
+      },
+    } as GlobalConfig;
+    const dispatcher = new HerdrDispatcher(config, { runner });
+    await expect(
+      dispatcher.dispatch({
+        agent: "foreman-implement",
+        issueId: "ENG-142",
+        command: "/foreman-implement",
+        dispatchId: "dispatch-1",
+        cwd: "/repo",
+      }),
+    ).rejects.toThrow(/herdr agent start .* failed \(exit 1\)/);
+    const closeCall = calls.find((argv) => argv[1] === "pane" && argv[2] === "close");
+    expect(closeCall).toEqual(["herdr", "pane", "close", "w1:t1:p1"]);
   });
 });
 

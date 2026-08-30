@@ -62,6 +62,9 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
     reproConfidence: "not-attempted",
     missingInfo: [],
     triageLabel: null,
+    draftDescription: null,
+    proposedEstimate: null,
+    destinationProjectId: null,
     ...overrides,
   };
 }
@@ -99,6 +102,9 @@ class FakeLinear implements LinearWriter {
   async issues(query: IssueQuery): Promise<Issue[]> {
     this.issuesCalls.push(query);
     return [...this.issuesById.values()];
+  }
+  async viewerId(): Promise<string> {
+    return "bot-1";
   }
   async comments() {
     return [];
@@ -314,20 +320,18 @@ describe("applyProposal — mutation sequence", () => {
     ]);
   });
 
-  it("notes an unmatched destinationProject without dropping the rest of the mutation", async () => {
+  it("throws when destinationProject names no project", async () => {
     const item = makeTriageItem({ destinationProject: "Nonexistent Project" });
     const issue = makeIssue({ comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")] });
     const linear = new FakeLinear([issue]);
     linear.projectsList = [{ id: "project-roadmap", name: "Roadmap" }];
 
-    const applied = await applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" });
-
-    expect(applied.note).toContain("not found");
-    expect(linear.updateCalls.some((call) => call.input.projectId !== undefined)).toBe(false);
-    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(true);
+    await expect(applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" })).rejects.toThrow(
+      "not found",
+    );
   });
 
-  it("leaves the project unset and notes the ambiguity when two projects share a name", async () => {
+  it("throws when destinationProject names two projects sharing that name", async () => {
     const item = makeTriageItem({ destinationProject: "Maintenance" });
     const issue = makeIssue({ comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")] });
     const linear = new FakeLinear([issue]);
@@ -336,13 +340,21 @@ describe("applyProposal — mutation sequence", () => {
       { id: "project-maintenance-b", name: "maintenance" },
     ];
 
-    const applied = await applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" });
-
-    expect(applied.note).toContain("ambiguous");
-    expect(applied.note).toContain("Maintenance");
-    expect(linear.updateCalls.some((call) => call.input.projectId !== undefined)).toBe(false);
-    expect(linear.commentCalls[0]?.body).toContain("ambiguous");
+    await expect(applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" })).rejects.toThrow(
+      "ambiguous",
+    );
   });
+
+  it("prefers destinationProjectId over destinationProject when both are set", async () => {
+    const item = makeTriageItem({ destinationProjectId: "project-direct", destinationProject: "Ignored Name" });
+    const issue = makeIssue({ comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")] });
+    const linear = new FakeLinear([issue]);
+
+    await applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" });
+
+    expect(linear.updateCalls.some((call) => call.input.projectId === "project-direct")).toBe(true);
+  });
+
 });
 
 describe("findApprovedUnapplied — filter passthrough", () => {

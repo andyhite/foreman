@@ -30,9 +30,8 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   ]);
 
   const legacyInTodo = todoIssues.filter((issue) => hasLabel(issue, LEGACY_LABEL));
-  const [{ inScope: backlog, skipped: scopeSkips }, { inScope: scopedBlocked }, { inScope: scopedReady }] = await Promise.all([
+  const [{ inScope: backlog, skipped: scopeSkips }, { inScope: scopedReady }] = await Promise.all([
     filterInScope(ctx, "refine", [...backlogIssues, ...legacyInTodo]),
-    filterInScope(ctx, "refine", blockedHuman),
     filterInScope(ctx, "refine", ready),
   ]);
 
@@ -40,7 +39,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
     backlog,
     todo: [],
     reviewCandidates: [],
-    blockedHumanCount: scopedBlocked.length,
+    blockedHumanCount: blockedHuman.length,
     readyBufferCount: scopedReady.length,
     planCandidates: [],
   };
@@ -68,6 +67,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "refine",
         });
+        ctx.watchSettle(handle, "refine");
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }
@@ -81,7 +81,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { backlog: backlog.length, readyBuffer: scopedReady.length, blocked: scopedBlocked.length },
+    counts: { backlog: backlog.length, readyBuffer: scopedReady.length, blocked: blockedHuman.length },
     queues: { pipeline: backlog.map(toQueueItem) },
   };
 }

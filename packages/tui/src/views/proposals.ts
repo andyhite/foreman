@@ -148,34 +148,19 @@ export const proposalsView: View = {
       });
       return true;
     }
-    if (matchesKey(key, "y")) {
+    if (matchesKey(key, "y") || matchesKey(key, "n")) {
       const issueId = item.issueId;
+      const flag = matchesKey(key, "y") ? "--approve" : "--reject";
       ctx.dispatch({
         type: "openModal",
         modal: {
-          kind: "confirm",
-          title: `Approve ${issueId}?`,
-          body: [`Destination: ${item.destination}`],
-          confirmLabel: "Approve",
-          onConfirm: { type: "toast", kind: "info", message: `approval applies through /foreman:apply ${issueId} --approve` },
-        },
-      });
-      return true;
-    }
-    if (matchesKey(key, "n")) {
-      const issueId = item.issueId;
-      ctx.dispatch({
-        type: "openModal",
-        modal: {
-          kind: "input",
-          title: `Reject ${issueId}`,
-          label: "reason",
-          value: "",
-          submit: (_value: string) => ({
-            type: "toast",
-            kind: "info",
-            message: `rejection applies through /foreman:apply ${issueId} --reject`,
-          }),
+          kind: "detail",
+          title: `${matchesKey(key, "y") ? "Approve" : "Reject"} ${issueId}`,
+          rows: [
+            ["destination", item.destination],
+            ["run in an omp session", `/foreman:apply ${issueId} ${flag}`],
+          ],
+          body: ["The TUI does not approve or reject proposals; it only names the command."],
         },
       });
       return true;
@@ -187,8 +172,8 @@ export const proposalsView: View = {
     return [
       ["↑↓", "select"],
       ["enter", "detail"],
-      ["y", "approve"],
-      ["n", "reject"],
+      ["y", "approve command"],
+      ["n", "reject command"],
     ];
   },
 };

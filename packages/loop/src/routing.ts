@@ -17,6 +17,7 @@
 import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
 import {
   AGENT_LABEL,
+  DISPATCH_COMMAND,
   LABEL_GROUP,
   hasLabel,
   implementationGate,
@@ -249,7 +250,7 @@ function routeRefine(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
     ctx.decisions.push({
       agent: "foreman-refine",
       issueId: issue.identifier,
-      command: `/foreman-refine ${issue.identifier}`,
+      command: `${DISPATCH_COMMAND.refine} ${issue.identifier}`,
       reason: `Backlog, priority ${issue.priority}, buffer below target.`,
     });
     admitDecision(ctx, "refine");
@@ -275,7 +276,7 @@ function routeImplement(ctx: RoutingContext, snapshot: BoardSnapshot, backpressu
     ctx.decisions.push({
       agent: "foreman-implement",
       issueId: issue.identifier,
-      command: `/foreman-implement ${issue.identifier}`,
+      command: `${DISPATCH_COMMAND.implement} ${issue.identifier}`,
       reason: "Implementation gate passes.",
     });
     admitDecision(ctx, "implement");
@@ -298,7 +299,7 @@ function routeReview(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
     ctx.decisions.push({
       agent: "foreman-review",
       issueId: issue.identifier,
-      command: `/foreman-review ${issue.identifier}`,
+      command: `${DISPATCH_COMMAND.review} ${issue.identifier}`,
       reason: `No ReviewResult for head ${candidate.headSha}.`,
     });
     admitDecision(ctx, "review");
@@ -341,7 +342,7 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
       agent: "foreman-plan",
       issueId: null,
       projectId: project.id,
-      command: `/foreman-plan ${project.id}`,
+      command: `${DISPATCH_COMMAND.plan} ${project.id}`,
       reason: `"${project.name}" has no issues yet.`,
     });
     admitDecision(ctx, "plan");
@@ -378,10 +379,10 @@ export function nextActions(
     planInFlightProjectIds: bookkeeping.inFlightProjectIds("plan"),
   };
 
+  routePlan(ctx, snapshot, backpressureTripped);
   routeRefine(ctx, snapshot, backpressureTripped);
   routeImplement(ctx, snapshot, backpressureTripped);
   routeReview(ctx, snapshot, backpressureTripped);
-  routePlan(ctx, snapshot, backpressureTripped);
 
   return { decisions: ctx.decisions, skipped: ctx.skipped };
 }

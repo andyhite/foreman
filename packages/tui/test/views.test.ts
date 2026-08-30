@@ -351,6 +351,18 @@ describe("views — keys", () => {
     expect(dispatched.some((action) => action.type === "editSetting" && action.key === "intake.window")).toBe(false);
   });
 
+  it("settings: cancelling an edit clears editingPath entirely, so global keys are no longer swallowed", () => {
+    const ctx = makeContext(makeLiveState());
+    expect(settingsView.handleKey(key("enter"), ctx)).toBe(true);
+    expect(ctx.state.settingsEdits["ui.editingPath"]).toBeDefined();
+    expect(settingsView.handleKey(key("escape"), ctx)).toBe(true);
+    // The store's `EDITING_PATH_KEY` entry must be gone, not set to "" —
+    // an empty string used to still read as "still editing" and every
+    // subsequent keypress (tab, q, ctrl-c) was consumed here forever.
+    expect("ui.editingPath" in ctx.state.settingsEdits).toBe(false);
+    expect(settingsView.handleKey(key("q"), ctx)).toBe(false);
+  });
+
   for (const { view, id } of [
     { view: overviewView, id: "overview" },
     ...CURSOR_VIEWS,

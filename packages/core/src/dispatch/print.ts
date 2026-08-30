@@ -72,6 +72,7 @@ export class PrintDispatcher implements Dispatcher {
     for (const name of this.#scrubEnv) {
       delete env[name];
     }
+    env.FOREMAN_DISPATCH_ID = request.dispatchId;
 
     const child = spawn(this.#config.agent.ompBin, argv, {
       cwd: request.cwd,

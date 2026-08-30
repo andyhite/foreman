@@ -6,7 +6,7 @@
  */
 
 import type { GitHubClient, LinearWriter } from "@foreman/core";
-import { assertIssueInScope, decodeMarker, MARKER_KIND, reviewGate } from "@foreman/core";
+import { assertIssueInScope, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
 import { getEntry } from "../runtime.ts";
 
@@ -15,14 +15,18 @@ export interface MergeCommandResult {
   message: string;
 }
 
-function latestReview(comments: readonly { body: string; createdAt: string }[]): ReviewResult | null {
-  let latest: { data: ReviewResult; createdAt: string } | null = null;
-  for (const comment of comments) {
-    const data = decodeMarker<ReviewResult>(MARKER_KIND.review, comment.body) ?? decodeMarker<ReviewResult>(MARKER_KIND.findings, comment.body);
-    if (!data) continue;
-    if (!latest || comment.createdAt > latest.createdAt) latest = { data, createdAt: comment.createdAt };
-  }
-  return latest?.data ?? null;
+/**
+ * The newest review marker, restricted to comments authored by the
+ * credential's own Linear user. When `authoredBy` is null (viewer id
+ * unavailable), every marker is treated as untrusted — the review gate then
+ * fails closed rather than letting a forged clean review through.
+ */
+function latestReview(
+  comments: readonly { id: string; body: string; createdAt: string; user: { id: string } | null }[],
+  authoredBy: string | null,
+): ReviewResult | null {
+  if (authoredBy === null) return null;
+  return latestMarker<ReviewResult>(MARKER_KIND.review, comments, { authoredBy })?.data ?? null;
 }
 
 export async function runMerge(linear: LinearWriter, github: GitHubClient, issueId: string): Promise<MergeCommandResult> {
@@ -36,10 +40,16 @@ export async function runMerge(linear: LinearWriter, github: GitHubClient, issue
   const repoSettings = entry;
   const branch = issue.branchName;
 
-  const pr = await github.prForBranch(repoPath, branch);
+  const pr = await github.prForBranch(repoPath, branch, { base: repoSettings.baseBranch });
   const headSha = pr?.headSha ?? null;
   const ciStatus = headSha ? await github.ciStatus(repoPath, headSha) : "none";
-  const review = latestReview(issue.comments);
+  let viewerId: string | null;
+  try {
+    viewerId = await linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  const review = latestReview(issue.comments, viewerId);
 
   const gate = reviewGate({
     issue,
@@ -60,8 +70,31 @@ export async function runMerge(linear: LinearWriter, github: GitHubClient, issue
     if (!pr) return { merged: false, message: `No open PR found for branch ${branch}.` };
     await github.mergePr(repoPath, pr.number, repoSettings.merge.strategy, repoSettings.merge.deleteBranch);
   } else {
-    await github.mergeBranchLocally(repoPath, branch, repoSettings.baseBranch, repoSettings.merge.strategy, repoSettings.merge.deleteBranch);
+    const mergeCommit = await github.mergeBranchLocally(
+      repoPath,
+      branch,
+      repoSettings.baseBranch,
+      repoSettings.merge.strategy,
+      repoSettings.merge.deleteBranch,
+    );
+    const body = encodeMarker(
+      MARKER_KIND.merged,
+      {
+        issueId: issue.identifier,
+        branch,
+        baseBranch: repoSettings.baseBranch,
+        mergeCommit,
+        strategy: repoSettings.merge.strategy,
+        mergedAt: new Date().toISOString(),
+      },
+      `Merged \`${branch}\` into \`${repoSettings.baseBranch}\` at \`${mergeCommit}\` via ${repoSettings.merge.strategy}.`,
+    );
+    await linear.createComment({ issueId: issue.id, body });
   }
 
-  return { merged: true, message: `Merged ${issueId} (${branch}) via ${repoSettings.merge.strategy}.` };
+  const states = await linear.workflowStates(issue.team.id);
+  const done = resolveState("done", states);
+  await linear.updateIssue(issue.id, { stateId: done.id });
+
+  return { merged: true, message: `Merged ${issueId} (${branch}) via ${repoSettings.merge.strategy}; moved to Done.` };
 }

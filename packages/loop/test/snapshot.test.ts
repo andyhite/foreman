@@ -18,7 +18,7 @@ function makeConfig(): GlobalConfig {
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql" },
     agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr" },
     repoDefaults: {
@@ -152,6 +152,53 @@ describe("buildSnapshot", () => {
     expect(snapshot.agents[0]?.pastTtl).toBe(20_000_000 > ttlMs);
     expect(snapshot.agents[0]?.status).toBe("running");
     expect(snapshot.agents[0]?.worktree).toBe("/repos/product-ENG-1");
+  });
+
+  it("uses the repo entry's own worktreePattern override over repoDefaults", () => {
+    const config = makeConfig();
+    config.repos.product = {
+      path: "/repos/product",
+      team: "ENG",
+      initiatives: ["initiative-1"],
+      worktreePattern: "../custom-<ISSUE-ID>",
+    };
+    const bookkeeping = emptyBookkeepingState();
+    bookkeeping.inFlight.push({
+      agent: "foreman-implement",
+      issueId: "ENG-1",
+      dispatchId: "d1",
+      startedAt: NOW.toISOString(),
+      stage: "implement",
+    });
+
+    const snapshot = buildSnapshot({
+      loopId: "repo:product",
+      kind: "repo",
+      label: "product",
+      alias: "product",
+      team: "ENG",
+      repoPath: "/repos/product",
+      initiativeIds: [],
+      pid: 1,
+      startedAt: NOW.toISOString(),
+      version: "0.1.0",
+      config,
+      runState: "running",
+      dryRun: false,
+      dispatcherKind: "print",
+      pausedAt: null,
+      lastTickAt: null,
+      ticks: 0,
+      now: NOW,
+      workers: [],
+      bookkeeping,
+      agentStatuses: new Map(),
+      boardCounts: {},
+      linear: { ok: true, lastPollAt: null, lastError: null, requests: 0 },
+      dispatchHistory: [],
+    });
+
+    expect(snapshot.agents[0]?.worktree).toBe("/repos/custom-ENG-1");
   });
 
   it("trips backpressure once the merged blocked count exceeds the configured threshold", () => {

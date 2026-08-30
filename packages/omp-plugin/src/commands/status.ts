@@ -18,10 +18,9 @@ import {
   readLockComment,
   readStatusFile,
   renderStatusConsole,
+  statusStaleThresholdMs,
 } from "@foreman/core";
 import { getConfig, getEntry, liveDispatchIds } from "../runtime.ts";
-
-const STATUS_STALE_AFTER_MS = 90_000;
 
 /** `AgentStatus` (contract §J) has no `"idle"`/`"parked"`/`"aborted"` distinction; this is the closest honest mapping onto the older registry vocabulary `/foreman:status` already renders. */
 const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
@@ -32,15 +31,28 @@ const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
   unknown: "idle",
 };
 
-export function readLoopState(statusPath: string, now: Date): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
+export function readLoopState(
+  statusPath: string,
+  now: Date,
+  cadenceMinutes = 5,
+): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
   const status = readStatusFile(statusPath);
   if (!status) {
     return { loop: { stage: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
   }
-  if (now.getTime() - new Date(status.writtenAt).getTime() > STATUS_STALE_AFTER_MS) {
+  const staleAfterMs = statusStaleThresholdMs(cadenceMinutes);
+  const ageMs = now.getTime() - new Date(status.writtenAt).getTime();
+  if (ageMs > staleAfterMs) {
+    if (status.snapshot.runtime.state === "paused") {
+      return {
+        loop: { stage: "paused", workers: status.snapshot.workers.map((worker) => ({ worker: worker.name, lastRunAt: worker.lastRunAt, dispatchCount: worker.dispatched })) },
+        backpressure: { tripped: status.snapshot.backpressure.tripped, reason: status.snapshot.backpressure.reason },
+        agents: status.snapshot.agents.map((agent) => ({ agent: agent.agent, state: AGENT_REGISTRY_STATE[agent.status], issueId: agent.issueId })),
+      };
+    }
     return {
       loop: { stage: "stopped/stale", workers: [] },
-      backpressure: { tripped: false, reason: "Last loop status is older than 90 seconds." },
+      backpressure: { tripped: false, reason: `Last loop status is older than ${Math.round(staleAfterMs / 1000)} seconds.` },
       agents: [],
     };
   }
@@ -72,7 +84,7 @@ function questionFor(issue: Issue): string {
   return latestBlockComment?.whatINeed ?? "(no BlockRecord found on this issue)";
 }
 
-export async function buildStatusState(linear: LinearWriter, stateDir: string, now: Date = new Date()): Promise<StatusState> {
+export async function buildStatusState(linear: LinearWriter, stateDir: string, now: Date = new Date(), cadenceMinutes = 5): Promise<StatusState> {
   const [blockedIssues, inFlightIssues, proposalIssues] = await Promise.all([
     linear.issues({ filter: BLOCKED_HUMAN_FILTER, includeComments: true }),
     linear.issues({ filter: IN_FLIGHT_FILTER, includeComments: true }),
@@ -100,7 +112,7 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const { loop, backpressure, agents } = readLoopState(stateDir, now);
+  const { loop, backpressure, agents } = readLoopState(stateDir, now, cadenceMinutes);
 
   return {
     blocked,
@@ -114,6 +126,6 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
 
 export async function renderStatus(linear: LinearWriter): Promise<string> {
   const config = getConfig();
-  const state = await buildStatusState(linear, loopPaths(config, getEntry().alias).status);
+  const state = await buildStatusState(linear, loopPaths(config, getEntry().alias).status, new Date(), config.loop.cadenceMinutes);
   return renderStatusConsole(state);
 }

@@ -1,10 +1,14 @@
 ---
 description: Triage the Linear Inbox and propose classification, priority, and destination for each item
+argument-hint: <ISSUE-ID...>
 ---
 
-Read the Inbox view (state = Triage) via `foreman_linear_read`. Assemble the
-shared `context` from the two-layer `Context` digest (§4.7) plus the full
-batch of Inbox items — triage works on the batch, not a single issue.
+Triage exactly the issues named in `$ARGUMENTS` (space-separated identifiers,
+e.g. `ENG-101 ENG-102`), not the whole Inbox view — the dispatch already
+selected this batch via `intake.batchSize`. Resolve each via
+`foreman_linear_read`. Assemble the shared `context` from the two-layer
+`Context` digest (§4.7) plus the full batch of resolved items — triage works
+on the batch, not a single issue.
 
 Dispatch `foreman-triage` through the `task` tool with `agent: foreman-triage`
 and the assembled `context`. The extension revises the call to force

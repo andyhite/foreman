@@ -31,22 +31,29 @@ export interface AppliedProposal {
   note: string | null;
 }
 
-/** The newest proposal marker on `issue`, or null. */
-export function latestProposal(issue: Issue): FoundMarker<TriageItem> | null {
-  const markers = findMarkers<TriageItem>(MARKER_KIND.proposal, issue.comments);
+/** The newest proposal marker on `issue`, or null. When `authoredBy` is set, markers not authored by that user id are ignored. */
+export function latestProposal(issue: Issue, authoredBy?: string): FoundMarker<TriageItem> | null {
+  const markers = findMarkers<TriageItem>(
+    MARKER_KIND.proposal,
+    issue.comments,
+    authoredBy !== undefined ? { authoredBy } : undefined,
+  );
   return markers[markers.length - 1] ?? null;
 }
 
 /** Only `applied` markers with `appliedProposalAt` are proposal-apply markers (Contract 1); a plugin `dispatchApplied` marker is a different event and must not mask an approved proposal. */
-export function hasLaterApplied(issue: Issue, afterCreatedAt: string): boolean {
-  return findMarkers<{ appliedProposalAt?: string }>(MARKER_KIND.applied, issue.comments).some(
-    (marker) => marker.createdAt > afterCreatedAt && marker.data.appliedProposalAt !== undefined,
-  );
+export function hasLaterApplied(issue: Issue, afterCreatedAt: string, authoredBy?: string): boolean {
+  return findMarkers<{ appliedProposalAt?: string }>(
+    MARKER_KIND.applied,
+    issue.comments,
+    authoredBy !== undefined ? { authoredBy } : undefined,
+  ).some((marker) => marker.createdAt > afterCreatedAt && marker.data.appliedProposalAt !== undefined);
 }
 
-export function hasLaterReject(issue: Issue, afterCreatedAt: string): boolean {
+export function hasLaterReject(issue: Issue, afterCreatedAt: string, authoredBy?: string): boolean {
   return issue.comments.some((comment) => {
     if (comment.createdAt <= afterCreatedAt) return false;
+    if (authoredBy !== undefined && comment.user?.id !== authoredBy) return false;
     const start = comment.body.trim().toLowerCase();
     return start.startsWith("reject:") || start.startsWith("rejected:");
   });
@@ -56,15 +63,15 @@ export function isCurrentlyProposed(issue: Issue): boolean {
   return issue.labels.some((label) => label.name === AGENT_LABEL.proposed);
 }
 
-/** Pure predicate over already-fetched issues. No I/O. */
-export function proposalCandidates(issues: readonly Issue[]): ProposalCandidate[] {
+/** Pure predicate over already-fetched issues. `authoredBy`, when set, restricts every marker read to that user id — a forged proposal/applied/reject marker from another user is invisible. */
+export function proposalCandidates(issues: readonly Issue[], authoredBy?: string): ProposalCandidate[] {
   const candidates: ProposalCandidate[] = [];
   for (const issue of issues) {
-    const found = latestProposal(issue);
+    const found = latestProposal(issue, authoredBy);
     if (!found) continue;
     if (isCurrentlyProposed(issue)) continue;
-    if (hasLaterApplied(issue, found.createdAt)) continue;
-    if (hasLaterReject(issue, found.createdAt)) continue;
+    if (hasLaterApplied(issue, found.createdAt, authoredBy)) continue;
+    if (hasLaterReject(issue, found.createdAt, authoredBy)) continue;
     candidates.push({ issue, item: found.data, proposedAt: found.createdAt });
   }
   return candidates;
@@ -73,14 +80,14 @@ export function proposalCandidates(issues: readonly Issue[]): ProposalCandidate[
 /** Fetches (comments included) then filters. `filter` narrows the scan. */
 export async function findApprovedUnapplied(
   linear: LinearWriter,
-  options?: { filter?: IssueFilter; limit?: number },
+  options?: { filter?: IssueFilter; limit?: number; authoredBy?: string },
 ): Promise<ProposalCandidate[]> {
   const issues = await linear.issues({
     filter: options?.filter,
     includeComments: true,
     limit: options?.limit ?? 500,
   });
-  return proposalCandidates(issues);
+  return proposalCandidates(issues, options?.authoredBy);
 }
 
 /** SPEC §7.1: destination, type label, priority, project, duplicate relation, proposed blockers, then the applied marker. */
@@ -104,25 +111,32 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
     addedLabelIds,
   };
 
-  // `destinationProject` names a project, never a UUID (SPEC §7.1). A name
-  // can also be ambiguous: `TriageItem` carries no initiative field, so when
-  // two projects share a name (every product tends to have a `Maintenance`
-  // project) there is no signal in the proposal that resolves which one the
-  // issue belongs to. Guessing would silently misfile the issue, which is
-  // worse than leaving the project unset, so both the not-found and the
-  // ambiguous case fold into the same applied-marker note instead of failing
-  // the rest of the mutation.
+  if (item.draftDescription) mutation.description = item.draftDescription;
+  if (item.proposedEstimate !== null) mutation.estimate = item.proposedEstimate;
+
+  // `destinationProjectId` is authoritative when the agent has it — a real
+  // Linear id, never ambiguous. `destinationProject` names a project, never
+  // a UUID (SPEC §7.1), and a name can be ambiguous: `TriageItem` carries no
+  // initiative field, so when two projects share a name (every product tends
+  // to have a `Maintenance` project) there is no signal in the proposal that
+  // resolves which one the issue belongs to. Guessing would silently misfile
+  // the issue, so a name that resolves to zero or several projects throws —
+  // `runApplyPass` isolates the failure per candidate.
   let projectNote: string | null = null;
-  if (item.destinationProject) {
+  if (item.destinationProjectId) {
+    mutation.projectId = item.destinationProjectId;
+  } else if (item.destinationProject) {
     const projects = await linear.projects();
     const destinationProject = item.destinationProject;
     const matches = projects.filter((candidate) => candidate.name.toLowerCase() === destinationProject.toLowerCase());
     if (matches.length === 1 && matches[0]) {
       mutation.projectId = matches[0].id;
     } else if (matches.length === 0) {
-      projectNote = `Proposed project "${destinationProject}" not found; project left unset.`;
+      throw new Error(`Proposed project "${destinationProject}" not found for issue ${issue.identifier}.`);
     } else {
-      projectNote = `Proposed project "${destinationProject}" is ambiguous (${matches.length} projects share that name); project left unset.`;
+      throw new Error(
+        `Proposed project "${destinationProject}" is ambiguous (${matches.length} projects share that name) for issue ${issue.identifier}.`,
+      );
     }
   }
 
@@ -131,7 +145,15 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
   if (item.duplicateOf) {
     const duplicate = await linear.issue(item.duplicateOf);
     if (duplicate) {
-      await linear.createRelation({ issueId: issue.id, relatedIssueId: duplicate.id, type: "duplicate" });
+      const alreadyRelated = issue.relations.some(
+        (relation) =>
+          relation.type === "duplicate" &&
+          relation.direction === "outgoing" &&
+          relation.other.id === duplicate.id,
+      );
+      if (!alreadyRelated) {
+        await linear.createRelation({ issueId: issue.id, relatedIssueId: duplicate.id, type: "duplicate" });
+      }
     }
   }
 
@@ -141,7 +163,15 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
       // `blocker` blocks `issue` (Linear stores "A blocks B" as
       // `{ issueId: A, relatedIssueId: B }`), the same orientation as
       // `applyRefine`'s spike case — not the inverse.
-      await linear.createRelation({ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+      const alreadyRelated = issue.relations.some(
+        (relation) =>
+          relation.type === "blocks" &&
+          relation.direction === "incoming" &&
+          relation.other.id === blocker.id,
+      );
+      if (!alreadyRelated) {
+        await linear.createRelation({ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+      }
     }
   }
 
@@ -176,7 +206,7 @@ export interface ApplyPassResult {
  */
 export async function runApplyPass(
   linear: LinearWriter,
-  options?: { filter?: IssueFilter; limit?: number },
+  options?: { filter?: IssueFilter; limit?: number; authoredBy?: string },
 ): Promise<ApplyPassResult> {
   const candidates = await findApprovedUnapplied(linear, options);
   const applied: AppliedProposal[] = [];

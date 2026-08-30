@@ -114,6 +114,7 @@ output: |
                   "type": "object",
                   "required": [
                     "title",
+                    "type",
                     "description",
                     "estimate",
                     "acceptanceCriteria"
@@ -122,6 +123,31 @@ output: |
                     "title": {
                       "minLength": 1,
                       "type": "string"
+                    },
+                    "type": {
+                      "description": "The `type:` label this sub-issue should carry.",
+                      "anyOf": [
+                        {
+                          "const": "type:bug",
+                          "type": "string"
+                        },
+                        {
+                          "const": "type:feature",
+                          "type": "string"
+                        },
+                        {
+                          "const": "type:chore",
+                          "type": "string"
+                        },
+                        {
+                          "const": "type:spike",
+                          "type": "string"
+                        },
+                        {
+                          "const": "type:docs",
+                          "type": "string"
+                        }
+                      ]
                     },
                     "description": {
                       "minLength": 1,

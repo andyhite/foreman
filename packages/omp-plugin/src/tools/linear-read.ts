@@ -55,8 +55,10 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
         return jsonResult(issue);
       }
       if (params.op === "issues") {
-        const issues = await linear.issues({ limit: params.limit, includeComments: params.includeComments });
-        return jsonResult(issues);
+        const fetched = await linear.issues({ limit: params.limit + 1, includeComments: params.includeComments });
+        const truncated = fetched.length > params.limit;
+        const issues = truncated ? fetched.slice(0, params.limit) : fetched;
+        return jsonResult({ issues, truncated, total: issues.length });
       }
       if (params.op === "comments") {
         if (!params.id) return errorResult("op \"comments\" requires \"id\".");
@@ -82,8 +84,10 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
       if (!params.view) return errorResult("op \"view\" requires \"view\".");
       const buildFilter = SAVED_VIEWS[params.view];
       if (!buildFilter) return errorResult(`Unknown view "${params.view}".`);
-      const issues = await linear.issues({ filter: buildFilter(), limit: params.limit });
-      return jsonResult(issues);
+      const fetchedView = await linear.issues({ filter: buildFilter(), limit: params.limit + 1 });
+      const viewTruncated = fetchedView.length > params.limit;
+      const viewIssues = viewTruncated ? fetchedView.slice(0, params.limit) : fetchedView;
+      return jsonResult({ issues: viewIssues, truncated: viewTruncated, total: viewIssues.length });
     },
   };
 

@@ -99,7 +99,52 @@ export function parseAgentOutput<N extends ForemanAgentName>(
     };
   }
 
-  return { kind: "result", result: envelope.result as ResultOf<N> };
+  const result = envelope.result as ResultOf<N>;
+
+  if (agent === "foreman-refine") {
+    const refineResult = result as unknown as {
+      estimate: number;
+      subIssues: readonly unknown[];
+      spikeCreated: unknown;
+      readyForImplementation: boolean;
+    };
+    const refineProblems: string[] = [];
+    if (
+      refineResult.readyForImplementation &&
+      (refineResult.estimate > 3 || refineResult.subIssues.length > 0 || refineResult.spikeCreated !== null)
+    ) {
+      refineProblems.push(
+        "/result/readyForImplementation: must be false when estimate > 3, subIssues is non-empty, or spikeCreated is set",
+      );
+    }
+    if (refineResult.estimate >= 5 && refineResult.subIssues.length === 0) {
+      refineProblems.push("/result/subIssues: must be non-empty when estimate >= 5");
+    }
+    if (refineProblems.length > 0) return { kind: "invalid", problems: refineProblems };
+  }
+
+  if (agent === "foreman-review") {
+    const reviewResult = result as unknown as {
+      verdict: string;
+      findings: ReadonlyArray<{ severity: string }>;
+      dodSatisfied: boolean;
+      dodChecklist: ReadonlyArray<{ satisfied: boolean }>;
+    };
+    const reviewProblems: string[] = [];
+    const hasBlocking = reviewResult.findings.some((finding) => finding.severity === "blocking");
+    if ((reviewResult.verdict === "request-changes") !== hasBlocking) {
+      reviewProblems.push(
+        '/result/verdict: must be "request-changes" if and only if at least one finding is "blocking"',
+      );
+    }
+    const allDodSatisfied = reviewResult.dodChecklist.every((check) => check.satisfied);
+    if (reviewResult.dodSatisfied && !allDodSatisfied) {
+      reviewProblems.push("/result/dodSatisfied: must be false when any dodChecklist entry is not satisfied");
+    }
+    if (reviewProblems.length > 0) return { kind: "invalid", problems: reviewProblems };
+  }
+
+  return { kind: "result", result };
 }
 
 /**

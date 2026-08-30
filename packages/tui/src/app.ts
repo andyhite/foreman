@@ -13,7 +13,7 @@
  */
 
 import type { Canvas, Key, Rect, Theme } from "@foreman/core";
-import { keyHints, kvRows, matchesKey, modal, splitVertical, tabsBar, wrapText } from "@foreman/core";
+import { keyHints, kvRows, matchesKey, modal, splitVertical, stringWidth, tabsBar, wrapText } from "@foreman/core";
 import type { Action, AppState, LoopPane, Toast } from "./store.ts";
 import { focusedPane, reduce, scrollFor } from "./store.ts";
 import type { View, ViewContext } from "./view.ts";
@@ -195,7 +195,7 @@ export class TuiHost {
       if (!toast || y < 1) break;
       const tone = toast.kind === "danger" ? "danger" : toast.kind === "warn" ? "warn" : toast.kind === "ok" ? "ok" : "info";
       const text = ` ${toast.message} `;
-      const x = Math.max(1, rect.width - text.length - 1);
+      const x = Math.max(1, rect.width - stringWidth(text) - 1);
       canvas.text(x, y, text, this.#theme.toneSgr(tone));
       y -= 1;
     }
@@ -213,16 +213,21 @@ export class TuiHost {
     }
 
     if (modalState.kind === "confirm") {
-      const height = Math.min(12, modalState.body.length + 6);
+      const width = Math.min(60, rect.width);
+      const wrapped = wrapText(modalState.body.join("\n"), Math.max(1, width - 2));
+      const height = Math.min(12, wrapped.length + 6);
       const inner = modal(canvas, rect, {
         theme,
         title: modalState.title,
-        width: 60,
+        width,
         height,
         footer: `y ${modalState.confirmLabel} · n cancel`,
       });
-      const lines = wrapText(modalState.body.join("\n"), inner.width);
-      lines.forEach((line, index) => canvas.text(inner.x, inner.y + index, line, theme.sgr()));
+      const visible =
+        wrapped.length > inner.height && inner.height > 0
+          ? [...wrapped.slice(0, inner.height - 1), `+${wrapped.length - (inner.height - 1)} more`]
+          : wrapped;
+      visible.forEach((line, index) => canvas.text(inner.x, inner.y + index, line, theme.sgr()));
       return;
     }
 
@@ -388,12 +393,15 @@ export class TuiHost {
         const { onConfirm, effect } = modal;
         this.#dispatch({ type: "closeModal" });
         // The effect first: `onConfirm` is often the bookkeeping that follows
-        // it, e.g. clearing the settings edits the patch just persisted.
-        if (effect) ctx.command(effect.loopId, effect.op, effect.params);
-        if (onConfirm) {
+        // it, e.g. clearing the settings edits the patch just persisted — and
+        // it must only run once that patch actually landed, not on a failed
+        // `ctx.command` the operator never saw fail.
+        void (async () => {
+          const succeeded = effect ? await ctx.command(effect.loopId, effect.op, effect.params) : true;
+          if (!succeeded || !onConfirm) return;
           if (onConfirm.type === "quit") this.#quit(0);
           else this.#dispatch(onConfirm);
-        }
+        })();
       } else if (matchesKey(key, "n") || matchesKey(key, "escape")) {
         this.#dispatch({ type: "closeModal" });
       }

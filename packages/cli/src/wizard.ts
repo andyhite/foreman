@@ -10,6 +10,7 @@
  */
 
 import { join } from "node:path";
+import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import {
@@ -69,6 +70,9 @@ async function preflight(deps: WizardDeps): Promise<PreflightResult> {
   const mark = hasOmp ? style("green", "✓") : style("dim", "○");
   const note = "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi";
   deps.log(`  ${mark} omp: ${hasOmp ? "found" : `not found (${note})`}`);
+  const hasHerdr = await deps.runner.exists("herdr");
+  const herdrMark = hasHerdr ? style("green", "✓") : style("dim", "○");
+  deps.log(`  ${herdrMark} herdr: ${hasHerdr ? "found" : "not found (optional — the loop dispatches into real herdr panes automatically when reachable, https://github.com/andyhite/herdr)"}`);
   return { missingGh, hasOmp };
 }
 
@@ -156,7 +160,7 @@ async function resolvePluginMode(
   return prompter.select(
     `Install the ${pluginLabel}?`,
     [
-      { value: "link" as const, label: "Dev mode — symlink this checkout (live edits, no rebuild-to-see-changes)" },
+      { value: "link" as const, label: "Dev mode — symlink this checkout, including the foreman CLI (live edits, no rebuild-to-see-changes)" },
       { value: "install" as const, label: "Install — fetch and register from GitHub" },
       { value: "skip" as const, label: "Skip" },
     ],
@@ -204,7 +208,7 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
         "The command's output is above. Common causes: no network, or `omp` not authenticated.",
     );
   }
-  const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME, options.githubRepo, scope);
+  const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME, scope);
   const installCode = await deps.runner.run("omp", installArgv);
   if (installCode !== 0) {
     throw new Error(
@@ -220,20 +224,36 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   const { missingGh, hasOmp } = await preflight(deps);
   await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
 
-  const requestedOmpMode = await resolvePluginMode(
-    deps.prompter,
-    "omp plugin (agents, commands, gates)",
-    options.ompMode,
-    "link",
-  );
-  const ompMode = hasOmp ? requestedOmpMode : "skip";
-  if (!hasOmp && requestedOmpMode !== "skip") {
-    deps.log("  omp is not installed, so the omp plugin was skipped. Install omp and re-run `foreman setup` to add it.");
+  let requestedMode: PluginMode;
+  if (hasOmp) {
+    requestedMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "link");
+  } else {
+    // Asking which strategy to use and then discarding the answer wastes an
+    // interactive prompt on an outcome already decided for the *plugin* —
+    // but an explicit `--link` still means "link the CLI too", and that
+    // half doesn't need omp at all, so it survives the downgrade below.
+    requestedMode = options.ompMode === "link" ? "link" : "skip";
+    if (options.ompMode !== "skip") {
+      const cliNote = requestedMode === "link" ? " The foreman CLI will still be linked to source below." : "";
+      deps.log(`  omp is not installed, so the omp plugin was skipped.${cliNote} Install omp and re-run \`foreman setup\` to add the plugin.`);
+    }
   }
+  const pluginMode = hasOmp ? requestedMode : "skip";
 
-  const needsBuild = ompMode === "link";
+  const needsBuild = pluginMode === "link";
   await buildRepo(deps, options.repoRoot, options.skipBuild || !needsBuild);
-  await setupOmpPlugin(deps, options, ompMode);
+  await setupOmpPlugin(deps, options, pluginMode);
+
+  if (requestedMode === "link") {
+    printSection(deps.log, "foreman CLI (dev mode)");
+    const binPath = writeCliBinLink(options.repoRoot, options.home);
+    deps.log(`  ${style("green", "✓")} wrote ${binPath} → runs packages/cli/src/main.ts straight from source (no rebuild needed)`);
+    const dir = cliBinDir(options.home);
+    if (!(process.env.PATH ?? "").split(":").includes(dir)) {
+      deps.log(`  ${style("yellow", "!")} ${dir} isn't on your PATH yet. Add it, e.g.:`);
+      deps.log(`    export PATH="${dir}:$PATH"`);
+    }
+  }
 
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Global setup complete.`);

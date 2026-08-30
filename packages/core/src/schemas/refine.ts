@@ -1,5 +1,11 @@
 import { type Static, Type } from "@sinclair/typebox";
+import { TYPE_LABELS } from "../domain/labels.ts";
 import { envelope } from "./envelope.ts";
+
+const TypeLabelSchema = Type.Union(
+  TYPE_LABELS.map((name) => Type.Literal(name)),
+  { description: "The `type:` label this sub-issue should carry." },
+);
 
 /** Fibonacci, read as agent-session size (SPEC §4.6). 5 means split; 8 means not an issue. */
 const EstimateSchema = Type.Union(
@@ -20,6 +26,7 @@ const EstimateSchema = Type.Union(
 export const SubIssue = Type.Object(
   {
     title: Type.String({ minLength: 1 }),
+    type: TypeLabelSchema,
     description: Type.String({
       minLength: 1,
       description: "Full body in the SPEC §13.1 template, same as `refinedDescription`.",

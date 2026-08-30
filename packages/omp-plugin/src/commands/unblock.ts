@@ -33,11 +33,12 @@ export async function runUnblock(
   }
 
   const removedLabelIds = issue.labels.filter((label) => blockedLabelNames.includes(label.name)).map((label) => label.id);
-  // Clear the block only when the reply can be recorded next: a failed comment
-  // leaves the safer blocked state instead of silently making work runnable.
-  await linear.updateIssue(issue.id, { removedLabelIds });
+  // Clear the block only after the reply is recorded: a failed comment
+  // leaves the safer blocked state instead of silently making work runnable
+  // while the operator's answer is lost.
   const body = encodeMarker(MARKER_KIND.unblock, { reply }, `**Operator reply:** ${reply}`);
   await linear.createComment({ issueId: issue.id, body });
+  await linear.updateIssue(issue.id, { removedLabelIds });
 
   return { ok: true, message: `${issueId} unblocked; the loop will re-dispatch on its next pass.` };
 }

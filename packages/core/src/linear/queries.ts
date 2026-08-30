@@ -33,6 +33,14 @@ const ISSUE_FIELDS = `
       relatedIssue { id identifier title state { id name type } }
     }
   }
+  inverseRelations {
+    nodes {
+      id
+      type
+      issue { id identifier title state { id name type } }
+      relatedIssue { id identifier title state { id name type } }
+    }
+  }
 `;
 
 const ISSUE_FIELDS_WITH_COMMENTS = `${ISSUE_FIELDS}
@@ -166,7 +174,7 @@ export const LABELS_QUERY = `
 export const WORKSPACE_LABELS_QUERY = `
   query WorkspaceLabels($after: String) {
     issueLabels(first: 250, after: $after) {
-      nodes { id name isGroup parent { id name } }
+      nodes { id name isGroup parent { id name } team { id } }
       pageInfo { hasNextPage endCursor }
     }
   }

@@ -213,8 +213,18 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
 
   // Prefer an entry already filed at this path; fall back to one already filed
   // under the (possibly operator-edited) alias — either way, re-running
-  // updates that entry in place instead of creating a duplicate.
-  const existingEntry = existingByPath?.entry ?? existing.repos[alias] ?? null;
+  // updates that entry in place instead of creating a duplicate. An alias
+  // already claimed by a *different* path is a collision, not "this repo's
+  // existing entry" — treating it as one would silently overwrite the other
+  // repo's registration below.
+  const aliasEntry = existing.repos[alias] ?? null;
+  if (aliasEntry && aliasEntry.path !== repoRoot && existingByPath?.alias !== alias) {
+    throw new Error(
+      `Alias "${alias}" is already registered to ${aliasEntry.path}; this repo is ${repoRoot}. ` +
+        "Pick a different alias, or run `foreman init` from the other repo to free it up first.",
+    );
+  }
+  const existingEntry = existingByPath?.entry ?? aliasEntry;
   if (existingEntry) {
     deps.log(`  ${style("cyan", "i")} "${alias}" is already registered at ${existingEntry.path} — updating it.`);
   }

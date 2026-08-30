@@ -8,7 +8,7 @@
  * implement agent spawns, and this module is the only place that shells out
  * to `git worktree`.
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, resolve as resolvePath } from "node:path";
 import type { CommandRunner } from "./exec.ts";
 import { nodeRunner } from "./exec.ts";
@@ -41,12 +41,38 @@ interface IssueRefLike {
   title: string;
 }
 
+/**
+ * Linear's issue identifier grammar (`<TEAM>-<number>`, e.g. `ENG-142`). Both
+ * `branchNameFor` and `worktreePathFor` interpolate `identifier` unvalidated
+ * into a filesystem path / git ref; an identifier containing `..` or a path
+ * separator would otherwise escape the repo, and one starting with `-` would
+ * be parsed by git as an option rather than a ref.
+ */
+const IDENTIFIER_RE = /^[A-Za-z0-9]+-\d+$/;
+
+function assertSafeIdentifier(identifier: string): void {
+  if (!IDENTIFIER_RE.test(identifier)) {
+    throw new Error(
+      `refusing to build a worktree path/branch name from issue identifier "${identifier}": ` +
+        `expected Linear's <TEAM>-<number> grammar`,
+    );
+  }
+}
+
+/** Rejects a ref that git would parse as an option rather than a ref name. */
+function assertSafeRef(ref: string, label: string): void {
+  if (ref.startsWith("-")) {
+    throw new Error(`refusing to pass "${label}" starting with "-" to git: ${ref}`);
+  }
+}
+
 /** Expand a `branchPattern` (SPEC §3.10) against an issue and its repository. */
 export function branchNameFor(
   pattern: string,
   issue: IssueRefLike,
   repoPath: string,
 ): string {
+  assertSafeIdentifier(issue.identifier);
   return pattern
     .replace(/<issue-id>/g, issue.identifier.toLowerCase())
     .replace(/<ISSUE-ID>/g, issue.identifier)
@@ -63,6 +89,7 @@ export function worktreePathFor(
   repoPath: string,
   issue: Pick<IssueRefLike, "identifier"> & { title?: string },
 ): string {
+  assertSafeIdentifier(issue.identifier);
   const expanded = pattern
     .replace(/<repo>/g, basename(repoPath))
     .replace(/<issue-id>/g, issue.identifier.toLowerCase())
@@ -158,6 +185,8 @@ export interface EnsureWorktreeInput {
   branch: string;
   baseBranch: string;
   runner?: CommandRunner;
+  /** Warnings only — e.g. degrading past an unreachable remote (SPEC §3.10's offline tolerance). Defaults to a no-op. */
+  log?: (message: string) => void;
 }
 
 export interface EnsureWorktreeResult {
@@ -177,9 +206,18 @@ export async function ensureWorktree(
 ): Promise<EnsureWorktreeResult> {
   const { repoPath, worktreePath, branch, baseBranch } = input;
   const runner = input.runner ?? nodeRunner;
+  const log = input.log ?? (() => {});
+
+  assertSafeRef(branch, "branch");
+  assertSafeRef(baseBranch, "baseBranch");
 
   const existing = await listWorktrees(repoPath, runner);
-  const registered = existing.find((entry) => entry.path === worktreePath);
+  // `git worktree list --porcelain` always reports realpaths, so a
+  // symlinked path component (a symlinked `/tmp` on macOS, a symlinked
+  // checkout root) makes a raw-equality match against `worktreePath` never
+  // hit even though the worktree is in fact already registered.
+  const target = existsSync(worktreePath) ? realpathSync(worktreePath) : worktreePath;
+  const registered = existing.find((entry) => entry.path === target || entry.path === worktreePath);
   if (registered) {
     if (registered.branch !== branch) {
       throw new Error(
@@ -199,8 +237,20 @@ export async function ensureWorktree(
   const remote = await remoteName(repoPath, runner);
   let baseRef = baseBranch;
   if (remote !== null) {
-    await runner.run(["git", "fetch", remote, baseBranch], { cwd: repoPath });
-    baseRef = `${remote}/${baseBranch}`;
+    try {
+      await runner.run(["git", "fetch", remote, baseBranch], { cwd: repoPath });
+      baseRef = `${remote}/${baseBranch}`;
+    } catch (error) {
+      // Offline, or the remote is briefly unreachable: degrade to the local
+      // base ref rather than fail every implement dispatch and burn the
+      // retry cap (SPEC §17.8), mirroring how `worktreeStatus` degrades
+      // rather than rejects when a git call fails.
+      if (!(await refExists(repoPath, `refs/heads/${baseBranch}`, runner))) throw error;
+      log(
+        `git fetch ${remote} ${baseBranch} failed (${String(error)}); using the local ` +
+          `${baseBranch} ref instead`,
+      );
+    }
   }
 
   // Derived from refs, not from the worktree list: a branch left behind by
@@ -218,6 +268,7 @@ export async function ensureWorktree(
 
   return { created: true, branchExisted, worktreePath };
 }
+
 
 /**
  * Merged-worktree cleanup only (SPEC §12: "Cleanup of merged worktrees is a

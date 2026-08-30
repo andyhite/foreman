@@ -34,6 +34,12 @@ jobs:
       - name: Build every package
         run: bun run build
 
+      - name: Exercise the built CLI
+        run: bun packages/cli/dist/main.js --help
+
+      - name: Lint the installer script
+        run: bash -n scripts/install.sh
+
       # The four agent definitions carry their output schema inlined in
       # frontmatter, generated from the TypeBox definitions in packages/core.
       # A hand-edit there would silently diverge from the validator the

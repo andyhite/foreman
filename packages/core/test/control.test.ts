@@ -266,6 +266,71 @@ describe("ControlServer.listen", () => {
   });
 });
 
+describe("ControlServer param validation", () => {
+  it("rejects tick with a non-string-array workers param instead of throwing", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      await expect(client.request("tick", { workers: 42 })).rejects.toThrow(/invalid workers/);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
+  it("rejects stop with an unknown mode", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      await expect(client.request("stop", { mode: "immediately" })).rejects.toThrow(/invalid stop mode/);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
+  it("rejects logs with a negative sinceSeq", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      await expect(client.request("logs", { sinceSeq: -1 })).rejects.toThrow(/invalid sinceSeq/);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+});
+
+describe("ControlServer.close unlink safety", () => {
+  it("does not unlink the socket file when listen() never bound (e.g. EADDRINUSE loss)", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const holder = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await holder.listen();
+    const contender = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    try {
+      await expect(contender.listen()).rejects.toThrow();
+      // The contender never bound; closing it must not delete the holder's live socket file.
+      await contender.close();
+      expect(existsSync(socketPath)).toBe(true);
+    } finally {
+      await holder.close();
+    }
+  });
+});
+
 describe("probeSocket / waitForSocket", () => {
   it("probeSocket resolves false for a nonexistent path rather than throwing", async () => {
     const dir = tempDir();

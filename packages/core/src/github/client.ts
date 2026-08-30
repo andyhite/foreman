@@ -18,6 +18,7 @@ export interface PullRequestInfo {
   state: string;
   isDraft: boolean;
   mergeable: boolean | null;
+  baseBranch: string;
 }
 
 interface GhPrListEntry {
@@ -27,6 +28,7 @@ interface GhPrListEntry {
   state: string;
   isDraft: boolean;
   mergeable: string;
+  baseRefName: string;
 }
 
 interface GhCheckRun {
@@ -60,31 +62,33 @@ export class GitHubClient {
   async prForBranch(
     repoPath: string,
     branch: string,
-    options?: { state?: "open" | "all" },
+    options?: { state?: "open" | "all"; base?: string },
   ): Promise<PullRequestInfo | null> {
-    const { stdout } = await this.#runner.run(
-      [
-        "gh",
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--state",
-        options?.state ?? "open",
-        "--json",
-        "number,url,headRefOid,state,isDraft,mergeable",
-        "--limit",
-        "1",
-      ],
-      { cwd: repoPath },
-    );
+    const argv = [
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      branch,
+      "--state",
+      options?.state ?? "open",
+      "--json",
+      "number,url,headRefOid,state,isDraft,mergeable,baseRefName",
+      "--limit",
+      "20",
+    ];
+    if (options?.base) argv.push("--base", options.base);
+    const { stdout } = await this.#runner.run(argv, { cwd: repoPath });
 
     const trimmed = stdout.trim();
     if (trimmed.length === 0) {
       return null;
     }
     const entries = JSON.parse(trimmed) as GhPrListEntry[];
-    const entry = entries[0];
+    const entry =
+      options?.state === "all"
+        ? (entries.find((candidate) => candidate.state === "MERGED") ?? entries[0])
+        : entries[0];
     if (!entry) {
       return null;
     }
@@ -95,6 +99,7 @@ export class GitHubClient {
       state: entry.state,
       isDraft: entry.isDraft,
       mergeable: entry.mergeable === "UNKNOWN" ? null : entry.mergeable === "MERGEABLE",
+      baseBranch: entry.baseRefName,
     };
   }
 
@@ -235,7 +240,7 @@ export class GitHubClient {
     baseBranch: string,
     strategy: MergeStrategy,
     deleteBranch: boolean,
-  ): Promise<void> {
+  ): Promise<string> {
     const status = await this.#runner.run(["git", "status", "--porcelain"], { cwd: repoPath });
     if (status.stdout.trim().length > 0) {
       throw new DirtyWorkingTreeError(repoPath);
@@ -249,6 +254,7 @@ export class GitHubClient {
       )
     ).stdout.trim();
 
+    let mergeCommit: string;
     try {
       await this.#runner.run(["git", "checkout", baseBranch], { cwd: repoPath });
       await this.#runner.run(["git", "pull", "origin", baseBranch], { cwd: repoPath });
@@ -266,6 +272,7 @@ export class GitHubClient {
       }
 
       await this.#runner.run(["git", "push", "origin", baseBranch], { cwd: repoPath });
+      mergeCommit = (await this.#runner.run(["git", "rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
 
       if (deleteBranch) {
         await this.#runner.run(["git", "branch", "-D", branch], { cwd: repoPath });
@@ -276,5 +283,6 @@ export class GitHubClient {
     } finally {
       await this.#runner.run(["git", "checkout", startingRef], { cwd: repoPath });
     }
+    return mergeCommit;
   }
 }

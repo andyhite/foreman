@@ -4,7 +4,7 @@
  * predicate by calling into `routing.ts` rather than re-deriving selection.
  */
 
-import type { BlockedItem, Dispatcher, GlobalConfig, Issue, LinearWriter, ProposalItem, QueueItem, ResolvedRepoEntry } from "@foreman/core";
+import type { BlockedItem, Dispatcher, DispatchHandle, GlobalConfig, Issue, LinearWriter, ProposalItem, QueueItem, ResolvedRepoEntry } from "@foreman/core";
 import type { BoardCounts } from "@foreman/core";
 import { issueScope } from "@foreman/core";
 import type { Bookkeeping } from "../bookkeeping.ts";
@@ -42,6 +42,8 @@ export interface WorkerContext {
   log: (message: string) => void;
   /** Dry-run: decisions are computed and logged, never dispatched or written. */
   dryRun: boolean;
+  /** Observe a launched dispatch to completion in the background; failures reach the retry cap. */
+  watchSettle(handle: DispatchHandle, stage: StageName): void;
 }
 
 export interface Worker {

@@ -96,6 +96,7 @@ export class ControlServer {
   readonly #log: (message: string) => void;
   readonly #connections = new Set<Connection>();
   #server: Server | null = null;
+  #bound = false;
   #seq = 0;
   #logRing: LogRecord[] = [];
 
@@ -121,13 +122,20 @@ export class ControlServer {
     this.#server = server;
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     server.once("error", reject);
-    server.listen(this.#socketPath, () => {
-      server.removeListener("error", reject);
-      resolve();
-    });
-    await promise;
-    // Owner-only after bind: `listen()` creates the socket file honoring the process umask, which
-    // a collaborative `umask 002` would leave group-writable (FOREMAN-SEC-002).
+    // Bind private from the first instant: a collaborative `umask 002` would otherwise leave a
+    // group-writable socket file for the window between `listen()` resolving and the belt-and-
+    // braces `chmodSync` below (FOREMAN-SEC-002).
+    const previousUmask = process.umask(0o077);
+    try {
+      server.listen(this.#socketPath, () => {
+        server.removeListener("error", reject);
+        this.#bound = true;
+        resolve();
+      });
+      await promise;
+    } finally {
+      process.umask(previousUmask);
+    }
     chmodSync(this.#socketPath, 0o600);
   }
 
@@ -144,7 +152,10 @@ export class ControlServer {
       server.close(() => resolve());
       await promise;
     }
-    if (existsSync(this.#socketPath)) unlinkSync(this.#socketPath);
+    // Only unlink the socket file when this instance actually bound it — an EADDRINUSE failure
+    // during `listen()` never sets `#bound`, so cleanup here must not delete the live peer's
+    // socket out from under it.
+    if (this.#bound && existsSync(this.#socketPath)) unlinkSync(this.#socketPath);
   }
 
   broadcast(event: EmittableEvent): void {
@@ -279,8 +290,16 @@ export class ControlServer {
         case "subscribe":
           connection.subscribed = true;
           return { ok: true, data: { recentLogs: this.recentLogs() } };
-        case "logs":
-          return { ok: true, data: { recentLogs: this.recentLogs(Number(params?.sinceSeq ?? 0)) } };
+        case "logs": {
+          const sinceSeq = params?.sinceSeq ?? 0;
+          if (typeof sinceSeq !== "number" || !Number.isFinite(sinceSeq) || sinceSeq < 0) {
+            return {
+              ok: false,
+              error: { code: "invalid-params", message: `invalid sinceSeq: ${String(sinceSeq)}` },
+            };
+          }
+          return { ok: true, data: { recentLogs: this.recentLogs(sinceSeq) } };
+        }
         case "snapshot":
           return { ok: true, data: await this.#handlers.snapshot() };
         case "pause":
@@ -289,12 +308,28 @@ export class ControlServer {
         case "resume":
           await this.#handlers.resume();
           return { ok: true };
-        case "stop":
-          await this.#handlers.stop((params?.mode as "graceful" | "now" | undefined) ?? "graceful");
+        case "stop": {
+          const mode = params?.mode ?? "graceful";
+          if (mode !== "graceful" && mode !== "now") {
+            return { ok: false, error: { code: "invalid-params", message: `invalid stop mode: ${String(mode)}` } };
+          }
+          await this.#handlers.stop(mode);
           return { ok: true };
-        case "tick":
-          await this.#handlers.tick(params?.workers as readonly string[] | undefined);
+        }
+        case "tick": {
+          const workers = params?.workers;
+          if (
+            workers !== undefined &&
+            (!Array.isArray(workers) || !workers.every((worker) => typeof worker === "string"))
+          ) {
+            return {
+              ok: false,
+              error: { code: "invalid-params", message: `invalid workers: ${JSON.stringify(workers)}` },
+            };
+          }
+          await this.#handlers.tick(workers as readonly string[] | undefined);
           return { ok: true };
+        }
         case "setStage": {
           const stage = params?.stage;
           if (!isLoopStage(stage)) {

@@ -80,6 +80,7 @@ interface WireLabel {
   name: string;
   isGroup?: boolean;
   parent: { id: string; name: string } | null;
+  team: { id: string } | null;
 }
 interface WireRelation {
   id: string;
@@ -118,6 +119,7 @@ interface WireIssue {
   parent: WireIssueRef | null;
   children: { nodes: WireIssueRef[] };
   relations: { nodes: WireRelation[] };
+  inverseRelations?: { nodes: WireRelation[] };
   comments?: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 }
 
@@ -143,8 +145,17 @@ export interface LinearClientOptions {
    * hand another team's Triage queue to the intake batch.
    */
   team?: string | null;
+  /**
+   * Per-attempt request deadline. Bun's `fetch` imposes no default timeout,
+   * so a half-open connection would otherwise freeze the awaiting call —
+   * and since a tick awaits these serially, one hung request would silently
+   * freeze the whole singleton loop.
+   */
+  timeoutMs?: number;
 }
 
+/** Hard ceiling on pagination loops — a full page every time up to this cap logs a warning rather than looping forever on a misbehaving cursor. */
+const MAX_PAGES = 50;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 export class LinearClient implements LinearWriter {
@@ -152,43 +163,68 @@ export class LinearClient implements LinearWriter {
   private readonly endpoint: string;
   private readonly fetchImpl: FetchLike;
   private readonly teamScope: IssueFilter | null;
+  private readonly timeoutMs: number;
   private readonly labelIdCache = new Map<string, IssueLabel>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
   private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
+  /** Every initiative a project belongs to, keyed by project id — same lifetime and invalidation (none) as `projectInitiativeCache`. */
+  private readonly projectInitiativesCache = new Map<string, InitiativeRef[]>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
   private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
   /** Once the working project-document content shape is discovered, reuse it. */
   private projectContentShape: "scalar" | "object" | null = null;
   /** Once the working initiative-document content shape is discovered, reuse it. */
   private initiativeContentShape: "scalar" | "object" | null = null;
+  private viewerIdCache: string | null = null;
 
   constructor(options: LinearClientOptions) {
     this.apiKey = options.apiKey;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.teamScope = options.team ? { team: { key: { eq: options.team } } } : null;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
+  /**
+   * One deadline shared across every retry of a logical request: retries
+   * back off but never get a fresh clock, so a request that keeps hitting
+   * 429s cannot outlive `timeoutMs` by retrying forever.
+   */
   private async request<T>(
     document: string,
     variables: Record<string, unknown>,
   ): Promise<T> {
-    return this.requestWithRetry<T>(document, variables, 0);
+    const signal = AbortSignal.timeout(this.timeoutMs);
+    return this.requestWithRetry<T>(document, variables, 0, signal);
   }
 
   private async requestWithRetry<T>(
     document: string,
     variables: Record<string, unknown>,
     attempt: number,
+    signal: AbortSignal,
   ): Promise<T> {
-    const response = await this.fetchImpl(this.endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: this.apiKey,
-      },
-      body: JSON.stringify({ query: document, variables }),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: this.apiKey,
+        },
+        body: JSON.stringify({ query: document, variables }),
+        signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new LinearApiError(
+          `Linear API request timed out after ${this.timeoutMs}ms`,
+          null,
+          null,
+        );
+      }
+      throw error;
+    }
 
     if (!response.ok) {
       if (attempt < 2 && RETRYABLE_STATUS.has(response.status)) {
@@ -197,8 +233,8 @@ export class LinearClient implements LinearWriter {
         // or GC'd, and every retryable status here is precisely the
         // rate-limit condition that can least afford a leaked connection.
         await response.text();
-        await this.backoff(response);
-        return this.requestWithRetry<T>(document, variables, attempt + 1);
+        await this.backoff(response, signal);
+        return this.requestWithRetry<T>(document, variables, attempt + 1, signal);
       }
       const body = await response.text();
       throw new LinearApiError(
@@ -229,14 +265,28 @@ export class LinearClient implements LinearWriter {
    * `Retry-After` is either delta-seconds or an HTTP-date (RFC 9110 §10.2.3);
    * Linear has been observed sending both. A date in the past or an
    * unparseable header falls back to 1s; either form is clamped to 60s so a
-   * misbehaving response header can't stall a caller indefinitely.
+   * misbehaving response header can't stall a caller indefinitely. Aborts
+   * early against `signal` so the overall request deadline still applies
+   * during a backoff sleep.
    */
-  private async backoff(response: Response): Promise<void> {
+  private async backoff(response: Response, signal: AbortSignal): Promise<void> {
     const retryAfter = response.headers.get("Retry-After");
     const delayMs = this.retryDelayMs(retryAfter);
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, delayMs);
-    await promise;
+    if (signal.aborted) {
+      throw new LinearApiError(`Linear API request timed out after ${this.timeoutMs}ms`, null, null);
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    const timer = setTimeout(resolve, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new LinearApiError(`Linear API request timed out after ${this.timeoutMs}ms`, null, null));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await promise;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private retryDelayMs(retryAfter: string | null): number {
@@ -254,6 +304,7 @@ export class LinearClient implements LinearWriter {
     return 1000;
   }
 
+
   private mapStateRef(state: WireStateRef): { id: LinearId; name: string; type: WorkflowState["type"] } {
     return { id: state.id, name: state.name, type: state.type as WorkflowState["type"] };
   }
@@ -269,20 +320,43 @@ export class LinearClient implements LinearWriter {
 
   /**
    * Normalize a relation row into the contract's `direction`/`other` shape.
-   * `issue.relations` is the single connection Linear exposes a relation row
-   * through from either endpoint (per `types.ts`'s `IssueRelation` doc), so
-   * this issue's own id decides which side is "this" and which is `other` —
-   * no second `inverseRelations` selection is needed.
+   * `direction` is supplied by the caller based on which connection the row
+   * came from (`relations` -> outgoing, `inverseRelations` -> incoming)
+   * rather than derived by comparing ids, since Linear's bidirectional
+   * exposure of `relations` alone is unverified (SPEC §16 assumption 5;
+   * `mapIssue` merges both connections defensively).
    */
-  private mapRelation(relation: WireRelation, queriedIssueId: string): IssueRelation {
-    const outgoing = relation.issue.id === queriedIssueId;
-    const other = outgoing ? relation.relatedIssue : relation.issue;
+  private mapRelation(relation: WireRelation, direction: "outgoing" | "incoming"): IssueRelation {
+    const other = direction === "outgoing" ? relation.relatedIssue : relation.issue;
     return {
       id: relation.id,
       type: relation.type as IssueRelationType,
-      direction: outgoing ? "outgoing" : "incoming",
+      direction,
       other: this.mapIssueRef(other),
     };
+  }
+
+  /**
+   * Merges `relations` (outgoing) and `inverseRelations` (incoming),
+   * de-duplicated by relation id. Correct whether or not Linear exposes a
+   * relation row bidirectionally through `relations` alone — if it does,
+   * the `inverseRelations` copy shares the same id and is dropped here; if
+   * it doesn't, this is the only place the incoming edge is ever seen.
+   */
+  private mergeRelations(wire: WireIssue): IssueRelation[] {
+    const seen = new Set<string>();
+    const merged: IssueRelation[] = [];
+    for (const relation of wire.relations.nodes) {
+      if (seen.has(relation.id)) continue;
+      seen.add(relation.id);
+      merged.push(this.mapRelation(relation, "outgoing"));
+    }
+    for (const relation of wire.inverseRelations?.nodes ?? []) {
+      if (seen.has(relation.id)) continue;
+      seen.add(relation.id);
+      merged.push(this.mapRelation(relation, "incoming"));
+    }
+    return merged;
   }
 
   private mapComment(comment: WireComment): Comment {
@@ -325,7 +399,7 @@ export class LinearClient implements LinearWriter {
       assignee: wire.assignee
         ? { id: wire.assignee.id, name: wire.assignee.name, displayName: wire.assignee.displayName }
         : null,
-      relations: wire.relations.nodes.map((relation) => this.mapRelation(relation, wire.id)),
+      relations: this.mergeRelations(wire),
       comments: wire.comments ? wire.comments.nodes.map((comment) => this.mapComment(comment)) : [],
     };
   }
@@ -361,6 +435,7 @@ export class LinearClient implements LinearWriter {
     const filter = this.scoped(query.filter);
     const results: Issue[] = [];
     let after: string | undefined;
+    let pages = 0;
     for (;;) {
       const data = await this.request<{
         issues: { nodes: WireIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
@@ -381,7 +456,16 @@ export class LinearClient implements LinearWriter {
         }
       }
       if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
+      if (data.issues.pageInfo.endCursor === after) {
+        console.warn(`issues(): cursor did not advance after ${results.length} results; stopping`);
+        break;
+      }
       after = data.issues.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        console.warn(`issues(): stopped after ${MAX_PAGES} pages (${results.length} results so far)`);
+        break;
+      }
     }
     return results;
   }
@@ -399,6 +483,7 @@ export class LinearClient implements LinearWriter {
   private async paginateComments(issueId: string, after: string | undefined): Promise<Comment[]> {
     const results: Comment[] = [];
     let cursor = after;
+    let pages = 0;
     for (;;) {
       const data = await this.request<{
         issue: {
@@ -410,7 +495,16 @@ export class LinearClient implements LinearWriter {
         results.push(this.mapComment(comment));
       }
       if (!data.issue.comments.pageInfo.hasNextPage || !data.issue.comments.pageInfo.endCursor) break;
+      if (data.issue.comments.pageInfo.endCursor === cursor) {
+        console.warn(`paginateComments(${issueId}): cursor did not advance after ${results.length} comments; stopping`);
+        break;
+      }
       cursor = data.issue.comments.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        console.warn(`paginateComments(${issueId}): stopped after ${MAX_PAGES} pages (${results.length} comments so far)`);
+        break;
+      }
     }
     return results;
   }
@@ -495,7 +589,11 @@ export class LinearClient implements LinearWriter {
    * `projectInitiative` enforces the exactly-one rule for repo resolution.
    */
   async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
-    return (await this.fetchProjectInitiatives(projectId)).initiatives;
+    const cached = this.projectInitiativesCache.get(projectId);
+    if (cached) return cached;
+    const { initiatives } = await this.fetchProjectInitiatives(projectId);
+    this.projectInitiativesCache.set(projectId, initiatives);
+    return initiatives;
   }
 
   async projectInitiative(projectId: string): Promise<InitiativeRef> {
@@ -571,6 +669,14 @@ export class LinearClient implements LinearWriter {
     return data.initiatives.nodes;
   }
 
+  /** The Linear user id the API key belongs to, memoized for the process lifetime. */
+  async viewerId(): Promise<string> {
+    if (this.viewerIdCache !== null) return this.viewerIdCache;
+    const data = await this.request<{ viewer: { id: string } }>("query { viewer { id } }", {});
+    this.viewerIdCache = data.viewer.id;
+    return data.viewer.id;
+  }
+
   async initiative(initiativeId: string): Promise<Initiative | null> {
     const shape = this.initiativeContentShape ?? "scalar";
     try {
@@ -643,22 +749,33 @@ export class LinearClient implements LinearWriter {
    * labels against it directly.
    *
    * Linear's `issueLabels` query has no verified team-filter argument, so
-   * team scoping happens client-side; team-scoped labels are a subset of
-   * the workspace result. `teamId` is accepted for API symmetry with
-   * `LinearReader` and reserved for a server-side filter once verified.
+   * team scoping happens client-side: when `teamId` is given, keep only
+   * labels owned by that team plus workspace-level labels (`team: null`) —
+   * dropping the rest is what stops `ensureLabel` from matching another
+   * team's same-named label and applying it cross-team.
    */
-  private async fetchRawLabels(_teamId?: string): Promise<WireLabel[]> {
+  private async fetchRawLabels(teamId?: string): Promise<WireLabel[]> {
     const results: WireLabel[] = [];
     let after: string | undefined;
+    let pages = 0;
     for (;;) {
       const data = await this.request<{
         issueLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
       }>(WORKSPACE_LABELS_QUERY, { after });
       results.push(...data.issueLabels.nodes);
       if (!data.issueLabels.pageInfo.hasNextPage || !data.issueLabels.pageInfo.endCursor) break;
+      if (data.issueLabels.pageInfo.endCursor === after) {
+        console.warn(`fetchRawLabels(): cursor did not advance after ${results.length} labels; stopping`);
+        break;
+      }
       after = data.issueLabels.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        console.warn(`fetchRawLabels(): stopped after ${MAX_PAGES} pages (${results.length} labels so far)`);
+        break;
+      }
     }
-    return results;
+    return teamId ? results.filter((label) => label.team === null || label.team.id === teamId) : results;
   }
 
   /**
@@ -822,7 +939,15 @@ export class LinearClient implements LinearWriter {
     const cached = this.labelIdCache.get(cacheKey);
     if (cached) return cached;
 
-    const existing = (await this.labels(teamId)).find((label) => label.name === name);
+    const matches = (await this.labels(teamId)).filter((label) => label.name === name);
+    if (matches.length > 1) {
+      throw new LinearApiError(
+        `Label "${name}" matches ${matches.length} labels visible to team ${teamId} (team-owned and workspace-level); cannot resolve unambiguously.`,
+        null,
+        null,
+      );
+    }
+    const existing = matches[0];
     if (existing) {
       this.labelIdCache.set(cacheKey, existing);
       return existing;

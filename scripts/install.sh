@@ -31,8 +31,15 @@ printf '\n\033[1mForeman installer\033[0m\n\n'
 
 if [ -e "$FOREMAN_INSTALL_DIR" ]; then
   [ -d "$FOREMAN_INSTALL_DIR" ] || die "$FOREMAN_INSTALL_DIR exists but is not a directory; choose an empty install path with FOREMAN_INSTALL_DIR."
-  git -C "$FOREMAN_INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+  # `rev-parse --is-inside-work-tree` succeeds for any directory *nested*
+  # inside a work tree — if $HOME is itself a repo (a dotfiles checkout),
+  # an install dir under it would pass this guard while every later
+  # `git -C "$FOREMAN_INSTALL_DIR"` command actually operates on that
+  # ancestor repo. Compare the work tree's actual root to the install dir.
+  toplevel="$(git -C "$FOREMAN_INSTALL_DIR" rev-parse --show-toplevel 2>/dev/null)" ||
     die "$FOREMAN_INSTALL_DIR exists but is not a git checkout; move it aside or choose another FOREMAN_INSTALL_DIR."
+  [ "$toplevel" = "$(cd "$FOREMAN_INSTALL_DIR" && pwd -P)" ] ||
+    die "$FOREMAN_INSTALL_DIR is nested inside another git checkout ($toplevel); choose another FOREMAN_INSTALL_DIR."
 
   if [ -n "$(git -C "$FOREMAN_INSTALL_DIR" status --porcelain)" ]; then
     die "$FOREMAN_INSTALL_DIR has uncommitted changes; commit, stash, or discard them before updating."
@@ -59,8 +66,8 @@ else
   fi
 fi
 
-info "bun install && bun run build"
-(cd "$FOREMAN_INSTALL_DIR" && bun install && bun run build)
+info "bun install --frozen-lockfile && bun run build"
+(cd "$FOREMAN_INSTALL_DIR" && bun install --frozen-lockfile && bun run build)
 
 mkdir -p "$FOREMAN_BIN_DIR"
 cat > "$FOREMAN_BIN_DIR/foreman" <<WRAPPER

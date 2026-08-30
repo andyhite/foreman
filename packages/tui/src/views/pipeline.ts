@@ -15,18 +15,12 @@ import type { View, ViewContext } from "../view.ts";
 
 const VIEW_ID = "pipeline";
 
-// `ui.pipelineFilter` is view-local UI state, not config. It is parked in
-// `settingsEdits` because that is the only free-form string slot the store
-// exposes; `settings.ts` skips every key starting `ui.` when building a
-// config patch, so this never reaches disk.
-const FILTER_KEY = "ui.pipelineFilter";
-
 function currentFilter(ctx: ViewContext): string {
-  return String(ctx.state.settingsEdits[FILTER_KEY] ?? "");
+  return ctx.state.pipelineFilter;
 }
 
 function setFilter(ctx: ViewContext, value: string): void {
-  ctx.dispatch({ type: "editSetting", key: FILTER_KEY, value });
+  ctx.dispatch({ type: "setPipelineFilter", filter: value });
 }
 
 function filteredRows(ctx: ViewContext, rows: readonly QueueItem[]): QueueItem[] {

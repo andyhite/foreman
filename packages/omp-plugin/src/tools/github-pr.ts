@@ -7,10 +7,25 @@
  */
 
 import { realpathSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionToolConfig, InferShape, ZodRawShape } from "@oh-my-pi/pi-coding-agent";
+import { nodeRunner } from "@foreman/core";
 import { getEntry, getGitHub } from "../runtime.ts";
 
 const OPS = ["create", "view"] as const;
+
+/** Resolves `git rev-parse --git-common-dir` for `repoPath`, absolute and realpath'd so a worktree and its
+ * origin repo compare equal regardless of a relative `.git` answer or a symlinked path component. */
+async function gitCommonDir(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await nodeRunner.run(["git", "rev-parse", "--git-common-dir"], { cwd: repoPath });
+    const raw = stdout.trim();
+    const absolute = isAbsolute(raw) ? raw : resolve(repoPath, raw);
+    return realpathSync(absolute);
+  } catch {
+    return null;
+  }
+}
 
 export function registerGitHubPrTool(pi: ExtensionAPI): void {
   const shape = {
@@ -37,8 +52,15 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
       } catch {
         return errorResult(`repoPath "${params.repoPath}" does not exist.`);
       }
+      // `repoPath` is only ever used as the `gh` working directory, so a
+      // Foreman worktree (whose git common dir points back at the registered
+      // repo's `.git`) is just as valid as the repo root itself — implement
+      // always runs from the worktree and has no other path to offer.
       if (repoPath !== realpathSync(entry.repoPath)) {
-        return errorResult(`repoPath must resolve to Foreman's registered repository (${entry.repoPath}).`);
+        const [worktreeCommonDir, repoCommonDir] = await Promise.all([gitCommonDir(repoPath), gitCommonDir(entry.repoPath)]);
+        if (worktreeCommonDir === null || worktreeCommonDir !== repoCommonDir) {
+          return errorResult(`repoPath must resolve to Foreman's registered repository (${entry.repoPath}) or one of its worktrees.`);
+        }
       }
       const github = getGitHub();
       if (params.op === "view") {

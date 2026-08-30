@@ -15,6 +15,7 @@
 import { homedir } from "node:os";
 import {
   ControlServer,
+  DISPATCH_COMMAND,
   HerdrDispatcher,
   INBOX_FILTER,
   INTAKE_LOOP_ID,
@@ -132,12 +133,20 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return parsed;
 }
 
-/** `"HH:MM"` window compared against `now`'s local time-of-day, once per calendar day. */
-export function pastIntakeWindow(window: string, now: Date): boolean {
+/** `"HH:MM"` window compared against `now`'s time-of-day in `timezone` (an IANA zone name), once per calendar day. */
+export function pastIntakeWindow(window: string, now: Date, timezone: string): boolean {
   const [hourStr, minuteStr] = window.split(":");
   const hour = Number(hourStr);
   const minute = Number(minuteStr);
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const nowHour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
+  const nowMinute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  const nowMinutes = nowHour * 60 + nowMinute;
   return nowMinutes >= hour * 60 + minute;
 }
 
@@ -219,7 +228,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
   } else {
     const lastRunAt = ctx.bookkeeping.state.lastTriageRunAt;
     const alreadyRanToday = lastRunAt !== null && sameCalendarDay(new Date(lastRunAt), now);
-    if (!pastIntakeWindow(ctx.config.intake.window, now)) {
+    if (!pastIntakeWindow(ctx.config.intake.window, now, ctx.config.intake.timezone)) {
       skipReason = `before intake.window (${ctx.config.intake.window})`;
     } else if (alreadyRanToday) {
       skipReason = "already dispatched the intake batch today";
@@ -230,11 +239,12 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
       } else if (!ctx.dryRun) {
         const dispatchId = newDispatchId("foreman-triage", "batch", now);
         const scratchCwd = `${expandHome(ctx.config.loop.stateDir)}/intake/scratch`;
+        const identifiers = inbox.map((issue) => issue.identifier).join(" ");
         try {
           const handle = await ctx.dispatcher.dispatch({
             agent: "foreman-triage",
             issueId: null,
-            command: "/foreman-triage",
+            command: `${DISPATCH_COMMAND.triage} ${identifiers}`,
             dispatchId,
             cwd: scratchCwd,
           });
@@ -243,7 +253,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
           ctx.bookkeeping.setLastRun("intake", now);
           dispatched = true;
         } catch (error) {
-          skipReason = `dispatch /foreman-triage failed: ${String(error)}`;
+          skipReason = `dispatch ${DISPATCH_COMMAND.triage} failed: ${String(error)}`;
         }
       } else {
         dispatched = true;
@@ -504,7 +514,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const dispatcher = await resolveDispatcher(
     {
       createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
-      createHerdr: () => new HerdrDispatcher(config),
+      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
     },
     log,
   );
@@ -527,8 +537,13 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     // `"dry-run"`, and `setStage` on this process throws — intake always
     // runs at the operator's configured autonomy, so a config left at the
     // safe default must not dispatch live triage agents just because
-    // `--dry-run` itself was never passed.
-    dryRun: args.dryRun || config.loop.stage === "dry-run",
+    // `--dry-run` itself was never passed. A getter, not a field snapshotted
+    // once here: `patchConfig`/`reload` (below) replace `ctx.config` in
+    // place, and a frozen boolean would then silently stop tracking the
+    // operator's live autonomy rung.
+    get dryRun(): boolean {
+      return args.dryRun || ctx.config.loop.stage === "dry-run";
+    },
   };
   const runtime = new IntakeRuntime();
 
@@ -616,14 +631,21 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
           continue;
         }
         runtime.tickRequested = false;
-        const report = await runIntakeTick(ctx);
-        runtime.lastReport = report;
-        runtime.ticks += 1;
-        runtime.lastTickAt = ctx.now().toISOString();
-        if (args.verbose && report.skipReason) {
-          log(`skip: ${report.skipReason}`);
+        try {
+          const report = await runIntakeTick(ctx);
+          runtime.lastReport = report;
+          runtime.ticks += 1;
+          runtime.lastTickAt = ctx.now().toISOString();
+          if (args.verbose && report.skipReason) {
+            log(`skip: ${report.skipReason}`);
+          }
+          publishIntakeStatus(ctx, runtime, statusPath);
+        } catch (error) {
+          // A transient Linear error (SPEC §17.5's per-worker isolation,
+          // mirrored here) must not terminate an unattended process — log
+          // and retry on the next cadence rather than crashing the loop.
+          log(`intake tick failed: ${String(error)}`);
         }
-        publishIntakeStatus(ctx, runtime, statusPath);
         if (runtime.currentRunState() === "draining") break;
         await intakeInterruptibleWait(runtime, 60_000);
       }

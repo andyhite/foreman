@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
-import { AGENT_LABEL, BLOCKED_LABEL, LEGACY_LABEL, TYPE_LABEL } from "@foreman/core";
+import { AGENT_LABEL, BLOCKED_LABEL, DISPATCH_COMMAND, LEGACY_LABEL, TYPE_LABEL } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { nextActions } from "../src/routing.ts";
 import type { BoardSnapshot, PlanCandidate, ReviewCandidate } from "../src/routing.ts";
@@ -23,7 +23,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
   return {
     repos: {},
     loop: { ...defaultLoop, ...overrides },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
@@ -291,6 +291,15 @@ describe("nextActions — refine buffer depth", () => {
     const { decisions } = nextActions(snapshot, config, freshBookkeeping());
     expect(decisions.some((d) => d.agent === "foreman-refine")).toBe(true);
   });
+
+  it("dispatches the /foreman:refine slash command with the issue identifier", () => {
+    const config = makeConfig({ readyBufferTarget: 5 });
+    const issue = makeIssue({ identifier: "ENG-1", priority: 2 });
+    const snapshot = emptySnapshot({ backlog: [issue], readyBufferCount: 2 });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    const decision = decisions.find((d) => d.agent === "foreman-refine");
+    expect(decision?.command).toBe(`${DISPATCH_COMMAND.refine} ENG-1`);
+  });
 });
 
 // ---- autonomy staging -----------------------------------------------------
@@ -389,7 +398,7 @@ describe("nextActions — plan", () => {
       agent: "foreman-plan",
       issueId: null,
       projectId: candidate.project.id,
-      command: `/foreman-plan ${candidate.project.id}`,
+      command: `${DISPATCH_COMMAND.plan} ${candidate.project.id}`,
     });
   });
 

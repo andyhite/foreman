@@ -27,10 +27,13 @@ flowchart LR
 Five workflow agents, each responsible for exactly one edge. None of them can
 spawn another agent, and none of them can write to Linear — the `task` tool and
 Linear's mutation API are both withheld, and the loop scrubs the Linear API key
-from every dispatched agent's environment. An agent returns a validated
-structured result; the extension performs the mutation. That split is the
-design. (An implement agent still holds `bash` for its actual job, so the
-boundary is defense-in-depth, not a sandbox — issue content is untrusted input.)
+from every dispatched agent's environment on both dispatch paths (print-mode
+`omp -p` and the herdr terminal pane). The one residual exposure the code
+cannot close: an implement agent still holds `bash`, so it can read
+`linear.apiKeyFile` directly if the operator stores the credential that way.
+An agent returns a validated structured result; the extension performs the
+mutation. That split is the design. (The `bash` boundary above is
+defense-in-depth, not a sandbox — issue content is untrusted input.)
 
 | Agent | Edge | Model | Produces |
 | --- | --- | --- | --- |
@@ -312,8 +315,9 @@ frontmatter — CI fails if the two drift.
 
 ## Development
 
-Same clone as above, but link instead of install: `foreman setup --omp link`
-symlinks `packages/omp-plugin` in place so edits show up without reinstalling.
+Same clone as above, but link instead of install: `--link` is a standalone
+flag (not an `--omp` value) because it links two things, not one — this
+checkout's `packages/omp-plugin` and the `foreman` CLI itself.
 
 ```bash
 git clone https://github.com/andyhite/foreman
@@ -322,18 +326,22 @@ bun install && bun run build
 bun run setup
 ```
 
-`bun run setup` runs `setup --omp link` straight from source (no prebuilt
+`bun run setup` runs `setup --link` straight from source (no prebuilt
 `@foreman/cli` needed); everything after `setup` still prompts, so it's the
 same tool-preflight-and-Linear-key walkthrough as the top-level install, just
 wired to link the plugin back to this checkout instead of installing from
-GitHub. Run `bun run packages/cli/src/main.ts init` inside each repo you
-want to register, same as with a built CLI.
+GitHub. `--link` also drops a `foreman` wrapper on `$PATH` (same
+`~/.local/bin` default, `$FOREMAN_BIN_DIR` override) that execs
+`packages/cli/src/main.ts` straight from source through `bun` instead of a
+prebuilt `dist/main.js` — like the plugin symlink, a source edit needs no
+rebuild to show up, so `foreman init` (and every other command) always runs
+today's checkout. Without `omp` installed, the plugin half is skipped but
+`--link` still links the CLI, since that half doesn't need `omp` at all.
 
 `omp plugin link` registers the checkout but skips its build step, so every
-source change needs `bun run build` (or `bun run --filter '@foreman/omp-plugin'
-build` for one package) before `/reload-plugins` picks it up. `foreman`
-itself is a bundled CLI too — rebuild `@foreman/cli` the same way after editing
-`packages/cli`, or run it straight from source with `bun run packages/cli/src/main.ts`.
+source change to the *plugin* needs `bun run build` (or `bun run --filter
+'@foreman/omp-plugin' build` for one package) before `/reload-plugins` picks
+it up — the CLI wrapper above is the one piece dev mode never needs rebuilt.
 
 ```bash
 bun run typecheck   # tsc --build across the workspace

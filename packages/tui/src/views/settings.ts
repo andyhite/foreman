@@ -73,7 +73,7 @@ const SECTIONS: readonly Section[] = [
     fields: [
       { path: "agent.maxRuntimeMs", kind: "number", label: "max runtime ms", hint: "mirrors omp's task.maxRuntimeMs", min: 60_000 },
       { path: "agent.lockTtlMarginMs", kind: "number", label: "lock ttl margin ms", hint: "lock TTL is 2×maxRuntimeMs + this", min: 0 },
-      { path: "agent.approvalMode", kind: "text", label: "approval mode", hint: "passed to every dispatched parent session" },
+      { path: "agent.approvalMode", kind: "select", label: "approval mode", hint: "passed to every dispatched parent session", options: ["always-ask", "write", "yolo"] },
       { path: "agent.ompBin", kind: "text", label: "omp bin", hint: "absolute path to the omp binary" },
       { path: "agent.herdrBin", kind: "text", label: "herdr bin", hint: "absolute path to the herdr binary" },
     ],
@@ -201,7 +201,7 @@ function validate(descriptor: FieldDescriptor, value: string | number | boolean)
 
 function editingPath(ctx: ViewContext): string | null {
   const value = ctx.state.settingsEdits[EDITING_PATH_KEY];
-  return typeof value === "string" ? value : null;
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 export const settingsView: View = {
@@ -280,7 +280,8 @@ export const settingsView: View = {
       const spec = buildSpec(ctx, descriptor);
       const result = applyFieldKey(spec, key, true);
       if (result.cancelled) {
-        ctx.dispatch({ type: "editSetting", key: EDITING_PATH_KEY, value: "" });
+        ctx.dispatch({ type: "deleteSettingEdit", key: EDITING_PATH_KEY });
+        ctx.dispatch({ type: "deleteSettingEdit", key: `ui.draft:${descriptor.path}` });
         ctx.dispatch({ type: "settingsError", message: null });
         return true;
       }
@@ -289,7 +290,8 @@ export const settingsView: View = {
       }
       if (result.committed) {
         const error = validate(descriptor, result.spec.value);
-        ctx.dispatch({ type: "editSetting", key: EDITING_PATH_KEY, value: "" });
+        ctx.dispatch({ type: "deleteSettingEdit", key: EDITING_PATH_KEY });
+        ctx.dispatch({ type: "deleteSettingEdit", key: `ui.draft:${descriptor.path}` });
         if (error) {
           ctx.dispatch({ type: "settingsError", message: error });
         } else {

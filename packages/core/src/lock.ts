@@ -36,6 +36,14 @@ export function newDispatchId(agent: string, issueId: string, now: Date = new Da
   return `${agent}-${issueId}-${compact}-${suffix}`;
 }
 
+/**
+ * The issue identifier `newDispatchId` embedded, or null when `dispatchId`
+ * is not one of ours.
+ */
+export function issueIdFromDispatchId(dispatchId: string): string | null {
+  return /^foreman-[a-z]+-(\S+)-\d{8}T\d{6}Z-\w+$/.exec(dispatchId)?.[1] ?? null;
+}
+
 export function renderLockComment(record: LockRecord): string {
   const expires = new Date(new Date(record.takenAt).getTime() + record.ttlMs).toISOString();
   const human = [
@@ -48,8 +56,9 @@ export function renderLockComment(record: LockRecord): string {
 
 export function readLockComment(
   comments: readonly MarkerSource[],
+  authoredBy?: string,
 ): FoundMarker<LockRecord> | null {
-  return latestMarker<LockRecord>(MARKER_KIND.lock, comments);
+  return latestMarker<LockRecord>(MARKER_KIND.lock, comments, authoredBy !== undefined ? { authoredBy } : undefined);
 }
 
 export interface LockState {

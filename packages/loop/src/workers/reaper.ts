@@ -21,7 +21,17 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
   const skipped: WorkerReport["skipped"] = [];
   const blocked: BlockedItem[] = [];
 
+  let viewerId: string | null;
+  try {
+    viewerId = await ctx.linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+
   const running = await ctx.linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500, includeComments: true });
+  if (running.length >= 500) {
+    ctx.log(`reaper: query returned a full page of 500 in-flight issues; some may not have been swept this pass.`);
+  }
 
   // Live dispatch ids: anything the loop itself started and has not yet
   // cleared from bookkeeping. This is deliberately non-authoritative (SPEC
@@ -33,7 +43,11 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
 
   for (const issue of running) {
     if (!hasLabel(issue, AGENT_LABEL.running)) continue;
-    const record = readLockComment(issue.comments);
+    // Authorship unverifiable (`viewerId` unavailable): fail closed — treat
+    // every lock marker as untrusted, so a forged release is never honored
+    // and this lock is reported rather than reclaimed.
+    if (viewerId === null) continue;
+    const record = readLockComment(issue.comments, viewerId);
     const classification = lockState(record?.data ?? null, {
       now,
       liveDispatchIds: [...liveDispatchIds],

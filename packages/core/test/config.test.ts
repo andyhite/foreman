@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ConfigError,
   boundInitiativeIds,
+  defaultAndValidateGlobalConfig,
   entryForCwd,
   expandHome,
   initiativeIndex,
@@ -136,6 +137,73 @@ describe("loadGlobalConfig", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("defaultAndValidateGlobalConfig", () => {
+  it("rejects an invalid agent.approvalMode literal", () => {
+    expect(() => defaultAndValidateGlobalConfig({ agent: { approvalMode: "yolo!" } }, "test")).toThrow(ConfigError);
+  });
+
+  it("accepts every agent.approvalMode literal", () => {
+    for (const mode of ["always-ask", "write", "yolo"] as const) {
+      const config = defaultAndValidateGlobalConfig({ agent: { approvalMode: mode } }, "test");
+      expect(config.agent.approvalMode).toBe(mode);
+    }
+  });
+
+  it("rejects an empty repos key", () => {
+    expect(() =>
+      defaultAndValidateGlobalConfig({ repos: { "": { path: "~/code/x", initiatives: [] } } }, "test"),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects a whitespace-only repos key", () => {
+    expect(() =>
+      defaultAndValidateGlobalConfig({ repos: { "  ": { path: "~/code/x", initiatives: [] } } }, "test"),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects a repos key containing a path separator or colon", () => {
+    for (const alias of ["a/b", "a\\b", "a:b"]) {
+      expect(() =>
+        defaultAndValidateGlobalConfig({ repos: { [alias]: { path: "~/code/x", initiatives: [] } } }, "test"),
+      ).toThrow(ConfigError);
+    }
+  });
+
+  it("rejects mergeDetection: false combined with pr.required: false on any repo", () => {
+    expect(() =>
+      defaultAndValidateGlobalConfig(
+        {
+          loop: { mergeDetection: false },
+          repos: { x: { path: "~/code/x", initiatives: [], pr: { required: false } } },
+        },
+        "test",
+      ),
+    ).toThrow(ConfigError);
+  });
+
+  it("allows mergeDetection: false when every repo keeps pr.required: true", () => {
+    const config = defaultAndValidateGlobalConfig(
+      { loop: { mergeDetection: false }, repos: { x: { path: "~/code/x", initiatives: ["init-1"] } } },
+      "test",
+    );
+    expect(config.loop.mergeDetection).toBe(false);
+  });
+
+  it("throws ConfigError when an initiative is bound to two entries, even outside loadGlobalConfig", () => {
+    expect(() =>
+      defaultAndValidateGlobalConfig(
+        {
+          repos: {
+            a: { path: "~/code/a", initiatives: ["init-1"] },
+            b: { path: "~/code/b", initiatives: ["init-1"] },
+          },
+        },
+        "test",
+      ),
+    ).toThrow(ConfigError);
   });
 });
 

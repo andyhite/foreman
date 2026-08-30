@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CommandRunner } from "../src/git/exec.ts";
 import {
   branchNameFor,
   ensureWorktree,
@@ -71,6 +72,16 @@ describe("branchNameFor", () => {
       "plotroom/eng-142",
     );
   });
+
+  it("rejects an identifier containing \"..\" (path/branch escape)", () => {
+    const issue = { identifier: "../../etc-1", title: "Escape" };
+    expect(() => branchNameFor("<issue-id>-<slug>", issue, "/repo")).toThrow(/identifier/);
+  });
+
+  it("rejects an identifier starting with \"-\" (git option injection)", () => {
+    const issue = { identifier: "-force-1", title: "Escape" };
+    expect(() => branchNameFor("<issue-id>-<slug>", issue, "/repo")).toThrow(/identifier/);
+  });
 });
 
 describe("worktreePathFor", () => {
@@ -93,6 +104,12 @@ describe("worktreePathFor", () => {
     const issue = { identifier: "ENG-142", title: "Fix Triage Dedupe" };
     const result = worktreePathFor("../<repo>-<slug>", repoPath, issue);
     expect(result).toBe("/Users/dev/code/plotroom-fix-triage-dedupe");
+  });
+
+  it("rejects an identifier containing \"..\" so a worktree path cannot escape the repo", () => {
+    const repoPath = "/Users/dev/code/plotroom";
+    const issue = { identifier: "../../etc-1" };
+    expect(() => worktreePathFor("../<repo>-<issue-id>", repoPath, issue)).toThrow(/identifier/);
   });
 });
 
@@ -235,5 +252,60 @@ describe("worktree lifecycle against a real repo", () => {
     expect(status.commits).toEqual([]);
     expect(status.dirty).toBe(false);
     expect(status.headSha).not.toBeNull();
+  });
+
+  it("rejects a branch or baseBranch starting with \"-\" (option injection)", async () => {
+    const worktreePath = join(repoRoot, "repo-eng-142");
+    await expect(
+      ensureWorktree({ repoPath, worktreePath, branch: "-force", baseBranch: "main" }),
+    ).rejects.toThrow(/branch/);
+    await expect(
+      ensureWorktree({ repoPath, worktreePath, branch: "eng-142-fix", baseBranch: "-force" }),
+    ).rejects.toThrow(/baseBranch/);
+  });
+
+  it("matches an already-registered worktree even when the requested path traverses a symlink", async () => {
+    const realParent = join(repoRoot, "real-parent");
+    mkdirSync(realParent);
+    const symlinkedParent = join(repoRoot, "symlinked-parent");
+    symlinkSync(realParent, symlinkedParent);
+    const worktreePath = join(symlinkedParent, "repo-eng-142");
+
+    const first = await ensureWorktree({ repoPath, worktreePath, branch: "eng-142-fix", baseBranch: "main" });
+    expect(first.created).toBe(true);
+
+    // `git worktree list --porcelain` reports the realpath; a second call
+    // through the same symlinked path must still recognize it as registered
+    // rather than falling through to the "refusing to clobber" guard.
+    const second = await ensureWorktree({ repoPath, worktreePath, branch: "eng-142-fix", baseBranch: "main" });
+    expect(second).toEqual({ created: false, branchExisted: true, worktreePath });
+  });
+
+  it("degrades to the local base ref when fetching the remote fails, rather than rejecting", async () => {
+    const worktreePath = join(repoRoot, "repo-eng-142");
+    git(repoPath, "remote", "add", "origin", "https://example.invalid/nonexistent.git");
+
+    const warnings: string[] = [];
+    const flakyRunner: CommandRunner = {
+      async run(argv, options) {
+        if (argv[0] === "git" && argv[1] === "fetch") {
+          throw new Error("simulated offline: could not resolve host");
+        }
+        const stdout = execFileSync("git", argv.slice(1), { cwd: options.cwd, encoding: "utf8" });
+        return { stdout, stderr: "", code: 0 };
+      },
+    };
+
+    const result = await ensureWorktree({
+      repoPath,
+      worktreePath,
+      branch: "eng-142-fix",
+      baseBranch: "main",
+      runner: flakyRunner,
+      log: (message) => warnings.push(message),
+    });
+
+    expect(result.created).toBe(true);
+    expect(warnings.some((message) => message.includes("git fetch"))).toBe(true);
   });
 });

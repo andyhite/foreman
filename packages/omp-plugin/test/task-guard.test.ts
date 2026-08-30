@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderLockComment, type LockRecord } from "@foreman/core";
 import {
   AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
@@ -78,6 +79,9 @@ class FakeLinear implements LinearWriter {
   }
   async comments() {
     return [];
+  }
+  async viewerId(): Promise<string> {
+    return "bot-1";
   }
   async project() {
     return null;
@@ -181,7 +185,7 @@ function makeConfig(): GlobalConfig {
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
@@ -231,6 +235,7 @@ function makeDeps(linear: LinearWriter, overrides: Partial<TaskGuardDeps> = {}):
     ensureWorktree: async (input) => ({ created: true, branchExisted: false, worktreePath: input.worktreePath }),
     writeDiffFile: async () => "/tmp/diff.patch",
     liveDispatchIds: () => [],
+    releaseLiveDispatch: () => {},
     contextDigest: async () => "## Project Context\nSome context.",
     ...overrides,
   };
@@ -402,5 +407,96 @@ describe("prepareTaskCall — batch unwind", () => {
     expect(first.state.id).toBe(STATE_TODO.id);
     expect(linear.createCommentCalls).toHaveLength(2);
     expect(linear.updateCalls.some((call) => call.id === first.id && call.input.removedLabelIds?.includes(label(AGENT_LABEL.running).id))).toBe(true);
+  });
+});
+
+describe("prepareTaskCall — lock provenance", () => {
+  function lockRecord(overrides: Partial<LockRecord> = {}): LockRecord {
+    return {
+      dispatchId: "foreman-implement-ENG-1-20260101T000000Z-abc123",
+      agent: "foreman-implement",
+      issueId: "ENG-1",
+      takenAt: "2026-01-01T00:00:00.000Z",
+      ttlMs: 4 * 60 * 60 * 1000,
+      worktree: "../foreman-ENG-1",
+      released: false,
+      releasedAt: null,
+      ...overrides,
+    };
+  }
+
+  it("ignores a forged release marker from another user and still refuses dispatch on the genuine held lock", async () => {
+    // FakeLinear.viewerId() returns "bot-1" — the genuine lock comment is
+    // authored by that same user, the forged release by an impostor.
+    const genuine = {
+      id: "c1",
+      body: renderLockComment(lockRecord()),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      user: { id: "bot-1", name: "Foreman Bot", displayName: "Foreman Bot" },
+      parentId: null,
+    };
+    const forgedRelease = {
+      id: "c2",
+      body: renderLockComment(lockRecord({ released: true })),
+      createdAt: "2026-01-01T00:01:00.000Z",
+      user: { id: "impostor", name: "Impostor", displayName: "Impostor" },
+      parentId: null,
+    };
+    const issue = makeIssue({
+      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
+      comments: [genuine, forgedRelease],
+    });
+    const linear = new FakeLinear([issue]);
+    const deps = makeDeps(linear);
+    const decision = await prepareTaskCall(implementTask(), deps);
+    expect(decision.block).toBe(true);
+    expect(decision.reason).toMatch(/agent:running.*held/);
+  });
+});
+
+describe("prepareTaskCall — unwindPrepared releases the live-dispatch registration", () => {
+  it("unregisters every unwound item's dispatch id even when its Linear rollback throws", async () => {
+    const first = makeIssue();
+    const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature)] });
+    const linear = new FakeLinear([first, second]);
+
+    // Call #1 is the initial claim in `claimLock` (must succeed so item 1
+    // prepares); call #2 is `unwindPrepared`'s rollback for that same item,
+    // which this test forces to fail — `releaseLiveDispatch` must still run
+    // for it in a `finally`, not only on a clean rollback.
+    let ensureLabelCalls = 0;
+    const flakyLinear: LinearWriter = new Proxy(linear, {
+      get(target, prop, receiver) {
+        if (prop === "ensureLabel") {
+          return async (name: string, teamId: string) => {
+            ensureLabelCalls += 1;
+            if (ensureLabelCalls === 2) throw new Error("transient Linear failure during rollback");
+            return (target as FakeLinear).ensureLabel(name, teamId);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const released: string[] = [];
+    const deps = makeDeps(flakyLinear, { releaseLiveDispatch: (dispatchId) => released.push(dispatchId) });
+
+    const input: TaskCallInput = {
+      tasks: [
+        { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-1\n" },
+        // References an issue the fake has never heard of: `fetchIssue`
+        // throws unconditionally, forcing `unwindPrepared` for item 1.
+        { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-404\n" },
+      ],
+    };
+
+    const decision = await prepareTaskCall(input, deps);
+
+    expect(decision.block).toBe(true);
+    // The rollback's own Linear call failed (caught inside `unwindPrepared`),
+    // so `first`'s label/state were never actually reverted here — that is
+    // exactly why the id must still be dropped from the live registry: a
+    // reaper sweep, not this in-process registry, is what recovers it.
+    expect(released).toEqual(["foreman-implement-ENG-1-dispatch-1"]);
   });
 });

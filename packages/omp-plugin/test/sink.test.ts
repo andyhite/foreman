@@ -29,15 +29,34 @@ describe("extractFromToolResult", () => {
     };
     const captured = extractFromToolResult(payload);
     expect(captured).toEqual([
-      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" }, aborted: false },
+      {
+        dispatchId: "foreman-implement-ENG-1-1",
+        agent: "foreman-implement",
+        data: { issueId: "ENG-1" },
+        aborted: false,
+        issueId: null,
+        previousStateId: null,
+      },
     ]);
   });
 
-  it("ignores results whose structuredOutput is invalid or malformed", () => {
+  it("still captures a runtime-invalid (valid: false) structuredOutput — a budget-truncated yield must reach the classifier downstream", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
       result: { content: [], details: { results: [{ structuredOutput: { data: {}, valid: false } }] } },
+    };
+    const captured = extractFromToolResult(payload);
+    expect(captured).toEqual([
+      { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: null, previousStateId: null },
+    ]);
+  });
+
+  it("ignores results whose structuredOutput is malformed (missing the valid/data shape)", () => {
+    const payload = {
+      toolName: "task",
+      input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
+      result: { content: [], details: { results: [{ structuredOutput: { notAStructuredOutput: true } }] } },
     };
     expect(extractFromToolResult(payload)).toEqual([]);
   });
@@ -59,6 +78,8 @@ describe("extractFromLifecycle", () => {
       agent: "foreman-refine",
       data: { issueId: "ENG-2" },
       aborted: false,
+      issueId: null,
+      previousStateId: null,
     });
   });
 
@@ -84,7 +105,7 @@ describe("sink — idempotency", () => {
   it("is a no-op on a second delivery of the same dispatch id", async () => {
     const applied = new Set<string>();
     const calls: CapturedOutput[] = [];
-    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false };
+    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: "ENG-1", previousStateId: null };
 
     await sink(captured, makeTracker(applied), async (value) => {
       calls.push(value);

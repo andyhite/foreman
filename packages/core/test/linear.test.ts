@@ -128,6 +128,52 @@ describe("LinearClient projectInitiative", () => {
   });
 });
 
+describe("LinearClient projectInitiatives (SPEC §17: avoid a serial GraphQL round-trip per issue)", () => {
+  it("caches the initiatives list per project, like projectInitiative does", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(200, {
+        data: {
+          project: {
+            id: "proj-1",
+            name: "Project",
+            initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }] },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    const first = await client.projectInitiatives("proj-1");
+    const second = await client.projectInitiatives("proj-1");
+    expect(first).toEqual([{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }]);
+    expect(second).toEqual(first);
+    expect(calls).toBe(1);
+  });
+
+  it("caches per project id independently", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(init.body as string) as { variables: { projectId: string } };
+      return jsonResponse(200, {
+        data: {
+          project: {
+            id: body.variables.projectId,
+            name: "Project",
+            initiatives: { nodes: [{ id: `init-${body.variables.projectId}`, name: "Push" }] },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await client.projectInitiatives("proj-1");
+    await client.projectInitiatives("proj-2");
+    await client.projectInitiatives("proj-1");
+    expect(calls).toBe(2);
+  });
+});
+
 describe("LinearClient initiative", () => {
   it("returns null for an unknown initiative id", async () => {
     const fetchStub: FetchLike = async () => jsonResponse(200, { data: { initiative: null } });
@@ -200,6 +246,22 @@ describe("LinearClient retry", () => {
     const issue = await client.issue("ENG-1");
     expect(calls).toBe(2);
     expect(issue?.identifier).toBe("ENG-1");
+  });
+});
+
+describe("LinearClient timeout", () => {
+  it("rejects with LinearApiError when the request deadline elapses", async () => {
+    const fetchStub: FetchLike = async (_url, init) => {
+      const { promise, reject } = Promise.withResolvers<Response>();
+      init.signal?.addEventListener("abort", () => {
+        const abortError = new Error("The operation was aborted");
+        abortError.name = "AbortError";
+        reject(abortError);
+      });
+      return promise;
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub, timeoutMs: 5 });
+    await expect(client.issue("ENG-1")).rejects.toThrow(/timed out/);
   });
 });
 
@@ -331,7 +393,8 @@ describe("LinearClient relation normalization", () => {
 
   it("marks an edge pointing at this issue as incoming with the owning issue as other", async () => {
     const wire = baseWireIssue({
-      relations: {
+      relations: { nodes: [] },
+      inverseRelations: {
         nodes: [
           {
             id: "rel-2",
@@ -347,6 +410,36 @@ describe("LinearClient relation normalization", () => {
     const issue = await client.issue("ENG-1");
     expect(issue?.relations[0]?.direction).toBe("incoming");
     expect(issue?.relations[0]?.other.id).toBe("3");
+  });
+
+  it("de-duplicates a relation id present in both relations and inverseRelations, preferring the outgoing tag", async () => {
+    const wire = baseWireIssue({
+      relations: {
+        nodes: [
+          {
+            id: "rel-3",
+            type: "blocks",
+            issue: { id: "issue-1", identifier: "ENG-1", title: "Test issue", state: WIRE_STATE },
+            relatedIssue: wireIssueRef("4", "started"),
+          },
+        ],
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            id: "rel-3",
+            type: "blocks",
+            issue: { id: "issue-1", identifier: "ENG-1", title: "Test issue", state: WIRE_STATE },
+            relatedIssue: wireIssueRef("4", "started"),
+          },
+        ],
+      },
+    });
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issue: wire } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    const issue = await client.issue("ENG-1");
+    expect(issue?.relations).toHaveLength(1);
+    expect(issue?.relations[0]?.direction).toBe("outgoing");
   });
 });
 
@@ -474,6 +567,41 @@ describe("LinearClient ensureLabel", () => {
 
     expect(labelQueryCalls).toBe(cachedCallsBefore);
     expect(cached).toEqual(label);
+  });
+  it("scopes matches to the requested team plus workspace-level labels", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: {
+          issueLabels: {
+            nodes: [
+              { id: "label-team-a", name: "Ready", isGroup: false, parent: null, team: { id: "team-a" } },
+              { id: "label-team-b", name: "Ready-B", isGroup: false, parent: null, team: { id: "team-b" } },
+              { id: "label-workspace", name: "Workspace", isGroup: false, parent: null, team: null },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    const teamALabels = await client.labels("team-a");
+    expect(teamALabels.map((label) => label.id).sort()).toEqual(["label-team-a", "label-workspace"]);
+  });
+
+  it("rejects an ambiguous match across a team-owned and a workspace-level label with the same name", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: {
+          issueLabels: {
+            nodes: [
+              { id: "label-1", name: "agent:ready", isGroup: false, parent: null, team: { id: "team-a" } },
+              { id: "label-2", name: "agent:ready", isGroup: false, parent: null, team: null },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.ensureLabel("agent:ready", "team-a")).rejects.toThrow(/ambiguously/);
   });
 });
 describe("LinearClient workspace label pagination", () => {

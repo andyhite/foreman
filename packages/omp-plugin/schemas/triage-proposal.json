@@ -40,6 +40,9 @@
                   "duplicateOf",
                   "proposedBlockedBy",
                   "destinationProject",
+                  "draftDescription",
+                  "proposedEstimate",
+                  "destinationProjectId",
                   "destination",
                   "reproConfidence",
                   "missingInfo",
@@ -109,6 +112,42 @@
                     "description": "Name of the project this issue belongs to once triaged: a milestone project's name, or the product's standing `Maintenance` project (SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely cannot tell.",
                     "anyOf": [
                       {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "draftDescription": {
+                    "description": "Drafted issue body when the source Inbox item lacks one; applied as the description on approval. Null when the existing description is adequate.",
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "proposedEstimate": {
+                    "description": "Estimate to apply on approval, or null when you cannot yet estimate it.",
+                    "anyOf": [
+                      {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "destinationProjectId": {
+                    "description": "Linear project id to apply on approval, preferred over `destinationProject` (a name, which can be ambiguous). Null when you don't have the id.",
+                    "anyOf": [
+                      {
+                        "minLength": 1,
                         "type": "string"
                       },
                       {

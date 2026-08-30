@@ -21,7 +21,7 @@ import type {
   TeamRef,
   WorkflowState,
 } from "@foreman/core";
-import { AGENT_LABEL, MAINTENANCE_PROJECT_NAME, TYPE_LABEL } from "@foreman/core";
+import { AGENT_LABEL, DISPATCH_COMMAND, MAINTENANCE_PROJECT_NAME, TYPE_LABEL } from "@foreman/core";
 import { implementWorker } from "../src/workers/implement.ts";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { planWorker } from "../src/workers/plan.ts";
@@ -46,7 +46,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20 },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
@@ -164,6 +164,9 @@ class FakeLinear implements LinearWriter {
   async comments(): Promise<Comment[]> {
     return [];
   }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
   async project(): Promise<Project | null> {
     return null;
   }
@@ -236,6 +239,7 @@ function makeContext(
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
     dryRun: false,
+    watchSettle: () => {},
   };
 }
 
@@ -372,6 +376,9 @@ class PlanFakeLinear implements LinearWriter {
   async comments(): Promise<Comment[]> {
     return [];
   }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
   async project(): Promise<Project | null> {
     return null;
   }
@@ -445,7 +452,7 @@ describe("planWorker — bare-project discovery (SPEC §7.6)", () => {
     expect(report.errors).toEqual([]);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]).toMatchObject({ agent: "foreman-plan", cwd: "/repos/product" });
-    expect(dispatcher.calls[0]?.command).toBe(`/foreman-plan ${bareProject.id}`);
+    expect(dispatcher.calls[0]?.command).toBe(`${DISPATCH_COMMAND.plan} ${bareProject.id}`);
   });
 
   it("never dispatches at a project that already has at least one issue", async () => {

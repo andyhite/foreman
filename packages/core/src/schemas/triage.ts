@@ -42,6 +42,15 @@ export const TriageItem = Type.Object(
         "(SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely " +
         "cannot tell.",
     }),
+    draftDescription: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "Drafted issue body when the source Inbox item lacks one; applied as the description on approval. Null when the existing description is adequate.",
+    }),
+    proposedEstimate: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()], {
+      description: "Estimate to apply on approval, or null when you cannot yet estimate it.",
+    }),
+    destinationProjectId: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "Linear project id to apply on approval, preferred over `destinationProject` (a name, which can be ambiguous). Null when you don't have the id.",
+    }),
     destination: Type.Union(
       [
         Type.Literal("Backlog"),

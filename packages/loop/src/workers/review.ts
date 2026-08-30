@@ -4,6 +4,7 @@
  * to this instance (SPEC §3.11).
  */
 
+import type { ReviewResult } from "@foreman/core";
 import {
   BLOCKED_HUMAN_FILTER,
   GitHubClient,
@@ -26,6 +27,12 @@ async function buildReviewCandidates(
   github: GitHubClient,
   skipped: WorkerReport["skipped"],
 ): Promise<ReviewCandidate[]> {
+  let viewerId: string | null;
+  try {
+    viewerId = await ctx.linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
   const inReviewIssues = await ctx.linear.issues({
     filter: inState("In Review"),
     limit: 500,
@@ -76,8 +83,13 @@ async function buildReviewCandidates(
       skipped.push({ stage: "review", issueId: issue.identifier, code: "pr-not-open", message: "PR has no head SHA." });
       continue;
     }
-    const review = latestMarker<{ headSha: string }>(MARKER_KIND.review, issue.comments);
-    const hasReviewForHead = review?.data.headSha === headSha;
+    // Authorship unverifiable: fail closed by treating the review marker as
+    // absent, so a forged clean review can never satisfy the merge gate.
+    const review =
+      viewerId === null
+        ? null
+        : latestMarker<ReviewResult>(MARKER_KIND.review, issue.comments, { authoredBy: viewerId });
+    const hasReviewForHead = review?.data.reviewedSha === headSha;
 
     candidates.push({ issue, prOpen, headSha, hasReviewForHead });
   }
@@ -94,13 +106,12 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
     buildReviewCandidates(ctx, github, candidateSkips),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
-  const { inScope: scopedBlocked } = await filterInScope(ctx, "review", blockedHuman);
 
   const snapshot: BoardSnapshot = {
     backlog: [],
     todo: [],
     reviewCandidates,
-    blockedHumanCount: scopedBlocked.length,
+    blockedHumanCount: blockedHuman.length,
     readyBufferCount: 0,
     planCandidates: [],
   };
@@ -130,6 +141,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
           startedAt: handle.startedAt,
           stage: "review",
         });
+        ctx.watchSettle(handle, "review");
         const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
         if (previousSha !== null && previousSha !== candidate.headSha) {
           const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
@@ -153,7 +165,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
     dispatched: decisions,
     skipped,
     errors,
-    counts: { inReview: reviewCandidates.length },
+    counts: { inReview: reviewCandidates.length, blocked: blockedHuman.length },
     queues: { pipeline: reviewCandidates.map((candidate) => toQueueItem(candidate.issue)) },
   };
 }

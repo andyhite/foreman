@@ -41,7 +41,7 @@ export function gauge(canvas: Canvas, rect: Rect, options: GaugeOptions): void {
     canvas.text(x, rect.y, truncate(labelText, labelWidth), theme.toneSgr("muted"));
     x += labelWidth;
   }
-  if (barWidth > 0 || labelWidth + suffixWidth < rect.width) {
+  if (labelWidth + suffixWidth + 2 <= rect.width) {
     canvas.text(x, rect.y, "[", theme.toneSgr("muted"));
     x += 1;
     canvas.text(x, rect.y, "█".repeat(filled), theme.toneSgr(tone));
@@ -51,7 +51,7 @@ export function gauge(canvas: Canvas, rect: Rect, options: GaugeOptions): void {
     canvas.text(x, rect.y, "]", theme.toneSgr("muted"));
     x += 1;
   }
-  canvas.text(x, rect.y, truncate(suffix, suffixWidth), theme.toneSgr("muted"));
+  canvas.text(x, rect.y, truncate(suffix, Math.max(0, rect.width - (x - rect.x))), theme.toneSgr("muted"));
 }
 
 const BLOCKS = "▁▂▃▄▅▆▇█";

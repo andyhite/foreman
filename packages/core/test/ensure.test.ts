@@ -35,6 +35,9 @@ class FakeLinear implements LinearWriter {
   async comments(): Promise<Comment[]> {
     return [];
   }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
   async project(): Promise<Project | null> {
     return null;
   }
@@ -162,6 +165,43 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
         created: true,
       },
     ]);
+  });
+
+  it("dry-run: reports a missing Maintenance project without creating it", async () => {
+    const linear = new FakeLinear(
+      new Map([["init-1", makeInitiative("init-1", "Foreman")]]),
+      new Map([["init-1", []]]),
+    );
+
+    const reports = await ensureMaintenanceProjects(linear, {
+      initiativeIds: ["init-1"],
+      teamId: "team-1",
+      dryRun: true,
+    });
+
+    expect(reports).toEqual([
+      { initiativeId: "init-1", initiativeName: "Foreman", projectId: null, created: false },
+    ]);
+    expect(linear.createProjectCalls).toEqual([]);
+    expect(linear.addProjectToInitiativeCalls).toEqual([]);
+  });
+
+  it("dry-run: still reports an already-existing Maintenance project, unmutated", async () => {
+    const linear = new FakeLinear(
+      new Map([["init-1", makeInitiative("init-1", "Foreman")]]),
+      new Map([["init-1", [{ id: "project-1", name: "Maintenance" }]]]),
+    );
+
+    const reports = await ensureMaintenanceProjects(linear, {
+      initiativeIds: ["init-1"],
+      teamId: "team-1",
+      dryRun: true,
+    });
+
+    expect(reports).toEqual([
+      { initiativeId: "init-1", initiativeName: "Foreman", projectId: "project-1", created: false },
+    ]);
+    expect(linear.createProjectCalls).toEqual([]);
   });
 
   it("throws ConfigError naming the id when a bound initiative does not resolve", async () => {

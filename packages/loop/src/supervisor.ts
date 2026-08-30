@@ -12,7 +12,8 @@
  * without a socket.
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   IN_FLIGHT_FILTER,
@@ -35,6 +36,8 @@ import { Bookkeeping } from "./bookkeeping.ts";
 import { buildSnapshot, type WorkerSnapshotInput } from "./snapshot.ts";
 import type { BlockedItem, BoardCounts, ProposalItem, QueueItem } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./workers/types.ts";
+import type { StageName } from "./routing.ts";
+import { applyPendingDecisions } from "./workers/decisions.ts";
 
 function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -47,11 +50,13 @@ function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
 export interface LoopLockInfo {
   pid: number;
   startedAt: string;
+  /** Unique per `acquire()` call (SPEC §17.4): the only way `release()` can tell "my lock" from a lock a later reclaim replaced it with. */
+  token: string;
 }
 
 export class LoopLockHeldError extends Error {
-  constructor(info: LoopLockInfo) {
-    super(`foreman-loop already running (pid ${info.pid}, started ${info.startedAt}).`);
+  constructor(info: LoopLockInfo, path: string) {
+    super(`foreman-loop already running (pid ${info.pid}, started ${info.startedAt}). Lock file: ${path}`);
     this.name = "LoopLockHeldError";
   }
 }
@@ -78,10 +83,19 @@ export const nodeProcessProbe: ProcessProbe = {
  * `acquire` against a live holder throws, and a holder whose pid is dead
  * (the process crashed without releasing) is taken over rather than left to
  * block the loop forever.
+ *
+ * Reclaiming a stale lock never unlinks: two supervisors observing the same
+ * dead holder could otherwise each unlink whatever is at the path —
+ * including the other's just-written fresh lock — and both end up believing
+ * they hold it. The reclaim write is instead an atomic rename, and each
+ * `acquire()` mints a random `token`; `release()` only unlinks the file when
+ * its on-disk token still matches this instance's, so a departing loser
+ * never deletes the winner's lock.
  */
 export class SupervisorLock {
   readonly #path: string;
   #acquired = false;
+  #token: string | null = null;
 
   constructor(path: string) {
     this.#path = path;
@@ -89,10 +103,12 @@ export class SupervisorLock {
 
   acquire(pid: number, now: Date, probe: ProcessProbe = nodeProcessProbe): void {
     mkdirSync(dirname(this.#path), { recursive: true });
-    const info: LoopLockInfo = { pid, startedAt: now.toISOString() };
+    const token = randomUUID();
+    const info: LoopLockInfo = { pid, startedAt: now.toISOString(), token };
     try {
       writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx" });
       this.#acquired = true;
+      this.#token = token;
       return;
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
@@ -103,32 +119,36 @@ export class SupervisorLock {
       existing = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
     } catch {
       // A truncated lock cannot prove a live owner. Treat it like any stale
-      // lock and retry the exclusive claim below.
+      // lock and retry the reclaim below.
     }
-    if (existing && probe.isAlive(existing.pid)) throw new LoopLockHeldError(existing);
+    if (existing && probe.isAlive(existing.pid)) throw new LoopLockHeldError(existing, this.#path);
 
-    // Reclaim only after deciding the observed owner is stale; the second
-    // exclusive write closes the race with another supervisor doing the same.
-    try {
-      unlinkSync(this.#path);
-    } catch (error) {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
-    }
-    try {
-      writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx" });
-      this.#acquired = true;
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-        const held = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
-        throw new LoopLockHeldError(held);
-      }
-      throw error;
-    }
+    // Reclaim only after deciding the observed owner is stale. Atomic
+    // replace (write to a token-suffixed temp path, then rename onto the
+    // real path) rather than unlink-then-write: an unlink here would race a
+    // concurrent reclaimer straight into deleting whichever process wrote
+    // its fresh lock first.
+    const tempPath = `${this.#path}.${token}`;
+    writeFileSync(tempPath, JSON.stringify(info, null, 2), "utf8");
+    renameSync(tempPath, this.#path);
+    this.#acquired = true;
+    this.#token = token;
   }
 
   release(): void {
-    if (this.#acquired && existsSync(this.#path)) unlinkSync(this.#path);
+    if (this.#acquired) {
+      try {
+        const current = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
+        if (current.token === this.#token) unlinkSync(this.#path);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+          // Corrupt or unreadable: nothing safe to compare the token
+          // against, so leave whatever is on disk alone rather than guess.
+        }
+      }
+    }
     this.#acquired = false;
+    this.#token = null;
   }
 
   get acquired(): boolean {
@@ -427,12 +447,18 @@ export class Supervisor {
     this.#wake?.();
   }
 
-  /** `"now"` interrupts the poll wait immediately; `"graceful"` lets `runForever` finish its current tick, then exit on its next loop check. */
+  /**
+   * Wakes the poll wait immediately in both modes: `#interruptibleWait`
+   * already re-checks `draining` on entry, so a graceful stop that arrives
+   * mid-wait must not sit until the next `pollMs` elapses just to notice it
+   * — `runForever`'s loop-top check handles "finish the current tick first"
+   * on its own; this only shortens the *wait between* ticks.
+   */
   requestStop(mode: "graceful" | "now"): void {
     this.#stopMode = mode;
     this.#runState = "draining";
     this.#emit({ event: "state", runtime: this.snapshot().runtime });
-    if (mode === "now") this.#wake?.();
+    this.#wake?.();
   }
 
   setStage(stage: LoopStage): void {
@@ -458,7 +484,42 @@ export class Supervisor {
         this.#emit({ event: "log", level: "info", line: message });
       },
       dryRun: this.#dryRun(),
+      watchSettle: (handle, stage) => this.#watchSettle(handle, stage),
     };
+  }
+
+  /**
+   * Observes a launched dispatch to completion in the background (SPEC
+   * §17.8): a child that exits non-zero, fails its gate, or yields invalid
+   * output must still reach the retry cap, not be silently re-dispatched
+   * forever with the attempt count stuck at zero. Never awaited inside a
+   * tick — `void`-started so `runTick` returns without waiting on the
+   * dispatch to finish.
+   */
+  #watchSettle(handle: DispatchHandle, stage: StageName): void {
+    void (async () => {
+      try {
+        const outcome = await this.#dispatcher.settle(handle);
+        if (outcome.status !== "settled" || (outcome.exitCode ?? 0) !== 0) {
+          const pending = this.#bookkeeping.recordAttemptFailure(
+            stage,
+            handle.issueId ?? "",
+            this.#config().loop.retryCap,
+            this.#now(),
+          );
+          if (pending) await applyPendingDecisions(this.#context(), [pending]);
+        }
+      } catch (error) {
+        this.#log(`watchSettle failed for ${handle.dispatchId}: ${String(error)}`);
+      } finally {
+        this.#bookkeeping.clearDispatch(handle.dispatchId);
+        try {
+          this.#bookkeeping.save();
+        } catch (error) {
+          this.#log(`failed to save bookkeeping: ${String(error)}`);
+        }
+      }
+    })();
   }
 
   /**

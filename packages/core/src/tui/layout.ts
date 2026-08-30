@@ -90,7 +90,27 @@ function distribute(total: number, specs: readonly SizeSpec[]): number[] {
     }
   }
 
+  trimExcess(sizes, specs, total);
   return sizes;
+}
+
+/** Trims size overshoot (from clamped mins exceeding available space) from the
+ * last non-fixed slot, then the last fixed slot, so a `min` is never honored
+ * beyond the space that actually exists. */
+function trimExcess(sizes: number[], specs: readonly SizeSpec[], total: number): void {
+  let excess = sizes.reduce((sum, size) => sum + size, 0) - total;
+  if (excess <= 0) return;
+  for (let pass = 0; pass < 2 && excess > 0; pass++) {
+    for (let i = sizes.length - 1; i >= 0 && excess > 0; i--) {
+      const spec = specs[i];
+      if (spec === undefined) continue;
+      if (pass === 0 && isFixed(spec)) continue;
+      const current = sizes[i] ?? 0;
+      const take = Math.min(current, excess);
+      sizes[i] = current - take;
+      excess -= take;
+    }
+  }
 }
 
 /** Stacks `specs` top-to-bottom inside `rect`, separated by `gap` rows. */

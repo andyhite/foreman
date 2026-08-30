@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { AGENT_LABEL, BLOCKED_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker } from "@foreman/core";
+import { AGENT_LABEL, BLOCKED_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, decodeMarker, encodeMarker } from "@foreman/core";
 import type {
   BlockRecord,
   Comment,
@@ -13,6 +13,7 @@ import type {
   Project,
   RefineResult,
   ResolvedRepoEntry,
+  ReviewResult,
   TeamRef,
   TriageItem,
   TriageProposal,
@@ -84,6 +85,9 @@ class FakeLinear implements LinearWriter {
 
   async issue(id: string): Promise<Issue | null> {
     return this.issuesById.get(id) ?? [...this.issuesById.values()].find((issue) => issue.id === id) ?? null;
+  }
+  async viewerId(): Promise<string> {
+    return "bot-1";
   }
   async issues(): Promise<Issue[]> {
     return [...this.issuesById.values()];
@@ -195,6 +199,9 @@ function makeTriageProposal(overrides: Partial<TriageProposal["items"][number]> 
         reproConfidence: "not-attempted",
         missingInfo: [],
         triageLabel: null,
+        draftDescription: null,
+        proposedEstimate: null,
+        destinationProjectId: null,
         ...overrides,
       },
     ],
@@ -212,6 +219,22 @@ function makeRefineResult(overrides: Partial<RefineResult> = {}): RefineResult {
     subIssues: [],
     spikeCreated: null,
     readyForImplementation: true,
+    ...overrides,
+  };
+}
+
+function makeReviewResult(overrides: Partial<ReviewResult> = {}): ReviewResult {
+  return {
+    issueId: "ENG-1",
+    reviewedSha: "abc123",
+    criteriaVerification: [],
+    dodSatisfied: true,
+    dodChecklist: [],
+    findings: [],
+    projectOrganization: "No concerns.",
+    scopeCreep: [],
+    testAdequacy: "Yes, tests would fail if reverted.",
+    verdict: "approve",
     ...overrides,
   };
 }
@@ -259,6 +282,17 @@ describe("applyOutcome — refine", () => {
     expect(readyLabel).toBeUndefined();
   });
 
+  it("removes the agent:running label after a successful refine", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    await applyOutcome(makeDeps(linear), {
+      kind: "result",
+      agent: "foreman-refine",
+      result: makeRefineResult({ readyForImplementation: false }),
+    });
+    expect(issue.labels.some((l) => l.name === AGENT_LABEL.running)).toBe(false);
+  });
+
   it("creates the sub-issues for an estimate of 5", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
@@ -269,8 +303,8 @@ describe("applyOutcome — refine", () => {
         estimate: 5,
         readyForImplementation: false,
         subIssues: [
-          { title: "Part 1", description: "Do part 1.", estimate: 2, acceptanceCriteria: ["Part 1 works"] },
-          { title: "Part 2", description: "Do part 2.", estimate: 3, acceptanceCriteria: ["Part 2 works"] },
+          { title: "Part 1", type: "type:feature", description: "Do part 1.", estimate: 2, acceptanceCriteria: ["Part 1 works"] },
+          { title: "Part 2", type: "type:chore", description: "Do part 2.", estimate: 3, acceptanceCriteria: ["Part 2 works"] },
         ],
       }),
     });
@@ -330,6 +364,44 @@ describe("applyOutcome — implement", () => {
     });
     expect(linear.createIssueCalls.length).toBe(2);
     expect(linear.relationCalls.length).toBe(2);
+  });
+});
+
+describe("applyOutcome — review", () => {
+  it("writes a review marker with matching reviewedSha, does not move the issue, and releases the lock for a clean result", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    await applyOutcome(makeDeps(linear), {
+      kind: "result",
+      agent: "foreman-review",
+      result: makeReviewResult({ reviewedSha: "sha-clean" }),
+    });
+
+    expect(linear.commentCalls.length).toBe(1);
+    const decoded = decodeMarker<ReviewResult>(MARKER_KIND.review, linear.commentCalls[0]?.body ?? "");
+    expect(decoded?.reviewedSha).toBe("sha-clean");
+    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(false);
+    expect(issue.labels.some((l) => l.name === AGENT_LABEL.running)).toBe(false);
+  });
+
+  it("moves the issue to Todo and releases the lock when a finding is blocking", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    await applyOutcome(makeDeps(linear), {
+      kind: "result",
+      agent: "foreman-review",
+      result: makeReviewResult({
+        reviewedSha: "sha-blocking",
+        verdict: "request-changes",
+        findings: [{ severity: "blocking", file: "src/foo.ts", line: 12, description: "Broken." }],
+      }),
+    });
+
+    expect(linear.commentCalls.length).toBe(1);
+    const decoded = decodeMarker<ReviewResult>(MARKER_KIND.review, linear.commentCalls[0]?.body ?? "");
+    expect(decoded?.reviewedSha).toBe("sha-blocking");
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_TODO.id)).toBe(true);
+    expect(issue.labels.some((l) => l.name === AGENT_LABEL.running)).toBe(false);
   });
 });
 
@@ -426,6 +498,9 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
     reproConfidence: "not-attempted",
     missingInfo: [],
     triageLabel: null,
+    draftDescription: null,
+    proposedEstimate: null,
+    destinationProjectId: null,
     ...overrides,
   };
 }
@@ -476,7 +551,7 @@ describe("runApplyCommand — --approve", () => {
     expect(mutation?.input.projectId).toBe("project-roadmap");
   });
 
-  it("applies everything else and notes an unmatched destinationProject without dropping the rest", async () => {
+  it("fails without mutating when destinationProject names no project", async () => {
     const item = makeTriageItem({ destinationProject: "Nonexistent Project" });
     const issue = makeIssue({
       labels: [label(TYPE_LABEL.feature)],
@@ -485,11 +560,10 @@ describe("runApplyCommand — --approve", () => {
     const linear = new FakeLinear([issue]);
     linear.projectsList = [{ id: "project-roadmap", name: "Roadmap" }];
     const result = await runApplyCommand(linear, ["ENG-1", "--approve"]);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(linear.updateCalls.some((call) => call.input.projectId !== undefined)).toBe(false);
-    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(true);
-    const appliedComment = linear.commentCalls.find((call) => call.body.includes("Nonexistent Project"));
-    expect(appliedComment?.body).toContain("not found");
+    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(false);
+    expect(result.message).toContain("not found");
   });
 });
 
@@ -528,7 +602,7 @@ describe("runApplyCommand — bare bulk", () => {
 });
 
 describe("runApplyCommand — --yes", () => {
-  it("reports successful proposals, notes, and per-issue failures without stopping the pass", async () => {
+  it("reports per-issue failures without stopping the pass, including a not-found destinationProject", async () => {
     const first = makeIssue({
       comments: [proposalComment(makeTriageItem({ destinationProject: "Missing Project" }), "2026-01-01T00:00:00.000Z")],
     });
@@ -547,8 +621,8 @@ describe("runApplyCommand — --yes", () => {
     const result = await runApplyCommand(linear, ["--yes"]);
 
     expect(result.ok).toBe(false);
-    expect(result.mutated).toBe(true);
-    expect(result.message).toContain("Applied 1 approved proposal(s).");
+    expect(result.mutated).toBe(false);
+    expect(result.message).toContain("Applied 0 approved proposal(s).");
     expect(result.message).toContain("Missing Project");
     expect(result.message).toContain("ENG-2: failed to apply: Linear unavailable");
   });

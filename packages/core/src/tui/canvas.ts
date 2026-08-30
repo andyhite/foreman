@@ -72,6 +72,16 @@ export class Canvas {
   #setCell(x: number, y: number, char: string, sgr: string): void {
     if (x < 0 || x >= this.#width || y < 0 || y >= this.#height) return;
     const idx = this.#index(x, y);
+    const prevChar = this.#chars[idx];
+    if (prevChar === CONTINUATION) {
+      if (x > 0) {
+        const leadIdx = this.#index(x - 1, y);
+        if (this.#chars[leadIdx] !== CONTINUATION) this.#chars[leadIdx] = " ";
+      }
+    } else if (char !== CONTINUATION && x + 1 < this.#width) {
+      const rightIdx = this.#index(x + 1, y);
+      if (this.#chars[rightIdx] === CONTINUATION) this.#chars[rightIdx] = " ";
+    }
     this.#chars[idx] = char;
     this.#sgrs[idx] = sgr;
   }
@@ -93,17 +103,24 @@ export class Canvas {
     const left = bounds.x;
     const right = bounds.x + bounds.width;
     let advanced = 0;
+    let lastPaintedIdx: number | null = null;
 
     for (const ch of plain) {
       const codePoint = ch.codePointAt(0);
       if (codePoint === undefined) continue;
       const w = charWidth(codePoint);
-      if (w === 0) continue;
+      if (w === 0) {
+        if (lastPaintedIdx !== null) this.#chars[lastPaintedIdx] += ch;
+        continue;
+      }
       if (col >= right) break;
       if (col + w > right) break;
       if (col >= left) {
         this.#setCell(col, y, ch, sgr);
+        lastPaintedIdx = this.#index(col, y);
         if (w === 2) this.#setCell(col + 1, y, CONTINUATION, sgr);
+      } else {
+        lastPaintedIdx = null;
       }
       col += w;
       advanced += w;

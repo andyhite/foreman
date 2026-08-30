@@ -24,13 +24,26 @@ export interface CapturedOutput {
   data: unknown;
   /** The lifecycle-reported abort flag (SPEC §17.8) — set when the dispatch hit its budget mid-run rather than yielding cleanly. */
   aborted: boolean;
+  /** The `FOREMAN-ISSUE` identifier embedded in the dispatched task text, or null when it could not be recovered — the issue the dispatch's lock was taken against (SPEC §3.5 item 5). */
+  issueId: string | null;
+  /** The `FOREMAN-PREV-STATE` workflow state id embedded in the dispatched task text, or null when absent (refine/review dispatches never move state, or the marker predates this field) — read back to restore the issue on an invalid result (Step 5 item 1). */
+  previousStateId: string | null;
 }
 
-/** Recovers `agent`/`dispatchId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
-export function extractDispatchInfo(taskText: string): { agent: string | null; dispatchId: string | null } {
+/** Recovers `agent`/`dispatchId`/`issueId`/`previousStateId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
+export function extractDispatchInfo(
+  taskText: string,
+): { agent: string | null; dispatchId: string | null; issueId: string | null; previousStateId: string | null } {
   const agentMatch = /^FOREMAN-AGENT:\s*(\S+)\s*$/m.exec(taskText);
   const dispatchMatch = /^FOREMAN-DISPATCH:\s*(\S+)\s*$/m.exec(taskText);
-  return { agent: agentMatch?.[1] ?? null, dispatchId: dispatchMatch?.[1] ?? null };
+  const issueMatch = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m.exec(taskText);
+  const prevStateMatch = /^FOREMAN-PREV-STATE:\s*(\S+)\s*$/m.exec(taskText);
+  return {
+    agent: agentMatch?.[1] ?? null,
+    dispatchId: dispatchMatch?.[1] ?? null,
+    issueId: issueMatch?.[1] ?? null,
+    previousStateId: prevStateMatch?.[1] ?? null,
+  };
 }
 
 function taskTextOf(entry: unknown): string {
@@ -69,13 +82,24 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
     const single = results[index];
     if (!isRecord(single)) continue;
     const structuredOutput = single.structuredOutput;
-    if (!isStructuredOutput(structuredOutput) || !structuredOutput.valid) continue;
+    // Runtime `valid: false` is not dropped here: a budget-truncated yield
+    // is both aborted and schema-invalid, and only `parseAgentOutput`
+    // (downstream, in the extension) can tell that apart from a genuine
+    // malformed result. `isStructuredOutput` remains the shape gate.
+    if (!isStructuredOutput(structuredOutput)) continue;
 
     const agent = agentOf(tasks[index]);
-    const { dispatchId } = extractDispatchInfo(taskTextOf(tasks[index]));
+    const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskTextOf(tasks[index]));
     if (!agent || !dispatchId) continue;
 
-    captured.push({ dispatchId, agent, data: structuredOutput.data, aborted: abortedOf(single) || abortedOf(payload.result) });
+    captured.push({
+      dispatchId,
+      agent,
+      data: structuredOutput.data,
+      aborted: abortedOf(single) || abortedOf(payload.result),
+      issueId,
+      previousStateId,
+    });
   }
   return captured;
 }
@@ -89,17 +113,26 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
 export function extractFromLifecycle(payload: unknown): CapturedOutput | null {
   if (!isRecord(payload)) return null;
   const structuredOutput = payload.structuredOutput;
-  if (!isStructuredOutput(structuredOutput) || !structuredOutput.valid) return null;
+  // See the comment in `extractFromToolResult` — `valid: false` must still
+  // reach the caller so a budget-truncated yield can be classified.
+  if (!isStructuredOutput(structuredOutput)) return null;
 
   const agent = typeof payload.agent === "string" ? payload.agent : null;
   const taskText =
     typeof payload.task === "string" ? payload.task : taskTextOf(payload.input);
-  const { dispatchId } = extractDispatchInfo(taskText);
+  const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskText);
   const explicitDispatchId = typeof payload.dispatchId === "string" ? payload.dispatchId : null;
   const finalDispatchId = explicitDispatchId ?? dispatchId;
   if (!agent || !finalDispatchId) return null;
 
-  return { dispatchId: finalDispatchId, agent, data: structuredOutput.data, aborted: abortedOf(payload) };
+  return {
+    dispatchId: finalDispatchId,
+    agent,
+    data: structuredOutput.data,
+    aborted: abortedOf(payload),
+    issueId,
+    previousStateId,
+  };
 }
 
 /** Marks a dispatch as applied, and checks whether it already was. Backed by Linear markers (`results/apply.ts` writes them). */

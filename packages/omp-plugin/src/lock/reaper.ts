@@ -6,7 +6,7 @@
  */
 
 import type { FoundMarker, Issue, LinearWriter, LockRecord } from "@foreman/core";
-import { AGENT_LABEL, IN_FLIGHT_FILTER, encodeMarker, lockState, MARKER_KIND, readLockComment } from "@foreman/core";
+import { AGENT_LABEL, BLOCKED_LABEL, IN_FLIGHT_FILTER, encodeMarker, lockState, MARKER_KIND, readLockComment } from "@foreman/core";
 
 export interface ReapedLock {
   issueId: string;
@@ -23,9 +23,12 @@ async function clearOrphanedLock(
   now: Date,
 ): Promise<ReapedLock> {
   const runningLabel = issue.labels.find((label) => label.name === AGENT_LABEL.running);
-  if (runningLabel) {
-    await linear.updateIssue(issue.id, { removedLabelIds: [runningLabel.id] });
-  }
+  const removedLabelIds = runningLabel ? [runningLabel.id] : [];
+  const needsInputLabel = await linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
+  await linear.updateIssue(issue.id, {
+    addedLabelIds: [needsInputLabel.id],
+    removedLabelIds,
+  });
 
   const body = encodeMarker(
     MARKER_KIND.lock,

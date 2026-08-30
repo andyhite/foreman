@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cliBinDir } from "../src/cli-link.ts";
 import type { Runner } from "../src/exec.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
@@ -102,6 +103,43 @@ describe("runWizard", () => {
     }
   });
 
+  it("links the foreman CLI to source in dev mode, on top of the omp plugin", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner: new RecordingRunner(),
+        log: () => {
+          // discard
+        },
+      });
+
+      const binPath = join(cliBinDir(home), "foreman");
+      const contents = readFileSync(binPath, "utf8");
+      expect(contents).toContain("exec bun");
+      expect(contents).toContain("/repo/packages/cli/src/main.ts");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not link the foreman CLI when installing from GitHub", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner: new RecordingRunner(),
+        log: () => {
+          // discard
+        },
+      });
+
+      expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("installs from GitHub and skips the local build", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
@@ -119,6 +157,23 @@ describe("runWizard", () => {
       expect(binSeq).not.toContain("bun run build");
       expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
       expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("links the foreman CLI even when omp isn't installed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const logs: string[] = [];
+      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner: new RecordingRunner({ missing: ["omp"] }),
+        log: (message) => logs.push(message),
+      });
+
+      expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(true);
+      expect(logs.some((line) => line.includes("omp is not installed"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

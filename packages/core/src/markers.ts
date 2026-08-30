@@ -27,12 +27,12 @@ export const MARKER_KIND = {
   review: "review",
   /** A rendered ImplementResult. */
   implement: "implement",
-  /** Blocking review findings routed back to implement. */
-  findings: "findings",
   /** A dispatch failed twice and was converted to a decision (SPEC §17.8). */
   failure: "failure",
   /** Written by the plugin's dispatch-applied marker (distinct from `applied`, which is the proposal-apply marker). */
   dispatchApplied: "dispatch-applied",
+  /** A branch or PR merge recorded by `/foreman:merge`, authoritative for direct-branch merge detection. */
+  merged: "merged",
 } as const;
 
 export type MarkerKind = (typeof MARKER_KIND)[keyof typeof MARKER_KIND];
@@ -44,6 +44,16 @@ export interface MarkerEnvelope<T> {
   foreman: MarkerKind;
   version: number;
   data: T;
+}
+
+/** Payload of a `merged` marker (`MARKER_KIND.merged`), written by `/foreman:merge` in direct-branch mode. */
+export interface MergedRecord {
+  issueId: string;
+  branch: string;
+  baseBranch: string;
+  mergeCommit: string;
+  strategy: string;
+  mergedAt: string;
 }
 
 /** A decoded marker plus the comment it came from. */
@@ -85,7 +95,8 @@ export function decodeMarker<T>(kind: MarkerKind, body: string): T | null {
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      (parsed as MarkerEnvelope<T>)[MARKER_FIELD] === kind
+      (parsed as MarkerEnvelope<T>)[MARKER_FIELD] === kind &&
+      (parsed as MarkerEnvelope<T>).version === MARKER_VERSION
     ) {
       return (parsed as MarkerEnvelope<T>).data;
     }
@@ -97,15 +108,29 @@ export interface MarkerSource {
   id: string;
   body: string;
   createdAt: string;
+  /** The comment's author, when known. Null for sources (e.g. rendering-only reads) that don't need provenance. */
+  user: { id: string } | null;
+}
+
+/** Options gating marker trust by comment authorship. Rendering-only reads omit this. */
+export interface MarkerReadOptions {
+  /**
+   * When set, comments not authored by this user id are skipped entirely —
+   * a forged marker from another Linear user cannot be read back as truth
+   * by control-plane logic (lock ownership, review/merge gating, etc).
+   */
+  authoredBy?: string;
 }
 
 /** Every marker of `kind` across a comment list, oldest first. */
 export function findMarkers<T>(
   kind: MarkerKind,
   comments: readonly MarkerSource[],
+  options?: MarkerReadOptions,
 ): FoundMarker<T>[] {
   const found: FoundMarker<T>[] = [];
   for (const comment of comments) {
+    if (options?.authoredBy !== undefined && comment.user?.id !== options.authoredBy) continue;
     const data = decodeMarker<T>(kind, comment.body);
     if (data !== null) {
       found.push({ commentId: comment.id, createdAt: comment.createdAt, data });
@@ -119,7 +144,8 @@ export function findMarkers<T>(
 export function latestMarker<T>(
   kind: MarkerKind,
   comments: readonly MarkerSource[],
+  options?: MarkerReadOptions,
 ): FoundMarker<T> | null {
-  const all = findMarkers<T>(kind, comments);
+  const all = findMarkers<T>(kind, comments, options);
   return all.length === 0 ? null : (all[all.length - 1] as FoundMarker<T>);
 }

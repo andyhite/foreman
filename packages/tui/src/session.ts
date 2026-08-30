@@ -17,7 +17,7 @@
  */
 
 import type { ControlEvent, ControlOp, GlobalConfig, LoopId, LoopSnapshot } from "@foreman/core";
-import { ControlClient, loopHandle, loopPaths, readStatusFile } from "@foreman/core";
+import { ControlClient, loopHandle, loopPaths, readStatusFile, statusStaleThresholdMs } from "@foreman/core";
 import type { Action } from "./store.ts";
 import { startLoop } from "./supervise.ts";
 
@@ -97,15 +97,17 @@ export class Session {
     if (connection) this.#connect(connection);
   }
 
-  async send(id: LoopId, op: ControlOp, params?: Record<string, unknown>): Promise<void> {
+  async send(id: LoopId, op: ControlOp, params?: Record<string, unknown>): Promise<boolean> {
     const connection = this.#connections.get(id);
     const client = connection?.client;
     this.#onAction({ type: "busy", loopId: id, op });
     try {
       if (!client || !client.connected) throw new Error(`${id} is not connected`);
       await client.request(op, params);
+      return true;
     } catch (error) {
       this.#onAction({ type: "toast", kind: "danger", message: `${id} ${op} failed: ${String(error)}` });
+      return false;
     } finally {
       this.#onAction({ type: "busy", loopId: id, op: null });
     }
@@ -152,6 +154,14 @@ export class Session {
         }
         connection.reconnectAttempt = 0;
         this.#onAction({ type: "connection", loopId: connection.id, connection: "live" });
+        // Registered before `subscribe` resolves: a close landing between the
+        // subscribe response and this registration would otherwise leave a
+        // dead client marked live with no reconnect scheduled.
+        client.onClose(() => {
+          if (connection.closed || connection.client !== client) return;
+          this.#fallbackToFile(connection);
+          this.#scheduleReconnect(connection);
+        });
         connection.unsubscribe = await client.subscribe(
           (event) => this.#handleEvent(connection, event),
           (response) => {
@@ -166,11 +176,6 @@ export class Session {
             });
           },
         );
-        client.onClose(() => {
-          if (connection.closed || connection.client !== client) return;
-          this.#fallbackToFile(connection);
-          this.#scheduleReconnect(connection);
-        });
       })
       .catch(() => {
         if (connection.closed || connection.client !== client) return;
@@ -194,12 +199,22 @@ export class Session {
   #fallbackToFile(connection: LoopConnection): void {
     const paths = loopPaths(this.#config, connection.id, this.#home);
     const statusFile = readStatusFile(paths.status);
-    if (statusFile) {
-      this.#onAction({ type: "connection", loopId: connection.id, connection: "file" });
-      this.#onAction({ type: "snapshot", loopId: connection.id, snapshot: statusFile.snapshot });
-    } else {
+    if (!statusFile) {
       this.#onAction({ type: "connection", loopId: connection.id, connection: "offline" });
+      return;
     }
+    const ageMs = Date.now() - new Date(statusFile.writtenAt).getTime();
+    if (Number.isFinite(ageMs) && ageMs > statusStaleThresholdMs(this.#config.loop.cadenceMinutes)) {
+      this.#onAction({
+        type: "connection",
+        loopId: connection.id,
+        connection: "offline",
+        error: `status.json is stale (${Math.round(ageMs / 60_000)}m old)`,
+      });
+      return;
+    }
+    this.#onAction({ type: "connection", loopId: connection.id, connection: "file" });
+    this.#onAction({ type: "snapshot", loopId: connection.id, snapshot: statusFile.snapshot });
   }
 
   #handleEvent(connection: LoopConnection, event: ControlEvent): void {

@@ -39,7 +39,18 @@ describe("parseArgs", () => {
     const args = parseArgs(["setup"]);
     expect(args.githubRepo).toBe("andyhite/foreman");
     expect(args.ompMode).toBeNull();
+    expect(args.link).toBe(false);
     expect(args.scope).toBeNull();
+  });
+
+  it("parses --link as a standalone flag, not nested under --omp", () => {
+    const args = parseArgs(["setup", "--link"]);
+    expect(args.link).toBe(true);
+    expect(args.ompMode).toBeNull();
+  });
+
+  it("rejects --link combined with --omp", () => {
+    expect(() => parseArgs(["setup", "--link", "--omp", "skip"])).toThrow(/--link and --omp are mutually exclusive/);
   });
 
   it("parses --yes, --omp, --scope, --repo-source, --repo, --home", () => {
@@ -67,6 +78,10 @@ describe("parseArgs", () => {
 
   it("rejects an invalid --omp mode", () => {
     expect(() => parseArgs(["setup", "--omp", "bogus"])).toThrow(/--omp must be one of/);
+  });
+
+  it("rejects --omp link now that dev mode is --link", () => {
+    expect(() => parseArgs(["setup", "--omp", "link"])).toThrow(/--omp must be one of/);
   });
 
   it("rejects an invalid --scope", () => {
