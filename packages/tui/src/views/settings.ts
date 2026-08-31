@@ -46,7 +46,11 @@ const SECTIONS: readonly Section[] = [
   {
     title: "loop",
     fields: [
-      { path: "loop.stage", kind: "select", label: "stage", hint: "autonomy staging (SPEC §17.9)", options: ["dry-run", "read-only", "full"] },
+      { path: "loop.stage", kind: "select", label: "global fallback stage", hint: "used by workers without an override and non-dispatch workers", options: ["dry-run", "read-only", "full"] },
+      { path: "loop.workerStages.plan", kind: "select", label: "plan stage", hint: "falls back to global stage when unset", options: ["dry-run", "read-only", "full"] },
+      { path: "loop.workerStages.refine", kind: "select", label: "refine stage", hint: "falls back to global stage when unset", options: ["dry-run", "read-only", "full"] },
+      { path: "loop.workerStages.implement", kind: "select", label: "implement stage", hint: "falls back to global stage when unset", options: ["dry-run", "read-only", "full"] },
+      { path: "loop.workerStages.review", kind: "select", label: "review stage", hint: "falls back to global stage when unset", options: ["dry-run", "read-only", "full"] },
       { path: "loop.wipGlobal", kind: "number", label: "wip global", hint: "global cap on concurrent agents", min: 1 },
       { path: "loop.wip.refine", kind: "number", label: "wip refine", hint: "refine stage concurrency cap", min: 1 },
       { path: "loop.wip.implement", kind: "number", label: "wip implement", hint: "implement stage concurrency cap", min: 1 },
@@ -150,7 +154,11 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
 }
 
 function configValue(config: GlobalConfig, path: string): unknown {
-  return getPath(config, path);
+  const value = getPath(config, path);
+  if (value === undefined && path.startsWith("loop.workerStages.")) {
+    return getPath(config, "loop.stage");
+  }
+  return value;
 }
 
 function editedValue(ctx: ViewContext, descriptor: FieldDescriptor): string | number | boolean {

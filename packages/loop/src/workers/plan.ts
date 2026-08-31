@@ -7,7 +7,7 @@
  */
 
 import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inProject, newDispatchId } from "@foreman/core";
-import type { BoardSnapshot, PlanCandidate } from "../routing.ts";
+import type { BoardSnapshot, DispatchDecision, PlanCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 
@@ -27,6 +27,7 @@ async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> 
 async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
+  const dispatched: DispatchDecision[] = [];
 
   const [planCandidates, blockedHuman] = await Promise.all([
     findPlanCandidates(ctx),
@@ -43,7 +44,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
-  if (!ctx.dryRun) {
+  if (ctx.dispatchPermitted) {
     for (const decision of decisions) {
       if (decision.agent !== "foreman-plan" || !decision.projectId) continue;
       const dispatchId = newDispatchId(decision.agent, decision.projectId, now);
@@ -64,6 +65,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
           stage: "plan",
         });
         ctx.watchSettle(handle, "plan");
+        dispatched.push(decision);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }
@@ -74,7 +76,8 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   return {
     worker: "plan",
     ranAt: now.toISOString(),
-    dispatched: decisions,
+    decisions,
+    dispatched,
     skipped,
     errors,
     counts: { blocked: blockedHuman.length },

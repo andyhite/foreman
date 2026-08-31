@@ -43,6 +43,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage: "full",
+      workerStages: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -239,6 +240,8 @@ function makeContext(
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
     dryRun: false,
+    effectiveStage: "full",
+    dispatchPermitted: true,
     watchSettle: () => {},
   };
 }

@@ -12,7 +12,7 @@ import {
   newDispatchId,
   readyFilter,
 } from "@foreman/core";
-import type { BoardSnapshot } from "../routing.ts";
+import type { BoardSnapshot, DispatchDecision } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
@@ -21,6 +21,7 @@ import { filterInScope } from "./types.ts";
 async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
+  const dispatched: DispatchDecision[] = [];
 
   const [backlogIssues, todoIssues, blockedHuman, ready] = await Promise.all([
     ctx.linear.issues({ filter: inState("Backlog"), limit: 500 }),
@@ -46,7 +47,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...scopeSkips);
-  if (!ctx.dryRun) {
+  if (ctx.dispatchPermitted) {
     for (const decision of decisions) {
       if (!decision.issueId) continue;
       const issue = backlog.find((candidate) => candidate.identifier === decision.issueId);
@@ -68,6 +69,7 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
           stage: "refine",
         });
         ctx.watchSettle(handle, "refine");
+        dispatched.push(decision);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }
@@ -78,7 +80,8 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   return {
     worker: "refine",
     ranAt: now.toISOString(),
-    dispatched: decisions,
+    decisions,
+    dispatched,
     skipped,
     errors,
     counts: { backlog: backlog.length, readyBuffer: scopedReady.length, blocked: blockedHuman.length },

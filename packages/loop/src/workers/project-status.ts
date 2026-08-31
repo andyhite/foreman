@@ -40,7 +40,7 @@ async function runProjectStatus(ctx: WorkerContext): Promise<WorkerReport> {
     }
   }
 
-  return { worker: "project-status", ranAt: now.toISOString(), dispatched: [], skipped: [], errors };
+  return { worker: "project-status", ranAt: now.toISOString(), decisions: [], dispatched: [], skipped: [], errors };
 }
 
 export const projectStatusWorker: Worker = {

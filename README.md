@@ -164,14 +164,18 @@ foreman loop --stage read-only            # comment and label, no code
 foreman loop --stage full                 # the whole pipeline
 ```
 
-`loop.stage` defaults to `dry-run`, so a loop started before you are ready logs
-its intentions instead of acting on them. A dry run with `--verbose` prints one
-line per skip with the gate that refused:
+`loop.stage` is the global fallback and defaults to `dry-run`, so a loop started
+before you are ready logs its intentions instead of acting on them. Override an
+individual worker in `loop.workerStages` when you want to validate the pipeline
+one step at a time: `dry-run` evaluates and logs only, `read-only` runs review
+only, and `full` permits that worker to dispatch. The TUI Logs view receives
+every intended dispatch and every routing skip; `--verbose` is no longer needed
+to see why work did not run.
 
 ```
-[foreman-loop] refine: 0 dispatched, 43 skipped
-[foreman-loop]   skip refine PLT-21: unprioritized — Priority is None.
-[foreman-loop]   skip implement ENG-9: backpressure-blocked-queue — team-wide blocked depth at threshold.
+[foreman-loop] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
+[foreman-loop]   would dispatch plan [effective stage: dry-run] (batch): "Plotroom" has no issues yet.
+[foreman-loop]   skip plan [effective stage: dry-run] (batch): wip-stage-full — plan WIP cap (1) reached.
 ```
 
 The `foreman-loop` prefix names the long-lived process, not the command — the
@@ -224,7 +228,7 @@ with `tab`/`shift-tab` or jumped to directly with `1`-`7`:
 | `S` | Stop the focused loop (confirm) |
 | `p` | Pause / resume |
 | `t` | Tick now |
-| `g` | Cycle stage `dry-run → read-only → full` (confirm on `full`) |
+| `g` | Cycle the focused loop's global fallback stage `dry-run → read-only → full` (confirm on `full`) |
 
 Flags: `--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop`
 and `foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
@@ -270,7 +274,8 @@ config. Defaults are chosen so that an empty config is a safe config.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `loop.stage` | `dry-run` | Autonomy rung: `dry-run`, `read-only`, `full` |
+| `loop.stage` | `dry-run` | Global autonomy fallback: `dry-run`, `read-only`, `full` |
+| `loop.workerStages` | `{}` | Optional per-worker overrides for `plan`, `refine`, `implement`, and `review`; unset uses `loop.stage` |
 | `loop.wipGlobal` | `3` | Hard cap on concurrent agents, per instance |
 | `loop.wip` | `1/2/3/2` | Per-stage caps: plan, refine, implement, review (triage is not a loop worker) |
 | `loop.backpressureThreshold` | `5` | Team-wide blocked depth at which all dispatch stops |

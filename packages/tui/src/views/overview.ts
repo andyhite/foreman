@@ -61,11 +61,18 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
   ];
 
   const { runtime } = snapshot;
+  const workerStages =
+    pane.kind === "repo"
+      ? ["plan", "refine", "implement", "review"]
+          .map((worker) => `${worker} ${ctx.state.config.loop.workerStages[worker as keyof typeof ctx.state.config.loop.workerStages] ?? runtime.stage}`)
+          .join(" · ")
+      : null;
+  const stageLabel = workerStages ? `${workerStages} · fallback ${runtime.stage}` : runtime.stage;
   const connBadge =
     pane.connection === "file"
       ? `status.json ${relativeTime(snapshot.runtime.lastTickAt, ctx.state.now)} old`
       : pane.connection;
-  canvas.text(stateBlock.x, stateBlock.y, `${runtime.state} · ${runtime.stage} · ${runtime.dispatcher}`, theme.sgr());
+  canvas.text(stateBlock.x, stateBlock.y, `${runtime.state} · ${stageLabel} · ${runtime.dispatcher}`, theme.sgr());
   canvas.text(
     stateBlock.x,
     stateBlock.y + 1,

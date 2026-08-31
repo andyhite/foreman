@@ -152,6 +152,21 @@ describe("defaultAndValidateGlobalConfig", () => {
     }
   });
 
+  it("defaults workerStages to an empty map so every worker inherits loop.stage", () => {
+    const config = defaultAndValidateGlobalConfig({ loop: { stage: "full" } }, "test");
+    expect(config.loop.workerStages).toEqual({});
+  });
+
+  it("accepts individual worker stage overrides and rejects unknown workers or stages", () => {
+    const config = defaultAndValidateGlobalConfig(
+      { loop: { workerStages: { plan: "read-only", implement: "full" } } },
+      "test",
+    );
+    expect(config.loop.workerStages).toEqual({ plan: "read-only", implement: "full" });
+    expect(() => defaultAndValidateGlobalConfig({ loop: { workerStages: { reaper: "full" } } }, "test")).toThrow(ConfigError);
+    expect(() => defaultAndValidateGlobalConfig({ loop: { workerStages: { review: "unsafe" } } }, "test")).toThrow(ConfigError);
+  });
+
   it("rejects an empty repos key", () => {
     expect(() =>
       defaultAndValidateGlobalConfig({ repos: { "": { path: "~/code/x", initiatives: [] } } }, "test"),

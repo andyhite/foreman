@@ -214,7 +214,48 @@ describe("views — content", () => {
     expect(hidden).not.toContain("widget exploded");
   });
 
-  it("settings shows section headers, loop.stage, real config keys with defaults, and the lock ttl", () => {
+  it("overview identifies each worker's effective stage when a worker overrides the fallback", () => {
+    const state = makeLiveState();
+    const mixedStages = {
+      ...state,
+      config: {
+        ...state.config,
+        loop: { ...state.config.loop, stage: "dry-run" as const, workerStages: { plan: "full" as const } },
+      },
+      loops: state.loops.map((pane) =>
+        pane.kind === "repo" && pane.snapshot
+          ? { ...pane, snapshot: { ...pane.snapshot, runtime: { ...pane.snapshot.runtime, stage: "dry-run" as const } } }
+          : pane,
+      ),
+    };
+    const canvas = canvasFor(CONTENT_RECT);
+    overviewView.render(canvas, CONTENT_RECT, makeContext(mixedStages));
+    const text = stripAnsi(canvas.toLines().join("\n"));
+
+    expect(text).toContain("plan full");
+  });
+
+
+  it("overview puts plan's effective stage before the global fallback in a narrow pane", () => {
+    const state = makeLiveState();
+    const mixedStages = {
+      ...state,
+      config: {
+        ...state.config,
+        loop: { ...state.config.loop, stage: "dry-run" as const, workerStages: { plan: "full" as const } },
+      },
+      loops: state.loops.map((pane) =>
+        pane.kind === "repo" && pane.snapshot
+          ? { ...pane, snapshot: { ...pane.snapshot, runtime: { ...pane.snapshot.runtime, stage: "dry-run" as const } } }
+          : pane,
+      ),
+    };
+    const canvas = new Canvas(80, 24);
+    overviewView.render(canvas, { x: 0, y: 0, width: 80, height: 24 }, makeContext(mixedStages));
+
+    expect(stripAnsi(canvas.toLines().join("\n"))).toContain("running · plan full");
+  });
+  it("settings shows section headers, global and worker stages, real config keys with defaults, and the lock ttl", () => {
     const state = makeLiveState();
     const ctx = makeContext(state);
     const canvas = canvasFor(CONTENT_RECT);
@@ -225,6 +266,9 @@ describe("views — content", () => {
       expect(text).toContain(section);
     }
     expect(text).toContain(state.config.loop.stage);
+    for (const label of ["plan stage", "refine stage", "implement stage", "review stage"]) {
+      expect(text).toContain(label);
+    }
     expect(text).toContain(state.config.agent.approvalMode);
     expect(text).toContain(state.config.repoDefaults.baseBranch);
     expect(text).toContain(state.configPath);
@@ -330,6 +374,28 @@ describe("views — keys", () => {
     expect(ctx.state.modal?.kind).toBe("confirm");
   });
 
+  it("settings: an unset worker stage displays the global fallback and saves through patchConfig", () => {
+    const ctx = makeContext(makeLiveState());
+    ctx.dispatch({ type: "setCursor", view: "settings", index: 1 });
+
+    expect(settingsView.handleKey(key("enter"), ctx)).toBe(true);
+    expect(ctx.state.settingsEdits["ui.editingPath"]).toBe("loop.workerStages.plan");
+    // The fixture has no plan override and defaults to global `dry-run`;
+    // right must therefore select `read-only`, not advance from an undefined value.
+    expect(settingsView.handleKey(key("right"), ctx)).toBe(true);
+    expect(settingsView.handleKey(key("enter"), ctx)).toBe(true);
+    expect(ctx.state.settingsEdits["loop.workerStages.plan"]).toBe("read-only");
+
+    expect(settingsView.handleKey(key("ctrl-s"), ctx)).toBe(true);
+    const modal = ctx.state.modal;
+    if (modal?.kind !== "confirm") throw new Error("expected a save confirmation");
+    expect(modal.effect).toEqual({
+      loopId: "repo:demo",
+      op: "patchConfig",
+      params: { patch: { loop: { workerStages: { plan: "read-only" } } } },
+    });
+  });
+
   it("settings: committing an invalid value dispatches settingsError, not editSetting", () => {
     const ctx = makeContext(makeLiveState());
     // `intake.window` is the one field settings.ts validates itself (a
@@ -337,7 +403,7 @@ describe("views — keys", () => {
     // `applyFieldKey` clamps every number commit to its `min` before
     // `validate()` ever runs, so that branch of `validate()` is unreachable
     // through the UI and is not exercised here).
-    const index = 12; // intake.window — see SECTIONS in settings.ts
+    const index = 16; // intake.window — see SECTIONS in settings.ts
     ctx.dispatch({ type: "setCursor", view: "settings", index });
     expect(settingsView.handleKey(key("enter"), ctx)).toBe(true);
     expect(ctx.state.settingsEdits["ui.editingPath"]).toBe("intake.window");

@@ -102,7 +102,7 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
   }
   ctx.bookkeeping.reconcile(liveIssueIds, liveDispatchIds, now, lockTtlMs(ctx.config));
 
-  return { worker: "reaper", ranAt: now.toISOString(), dispatched: [], skipped, errors, queues: { blocked } };
+  return { worker: "reaper", ranAt: now.toISOString(), decisions: [], dispatched: [], skipped, errors, queues: { blocked } };
 }
 
 export const reaperWorker: Worker = {

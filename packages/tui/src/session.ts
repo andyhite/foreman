@@ -17,7 +17,7 @@
  */
 
 import type { ControlEvent, ControlOp, GlobalConfig, LoopId, LoopSnapshot } from "@foreman/core";
-import { ControlClient, loopHandle, loopPaths, readStatusFile, statusStaleThresholdMs } from "@foreman/core";
+import { ControlClient, loadGlobalConfig, loopHandle, loopPaths, readStatusFile, statusStaleThresholdMs } from "@foreman/core";
 import type { Action } from "./store.ts";
 import { startLoop } from "./supervise.ts";
 
@@ -104,6 +104,11 @@ export class Session {
     try {
       if (!client || !client.connected) throw new Error(`${id} is not connected`);
       await client.request(op, params);
+      if (op === "patchConfig") {
+        const { config } = loadGlobalConfig(this.#home ? { home: this.#home } : undefined);
+        this.#config = config;
+        this.#onAction({ type: "config", config });
+      }
       return true;
     } catch (error) {
       this.#onAction({ type: "toast", kind: "danger", message: `${id} ${op} failed: ${String(error)}` });

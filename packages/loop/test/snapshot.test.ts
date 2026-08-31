@@ -15,6 +15,7 @@ function makeConfig(): GlobalConfig {
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage: "full",
+      workerStages: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },

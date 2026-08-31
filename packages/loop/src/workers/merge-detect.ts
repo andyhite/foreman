@@ -29,7 +29,7 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
     ctx.log(
       "merge detection disabled (loop.mergeDetection=false); merged PRs will not move to Done.",
     );
-    return { worker: "merge-detect", ranAt: now.toISOString(), dispatched: [], skipped, errors };
+    return { worker: "merge-detect", ranAt: now.toISOString(), decisions: [], dispatched: [], skipped, errors };
   }
 
   const github = new GitHubClient();
@@ -100,7 +100,7 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
     }
   }
 
-  return { worker: "merge-detect", ranAt: now.toISOString(), dispatched: [], skipped, errors };
+  return { worker: "merge-detect", ranAt: now.toISOString(), decisions: [], dispatched: [], skipped, errors };
 }
 
 export const mergeDetectWorker: Worker = {

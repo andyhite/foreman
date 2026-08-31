@@ -16,6 +16,7 @@ import type {
   IssueQuery,
   LinearWriter,
   ResolvedRepoEntry,
+  ControlEvent,
 } from "@foreman/core";
 import { repoLoopId } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
@@ -78,6 +79,7 @@ function makeConfig(stage: "dry-run" | "read-only" | "full" = "dry-run"): Global
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage,
+      workerStages: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -247,12 +249,12 @@ function makeStubWorker(): Worker {
     name: "refine",
     cadenceMs: 0,
     async run(ctx: WorkerContext): Promise<WorkerReport> {
+      const decision = { agent: "foreman-refine" as const, issueId: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." };
       return {
         worker: "refine",
         ranAt: ctx.now().toISOString(),
-        dispatched: [
-          { agent: "foreman-refine", issueId: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." },
-        ],
+        decisions: [decision],
+        dispatched: ctx.dispatchPermitted ? [decision] : [],
         skipped: [{ stage: "refine", issueId: "ENG-2", code: "unprioritized", message: "Priority is None." }],
         errors: [],
       };
@@ -280,27 +282,48 @@ function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
   });
 }
 
-describe("Supervisor.runTick — verbose skip logging (defect: --verbose was inert in continuous mode)", () => {
-  it("always logs the dispatch count and per-decision dispatch lines, regardless of verbose", async () => {
+describe("Supervisor.runTick — decision observability", () => {
+  it("logs actual dispatches and every skip regardless of verbose", async () => {
     const logs: string[] = [];
     const supervisor = makeSupervisor(false, logs);
     await supervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("refine: 1 dispatched, 1 skipped"))).toBe(true);
-    expect(logs.some((line) => line.includes("→ refine ENG-1: Backlog, priority 1."))).toBe(true);
+    expect(logs.some((line) => line.includes("effective stage: full") && line.includes("1 dispatched"))).toBe(true);
+    expect(logs.some((line) => line.includes("dispatched refine [effective stage: full] ENG-1"))).toBe(true);
+    expect(logs.some((line) => line.includes("skip refine [effective stage: full] ENG-2: unprioritized"))).toBe(true);
   });
 
-  it("logs skip records when verbose is true", async () => {
-    const logs: string[] = [];
-    const supervisor = makeSupervisor(true, logs);
+  it("publishes decision logs to control subscribers", async () => {
+    const supervisor = makeSupervisor(false, []);
+    const events: ControlEvent[] = [];
+    supervisor.onEvent((event) => events.push(event));
     await supervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("skip refine ENG-2: unprioritized") || line.includes("skip refine ENG-2 unprioritized"))).toBe(true);
+    expect(events.some((event) => event.event === "log" && event.line.includes("ENG-1"))).toBe(true);
+    expect(events.some((event) => event.event === "log" && event.line.includes("unprioritized"))).toBe(true);
   });
 
-  it("omits skip records when verbose is false, even in the same runTick call used by continuous mode", async () => {
+  it("uses would dispatch for CLI dry-run decisions without counting a dispatch", async () => {
     const logs: string[] = [];
     const supervisor = makeSupervisor(false, logs);
     await supervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("unprioritized"))).toBe(false);
+    expect(logs.some((line) => line.includes("would dispatch refine [effective stage: full] ENG-1"))).toBe(false);
+    const drySupervisor = new Supervisor({
+      config: makeConfig("full"),
+      linear: new NoopLinear() as unknown as LinearWriter,
+      dispatcher: new FakeDispatcher("print", true),
+      bookkeeping: Bookkeeping.load(join(tempStateDir(), "bookkeeping.json")),
+      stateDir: tempStateDir(),
+      entry: makeEntry(),
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: (message) => logs.push(message),
+      dryRun: true,
+      loopId: repoLoopId("acme"),
+      statusPath: null,
+      version: "0.1.0-test",
+      team: "ENG",
+    });
+    await drySupervisor.runTick([makeStubWorker()]);
+    expect(logs.some((line) => line.includes("would dispatch refine [effective stage: full] ENG-1"))).toBe(true);
+    expect(drySupervisor.snapshot().history.dispatchesPerTick.at(-1)).toBe(0);
   });
 });
 
@@ -333,6 +356,7 @@ function makeDispatchAndWatchWorker(): Worker {
       return {
         worker: "implement",
         ranAt: ctx.now().toISOString(),
+        decisions: [],
         dispatched: [],
         skipped: [],
         errors: [],

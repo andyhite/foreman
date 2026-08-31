@@ -15,7 +15,7 @@ import {
   newDispatchId,
   nodeRunner,
 } from "@foreman/core";
-import type { BoardSnapshot, ReviewCandidate } from "../routing.ts";
+import type { BoardSnapshot, DispatchDecision, ReviewCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
@@ -99,6 +99,7 @@ async function buildReviewCandidates(
 async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
+  const dispatched: DispatchDecision[] = [];
   const github = new GitHubClient();
 
   const candidateSkips: WorkerReport["skipped"] = [];
@@ -119,7 +120,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...candidateSkips);
 
-  if (!ctx.dryRun) {
+  if (ctx.dispatchPermitted) {
     for (const decision of decisions) {
       if (!decision.issueId) continue;
       const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
@@ -142,6 +143,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
           stage: "review",
         });
         ctx.watchSettle(handle, "review");
+        dispatched.push(decision);
         const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
         if (previousSha !== null && previousSha !== candidate.headSha) {
           const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
@@ -162,7 +164,8 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   return {
     worker: "review",
     ranAt: now.toISOString(),
-    dispatched: decisions,
+    decisions,
+    dispatched,
     skipped,
     errors,
     counts: { inReview: reviewCandidates.length, blocked: blockedHuman.length },

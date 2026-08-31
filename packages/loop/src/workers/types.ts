@@ -13,6 +13,9 @@ import type { DispatchDecision, SkipRecord, StageName } from "../routing.ts";
 export interface WorkerReport {
   worker: StageName | "reaper" | "merge-detect" | "project-status";
   ranAt: string;
+  /** Dispatch intents selected by routing, including dry-run decisions. */
+  decisions: DispatchDecision[];
+  /** Dispatches successfully launched during this run. */
   dispatched: DispatchDecision[];
   skipped: SkipRecord[];
   errors: string[];
@@ -40,7 +43,11 @@ export interface WorkerContext {
   /** Injectable clock, so tests never depend on wall time. */
   now: () => Date;
   log: (message: string) => void;
-  /** Dry-run: decisions are computed and logged, never dispatched or written. */
+  /** The worker's resolved autonomy rung after `loop.workerStages` fallback. */
+  effectiveStage: GlobalConfig["loop"]["stage"];
+  /** Whether this worker may launch a dispatch in this run; CLI `--dry-run` always makes this false. */
+  dispatchPermitted: boolean;
+  /** True when the global stage or explicit CLI flag forces legacy non-dispatch behavior. */
   dryRun: boolean;
   /** Observe a launched dispatch to completion in the background; failures reach the retry cap. */
   watchSettle(handle: DispatchHandle, stage: StageName): void;

@@ -17,6 +17,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
     reviewCycleCap: 2,
     cadenceMinutes: 5,
     stage: "full",
+    workerStages: {},
     mergeDetection: true,
     stateDir: "~/.foreman/state",
   };
@@ -317,6 +318,14 @@ describe("nextActions — stage permission", () => {
     expect(agents.has("foreman-review")).toBe(true);
     expect(agents.has("foreman-refine")).toBe(false);
     expect(agents.has("foreman-implement")).toBe(false);
+  });
+
+  it("uses a worker override before the global fallback", () => {
+    const config = makeConfig({ stage: "read-only", workerStages: { implement: "full", review: "dry-run" } });
+    const snapshot = emptySnapshot({ todo: [makeTodoIssue()], reviewCandidates: [makeReviewCandidate()] });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions.map((decision) => decision.agent)).toEqual(["foreman-implement", "foreman-review"]);
+    expect(skipped).not.toContainEqual(expect.objectContaining({ stage: "implement", code: "stage-not-permitted" }));
   });
 
   it("full permits all three", () => {

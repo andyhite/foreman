@@ -129,13 +129,28 @@ function suppressingLabel(issue: Issue): { code: string; message: string } | nul
   return null;
 }
 
-export function stagePermitted(stage: StageName, loopStage: GlobalConfig["loop"]["stage"]): boolean {
-  if (loopStage === "full") return true;
-  if (loopStage === "read-only") return stage === "review";
-  // "dry-run" evaluates every stage but workers never dispatch. Unknown
-  // runtime input is not an autonomy rung: fail closed rather than treating
-  // a malformed control request as permission for the whole pipeline.
-  return loopStage === "dry-run";
+/** Resolves a worker's autonomy rung, falling back to the global stage. */
+export function effectiveStage(stage: StageName, loop: GlobalConfig["loop"]): GlobalConfig["loop"]["stage"] {
+  return loop.workerStages[stage] ?? loop.stage;
+}
+
+/**
+ * Whether routing may produce a dispatch intent. Dry-run intentionally permits
+ * every worker to evaluate and report its intent; launch permission is handled
+ * separately by the supervisor's worker context.
+ */
+export function stagePermitted(stage: StageName, loop: GlobalConfig["loop"]): boolean {
+  const effective = effectiveStage(stage, loop);
+  if (effective === "full") return true;
+  if (effective === "read-only") return stage === "review";
+  return effective === "dry-run";
+}
+
+/** Whether a worker may launch a selected dispatch, including the CLI safety override. */
+export function dispatchPermitted(stage: StageName, loop: GlobalConfig["loop"], cliDryRun: boolean): boolean {
+  if (cliDryRun) return false;
+  const effective = effectiveStage(stage, loop);
+  return effective === "full" || (effective === "read-only" && stage === "review");
 }
 
 /** Older first, then higher priority first — SPEC §17.5's pickup order. */
@@ -151,7 +166,6 @@ interface RoutingContext {
   globalRemaining: number;
   stageRemaining: Record<StageName, number>;
   loop: GlobalConfig["loop"];
-  loopStage: GlobalConfig["loop"]["stage"];
   /** Project ids that already have a `plan` dispatch in flight (SPEC §7.6) — prevents a second dispatch before the first's issues land. */
   planInFlightProjectIds: ReadonlySet<string>;
 }
@@ -190,13 +204,14 @@ function admitCandidate(
     );
     return false;
   }
-  if (!stagePermitted(stage, ctx.loopStage)) {
+  const effective = effectiveStage(stage, ctx.loop);
+  if (!stagePermitted(stage, ctx.loop)) {
     pushSkip(
       ctx,
       stage,
       issue.identifier,
       "stage-not-permitted",
-      `Loop stage "${ctx.loopStage}" does not permit ${stage} dispatch.`,
+      `Effective ${stage} stage "${effective}" does not permit dispatch.`,
     );
     return false;
   }
@@ -326,8 +341,9 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
       pushProjectSkip(ctx, "plan", project.id, "backpressure-blocked-queue", "Blocked-human queue exceeds the backpressure threshold.");
       continue;
     }
-    if (!stagePermitted("plan", ctx.loopStage)) {
-      pushProjectSkip(ctx, "plan", project.id, "stage-not-permitted", `Loop stage "${ctx.loopStage}" does not permit plan dispatch.`);
+    const effective = effectiveStage("plan", ctx.loop);
+    if (!stagePermitted("plan", ctx.loop)) {
+      pushProjectSkip(ctx, "plan", project.id, "stage-not-permitted", `Effective plan stage "${effective}" does not permit dispatch.`);
       continue;
     }
     if (ctx.globalRemaining <= 0) {
@@ -375,7 +391,6 @@ export function nextActions(
     globalRemaining: Math.max(0, loop.wipGlobal - bookkeeping.totalInFlight()),
     stageRemaining,
     loop,
-    loopStage: loop.stage,
     planInFlightProjectIds: bookkeeping.inFlightProjectIds("plan"),
   };
 

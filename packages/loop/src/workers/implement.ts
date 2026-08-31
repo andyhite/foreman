@@ -10,8 +10,8 @@ import {
   inState,
   newDispatchId,
 } from "@foreman/core";
-import type { BoardSnapshot } from "../routing.ts";
 import { nextActions } from "../routing.ts";
+import type { BoardSnapshot, DispatchDecision } from "../routing.ts";
 import { toQueueItem } from "../snapshot.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 import { filterInScope } from "./types.ts";
@@ -20,6 +20,7 @@ import { applyPendingDecisions } from "./decisions.ts";
 async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
+  const dispatched: DispatchDecision[] = [];
 
   const [todoIssues, blockedHuman] = await Promise.all([
     ctx.linear.issues({ filter: inState("Todo"), limit: 500 }),
@@ -40,7 +41,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...scopeSkips);
 
-  if (!ctx.dryRun) {
+  if (ctx.dispatchPermitted) {
     for (const decision of decisions) {
       if (!decision.issueId) continue;
       const issue = todo.find((candidate) => candidate.identifier === decision.issueId);
@@ -62,6 +63,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
           stage: "implement",
         });
         ctx.watchSettle(handle, "implement");
+        dispatched.push(decision);
         ctx.bookkeeping.resetAttempts("implement", decision.issueId);
       } catch (error) {
         errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
@@ -83,7 +85,8 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   return {
     worker: "implement",
     ranAt: now.toISOString(),
-    dispatched: decisions,
+    decisions,
+    dispatched,
     skipped,
     errors,
     counts: { todo: todo.length, blocked: blockedHuman.length },

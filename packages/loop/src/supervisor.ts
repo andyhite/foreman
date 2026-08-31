@@ -36,8 +36,12 @@ import { Bookkeeping } from "./bookkeeping.ts";
 import { buildSnapshot, type WorkerSnapshotInput } from "./snapshot.ts";
 import type { BlockedItem, BoardCounts, ProposalItem, QueueItem } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./workers/types.ts";
-import type { StageName } from "./routing.ts";
+import { dispatchPermitted, effectiveStage, type StageName } from "./routing.ts";
 import { applyPendingDecisions } from "./workers/decisions.ts";
+
+function isStageName(name: string): name is StageName {
+  return name === "plan" || name === "refine" || name === "implement" || name === "review";
+}
 
 function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -221,11 +225,10 @@ export class Supervisor {
   readonly #config0: { current: GlobalConfig };
   readonly #linear: LinearWriter;
   readonly #dispatcher: Dispatcher;
-  readonly #bookkeeping: Bookkeeping;
   readonly #entry: ResolvedRepoEntry;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
-  readonly #verbose: boolean;
+  readonly #bookkeeping: Bookkeeping;
   readonly #lock: SupervisorLock;
   readonly #loopId: LoopId;
   readonly #statusPath: string | null;
@@ -267,8 +270,11 @@ export class Supervisor {
     this.#bookkeeping = options.bookkeeping;
     this.#entry = options.entry;
     this.#now = options.now ?? (() => new Date());
-    this.#log = options.log ?? ((message) => console.log(`[foreman-loop] ${message}`));
-    this.#verbose = options.verbose ?? false;
+    const writeLog = options.log ?? ((message: string) => console.log(`[foreman-loop] ${message}`));
+    this.#log = (message) => {
+      writeLog(message);
+      this.#emit({ event: "log", level: "info", line: message });
+    };
     this.#lock = new SupervisorLock(lockPathFor(options.stateDir));
     this.#loopId = options.loopId;
     this.#statusPath = options.statusPath;
@@ -470,21 +476,21 @@ export class Supervisor {
     this.#config0.current = config;
     this.publishStatus();
   }
-
-  #context(): WorkerContext {
+  #context(workerName = ""): WorkerContext {
+    const stage = isStageName(workerName) ? workerName : null;
+    const config = this.#config();
     return {
-      config: this.#config(),
+      config,
       bookkeeping: this.#bookkeeping,
       dispatcher: this.#wrappedDispatcher(),
       linear: this.#linear,
       entry: this.#entry,
       now: this.#now,
-      log: (message: string) => {
-        this.#log(message);
-        this.#emit({ event: "log", level: "info", line: message });
-      },
+      log: this.#log,
+      effectiveStage: stage ? effectiveStage(stage, config.loop) : config.loop.stage,
+      dispatchPermitted: stage ? dispatchPermitted(stage, config.loop, this.#cliDryRun) : false,
       dryRun: this.#dryRun(),
-      watchSettle: (handle, stage) => this.#watchSettle(handle, stage),
+      watchSettle: (handle, workerStage) => this.#watchSettle(handle, workerStage),
     };
   }
 
@@ -563,26 +569,31 @@ export class Supervisor {
       this.#runningWorkers.add(worker.name);
       let report: WorkerReport;
       try {
-        report = await worker.run(this.#context());
-        const dispatchLabel = this.#dryRun() ? "would dispatch" : "dispatched";
-        const dispatchCount = this.#dryRun() ? 0 : report.dispatched.length;
+        report = await worker.run(this.#context(worker.name));
+        const stage = isStageName(worker.name) ? worker.name : null;
+        const effective = stage ? effectiveStage(stage, this.#config().loop) : this.#config().loop.stage;
+        const launched = new Set(report.dispatched);
         this.#log(
-          `${worker.name}: ${this.#dryRun() ? report.dispatched.length : dispatchCount} ${dispatchLabel}, ${report.skipped.length} skipped` +
+          `${worker.name} [effective stage: ${effective}]: ${report.dispatched.length} dispatched, ${report.decisions.length - report.dispatched.length} would dispatch, ${report.skipped.length} skipped` +
             (report.errors.length > 0 ? `, ${report.errors.length} error(s)` : ""),
         );
-        for (const decision of report.dispatched) {
-          this.#log(`  ${this.#dryRun() ? "would dispatch" : "→"} ${worker.name} ${decision.issueId ?? "(batch)"}: ${decision.reason}`);
+        for (const decision of report.decisions) {
+          const action = launched.has(decision) ? "dispatched" : "would dispatch";
+          this.#log(
+            `  ${action} ${worker.name} [effective stage: ${effective}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
+          );
         }
-        if (this.#verbose) {
-          for (const skip of report.skipped) {
-            this.#log(`  skip ${worker.name} ${skip.issueId ?? "(batch)"}: ${skip.code} — ${skip.message}`);
-          }
+        for (const skip of report.skipped) {
+          this.#log(
+            `  skip ${worker.name} [effective stage: ${effective}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
+          );
         }
       } catch (error) {
         this.#log(`${worker.name} failed: ${String(error)}`);
         report = {
           worker: worker.name as WorkerReport["worker"],
           ranAt: this.#now().toISOString(),
+          decisions: [],
           dispatched: [],
           skipped: [],
           errors: [String(error)],
@@ -598,7 +609,7 @@ export class Supervisor {
       this.#emit({
         event: "tick",
         worker: worker.name,
-        dispatched: this.#dryRun() ? 0 : report.dispatched.length,
+        dispatched: report.dispatched.length,
         skipped: report.skipped.length,
         errors: report.errors.length,
       });
@@ -622,7 +633,7 @@ export class Supervisor {
 
     this.#ticks += 1;
     this.#lastTickAt = this.#now().toISOString();
-    const totalDispatched = this.#dryRun() ? 0 : reports.reduce((sum, report) => sum + report.dispatched.length, 0);
+    const totalDispatched = reports.reduce((sum, report) => sum + report.dispatched.length, 0);
     this.#dispatchHistory.push(totalDispatched);
     if (this.#dispatchHistory.length > 60) this.#dispatchHistory.splice(0, this.#dispatchHistory.length - 60);
 

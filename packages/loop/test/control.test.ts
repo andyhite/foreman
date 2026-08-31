@@ -67,6 +67,7 @@ function makeConfig(): GlobalConfig {
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       stage: "full",
+      workerStages: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -126,6 +127,7 @@ function makeDispatchingWorker(name = "refine"): Worker {
       return {
         worker: "refine",
         ranAt: ctx.now().toISOString(),
+        decisions: [{ agent: "foreman-refine", issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
         dispatched: [{ agent: "foreman-refine", issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
         skipped: [],
         errors: [],

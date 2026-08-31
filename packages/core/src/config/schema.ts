@@ -72,6 +72,30 @@ export const RepoSettingsOverrideSchema = Type.Object(
 
 export type RepoSettingsOverride = Static<typeof RepoSettingsOverrideSchema>;
 
+const LoopStageValueSchema = Type.Union([
+  Type.Literal("dry-run"),
+  Type.Literal("read-only"),
+  Type.Literal("full"),
+]);
+
+export const LoopStageSchema = Type.Union(
+  [Type.Literal("dry-run"), Type.Literal("read-only"), Type.Literal("full")],
+  { default: "dry-run" },
+);
+/** Optional per-worker autonomy overrides; omitted workers inherit `loop.stage`. */
+export const WorkerStagesSchema = Type.Partial(
+  Type.Object(
+    {
+      plan: LoopStageValueSchema,
+      refine: LoopStageValueSchema,
+      implement: LoopStageValueSchema,
+      review: LoopStageValueSchema,
+    },
+    { additionalProperties: false },
+  ),
+  { additionalProperties: false, default: {} },
+);
+
 export const LoopSettingsSchema = Type.Object(
   {
     /** Global cap on concurrent agents. This is the one that protects you (SPEC §17.6). */
@@ -100,14 +124,12 @@ export const LoopSettingsSchema = Type.Object(
      * Autonomy staging (SPEC §17.9). Defaults to the safest rung, so a loop
      * started before its operator is ready logs instead of dispatching.
      */
-    stage: Type.Union(
-      [
-        Type.Literal("dry-run"),
-        Type.Literal("read-only"),
-        Type.Literal("full"),
-      ],
-      { default: "dry-run" },
-    ),
+    stage: LoopStageSchema,
+    /**
+     * Per-worker autonomy overrides. A missing key retains the global
+     * `loop.stage` fallback, allowing workers to be enabled independently.
+     */
+    workerStages: WorkerStagesSchema,
     /**
      * Poll merged PRs and move issues to Done. Required when `pr.required` is
      * false, and on by default regardless: Linear's GitHub integration only
