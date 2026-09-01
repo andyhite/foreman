@@ -7,7 +7,7 @@ import { parseArgs } from "../src/main.ts";
  * test that needed the bundle would pass locally and fail there.
  */
 const entrypoint = (): string => join(import.meta.dir, "..", "src", "main.ts");
-const repoRoot = (): string => join(import.meta.dir, "..", "..", "..");
+const checkoutRoot = (): string => join(import.meta.dir, "..", "..", "..");
 
 describe("parseArgs", () => {
   it("treats setup and init as distinct commands, not aliases", () => {
@@ -23,16 +23,16 @@ describe("parseArgs", () => {
   });
 
   it("finds a command after flags while skipping their consumed values", () => {
-    const args = parseArgs(["--repo", "/tmp/setup", "--scope", "project", "setup"]);
+    const args = parseArgs(["--checkout", "/tmp/setup", "--scope", "project", "setup"]);
     expect(args.command).toBe("setup");
-    expect(args.repoPath).toBe("/tmp/setup");
+    expect(args.checkoutPath).toBe("/tmp/setup");
     expect(args.scope).toBe("project");
   });
 
   it("reports misplaced positionals and duplicate commands with their cause", () => {
     expect(() => parseArgs(["setup", "extra"])).toThrow(/Unexpected positional argument "extra"/);
     expect(() => parseArgs(["setup", "init"])).toThrow(/Multiple commands supplied/);
-    expect(parseArgs(["--repo", "setup"]).command).toBeNull();
+    expect(parseArgs(["--checkout", "setup"]).command).toBeNull();
   });
 
   it("reports unknown commands before any command is set", () => {
@@ -42,8 +42,8 @@ describe("parseArgs", () => {
   it("rejects setup-only flags on init", () => {
     expect(() => parseArgs(["init", "--scope", "user"])).toThrow(/--scope applies to `foreman setup`/);
     expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
-    expect(() => parseArgs(["init", "--path", "/tmp", "--repo", "/tmp/checkout"])).toThrow(
-      /--repo applies to `foreman setup`/,
+    expect(() => parseArgs(["init", "--path", "/tmp", "--checkout", "/tmp/checkout"])).toThrow(
+      /--checkout applies to `foreman setup`/,
     );
   });
 
@@ -89,7 +89,7 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["setup", "--link", "--omp", "skip"])).toThrow(/--link and --omp are mutually exclusive/);
   });
 
-  it("parses --yes, --omp, --scope, --repo-source, --repo, --home", () => {
+  it("parses --yes, --omp, --scope, --repo-source, --checkout, --home", () => {
     const args = parseArgs([
       "setup",
       "--yes",
@@ -99,7 +99,7 @@ describe("parseArgs", () => {
       "project",
       "--repo-source",
       "someone/fork",
-      "--repo",
+      "--checkout",
       "/tmp/checkout",
       "--home",
       "/tmp/home",
@@ -108,7 +108,7 @@ describe("parseArgs", () => {
     expect(args.ompMode).toBe("install");
     expect(args.scope).toBe("project");
     expect(args.githubRepo).toBe("someone/fork");
-    expect(args.repoPath).toBe("/tmp/checkout");
+    expect(args.checkoutPath).toBe("/tmp/checkout");
     expect(args.home).toBe("/tmp/home");
   });
 
@@ -142,26 +142,26 @@ describe("foreman repo delegation", () => {
    */
   it("cannot parse the subcommand or the supervisor's flags", () => {
     expect(() => parseArgs(["repo"])).toThrow(/Unknown command "repo"/);
-    expect(() => parseArgs(["--dry-run"])).toThrow(/Unrecognized argument: --dry-run/);
-    expect(() => parseArgs(["--stage", "full"])).toThrow(/Unrecognized argument: --stage/);
+    expect(() => parseArgs(["--once"])).toThrow(/Unrecognized argument: --once/);
+    expect(() => parseArgs(["--mode", "yolo"])).toThrow(/Unrecognized argument: --mode/);
   });
 
   it("routes `repo --help` to the supervisor's help, not the CLI's", async () => {
     const proc = Bun.spawn(["bun", "run", entrypoint(), "repo", "--help"], {
-      cwd: repoRoot(),
+      cwd: checkoutRoot(),
       stdout: "pipe",
       stderr: "pipe",
     });
     const stdout = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     expect(stdout).toContain("foreman repo — Foreman per-repo supervisor");
-    expect(stdout).toContain("--dry-run");
+    expect(stdout).toContain("--mode <m>");
     expect(stdout).not.toContain("Interactive installer");
   });
 
   it("still prints the CLI's own help with no arguments", async () => {
     const proc = Bun.spawn(["bun", "run", entrypoint(), "--help"], {
-      cwd: repoRoot(),
+      cwd: checkoutRoot(),
       stdout: "pipe",
       stderr: "pipe",
     });

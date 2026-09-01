@@ -92,7 +92,7 @@ describe("runInit", () => {
       expect(config.repos).toEqual({
         plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
       });
-      expect(logs.some((line) => line.includes("foreman repo --dry-run --once"))).toBe(true);
+      expect(logs.some((line) => line.includes("foreman repo --once"))).toBe(true);
 
       const loaded = loadGlobalConfig({ home });
       expect(loaded.config.repos.plotroom?.path).toBe("/repos/plotroom");
@@ -230,6 +230,53 @@ describe("runInit", () => {
     } finally {
       rmSync(homeMain, { recursive: true, force: true });
       rmSync(homeOther, { recursive: true, force: true });
+    }
+  });
+
+  it("writes baseBranch when the repo's default branch differs from a non-default repoDefaults.baseBranch", async () => {
+    const home = makeTempHome();
+    try {
+      mkdirSync(join(home, ".foreman"), { recursive: true });
+      writeFileSync(
+        join(home, ".foreman", "config.json"),
+        JSON.stringify({ repoDefaults: { baseBranch: "trunk" } }),
+      );
+
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
+
+      const config = readConfig(home);
+      expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBe("main");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("omits baseBranch when the repo's default branch matches a non-default repoDefaults.baseBranch", async () => {
+    const home = makeTempHome();
+    try {
+      mkdirSync(join(home, ".foreman"), { recursive: true });
+      writeFileSync(
+        join(home, ".foreman", "config.json"),
+        JSON.stringify({ repoDefaults: { baseBranch: "trunk" } }),
+      );
+
+      const git = new FakeGit({
+        "git rev-parse --show-toplevel": "/repos/plotroom\n",
+        "git symbolic-ref --short refs/remotes/origin/HEAD": "origin/trunk\n",
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
+
+      const config = readConfig(home);
+      expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

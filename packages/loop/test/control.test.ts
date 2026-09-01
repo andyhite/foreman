@@ -12,6 +12,7 @@ import type {
   LinearWriter,
   ResolvedRepoEntry,
 } from "@foreman/core";
+import { YOLO_CONFIRMER } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { createControlHandlers } from "../src/control.ts";
 import { Supervisor } from "../src/supervisor.ts";
@@ -66,8 +67,8 @@ function makeConfig(): GlobalConfig {
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage: "full",
-      workerStages: {},
+      mode: "yolo",
+      workerModes: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -147,7 +148,7 @@ function makeSupervisor(dispatcher: Dispatcher = new FakeDispatcher("print", tru
     entry: makeEntry(),
     now: () => new Date(),
     log: () => {},
-    dryRun: false,
+    confirmer: YOLO_CONFIRMER,
     loopId: "repo:product",
     statusPath: join(stateDir, "status.json"),
     version: "0.1.0",
@@ -164,7 +165,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 describe("createControlHandlers — delegation", () => {
-  it("snapshot/setStage/stop delegate straight to the supervisor", async () => {
+  it("snapshot/setMode/stop delegate straight to the supervisor", async () => {
     const supervisor = makeSupervisor();
     supervisor.acquireLock();
     const handlers = createControlHandlers({ supervisor });
@@ -181,8 +182,8 @@ describe("createControlHandlers — delegation", () => {
     expect({ ...delegated.runtime, uptimeMs: 0 }).toEqual({ ...direct.runtime, uptimeMs: 0 });
     expect(delegated.loop).toEqual(direct.loop);
 
-    handlers.setStage("read-only");
-    expect(supervisor.snapshot().runtime.stage).toBe("read-only");
+    handlers.setMode("confirm");
+    expect(supervisor.snapshot().runtime.mode).toBe("confirm");
 
     handlers.stop("graceful");
     expect(supervisor.runState).toBe("draining");

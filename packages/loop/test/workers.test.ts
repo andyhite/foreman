@@ -17,13 +17,26 @@ import type {
   Project,
   ProjectRef,
   ProjectStatus,
+  MergedRecord,
   ResolvedRepoEntry,
   TeamRef,
   WorkflowState,
 } from "@foreman/core";
-import { AGENT_LABEL, DISPATCH_COMMAND, MAINTENANCE_PROJECT_NAME, TYPE_LABEL } from "@foreman/core";
+import {
+  AGENT_LABEL,
+  branchNameFor,
+  DENY_CONFIRMER,
+  DISPATCH_COMMAND,
+  encodeMarker,
+  MAINTENANCE_PROJECT_NAME,
+  MARKER_KIND,
+  TYPE_LABEL,
+  YOLO_CONFIRMER,
+} from "@foreman/core";
+import type { ConfirmRequest } from "@foreman/core";
 import { implementWorker } from "../src/workers/implement.ts";
 import { Bookkeeping } from "../src/bookkeeping.ts";
+import { mergeDetectWorker } from "../src/workers/merge-detect.ts";
 import { planWorker } from "../src/workers/plan.ts";
 import { projectStatusWorker } from "../src/workers/project-status.ts";
 import { refineWorker } from "../src/workers/refine.ts";
@@ -42,8 +55,8 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage: "full",
-      workerStages: {},
+      mode: "yolo",
+      workerModes: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -230,6 +243,7 @@ function makeContext(
   config: GlobalConfig,
   dispatcher: Dispatcher,
   entry: ResolvedRepoEntry = makeEntry(),
+  confirmer: { confirm(request: ConfirmRequest): Promise<boolean> } = YOLO_CONFIRMER,
 ): WorkerContext {
   return {
     config,
@@ -239,9 +253,8 @@ function makeContext(
     entry,
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
-    dryRun: false,
-    effectiveStage: "full",
-    dispatchPermitted: true,
+    mode: "yolo",
+    confirm: (request) => confirmer.confirm(request),
     watchSettle: () => {},
   };
 }
@@ -281,6 +294,37 @@ describe("implementWorker — scope resolution (SPEC §3.11)", () => {
     expect(report.skipped.some((s) => s.code === "out-of-scope")).toBe(false);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]?.cwd).toBe("/repos/product");
+  });
+
+  it("produces zero dispatches and a dispatch-declined skip when the confirmer denies", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry, DENY_CONFIRMER);
+
+    const report = await implementWorker.run(ctx);
+
+    expect(dispatcher.calls).toEqual([]);
+    expect(report.dispatched).toEqual([]);
+    const skip = report.skipped.find((s) => s.code === "dispatch-declined");
+    expect(skip).toBeDefined();
+    expect(skip?.issueId).toBe(issue.identifier);
+  });
+
+  it("dispatches normally when the confirmer accepts", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry, YOLO_CONFIRMER);
+
+    const report = await implementWorker.run(ctx);
+
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(report.dispatched).toHaveLength(1);
   });
 });
 
@@ -553,7 +597,7 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
     expect(linear.updateProjectStatusCalls).toEqual([]);
   });
 
-  it("does not mutate anything in dry-run mode", async () => {
+  it("does not mutate the project status when the confirmer declines", async () => {
     const project: ProjectRef = { id: "project-1", name: "Search revamp" };
     const linear = new PlanFakeLinear(
       { "initiative-1": [project] },
@@ -561,10 +605,135 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
       { "project-1": { id: "status-started", name: "Started", type: "started" } },
     );
     const entry = makeEntry({ initiativeIds: ["initiative-1"] });
-    const ctx = { ...makeContext(linear, makeConfig(), new FakeDispatcher(), entry), dryRun: true };
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry, DENY_CONFIRMER);
 
     await projectStatusWorker.run(ctx);
 
     expect(linear.updateProjectStatusCalls).toEqual([]);
+  });
+});
+
+// ---- merge-detect worker -----------------------------------------------------
+
+/** Minimal `LinearWriter` stub for merge-detect: a fixed In Review issue list, and a recorded `updateIssue` call. */
+class MergeDetectFakeLinear implements LinearWriter {
+  updateIssueCalls: Array<{ id: string; stateId: string }> = [];
+
+  constructor(private readonly inReview: Issue[]) {}
+
+  async issue(): Promise<Issue | null> {
+    return null;
+  }
+  async issues(): Promise<Issue[]> {
+    return this.inReview;
+  }
+  async comments(): Promise<Comment[]> {
+    return [];
+  }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
+  async project(): Promise<Project | null> {
+    return null;
+  }
+  async projectStatus(): Promise<null> {
+    return null;
+  }
+  async projectInitiatives(): Promise<InitiativeRef[]> {
+    return [{ id: "initiative-1", name: "Product" }];
+  }
+  async projectInitiative(): Promise<InitiativeRef> {
+    throw new Error("not used in these tests");
+  }
+  async initiative(): Promise<Initiative | null> {
+    return null;
+  }
+  async initiatives(): Promise<InitiativeRef[]> {
+    return [];
+  }
+  async initiativeProjects(): Promise<never[]> {
+    return [];
+  }
+  async workflowStates(): Promise<WorkflowState[]> {
+    return [{ id: "state-done", name: "Done", type: "completed", position: 1 }];
+  }
+  async labels(): Promise<IssueLabel[]> {
+    return [];
+  }
+  async teams(): Promise<TeamRef[]> {
+    return [];
+  }
+  async projects(): Promise<never[]> {
+    return [];
+  }
+  async updateIssue(id: string, input: { stateId?: string }): Promise<Issue> {
+    this.updateIssueCalls.push({ id, stateId: input.stateId ?? "" });
+    throw new Error("caller only inspects updateIssueCalls in these tests");
+  }
+  async createIssue(): Promise<Issue> {
+    throw new Error("not used in these tests");
+  }
+  async createComment(): Promise<Comment> {
+    throw new Error("not used in these tests");
+  }
+  async createRelation(): Promise<void> {}
+  async createProject(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async addProjectToInitiative(): Promise<void> {}
+  async updateProjectStatus(): Promise<void> {}
+  async deleteRelation(): Promise<void> {}
+  async createLabel(): Promise<IssueLabel> {
+    throw new Error("not used in these tests");
+  }
+  async ensureLabel(): Promise<IssueLabel> {
+    throw new Error("not used in these tests");
+  }
+}
+
+/** A merged-marker comment authored by the bot, matching the issue's direct branch and base — the shape `/foreman:merge` writes. */
+function mergedMarkerComment(issue: Issue, entry: ResolvedRepoEntry): Comment {
+  const branch = branchNameFor(entry.branchPattern, issue, entry.repoPath);
+  const record: MergedRecord = {
+    issueId: issue.identifier,
+    branch,
+    baseBranch: entry.baseBranch,
+    mergeCommit: "deadbeef",
+    strategy: "squash",
+    mergedAt: "2026-06-01T00:00:00.000Z",
+  };
+  return {
+    id: "comment-1",
+    body: encodeMarker(MARKER_KIND.merged, record, "Merged."),
+    createdAt: "2026-06-01T00:00:00.000Z",
+    user: { id: "bot-1", name: "bot", displayName: "bot" },
+    parentId: null,
+  };
+}
+
+describe("mergeDetectWorker — confirmation gate (SPEC §17.9)", () => {
+  it("does not call updateIssue when the confirmer denies", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], pr: { required: false, draft: false, ciRequired: true } });
+    const issue = makeIssue({ state: { id: "state-review", name: "In Review", type: "started", position: 3 } });
+    issue.comments = [mergedMarkerComment(issue, entry)];
+    const linear = new MergeDetectFakeLinear([issue]);
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry, DENY_CONFIRMER);
+
+    const report = await mergeDetectWorker.run(ctx);
+
+    expect(linear.updateIssueCalls).toEqual([]);
+    expect(report.skipped.some((s) => s.code === "linear-write-declined")).toBe(true);
+  });
+
+  it("calls updateIssue when the confirmer accepts", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], pr: { required: false, draft: false, ciRequired: true } });
+    const issue = makeIssue({ state: { id: "state-review", name: "In Review", type: "started", position: 3 } });
+    issue.comments = [mergedMarkerComment(issue, entry)];
+    const linear = new MergeDetectFakeLinear([issue]);
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry, YOLO_CONFIRMER);
+
+    await mergeDetectWorker.run(ctx);
+
+    expect(linear.updateIssueCalls).toEqual([{ id: issue.id, stateId: "state-done" }]);
   });
 });

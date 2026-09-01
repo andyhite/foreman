@@ -40,8 +40,8 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage: "full",
-      workerStages: {},
+      mode: "yolo",
+      workerModes: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -267,7 +267,7 @@ function makeContext(overrides: Partial<IntakeContext> & { config: GlobalConfig;
     team: "ENG",
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
-    dryRun: false,
+    confirm: async () => true,
     ...overrides,
   };
 }
@@ -332,7 +332,27 @@ describe("runIntakeTick — window guard", () => {
     expect(report.dispatched).toBe(true);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]?.agent).toBe("foreman-triage");
-    expect(dispatcher.calls[0]?.command).toBe(`${DISPATCH_COMMAND.triage} ${issue.identifier}`);
+    expect(dispatcher.calls[0]?.command).toBe(
+      `${DISPATCH_COMMAND.triage} --stale-low-days ${config.intake.staleLowDays} ${issue.identifier}`,
+    );
+  });
+
+  it("carries a non-default intake.staleLowDays through to the dispatched command", async () => {
+    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 30, batchSize: 20, timezone: "UTC" } });
+    const dispatcher = new FakeDispatcher();
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue], []);
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+    });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(true);
+    expect(dispatcher.calls[0]?.command).toContain("--stale-low-days 30");
   });
 
   it("does not dispatch a second batch the same calendar day", async () => {
@@ -353,6 +373,39 @@ describe("runIntakeTick — window guard", () => {
     expect(second.dispatched).toBe(false);
     expect(second.skipReason).toContain("already dispatched");
     expect(dispatcher.calls).toHaveLength(0);
+  });
+
+  it("skips the triage dispatch with 'operator declined' under a denying confirmer, and dispatches under YOLO_CONFIRMER", async () => {
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const declined = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      confirm: async () => false,
+    });
+
+    const declinedReport = await runIntakeTick(declined);
+
+    expect(declinedReport.dispatched).toBe(false);
+    expect(declinedReport.skipReason).toBe("operator declined");
+    expect(dispatcher.calls).toHaveLength(0);
+
+    const approvedLinear = new FakeLinear([makeIssue()], []);
+    const approved = makeContext({
+      config,
+      linear: approvedLinear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      confirm: async () => true,
+    });
+
+    const approvedReport = await runIntakeTick(approved);
+
+    expect(approvedReport.dispatched).toBe(true);
+    expect(dispatcher.calls).toHaveLength(1);
   });
 });
 

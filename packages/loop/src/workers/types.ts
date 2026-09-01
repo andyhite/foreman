@@ -4,7 +4,7 @@
  * predicate by calling into `routing.ts` rather than re-deriving selection.
  */
 
-import type { BlockedItem, Dispatcher, DispatchHandle, GlobalConfig, Issue, LinearWriter, ProposalItem, QueueItem, ResolvedRepoEntry } from "@foreman/core";
+import type { BlockedItem, ConfirmRequest, Dispatcher, DispatchHandle, GlobalConfig, Issue, LinearWriter, LoopMode, ProposalItem, QueueItem, ResolvedRepoEntry } from "@foreman/core";
 import type { BoardCounts } from "@foreman/core";
 import { issueScope } from "@foreman/core";
 import type { Bookkeeping } from "../bookkeeping.ts";
@@ -13,7 +13,7 @@ import type { DispatchDecision, SkipRecord, StageName } from "../routing.ts";
 export interface WorkerReport {
   worker: StageName | "reaper" | "merge-detect" | "project-status";
   ranAt: string;
-  /** Dispatch intents selected by routing, including dry-run decisions. */
+  /** Dispatch intents selected by routing, whether or not they were confirmed. */
   decisions: DispatchDecision[];
   /** Dispatches successfully launched during this run. */
   dispatched: DispatchDecision[];
@@ -43,12 +43,14 @@ export interface WorkerContext {
   /** Injectable clock, so tests never depend on wall time. */
   now: () => Date;
   log: (message: string) => void;
-  /** The worker's resolved autonomy rung after `loop.workerStages` fallback. */
-  effectiveStage: GlobalConfig["loop"]["stage"];
-  /** Whether this worker may launch a dispatch in this run; CLI `--dry-run` always makes this false. */
-  dispatchPermitted: boolean;
-  /** True when the global stage or explicit CLI flag forces legacy non-dispatch behavior. */
-  dryRun: boolean;
+  /** This worker's resolved mode after the `loop.workerModes` fallback (SPEC §17.9). */
+  mode: LoopMode;
+  /**
+   * Gate for every action that changes state outside this process — an agent
+   * dispatch, a Linear mutation. Resolves `true` without prompting under
+   * `yolo`; under `confirm` it asks on the loop's own terminal (SPEC §17.9).
+   */
+  confirm(request: ConfirmRequest): Promise<boolean>;
   /** Observe a launched dispatch to completion in the background; failures reach the retry cap. */
   watchSettle(handle: DispatchHandle, stage: StageName): void;
 }

@@ -31,8 +31,8 @@ import {
   type Issue,
   type LoopId,
   type LoopKind,
+  type LoopMode,
   type LoopSnapshot,
-  type LoopStage,
   type ProposalItem,
   type QueueItem,
   type RunState,
@@ -118,7 +118,6 @@ export interface BuildSnapshotInput {
   version: string;
   config: GlobalConfig;
   runState: RunState;
-  dryRun: boolean;
   dispatcherKind: "herdr" | "print" | "none";
   pausedAt: string | null;
   lastTickAt: string | null;
@@ -219,8 +218,7 @@ export function buildSnapshot(input: BuildSnapshotInput): LoopSnapshot {
     },
     runtime: {
       state: input.runState,
-      stage: input.config.loop.stage as LoopStage,
-      dryRun: input.dryRun,
+      mode: input.config.loop.mode,
       dispatcher: input.dispatcherKind,
       pausedAt: input.pausedAt,
       lastTickAt: input.lastTickAt,

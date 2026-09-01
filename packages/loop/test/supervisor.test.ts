@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   Comment,
+  Confirmer,
   CreateIssueInput,
   Dispatcher,
   DispatchHandle,
@@ -15,10 +16,11 @@ import type {
   IssueLabel,
   IssueQuery,
   LinearWriter,
+  LoopMode,
   ResolvedRepoEntry,
   ControlEvent,
 } from "@foreman/core";
-import { repoLoopId } from "@foreman/core";
+import { DENY_CONFIRMER, repoLoopId, YOLO_CONFIRMER } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import {
   LoopLockHeldError,
@@ -67,7 +69,7 @@ class FakeDispatcher implements Dispatcher {
   }
 }
 
-function makeConfig(stage: "dry-run" | "read-only" | "full" = "dry-run"): GlobalConfig {
+function makeConfig(mode: LoopMode = "confirm"): GlobalConfig {
   return {
     repos: {},
     loop: {
@@ -78,8 +80,8 @@ function makeConfig(stage: "dry-run" | "read-only" | "full" = "dry-run"): Global
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage,
-      workerStages: {},
+      mode,
+      workerModes: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -243,18 +245,19 @@ function makeEntry(): ResolvedRepoEntry {
   };
 }
 
-/** Always dispatches one decision and skips one issue with a fixed code, for asserting log shape. */
+/** Confirms via `ctx.confirm` before dispatching one decision; always skips a second issue with a fixed code. */
 function makeStubWorker(): Worker {
   return {
     name: "refine",
     cadenceMs: 0,
     async run(ctx: WorkerContext): Promise<WorkerReport> {
       const decision = { agent: "foreman-refine" as const, issueId: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." };
+      const approved = await ctx.confirm({ kind: "dispatch", summary: "dispatch foreman-refine for ENG-1" });
       return {
         worker: "refine",
         ranAt: ctx.now().toISOString(),
         decisions: [decision],
-        dispatched: ctx.dispatchPermitted ? [decision] : [],
+        dispatched: approved ? [decision] : [],
         skipped: [{ stage: "refine", issueId: "ENG-2", code: "unprioritized", message: "Priority is None." }],
         errors: [],
       };
@@ -262,10 +265,10 @@ function makeStubWorker(): Worker {
   };
 }
 
-function makeSupervisor(logs: string[]): Supervisor {
+function makeSupervisor(logs: string[], confirmer: Confirmer = YOLO_CONFIRMER): Supervisor {
   const stateDir = tempStateDir();
   return new Supervisor({
-    config: makeConfig("full"),
+    config: makeConfig("yolo"),
     linear: new NoopLinear() as unknown as LinearWriter,
     dispatcher: new FakeDispatcher("print", true),
     bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),
@@ -273,7 +276,7 @@ function makeSupervisor(logs: string[]): Supervisor {
     entry: makeEntry(),
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: (message) => logs.push(message),
-    dryRun: false,
+    confirmer,
     loopId: repoLoopId("acme"),
     statusPath: join(stateDir, "status.json"),
     version: "0.1.0-test",
@@ -286,9 +289,9 @@ describe("Supervisor.runTick — decision observability", () => {
     const logs: string[] = [];
     const supervisor = makeSupervisor(logs);
     await supervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("effective stage: full") && line.includes("1 dispatched"))).toBe(true);
-    expect(logs.some((line) => line.includes("dispatched refine [effective stage: full] ENG-1"))).toBe(true);
-    expect(logs.some((line) => line.includes("skip refine [effective stage: full] ENG-2: unprioritized"))).toBe(true);
+    expect(logs.some((line) => line.includes("mode: yolo") && line.includes("1 dispatched"))).toBe(true);
+    expect(logs.some((line) => line.includes("dispatched refine [mode: yolo] ENG-1"))).toBe(true);
+    expect(logs.some((line) => line.includes("skip refine [mode: yolo] ENG-2: unprioritized"))).toBe(true);
   });
 
   it("publishes decision logs to control subscribers", async () => {
@@ -300,29 +303,27 @@ describe("Supervisor.runTick — decision observability", () => {
     expect(events.some((event) => event.event === "log" && event.line.includes("unprioritized"))).toBe(true);
   });
 
-  it("uses would dispatch for CLI dry-run decisions without counting a dispatch", async () => {
-    const logs: string[] = [];
-    const supervisor = makeSupervisor(logs);
-    await supervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("would dispatch refine [effective stage: full] ENG-1"))).toBe(false);
-    const drySupervisor = new Supervisor({
-      config: makeConfig("full"),
-      linear: new NoopLinear() as unknown as LinearWriter,
-      dispatcher: new FakeDispatcher("print", true),
-      bookkeeping: Bookkeeping.load(join(tempStateDir(), "bookkeeping.json")),
-      stateDir: tempStateDir(),
-      entry: makeEntry(),
-      now: () => new Date("2026-06-01T12:00:00.000Z"),
-      log: (message) => logs.push(message),
-      dryRun: true,
-      loopId: repoLoopId("acme"),
-      statusPath: null,
-      version: "0.1.0-test",
-      team: "ENG",
-    });
-    await drySupervisor.runTick([makeStubWorker()]);
-    expect(logs.some((line) => line.includes("would dispatch refine [effective stage: full] ENG-1"))).toBe(true);
-    expect(drySupervisor.snapshot().history.dispatchesPerTick.at(-1)).toBe(0);
+  it("a denying confirmer produces no dispatch; YOLO_CONFIRMER dispatches", async () => {
+    const deniedLogs: string[] = [];
+    const deniedSupervisor = makeSupervisor(deniedLogs, DENY_CONFIRMER);
+    await deniedSupervisor.runTick([makeStubWorker()]);
+    expect(deniedLogs.some((line) => line.includes("would dispatch refine [mode: yolo] ENG-1"))).toBe(true);
+    expect(deniedSupervisor.snapshot().history.dispatchesPerTick.at(-1)).toBe(0);
+
+    const yoloLogs: string[] = [];
+    const yoloSupervisor = makeSupervisor(yoloLogs, YOLO_CONFIRMER);
+    await yoloSupervisor.runTick([makeStubWorker()]);
+    expect(yoloLogs.some((line) => line.includes("dispatched refine [mode: yolo] ENG-1"))).toBe(true);
+    expect(yoloSupervisor.snapshot().history.dispatchesPerTick.at(-1)).toBe(1);
+  });
+
+  it("setMode(\"yolo\") flips snapshot().runtime.mode", () => {
+    const supervisor = makeSupervisor([]);
+    expect(supervisor.snapshot().runtime.mode).toBe("yolo");
+    supervisor.setMode("confirm");
+    expect(supervisor.snapshot().runtime.mode).toBe("confirm");
+    supervisor.setMode("yolo");
+    expect(supervisor.snapshot().runtime.mode).toBe("yolo");
   });
 });
 
@@ -450,7 +451,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
     const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
     const linear = new DecisionLinear();
     const supervisor = new Supervisor({
-      config: makeConfig("full"),
+      config: makeConfig("yolo"),
       linear: linear as unknown as LinearWriter,
       dispatcher: new SettlingDispatcher(1),
       bookkeeping,
@@ -458,7 +459,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
       entry: makeEntry(),
       now: () => new Date("2026-06-01T12:00:00.000Z"),
       log: () => {},
-      dryRun: false,
+      confirmer: YOLO_CONFIRMER,
       loopId: repoLoopId("acme"),
       statusPath: null,
       version: "0.1.0-test",
@@ -494,7 +495,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
     const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
     const linear = new DecisionLinear();
     const supervisor = new Supervisor({
-      config: makeConfig("full"),
+      config: makeConfig("yolo"),
       linear: linear as unknown as LinearWriter,
       dispatcher: new SettlingDispatcher(0),
       bookkeeping,
@@ -502,7 +503,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
       entry: makeEntry(),
       now: () => new Date("2026-06-01T12:00:00.000Z"),
       log: () => {},
-      dryRun: false,
+      confirmer: YOLO_CONFIRMER,
       loopId: repoLoopId("acme"),
       statusPath: null,
       version: "0.1.0-test",

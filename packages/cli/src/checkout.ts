@@ -3,6 +3,11 @@
  * from — the source of the omp-plugin directory that dev mode links and that
  * `bun run build` builds.
  *
+ * Named for the checkout, not the repo: "repo" already means two other things
+ * in this CLI — the `foreman repo` supervisor command, and a `repos` registry
+ * alias naming a product repo Foreman manages (SPEC §3.10, §3.11). This
+ * module resolves neither; it finds Foreman's own source tree.
+ *
  * Walks up from this module's own location (inside `packages/cli`) rather
  * than `process.cwd()`, so `foreman setup` works the same whether it is run
  * from the repo root, a subdirectory, or an unrelated cwd — the binary always
@@ -13,14 +18,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export class RepoNotFoundError extends Error {
+export class CheckoutNotFoundError extends Error {
   constructor() {
     super(
-      "Could not locate the foreman repo root. `foreman setup` needs to run from " +
-        "inside a clone of https://github.com/andyhite/foreman (or pass --repo <path>) " +
+      "Could not locate the foreman checkout. `foreman setup` needs to run from " +
+        "inside a clone of https://github.com/andyhite/foreman (or pass --checkout <path>) " +
         "to find packages/omp-plugin.",
     );
-    this.name = "RepoNotFoundError";
+    this.name = "CheckoutNotFoundError";
   }
 }
 
@@ -36,7 +41,7 @@ function looksLikeForemanRoot(dir: string): boolean {
 }
 
 /** Searches `startDir` and its ancestors (default: this module's own location). */
-export function findRepoRoot(startDir?: string): string {
+export function findCheckoutRoot(startDir?: string): string {
   let dir = startDir ?? dirname(fileURLToPath(import.meta.url));
   for (let hops = 0; hops < 12; hops += 1) {
     if (looksLikeForemanRoot(dir)) return dir;
@@ -44,16 +49,16 @@ export function findRepoRoot(startDir?: string): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new RepoNotFoundError();
+  throw new CheckoutNotFoundError();
 }
 
-/** Resolves the repo root from an explicit `--repo` flag, or searches when omitted. */
-export function resolveRepoRoot(explicitPath: string | null): string {
+/** Resolves the checkout root from an explicit `--checkout` flag, or searches when omitted. */
+export function resolveCheckoutRoot(explicitPath: string | null): string {
   if (explicitPath) {
     if (!looksLikeForemanRoot(explicitPath)) {
-      throw new Error(`--repo ${explicitPath} does not look like a foreman checkout (no packages/omp-plugin).`);
+      throw new Error(`--checkout ${explicitPath} does not look like a foreman checkout (no packages/omp-plugin).`);
     }
     return explicitPath;
   }
-  return findRepoRoot();
+  return findCheckoutRoot();
 }

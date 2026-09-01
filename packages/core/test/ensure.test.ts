@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ConfigError } from "../src/config/load.ts";
+import { DENY_CONFIRMER, YOLO_CONFIRMER } from "../src/confirm.ts";
 import { ensureMaintenanceProjects, MAINTENANCE_PROJECT_NAME } from "../src/ensure.ts";
 import type { CreateIssueInput, IssueQuery, LinearWriter } from "../src/linear/api.ts";
 import type {
@@ -113,6 +114,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const reports = await ensureMaintenanceProjects(linear, {
       initiativeIds: ["init-1"],
       teamId: "team-1",
+      confirmer: YOLO_CONFIRMER,
     });
 
     expect(reports).toEqual([
@@ -131,6 +133,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const reports = await ensureMaintenanceProjects(linear, {
       initiativeIds: ["init-1"],
       teamId: "team-1",
+      confirmer: YOLO_CONFIRMER,
     });
 
     expect(reports[0]).toEqual({
@@ -151,6 +154,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const reports = await ensureMaintenanceProjects(linear, {
       initiativeIds: ["init-1"],
       teamId: "team-1",
+      confirmer: YOLO_CONFIRMER,
     });
 
     expect(linear.createProjectCalls).toEqual([{ name: MAINTENANCE_PROJECT_NAME, teamIds: ["team-1"] }]);
@@ -167,7 +171,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     ]);
   });
 
-  it("dry-run: reports a missing Maintenance project without creating it", async () => {
+  it("declined: reports a missing Maintenance project without creating it", async () => {
     const linear = new FakeLinear(
       new Map([["init-1", makeInitiative("init-1", "Foreman")]]),
       new Map([["init-1", []]]),
@@ -176,7 +180,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const reports = await ensureMaintenanceProjects(linear, {
       initiativeIds: ["init-1"],
       teamId: "team-1",
-      dryRun: true,
+      confirmer: DENY_CONFIRMER,
     });
 
     expect(reports).toEqual([
@@ -186,7 +190,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     expect(linear.addProjectToInitiativeCalls).toEqual([]);
   });
 
-  it("dry-run: still reports an already-existing Maintenance project, unmutated", async () => {
+  it("declined: still reports an already-existing Maintenance project, unmutated", async () => {
     const linear = new FakeLinear(
       new Map([["init-1", makeInitiative("init-1", "Foreman")]]),
       new Map([["init-1", [{ id: "project-1", name: "Maintenance" }]]]),
@@ -195,7 +199,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const reports = await ensureMaintenanceProjects(linear, {
       initiativeIds: ["init-1"],
       teamId: "team-1",
-      dryRun: true,
+      confirmer: DENY_CONFIRMER,
     });
 
     expect(reports).toEqual([
@@ -208,10 +212,10 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     const linear = new FakeLinear(new Map(), new Map());
 
     await expect(
-      ensureMaintenanceProjects(linear, { initiativeIds: ["ghost-init"], teamId: "team-1" }),
+      ensureMaintenanceProjects(linear, { initiativeIds: ["ghost-init"], teamId: "team-1", confirmer: YOLO_CONFIRMER }),
     ).rejects.toThrow(ConfigError);
     await expect(
-      ensureMaintenanceProjects(linear, { initiativeIds: ["ghost-init"], teamId: "team-1" }),
+      ensureMaintenanceProjects(linear, { initiativeIds: ["ghost-init"], teamId: "team-1", confirmer: YOLO_CONFIRMER }),
     ).rejects.toThrow(/ghost-init/);
   });
 
@@ -223,7 +227,7 @@ describe("ensureMaintenanceProjects (SPEC §3.11)", () => {
     );
 
     await expect(
-      ensureMaintenanceProjects(linear, { initiativeIds: ["init-1"], teamId: "team-1" }),
+      ensureMaintenanceProjects(linear, { initiativeIds: ["init-1"], teamId: "team-1", confirmer: YOLO_CONFIRMER }),
     ).rejects.toThrow(/project-created/);
   });
 });

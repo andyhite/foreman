@@ -41,42 +41,45 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...scopeSkips);
 
-  if (ctx.dispatchPermitted) {
-    for (const decision of decisions) {
-      if (!decision.issueId) continue;
-      const issue = todo.find((candidate) => candidate.identifier === decision.issueId);
-      if (!issue) continue;
-      const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
-      try {
-        const handle = await ctx.dispatcher.dispatch({
-          agent: decision.agent,
-          issueId: decision.issueId,
-          command: decision.command,
-          dispatchId,
-          cwd: ctx.entry.repoPath,
-        });
-        ctx.bookkeeping.recordDispatch({
-          agent: decision.agent,
-          issueId: decision.issueId,
-          dispatchId: handle.dispatchId,
-          startedAt: handle.startedAt,
-          stage: "implement",
-        });
-        ctx.watchSettle(handle, "implement");
-        dispatched.push(decision);
-        ctx.bookkeeping.resetAttempts("implement", decision.issueId);
-      } catch (error) {
-        errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
-        const pending = ctx.bookkeeping.recordAttemptFailure(
-          "implement",
-          decision.issueId,
-          ctx.config.loop.retryCap,
-          now,
-        );
-        if (pending) {
-          errors.push(...(await applyPendingDecisions(ctx, [pending])));
-          ctx.bookkeeping.drainPendingDecisions();
-        }
+  for (const decision of decisions) {
+    if (!decision.issueId) continue;
+    const issue = todo.find((candidate) => candidate.identifier === decision.issueId);
+    if (!issue) continue;
+    const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
+    const summary = `dispatch ${decision.agent} for ${decision.issueId}`;
+    if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
+      skipped.push({ stage: "implement", issueId: decision.issueId, code: "dispatch-declined", message: `Operator declined: ${summary}` });
+      continue;
+    }
+    try {
+      const handle = await ctx.dispatcher.dispatch({
+        agent: decision.agent,
+        issueId: decision.issueId,
+        command: decision.command,
+        dispatchId,
+        cwd: ctx.entry.repoPath,
+      });
+      ctx.bookkeeping.recordDispatch({
+        agent: decision.agent,
+        issueId: decision.issueId,
+        dispatchId: handle.dispatchId,
+        startedAt: handle.startedAt,
+        stage: "implement",
+      });
+      ctx.watchSettle(handle, "implement");
+      dispatched.push(decision);
+      ctx.bookkeeping.resetAttempts("implement", decision.issueId);
+    } catch (error) {
+      errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
+      const pending = ctx.bookkeeping.recordAttemptFailure(
+        "implement",
+        decision.issueId,
+        ctx.config.loop.retryCap,
+        now,
+      );
+      if (pending) {
+        errors.push(...(await applyPendingDecisions(ctx, [pending])));
+        ctx.bookkeeping.drainPendingDecisions();
       }
     }
   }

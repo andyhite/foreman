@@ -44,31 +44,41 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
-  if (ctx.dispatchPermitted) {
-    for (const decision of decisions) {
-      if (decision.agent !== "foreman-plan" || !decision.projectId) continue;
-      const dispatchId = newDispatchId(decision.agent, decision.projectId, now);
-      try {
-        const handle = await ctx.dispatcher.dispatch({
-          agent: decision.agent,
-          issueId: null,
-          command: decision.command,
-          dispatchId,
-          cwd: ctx.entry.repoPath,
-        });
-        ctx.bookkeeping.recordDispatch({
-          agent: decision.agent,
-          issueId: null,
-          projectId: decision.projectId,
-          dispatchId: handle.dispatchId,
-          startedAt: handle.startedAt,
-          stage: "plan",
-        });
-        ctx.watchSettle(handle, "plan");
-        dispatched.push(decision);
-      } catch (error) {
-        errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
-      }
+  for (const decision of decisions) {
+    if (decision.agent !== "foreman-plan" || !decision.projectId) continue;
+    const project = planCandidates.find((candidate) => candidate.project.id === decision.projectId)?.project;
+    const dispatchId = newDispatchId(decision.agent, decision.projectId, now);
+    const summary = `dispatch ${decision.agent} for project ${project?.name ?? decision.projectId}`;
+    if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
+      skipped.push({
+        stage: "plan",
+        issueId: null,
+        projectId: decision.projectId,
+        code: "dispatch-declined",
+        message: `Operator declined: ${summary}`,
+      });
+      continue;
+    }
+    try {
+      const handle = await ctx.dispatcher.dispatch({
+        agent: decision.agent,
+        issueId: null,
+        command: decision.command,
+        dispatchId,
+        cwd: ctx.entry.repoPath,
+      });
+      ctx.bookkeeping.recordDispatch({
+        agent: decision.agent,
+        issueId: null,
+        projectId: decision.projectId,
+        dispatchId: handle.dispatchId,
+        startedAt: handle.startedAt,
+        stage: "plan",
+      });
+      ctx.watchSettle(handle, "plan");
+      dispatched.push(decision);
+    } catch (error) {
+      errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
     }
   }
 

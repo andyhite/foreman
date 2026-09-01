@@ -12,9 +12,14 @@
  * global backpressure and the global WIP cap (§17.7, §17.6) are evaluated
  * exactly once, against one shared remaining-capacity counter, rather than
  * four workers racing four separate reads of the same limit.
+ *
+ * Routing decides WHAT to do — it never consults `loop.mode`. Whether the
+ * operator is asked before a decision turns into a dispatch or a Linear
+ * mutation is `WorkerContext.confirm`'s job (SPEC §17.9), evaluated by each
+ * worker per decision, not gated here.
  */
 
-import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
+import type { GlobalConfig, Issue, LoopMode, ProjectRef } from "@foreman/core";
 import {
   AGENT_LABEL,
   DISPATCH_COMMAND,
@@ -129,28 +134,22 @@ function suppressingLabel(issue: Issue): { code: string; message: string } | nul
   return null;
 }
 
-/** Resolves a worker's autonomy rung, falling back to the global stage. */
-export function effectiveStage(stage: StageName, loop: GlobalConfig["loop"]): GlobalConfig["loop"]["stage"] {
-  return loop.workerStages[stage] ?? loop.stage;
+
+/** A worker's resolved mode after the `loop.workerModes` fallback (SPEC §17.9). */
+export function effectiveMode(stage: StageName, loop: GlobalConfig["loop"]): LoopMode {
+  return loop.workerModes[stage] ?? loop.mode;
 }
 
 /**
- * Whether routing may produce a dispatch intent. Dry-run intentionally permits
- * every worker to evaluate and report its intent; launch permission is handled
- * separately by the supervisor's worker context.
+ * Whether this process needs an operator to ask before it acts — true when
+ * `loop.mode` is `confirm`, or any `loop.workerModes` override is. The
+ * startup guard in each entrypoint uses this to refuse to start without a
+ * TTY: a `confirm`-mode loop with nobody to ask would silently decline every
+ * action forever, which is worse than not starting.
  */
-export function stagePermitted(stage: StageName, loop: GlobalConfig["loop"]): boolean {
-  const effective = effectiveStage(stage, loop);
-  if (effective === "full") return true;
-  if (effective === "read-only") return stage === "review";
-  return effective === "dry-run";
-}
-
-/** Whether a worker may launch a selected dispatch, including the CLI safety override. */
-export function dispatchPermitted(stage: StageName, loop: GlobalConfig["loop"], cliDryRun: boolean): boolean {
-  if (cliDryRun) return false;
-  const effective = effectiveStage(stage, loop);
-  return effective === "full" || (effective === "read-only" && stage === "review");
+export function confirmationRequired(loop: GlobalConfig["loop"]): boolean {
+  if (loop.mode === "confirm") return true;
+  return Object.values(loop.workerModes).some((mode) => mode === "confirm");
 }
 
 /** Older first, then higher priority first — SPEC §17.5's pickup order. */
@@ -179,9 +178,9 @@ function pushProjectSkip(ctx: RoutingContext, stage: StageName, projectId: strin
 }
 
 /**
- * Shared per-candidate gauntlet: label suppression, backpressure, stage
- * permission, then WIP. Returns `true` when the candidate may proceed to its
- * stage-specific check; on any rejection it records the `SkipRecord` itself.
+ * Shared per-candidate gauntlet: label suppression, backpressure, then WIP.
+ * Returns `true` when the candidate may proceed to its stage-specific check;
+ * on any rejection it records the `SkipRecord` itself.
  */
 function admitCandidate(
   ctx: RoutingContext,
@@ -201,17 +200,6 @@ function admitCandidate(
       issue.identifier,
       "backpressure-blocked-queue",
       "Blocked-human queue exceeds the backpressure threshold.",
-    );
-    return false;
-  }
-  const effective = effectiveStage(stage, ctx.loop);
-  if (!stagePermitted(stage, ctx.loop)) {
-    pushSkip(
-      ctx,
-      stage,
-      issue.identifier,
-      "stage-not-permitted",
-      `Effective ${stage} stage "${effective}" does not permit dispatch.`,
     );
     return false;
   }
@@ -339,11 +327,6 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
     }
     if (backpressureTripped) {
       pushProjectSkip(ctx, "plan", project.id, "backpressure-blocked-queue", "Blocked-human queue exceeds the backpressure threshold.");
-      continue;
-    }
-    const effective = effectiveStage("plan", ctx.loop);
-    if (!stagePermitted("plan", ctx.loop)) {
-      pushProjectSkip(ctx, "plan", project.id, "stage-not-permitted", `Effective plan stage "${effective}" does not permit dispatch.`);
       continue;
     }
     if (ctx.globalRemaining <= 0) {

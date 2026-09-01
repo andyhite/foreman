@@ -10,6 +10,7 @@
  */
 
 import { ConfigError } from "./config/load.ts";
+import type { Confirmer } from "./confirm.ts";
 import type { LinearId } from "./linear/types.ts";
 import type { LinearWriter } from "./linear/api.ts";
 
@@ -18,7 +19,7 @@ export const MAINTENANCE_PROJECT_NAME = "Maintenance";
 export interface EnsureReport {
   initiativeId: string;
   initiativeName: string;
-  /** Null only in a dry-run report for an initiative that has no Maintenance project yet. */
+  /** Null only when the operator declined the create-project confirmation for an initiative that has no Maintenance project yet. */
   projectId: string | null;
   created: boolean;
 }
@@ -34,15 +35,17 @@ export interface EnsureReport {
  * is the registry pointing at nothing — that must fail loudly before any
  * spawn (SPEC §3.11), not be swallowed as "nothing to ensure."
  *
- * `dryRun` (SPEC §17.9): the two safer autonomy rungs must never mutate
- * Linear. Every initiative still resolves and every existing Maintenance
- * project is still reported, but a missing one is reported with `projectId:
- * null` and `created: false` instead of being created — the caller logs
- * that as "would create" and moves on.
+ * `confirmer` (SPEC §17.9): creating the Maintenance project is a Linear
+ * mutation, so it goes through `Confirmer.confirm` first. Every initiative
+ * still resolves and every existing Maintenance project is still reported;
+ * when the operator declines (or `confirmer` is `YOLO_CONFIRMER`, which
+ * never declines), a missing one is reported with `projectId: null` and
+ * `created: false` instead of being created — the caller logs that as
+ * "declined" or "would create" and moves on.
  */
 export async function ensureMaintenanceProjects(
   linear: LinearWriter,
-  input: { initiativeIds: readonly string[]; teamId: LinearId; dryRun?: boolean },
+  input: { initiativeIds: readonly string[]; teamId: LinearId; confirmer: Confirmer },
 ): Promise<EnsureReport[]> {
   const reports: EnsureReport[] = [];
 
@@ -72,7 +75,11 @@ export async function ensureMaintenanceProjects(
       continue;
     }
 
-    if (input.dryRun) {
+    const proceed = await input.confirmer.confirm({
+      kind: "linear-write",
+      summary: `create the Maintenance project under initiative ${initiative.name}`,
+    });
+    if (!proceed) {
       reports.push({
         initiativeId,
         initiativeName: initiative.name,

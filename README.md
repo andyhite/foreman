@@ -169,25 +169,33 @@ if you want to hack on Foreman itself instead of just running it.
 The supervisor polls Linear and dispatches whatever the gates allow.
 
 ```bash
-foreman repo --dry-run --once   # decide and log, dispatch nothing
-foreman repo --stage read-only  # comment and label, no code
-foreman repo --stage full       # the whole pipeline
+foreman repo --once             # one tick, asking before each action
+foreman repo --mode yolo        # unattended
 ```
 
-`loop.stage` is the global fallback and defaults to `dry-run`, so a loop started
-before you are ready logs its intentions instead of acting on them. Override an
-individual worker in `loop.workerStages` when you want to validate the pipeline
-one step at a time: `dry-run` evaluates and logs only, `read-only` runs review
-only, and `full` permits that worker to dispatch. Every tick logs a per-worker
-summary plus each dispatch intent and every routing skip to stdout, so there is
-nothing for a `--verbose` flag to reveal and `foreman repo` does not take one.
+`loop.mode` is the global fallback and defaults to `confirm`, so a loop
+started before you are ready asks before every agent dispatch and every
+Linear mutation instead of acting on them — reads are never gated, and the
+loop still evaluates every worker's predicate and logs its intent either
+way. Declining is how you get a dry run: say no to everything and the loop
+only ever logs. Override an individual worker in `loop.workerModes` when you
+want to validate the pipeline one step at a time — `{ "review": "yolo" }`
+lets `review` dispatch unattended while every other worker still asks first.
+`confirm` mode needs a terminal: a loop started with any worker's effective
+mode resolving to `confirm` and no TTY attached refuses to start rather than
+declining everything silently. Every tick logs a per-worker summary plus
+each dispatch intent and every routing skip to stdout, so there is nothing
+for a `--verbose` flag to reveal and `foreman repo` does not take one.
 `foreman team` still does, where it adds the skip reason for each triaged
 issue.
 
 ```
-[foreman-repo] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
-[foreman-repo]   would dispatch plan [effective stage: dry-run] (batch): "Plotroom" has no issues yet.
-[foreman-repo]   skip plan [effective stage: dry-run] (batch): wip-stage-full — plan WIP cap (1) reached.
+[foreman-repo:plotroom] confirm: dispatch foreman-plan for project Plotroom
+[foreman-repo:plotroom]   command: /foreman:plan 8f2c1d90
+[foreman-repo:plotroom]   cwd: /Users/you/Code/plotroom
+Proceed? [y/N] y
+[foreman-repo:plotroom] plan [mode: confirm]: 1 dispatched, 0 would dispatch, 43 skipped
+[foreman-repo:plotroom]   ✓ dispatched plan [mode: confirm] 8f2c1d90: "Plotroom" has no issues yet.
 ```
 
 The `foreman-repo` prefix names the long-lived process, not the command — the
@@ -200,7 +208,7 @@ Each loop process — a repo's `foreman repo` and the team-level `foreman
 team` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
 speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
 after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
-`subscribe`, `pause`, `resume`, `stop`, `tick`, `setStage`, `patchConfig`,
+`subscribe`, `pause`, `resume`, `stop`, `tick`, `setMode`, `patchConfig`,
 `reload`, `attachAgent`, `killAgent`, `logs`. `stop` takes
 `mode: "graceful" | "now"`: both transition to `draining` and release the
 lock once shutdown completes. `"graceful"` lets the in-flight tick finish

@@ -1,11 +1,14 @@
 ---
 description: Triage the Linear Inbox and propose classification, priority, and destination for each item
-argument-hint: <ISSUE-ID...>
+argument-hint: [--stale-low-days <days>] <ISSUE-ID...>
 ---
 
 Triage exactly the issues named in `$ARGUMENTS` (space-separated identifiers,
 e.g. `ENG-101 ENG-102`), not the whole Inbox view — the dispatch already
-selected this batch via `intake.batchSize`. Resolve each via
+selected this batch via `intake.batchSize`. `$ARGUMENTS` may lead with
+`--stale-low-days <days>`, the operator's configured `intake.staleLowDays`;
+carry that number into the assembled `context` so the agent's staleness rule
+uses it instead of an assumed default. Resolve each issue via
 `foreman_linear_read`. Assemble the shared `context` from the two-layer
 `Context` digest (§4.7) plus the full batch of resolved items — triage works
 on the batch, not a single issue.

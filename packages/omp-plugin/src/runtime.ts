@@ -168,7 +168,7 @@ export function getLinear(): LinearWriter {
   const linear = requireRuntime().linear;
   if (!linear) {
     throw new Error(
-      "No Linear API key resolved. Set the env var named by linear.apiKeyEnv or linear.apiKeyFile in .foreman/config.json.",
+      "No Linear API key resolved. Set the env var named by linear.apiKeyEnv, or point linear.apiKeyFile at a file whose first line is the key, in ~/.foreman/config.json.",
     );
   }
   return linear;

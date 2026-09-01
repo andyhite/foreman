@@ -57,7 +57,7 @@ beforeEach(() => {
     repos: {
       demo: { path: home, initiatives: ["init-1"], team: "ENG" },
     },
-    loop: { stateDir: join(home, "state") },
+    loop: { stateDir: join(home, "state"), mode: "yolo" },
     linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint },
   };
   mkdirSync(join(home, ".foreman"), { recursive: true });

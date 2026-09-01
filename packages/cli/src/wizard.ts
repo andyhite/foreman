@@ -30,7 +30,7 @@ export type PluginMode = "link" | "install" | "skip";
 
 export interface WizardOptions {
   home: string;
-  repoRoot: string;
+  checkoutRoot: string;
   githubRepo: string;
   scope: OmpScope | null;
   ompMode: PluginMode | null;
@@ -140,15 +140,15 @@ async function configureGlobalConfig(
   log(`  wrote ${configPath}`);
 }
 
-async function buildRepo(deps: WizardDeps, repoRoot: string, skipBuild: boolean): Promise<void> {
+async function buildCheckout(deps: WizardDeps, checkoutRoot: string, skipBuild: boolean): Promise<void> {
   if (skipBuild) return;
   printSection(deps.log, "Building the checkout");
   deps.log("  bun install");
-  if ((await deps.runner.run("bun", ["install"], { cwd: repoRoot })) !== 0) {
+  if ((await deps.runner.run("bun", ["install"], { cwd: checkoutRoot })) !== 0) {
     throw new Error("bun install failed; fix the error above and re-run `foreman setup`.");
   }
   deps.log("  bun run build");
-  if ((await deps.runner.run("bun", ["run", "build"], { cwd: repoRoot })) !== 0) {
+  if ((await deps.runner.run("bun", ["run", "build"], { cwd: checkoutRoot })) !== 0) {
     throw new Error("bun run build failed; fix the error above and re-run `foreman setup`.");
   }
 }
@@ -203,7 +203,7 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
     ));
 
   if (mode === "link") {
-    const pluginDir = join(options.repoRoot, "packages", "omp-plugin");
+    const pluginDir = join(options.checkoutRoot, "packages", "omp-plugin");
     const argv = ompLinkArgv(pluginDir, scope);
     const code = await deps.runner.run("omp", argv);
     if (code !== 0) {
@@ -269,12 +269,12 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   const pluginMode = hasOmp ? requestedMode : "skip";
 
   const needsBuild = pluginMode === "link";
-  await buildRepo(deps, options.repoRoot, options.skipBuild || !needsBuild);
+  await buildCheckout(deps, options.checkoutRoot, options.skipBuild || !needsBuild);
   await setupOmpPlugin(deps, options, pluginMode);
 
   if (requestedMode === "link") {
     printSection(deps.log, "foreman CLI (dev mode)");
-    const binPath = writeCliBinLink(options.repoRoot, options.home);
+    const binPath = writeCliBinLink(options.checkoutRoot, options.home);
     deps.log(`  ${style("green", "✓")} wrote ${binPath} → runs packages/cli/src/main.ts straight from source (no rebuild needed)`);
     const dir = cliBinDir(options.home);
     if (!(process.env.PATH ?? "").split(":").includes(dir)) {

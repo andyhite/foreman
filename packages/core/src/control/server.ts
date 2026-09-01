@@ -26,9 +26,9 @@ import {
   type ControlResponse,
   encodeFrame,
   FrameDecoder,
-  isLoopStage,
+  isLoopMode,
   type LoopSnapshot,
-  type LoopStage,
+  type LoopMode,
   type ServerInfo,
 } from "./protocol.ts";
 import { probeSocket } from "./client.ts";
@@ -42,7 +42,7 @@ export interface ControlHandlers {
   resume(): Promise<void> | void;
   stop(mode: "graceful" | "now"): Promise<void> | void;
   tick(workers?: readonly string[]): Promise<void> | void;
-  setStage(stage: LoopStage): Promise<void> | void;
+  setMode(mode: LoopMode): Promise<void> | void;
   patchConfig(patch: unknown): Promise<void> | void;
   reload(): Promise<void> | void;
   attachAgent(dispatchId: string): Promise<void> | void;
@@ -332,12 +332,12 @@ export class ControlServer {
           await this.#handlers.tick(workers as readonly string[] | undefined);
           return { ok: true };
         }
-        case "setStage": {
-          const stage = params?.stage;
-          if (!isLoopStage(stage)) {
-            return { ok: false, error: { code: "invalid-params", message: `invalid stage: ${String(stage)}` } };
+        case "setMode": {
+          const mode = params?.mode;
+          if (!isLoopMode(mode)) {
+            return { ok: false, error: { code: "invalid-params", message: `invalid mode: ${String(mode)}` } };
           }
-          await this.#handlers.setStage(stage);
+          await this.#handlers.setMode(mode);
           return { ok: true };
         }
         case "patchConfig":

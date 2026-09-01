@@ -21,10 +21,10 @@ export function cliBinDir(home: string): string {
 }
 
 /** Writes the wrapper and returns its path. */
-export function writeCliBinLink(repoRoot: string, home: string): string {
+export function writeCliBinLink(checkoutRoot: string, home: string): string {
   const dir = cliBinDir(home);
   const binPath = join(dir, "foreman");
-  const entry = join(repoRoot, "packages", "cli", "src", "main.ts");
+  const entry = join(checkoutRoot, "packages", "cli", "src", "main.ts");
   mkdirSync(dir, { recursive: true });
   writeFileSync(binPath, `#!/usr/bin/env bash\nexec bun "${entry}" "$@"\n`, "utf8");
   chmodSync(binPath, 0o755);

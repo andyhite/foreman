@@ -7,7 +7,7 @@ import { readLoopState } from "../src/commands/status.ts";
 
 const snapshot: LoopSnapshot = {
   loop: { id: "repo:test", kind: "repo", label: "test", alias: "test", team: null, repoPath: "/tmp/test", initiativeIds: [], pid: 1, startedAt: "2026-01-01T00:00:00.000Z", version: "test" },
-  runtime: { state: "running", stage: "full", dryRun: false, dispatcher: "none", pausedAt: null, lastTickAt: null, nextTickAt: null, ticks: 1, uptimeMs: 1 },
+  runtime: { state: "running", mode: "yolo", dispatcher: "none", pausedAt: null, lastTickAt: null, nextTickAt: null, ticks: 1, uptimeMs: 1 },
   workers: [], agents: [],
   wip: { global: { used: 0, cap: 1 }, byStage: [] },
   backpressure: { tripped: false, blockedCount: 0, threshold: 1, reason: null },
@@ -25,7 +25,7 @@ describe("readLoopState", () => {
       writeFileSync(path, JSON.stringify({ schema: 1, writtenAt: "2026-01-01T00:00:00.000Z", snapshot }));
       // cadenceMinutes 1 -> threshold = 1*2*60_000 + 30_000 = 150s; 151s later is past it.
       const state = readLoopState(path, new Date("2026-01-01T00:02:31.000Z"), 1);
-      expect(state.loop.stage).toBe("stopped/stale");
+      expect(state.loop.mode).toBe("stopped/stale");
       expect(state.agents).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -39,7 +39,7 @@ describe("readLoopState", () => {
       const pausedSnapshot: LoopSnapshot = { ...snapshot, runtime: { ...snapshot.runtime, state: "paused" } };
       writeFileSync(path, JSON.stringify({ schema: 1, writtenAt: "2026-01-01T00:00:00.000Z", snapshot: pausedSnapshot }));
       const state = readLoopState(path, new Date("2026-01-01T00:02:31.000Z"), 1);
-      expect(state.loop.stage).toBe("paused");
+      expect(state.loop.mode).toBe("paused");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

@@ -38,20 +38,20 @@ export function readLoopState(
 ): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
   const status = readStatusFile(statusPath);
   if (!status) {
-    return { loop: { stage: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
+    return { loop: { mode: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
   }
   const staleAfterMs = statusStaleThresholdMs(cadenceMinutes);
   const ageMs = now.getTime() - new Date(status.writtenAt).getTime();
   if (ageMs > staleAfterMs) {
     if (status.snapshot.runtime.state === "paused") {
       return {
-        loop: { stage: "paused", workers: status.snapshot.workers.map((worker) => ({ worker: worker.name, lastRunAt: worker.lastRunAt, dispatchCount: worker.dispatched })) },
+        loop: { mode: "paused", workers: status.snapshot.workers.map((worker) => ({ worker: worker.name, lastRunAt: worker.lastRunAt, dispatchCount: worker.dispatched })) },
         backpressure: { tripped: status.snapshot.backpressure.tripped, reason: status.snapshot.backpressure.reason },
         agents: status.snapshot.agents.map((agent) => ({ agent: agent.agent, state: AGENT_REGISTRY_STATE[agent.status], issueId: agent.issueId })),
       };
     }
     return {
-      loop: { stage: "stopped/stale", workers: [] },
+      loop: { mode: "stopped/stale", workers: [] },
       backpressure: { tripped: false, reason: `Last loop status is older than ${Math.round(staleAfterMs / 1000)} seconds.` },
       agents: [],
     };
@@ -68,7 +68,7 @@ export function readLoopState(
     issueId: agent.issueId,
   }));
   return {
-    loop: { stage: snapshot.runtime.stage, workers },
+    loop: { mode: snapshot.runtime.mode, workers },
     backpressure: { tripped: snapshot.backpressure.tripped, reason: snapshot.backpressure.reason },
     agents,
   };

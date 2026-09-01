@@ -33,7 +33,7 @@ export interface LoadedConfig {
  * flattened — what every consumer actually wants (SPEC §3.10, §3.11).
  */
 export type ResolvedRepoEntry = RepoSettings & {
-  /** Registry key: the `--repo` argument, herdr workspace name, and state-dir segment. */
+  /** Registry key: the positional alias argument to `foreman repo`, herdr workspace name, and state-dir segment. */
   alias: string;
   /** Absolute, `~`-expanded. */
   repoPath: string;
@@ -94,7 +94,7 @@ function assertInitiativesUnique(config: GlobalConfig, describeFor: string): voi
   }
 }
 
-/** Rejects a `repos` alias that is empty, whitespace-only, or contains a path/label-hostile character (SPEC §3.10): the alias is also the `--repo` argument, the herdr workspace label, and a state-directory segment. */
+/** Rejects a `repos` alias that is empty, whitespace-only, or contains a path/label-hostile character (SPEC §3.10): the alias is also the positional alias argument to `foreman repo`, the herdr workspace label, and a state-directory segment. */
 function assertRepoAliasesValid(config: GlobalConfig, describeFor: string): void {
   const problems: string[] = [];
   for (const alias of Object.keys(config.repos)) {
@@ -284,7 +284,7 @@ export function entryForCwd(config: GlobalConfig, cwd: string, home?: string): R
 
   if (bestAlias === null) {
     throw new ConfigError(`No repos entry matches the working directory ${target}`, [
-      `add an entry under repos in ${join(home ?? homedir(), ".foreman", "config.json")}, or pass --repo <alias>`,
+      `add an entry under repos in ${join(home ?? homedir(), ".foreman", "config.json")}, or run foreman repo <alias>`,
     ]);
   }
   return resolveRepoEntry(config, bestAlias, home);

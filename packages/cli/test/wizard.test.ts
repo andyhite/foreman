@@ -81,10 +81,10 @@ class RecordingRunner implements Runner {
   }
 }
 
-function baseOptions(overrides: Partial<WizardOptions>, home: string, repoRoot: string): WizardOptions {
+function baseOptions(overrides: Partial<WizardOptions>, home: string, checkoutRoot: string): WizardOptions {
   return {
     home,
-    repoRoot,
+    checkoutRoot,
     githubRepo: "andyhite/foreman",
     scope: "user",
     ompMode: null,

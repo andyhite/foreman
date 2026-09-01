@@ -81,12 +81,13 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
         continue;
       }
 
-      if (ctx.dryRun || ctx.config.loop.stage === "read-only") {
+      const summary = `move ${issue.identifier} to Done (PR merged)`;
+      if (!(await ctx.confirm({ kind: "linear-write", summary }))) {
         skipped.push({
           stage: "review",
           issueId: issue.identifier,
-          code: ctx.dryRun ? "dry-run-merge-detected" : "read-only-merge-detected",
-          message: "Merge detected; would move to Done outside read-only mode.",
+          code: "linear-write-declined",
+          message: `Operator declined: ${summary}`,
         });
         continue;
       }

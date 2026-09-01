@@ -14,8 +14,8 @@ function makeConfig(): GlobalConfig {
       retryCap: 2,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
-      stage: "full",
-      workerStages: {},
+      mode: "yolo",
+      workerModes: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -49,7 +49,6 @@ describe("buildSnapshot", () => {
       version: "0.1.0",
       config: makeConfig(),
       runState: "running",
-      dryRun: false,
       dispatcherKind: "herdr",
       pausedAt: null,
       lastTickAt: "2026-06-01T11:55:00.000Z",
@@ -79,7 +78,7 @@ describe("buildSnapshot", () => {
       version: "0.1.0",
     });
     expect(snapshot.runtime.state).toBe("running");
-    expect(snapshot.runtime.stage).toBe("full");
+    expect(snapshot.runtime.mode).toBe("yolo");
     expect(snapshot.runtime.ticks).toBe(4);
     expect(snapshot.runtime.uptimeMs).toBe(NOW.getTime() - new Date("2026-06-01T11:00:00.000Z").getTime());
 
@@ -133,7 +132,6 @@ describe("buildSnapshot", () => {
       version: "0.1.0",
       config,
       runState: "running",
-      dryRun: false,
       dispatcherKind: "print",
       pausedAt: null,
       lastTickAt: null,
@@ -185,7 +183,6 @@ describe("buildSnapshot", () => {
       version: "0.1.0",
       config,
       runState: "running",
-      dryRun: false,
       dispatcherKind: "print",
       pausedAt: null,
       lastTickAt: null,
@@ -217,7 +214,6 @@ describe("buildSnapshot", () => {
       version: "0.1.0",
       config,
       runState: "running",
-      dryRun: false,
       dispatcherKind: "none",
       pausedAt: null,
       lastTickAt: null,
@@ -247,7 +243,6 @@ describe("buildSnapshot", () => {
         version: "0.1.0",
         config,
         runState: "running" as const,
-        dryRun: false,
         dispatcherKind: "none" as const,
         pausedAt: null,
         lastTickAt: null,

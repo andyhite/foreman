@@ -298,10 +298,12 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     path: repoRoot,
     initiatives: bindings,
     ...(team.length > 0 ? { team } : {}),
-    // Writing today's default back out would pin it forever the next time
-    // the schema's default changes underneath an untouched config — see
-    // global-config.ts's header comment.
-    ...(baseBranch !== "main" ? { baseBranch } : {}),
+    // Writing today's inherited default back out would pin it forever the
+    // next time repoDefaults.baseBranch changes underneath an untouched
+    // entry — see global-config.ts's header comment. So the entry only
+    // records baseBranch when the repo's real default branch differs from
+    // what it would otherwise inherit from repoDefaults.
+    ...(baseBranch !== existing.effectiveBaseBranch ? { baseBranch } : {}),
   };
 
   const removeRepos = existingByPath && existingByPath.alias !== alias ? [existingByPath.alias] : [];
@@ -330,5 +332,5 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
 
   printSection(deps.log, "Next step");
-  deps.log("  foreman repo --dry-run --once");
+  deps.log("  foreman repo --once");
 }

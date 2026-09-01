@@ -25,13 +25,14 @@ import {
   type AgentStatus,
   type ControlEvent,
   type EmittableEvent as CoreEmittableEvent,
+  type Confirmer,
   type Dispatcher,
   type DispatchHandle,
   type GlobalConfig,
   type LinearWriter,
   type LoopId,
+  type LoopMode,
   type LoopSnapshot,
-  type LoopStage,
   type ResolvedRepoEntry,
   type RunState,
 } from "@foreman/core";
@@ -39,7 +40,7 @@ import { Bookkeeping } from "./bookkeeping.ts";
 import { buildSnapshot, type WorkerSnapshotInput } from "./snapshot.ts";
 import type { BlockedItem, BoardCounts, ProposalItem, QueueItem } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./workers/types.ts";
-import { dispatchPermitted, effectiveStage, type StageName } from "./routing.ts";
+import { effectiveMode, type StageName } from "./routing.ts";
 import { applyPendingDecisions } from "./workers/decisions.ts";
 
 function isStageName(name: string): name is StageName {
@@ -250,7 +251,7 @@ export interface SupervisorOptions {
   entry: ResolvedRepoEntry;
   now?: () => Date;
   log?: (message: string) => void;
-  dryRun: boolean;
+  confirmer: Confirmer;
   /** This loop's control-plane identity (contract §I/§J): who `status.json` and every broadcast event say they are. */
   loopId: LoopId;
   statusPath: string | null;
@@ -281,8 +282,7 @@ export class Supervisor {
   readonly #version: string;
   readonly #team: string | null;
   readonly #startedAt: string;
-  /** True only when `--dry-run` was the operator's explicit flag, independent of `loop.stage` — `setStage`/`reloadConfig` must not erase it. */
-  readonly #cliDryRun: boolean;
+  readonly #confirmer: Confirmer;
 
   #runState: RunState = "starting";
   #pausedAt: string | null = null;
@@ -329,7 +329,7 @@ export class Supervisor {
     this.#version = options.version;
     this.#team = options.team;
     this.#startedAt = this.#now().toISOString();
-    this.#cliDryRun = options.dryRun;
+    this.#confirmer = options.confirmer;
   }
 
   get bookkeeping(): Bookkeeping {
@@ -346,10 +346,6 @@ export class Supervisor {
 
   #config(): GlobalConfig {
     return this.#config0.current;
-  }
-
-  #dryRun(): boolean {
-    return this.#cliDryRun || this.#config().loop.stage === "dry-run";
   }
 
   #fallbackFromHerdr(): Dispatcher {
@@ -470,7 +466,6 @@ export class Supervisor {
       version: this.#version,
       config: this.#config(),
       runState: this.#runState,
-      dryRun: this.#dryRun(),
       dispatcherKind: this.#dispatcher.kind,
       pausedAt: this.#pausedAt,
       lastTickAt: this.#lastTickAt,
@@ -539,8 +534,8 @@ export class Supervisor {
     this.#wake?.();
   }
 
-  setStage(stage: LoopStage): void {
-    this.#config0.current = { ...this.#config(), loop: { ...this.#config().loop, stage } };
+  setMode(mode: LoopMode): void {
+    this.#config0.current = { ...this.#config(), loop: { ...this.#config().loop, mode } };
     this.publishStatus();
   }
 
@@ -559,9 +554,8 @@ export class Supervisor {
       entry: this.#entry,
       now: this.#now,
       log: this.#log,
-      effectiveStage: stage ? effectiveStage(stage, config.loop) : config.loop.stage,
-      dispatchPermitted: stage ? dispatchPermitted(stage, config.loop, this.#cliDryRun) : false,
-      dryRun: this.#dryRun(),
+      mode: stage ? effectiveMode(stage, config.loop) : config.loop.mode,
+      confirm: (request) => this.#confirmer.confirm(request),
       watchSettle: (handle, workerStage) => this.#watchSettle(handle, workerStage),
     };
   }
@@ -644,10 +638,10 @@ export class Supervisor {
       try {
         report = await worker.run(this.#context(worker.name));
         const stage = isStageName(worker.name) ? worker.name : null;
-        const effective = stage ? effectiveStage(stage, this.#config().loop) : this.#config().loop.stage;
+        const mode = stage ? effectiveMode(stage, this.#config().loop) : this.#config().loop.mode;
         const launched = new Set(report.dispatched);
         this.#log(
-          `${worker.name} [effective stage: ${effective}]: ${style("green", `${report.dispatched.length} dispatched`)}, ` +
+          `${worker.name} [mode: ${mode}]: ${style("green", `${report.dispatched.length} dispatched`)}, ` +
             `${style("yellow", `${report.decisions.length - report.dispatched.length} would dispatch`)}, ${report.skipped.length} skipped` +
             (report.errors.length > 0 ? `, ${style("red", `${report.errors.length} error(s)`)}` : ""),
         );
@@ -656,12 +650,12 @@ export class Supervisor {
           const action = dispatched ? "dispatched" : "would dispatch";
           const marker = dispatched ? style("green", "✓") : style("yellow", "~");
           this.#log(
-            `  ${marker} ${action} ${worker.name} [effective stage: ${effective}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
+            `  ${marker} ${action} ${worker.name} [mode: ${mode}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
           );
         }
         for (const skip of report.skipped) {
           this.#log(
-            `  ${style("dim", "○")} skip ${worker.name} [effective stage: ${effective}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
+            `  ${style("dim", "○")} skip ${worker.name} [mode: ${mode}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
           );
         }
       } catch (error) {

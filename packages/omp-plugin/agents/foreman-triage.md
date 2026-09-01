@@ -451,7 +451,8 @@ Follow `foreman-triage-inbox` for the full method. In outline, per item:
    both `null` when the existing description and estimate are adequate.
 
 You may recommend `Canceled` freely. Propose cancellation by default for
-un-actioned `Low` items past the configured staleness threshold.
+un-actioned `Low` items past the `intake.staleLowDays` threshold, arriving
+on the dispatch as `--stale-low-days`.
 
 ## Output
 

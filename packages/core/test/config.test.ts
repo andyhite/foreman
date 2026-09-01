@@ -152,19 +152,24 @@ describe("defaultAndValidateGlobalConfig", () => {
     }
   });
 
-  it("defaults workerStages to an empty map so every worker inherits loop.stage", () => {
-    const config = defaultAndValidateGlobalConfig({ loop: { stage: "full" } }, "test");
-    expect(config.loop.workerStages).toEqual({});
+  it("defaults loop.mode to confirm and workerModes to an empty map", () => {
+    const config = defaultAndValidateGlobalConfig({}, "test");
+    expect(config.loop.mode).toBe("confirm");
+    expect(config.loop.workerModes).toEqual({});
   });
 
-  it("accepts individual worker stage overrides and rejects unknown workers or stages", () => {
+  it("accepts individual worker mode overrides and rejects unknown workers or modes", () => {
     const config = defaultAndValidateGlobalConfig(
-      { loop: { workerStages: { plan: "read-only", implement: "full" } } },
+      { loop: { workerModes: { plan: "yolo", implement: "confirm" } } },
       "test",
     );
-    expect(config.loop.workerStages).toEqual({ plan: "read-only", implement: "full" });
-    expect(() => defaultAndValidateGlobalConfig({ loop: { workerStages: { reaper: "full" } } }, "test")).toThrow(ConfigError);
-    expect(() => defaultAndValidateGlobalConfig({ loop: { workerStages: { review: "unsafe" } } }, "test")).toThrow(ConfigError);
+    expect(config.loop.workerModes).toEqual({ plan: "yolo", implement: "confirm" });
+    expect(() => defaultAndValidateGlobalConfig({ loop: { workerModes: { reaper: "yolo" } } }, "test")).toThrow(ConfigError);
+    expect(() => defaultAndValidateGlobalConfig({ loop: { workerModes: { review: "unsafe" } } }, "test")).toThrow(ConfigError);
+  });
+
+  it("rejects a bogus loop.mode value", () => {
+    expect(() => defaultAndValidateGlobalConfig({ loop: { mode: "full-autonomy" } }, "test")).toThrow(ConfigError);
   });
 
   it("rejects an empty repos key", () => {

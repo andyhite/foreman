@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
 import { AGENT_LABEL, BLOCKED_LABEL, DISPATCH_COMMAND, LEGACY_LABEL, TYPE_LABEL } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
-import { nextActions } from "../src/routing.ts";
+import { confirmationRequired, effectiveMode, nextActions } from "../src/routing.ts";
 import type { BoardSnapshot, PlanCandidate, ReviewCandidate } from "../src/routing.ts";
 
 // ---- fixtures --------------------------------------------------------------
@@ -16,8 +16,8 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
     retryCap: 2,
     reviewCycleCap: 2,
     cadenceMinutes: 5,
-    stage: "full",
-    workerStages: {},
+    mode: "yolo",
+    workerModes: {},
     mergeDetection: true,
     stateDir: "~/.foreman/state",
   };
@@ -303,41 +303,51 @@ describe("nextActions — refine buffer depth", () => {
   });
 });
 
-// ---- autonomy staging -----------------------------------------------------
+// ---- mode: routing is autonomy-blind -------------------------------------------
 
-describe("nextActions — stage permission", () => {
-  it("read-only permits only review", () => {
-    const config = makeConfig({ stage: "read-only" });
-    const snapshot = emptySnapshot({
-      backlog: [makeIssue({ priority: 2 })],
-      todo: [makeTodoIssue()],
-      reviewCandidates: [makeReviewCandidate()],
-    });
-    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
-    const agents = new Set(decisions.map((d) => d.agent));
-    expect(agents.has("foreman-review")).toBe(true);
-    expect(agents.has("foreman-refine")).toBe(false);
-    expect(agents.has("foreman-implement")).toBe(false);
+describe("effectiveMode", () => {
+  it("falls back to loop.mode when no worker override is set", () => {
+    const loop = makeConfig({ mode: "confirm" }).loop;
+    expect(effectiveMode("implement", loop)).toBe("confirm");
   });
 
   it("uses a worker override before the global fallback", () => {
-    const config = makeConfig({ stage: "read-only", workerStages: { implement: "full", review: "dry-run" } });
-    const snapshot = emptySnapshot({ todo: [makeTodoIssue()], reviewCandidates: [makeReviewCandidate()] });
-    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
-    expect(decisions.map((decision) => decision.agent)).toEqual(["foreman-implement", "foreman-review"]);
-    expect(skipped).not.toContainEqual(expect.objectContaining({ stage: "implement", code: "stage-not-permitted" }));
+    const loop = makeConfig({ mode: "confirm", workerModes: { implement: "yolo" } }).loop;
+    expect(effectiveMode("implement", loop)).toBe("yolo");
+    expect(effectiveMode("review", loop)).toBe("confirm");
+  });
+});
+
+describe("confirmationRequired", () => {
+  it("is true when loop.mode is confirm", () => {
+    const loop = makeConfig({ mode: "confirm" }).loop;
+    expect(confirmationRequired(loop)).toBe(true);
   });
 
-  it("full permits all three", () => {
-    const config = makeConfig({ stage: "full", wipGlobal: 10 });
+  it("is true when loop.mode is yolo but a worker override is confirm", () => {
+    const loop = makeConfig({ mode: "yolo", workerModes: { implement: "confirm" } }).loop;
+    expect(confirmationRequired(loop)).toBe(true);
+  });
+
+  it("is false when loop.mode is yolo with no overrides", () => {
+    const loop = makeConfig({ mode: "yolo" }).loop;
+    expect(confirmationRequired(loop)).toBe(false);
+  });
+});
+
+describe("nextActions — produces dispatch intents regardless of mode", () => {
+  it("dispatches under confirm mode exactly as it would under yolo — mode gating is WorkerContext.confirm's job, not routing's", () => {
     const snapshot = emptySnapshot({
       backlog: [makeIssue({ priority: 2 })],
       todo: [makeTodoIssue()],
       reviewCandidates: [makeReviewCandidate()],
     });
-    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
-    const agents = new Set(decisions.map((d) => d.agent));
-    expect(agents.size).toBe(3);
+    const confirmConfig = makeConfig({ mode: "confirm", wipGlobal: 10 });
+    const yoloConfig = makeConfig({ mode: "yolo", wipGlobal: 10 });
+    const confirmAgents = new Set(nextActions(snapshot, confirmConfig, freshBookkeeping()).decisions.map((d) => d.agent));
+    const yoloAgents = new Set(nextActions(snapshot, yoloConfig, freshBookkeeping()).decisions.map((d) => d.agent));
+    expect(confirmAgents.size).toBe(3);
+    expect(yoloAgents).toEqual(confirmAgents);
   });
 });
 
@@ -380,7 +390,7 @@ describe("nextActions — ordering by priority then age", () => {
 
 describe("nextActions — never produces a merge decision", () => {
   it("no decision's agent or command ever names merge", () => {
-    const config = makeConfig({ stage: "full" });
+    const config = makeConfig();
     const snapshot = emptySnapshot({
       backlog: [makeIssue({ priority: 2 })],
       todo: [makeTodoIssue()],
@@ -439,17 +449,6 @@ describe("nextActions — plan", () => {
     expect(decisions).toHaveLength(0);
     expect(skipped).toContainEqual(
       expect.objectContaining({ stage: "plan", code: "backpressure-blocked-queue" }),
-    );
-  });
-
-  it("read-only stage permits only review, never plan", () => {
-    const config = makeConfig({ stage: "read-only" });
-    const candidate = makePlanCandidate();
-    const snapshot = emptySnapshot({ planCandidates: [candidate] });
-    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
-    expect(decisions).toHaveLength(0);
-    expect(skipped).toContainEqual(
-      expect.objectContaining({ stage: "plan", code: "stage-not-permitted" }),
     );
   });
 

@@ -304,16 +304,36 @@ default defined here, not a constant):
 {
   "loop": {
     "wipGlobal": 3,                                       // §17.6
-    "wip": { "refine": 2, "implement": 3, "review": 2 },
+    "wip": { "refine": 2, "implement": 3, "review": 2, "plan": 1 },
     "readyBufferTarget": 5,                               // §17.6
     "backpressureThreshold": 5,                           // §17.7
     "retryCap": 2,                                        // §17.8
     "reviewCycleCap": 2,                                  // §7.4
-    "cadenceMinutes": 5
+    "cadenceMinutes": 5,
+    "mode": "confirm",                                    // §17.9 — ask before every dispatch and every Linear write; "yolo" acts unattended
+    "workerModes": {},                                    // §17.9 — per-worker override; a missing key inherits loop.mode
+    "mergeDetection": true,                               // §16 item 7 — required (not optional) when repoDefaults.pr.required is false
+    "stateDir": "~/.foreman/state"
   },
   "intake": {                                             // §3.12 — team-level process
     "window": "06:00",
-    "staleLowDays": 90                                    // §7.1
+    "staleLowDays": 90,                                   // §7.1
+    "batchSize": 20,
+    "timezone": "<host IANA zone>"                        // resolved at load time, e.g. "America/Los_Angeles"
+  },
+
+  "linear": {
+    "apiKeyEnv": "LINEAR_API_KEY",                        // checked first
+    "apiKeyFile": null,                                   // checked when the env var is unset
+    "endpoint": "https://api.linear.app/graphql"
+  },
+
+  "agent": {
+    "maxRuntimeMs": 7200000,                              // §11 — mirrors omp's own task.maxRuntimeMs; the lock TTL derives from this
+    "lockTtlMarginMs": 1800000,                           // lock TTL is 2 × maxRuntimeMs + this (~4.5h by default)
+    "ompBin": "omp",
+    "approvalMode": "yolo",                               // §17.2, §17.3 — always-ask | write | yolo, passed to every dispatched parent session
+    "herdrBin": "herdr"
   },
 
   "repoDefaults": {                                       // inherited by every repos.* entry
@@ -1683,30 +1703,50 @@ Review→fix cycles are counted the same way and capped at **2** (§7.4); hittin
 the cap converts to `blocked:needs-decision` with both the findings and the
 implement agent's last result attached.
 
-### 17.9 Autonomy staging
+### 17.9 Autonomy
 
-Do not go from manual commands to a full loop. Each stage runs until it's
-boring:
+There are exactly two loop modes, `loop.mode`: `confirm` (the default) and
+`yolo`.
 
-1. **Manual.** Commands only. The loop doesn't exist yet.
-2. **Dry run.** `foreman repo --dry-run` logs what each worker would dispatch and does
-   nothing. Run for a week. Read the log every morning. This is where routing
-   bugs surface for free.
-3. **Read-only auto.** `foreman team` goes live (propose-only by
-   construction) and the loop dispatches `foreman-review` only. Both are
-   non-mutating, so a bad dispatch costs tokens and nothing else.
-4. **Full loop.** Add `foreman-refine` and `foreman-implement`, WIP 3,
-   backpressure 5.
-5. **Herdr dispatcher.** Swap the dispatcher only after the loop is boring on
-   print mode. Changing the execution substrate and the routing rules in the
-   same week means you won't know which one broke.
+`confirm` asks the operator, on the loop's own terminal, before every action
+that changes state *outside the loop process*: every agent dispatch and every
+Linear mutation. Reads are never gated — the loop still evaluates every
+worker's predicate and still logs its intent either way. The loop's own
+`status.json` / `bookkeeping.json` / `loop.lock` writes are not gated either;
+those files are how the process remembers what it already did, so prompting
+for them would make `confirm` mode unable to keep books rather than more
+careful.
 
-Merge authority never enters the loop. The operator merges, at every stage.
+Declining is how you get a dry run: the loop still evaluates, still logs its
+intent, and records a skip (`dispatch-declined`, `linear-write-declined`).
+There is no separate dry-run rung, because answering `n` to everything is the
+same thing, and it lets you say yes to the one dispatch you did want.
+
+`loop.workerModes` overrides `loop.mode` per worker. `{ "review": "yolo" }`
+reproduces exactly what the old read-only-auto rung used to do — every
+worker but review evaluates and asks, review dispatches unattended — which is
+why that rung is gone rather than renamed: it is one entry in a map, not a
+separate stage of the ladder.
+
+`confirm` mode needs a terminal. A loop started with any worker's effective
+mode resolving to `confirm` and no TTY attached refuses to start rather than
+declining everything silently — there would be nobody to ask.
+
+Merge authority never enters the loop. The operator merges, in either mode.
 
 Tune WIP and backpressure upward only after a stretch where the blocked queue
 consistently drains to zero within a day. If it doesn't drain, the constraint is
 the operator's attention, and raising the limits makes throughput worse rather
 than better.
+
+`loop.mode: "yolo"` and `agent.approvalMode: "yolo"` are different settings
+at different layers and neither implies the other. `loop.mode` governs
+whether the supervisor asks *its* operator before dispatching or writing to
+Linear. `agent.approvalMode` is the omp approval mode each dispatched agent
+session itself runs under, once dispatched. A `confirm`-mode loop can still
+dispatch agents that run with `approvalMode: "yolo"` inside their own
+sessions, and a `yolo`-mode loop can dispatch agents pinned to a stricter
+`approvalMode`.
 
 ---
 
@@ -1746,15 +1786,15 @@ than better.
    implement skill, the findings route with its cycle cap (§7.4), both merge
    modes and `/foreman:merge` (§3.10). ~1.5 days, most of it in worktree
    lifecycle and the fix cycle.
-6. **`foreman repo` + `PrintDispatcher` + autonomy staging (§17).** The CLI
+6. **`foreman repo` + `PrintDispatcher` + autonomy (§17.9).** The CLI
    with team resolution (§3.11), supervisor, per-repo lockfile, bookkeeping
    file, the three stage workers plus reaper, per-instance cap and per-stage
    sub-limits, Ready buffer target, team-wide backpressure, retry counter,
-   `--dry-run`. Prove it single-instance in one repo before starting a
+   `Confirmer`/`--mode`. Prove it single-instance in one repo before starting a
    second.
    ~1.5 days. Start with the `implement` worker alone and add the others one at
    a time — four workers introduced together makes a routing bug impossible to
-   attribute. Then walk the staging ladder, a week per stage.
+   attribute. Then run a week in `confirm` mode before switching to `yolo`.
 7. **`HerdrDispatcher` (optional).** Workspace/tab/pane layout, agent naming,
    sidebar tokens, attach path, print-mode fallback. ~half a day. Only after
    step 6 is boring.
@@ -1767,7 +1807,7 @@ that dispatches confidently into a routing bug.
 
 ## 19. Non-goals
 
-- Auto-merge on clean review, at any autonomy stage
+- Auto-merge on clean review, in either loop mode
 - An orchestrator *agent* — routing is a pure function (§17.1)
 - Agents holding Linear or GitHub write tools (implement's `foreman_github_pr`
   excepted) — the extension is the sole writer (principle 9)
@@ -1845,7 +1885,7 @@ Ops: `hello` (handshake — protocol version, loop id), `snapshot` (the current
 `LoopSnapshot`, the same shape `status.json` holds), `subscribe` (start
 receiving events), `pause` / `resume` (stop or resume dispatch without
 releasing the lock), `stop` (graceful shutdown), `tick` (run one scheduling
-pass immediately, outside the cadence), `setStage` (change `loop.stage`),
+pass immediately, outside the cadence), `setMode` (change `loop.mode`),
 `patchConfig` (merge a partial config document and hot-reload it), `reload`
 (re-read config from disk without a patch), `attachAgent` / `killAgent`
 (herdr-pane operations, §17.3 — a no-op reply naming the print-mode fallback
@@ -1853,13 +1893,13 @@ when there is no herdr pane to attach to), and `logs` (tail the loop's own
 log, not an agent's).
 
 A `LoopSnapshot`, by field group rather than a full type dump: identity (loop
-id, stage, paused/running), the per-worker table from §17.5 (last run,
+id, mode, paused/running), the per-worker table from §17.5 (last run,
 in-flight count, next scheduled run), the WIP and backpressure numbers of
 §17.6–§17.7 as measured right now, the blocked and proposed queues (issue ids
 and labels, not full issue bodies — the client fetches those from Linear
 directly if it needs them), and recent log lines for the overview view. It is
 deliberately the read side only: nothing in the shape is round-tripped back
-through a write op except `setStage` and `patchConfig`, and those go through
+through a write op except `setMode` and `patchConfig`, and those go through
 their own named ops rather than a general "set snapshot field" verb.
 
 ### 20.3 The control plane adds no new authority
@@ -1868,7 +1908,7 @@ Every op in §20.2 is either a read (`hello`, `snapshot`, `subscribe`, `logs`)
 or a call to a state transition the loop already makes on its own schedule
 (`pause`/`resume` stop and start the same dispatch loop the cadence drives;
 `tick` runs the same scheduling pass early; `stop` is the same shutdown path
-as `SIGTERM`). `setStage` and `patchConfig` write to
+as `SIGTERM`). `setMode` and `patchConfig` write to
 `~/.foreman/config.json` (§3.10) exactly as hand-editing the file and letting
 the config loader's `session_start` validation pick it up would — they tune
 parameters, never invariants. There is no op that creates, transitions, or

@@ -21,7 +21,7 @@ import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { DEFAULT_GITHUB_REPO, type OmpScope } from "./plugin-commands.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
-import { resolveRepoRoot } from "./repo.ts";
+import { resolveCheckoutRoot } from "./checkout.ts";
 import type { PluginMode } from "./wizard.ts";
 import { runWizard } from "./wizard.ts";
 
@@ -32,7 +32,7 @@ interface ParsedArgs {
   link: boolean;
   ompMode: "install" | "skip" | null;
   githubRepo: string;
-  repoPath: string | null;
+  checkoutPath: string | null;
   path: string | null;
   home: string | null;
   skipBuild: boolean;
@@ -60,7 +60,7 @@ Options for setup:
   --scope <user|project>     omp plugin install scope (default: prompted, "user").
   --omp <install|skip>       omp plugin mode when not using --link (default: prompted, "install").
   --repo-source <owner/repo>  GitHub source for "install" mode (default: ${DEFAULT_GITHUB_REPO}).
-  --repo <path>              Path to the foreman checkout (default: auto-detected).
+  --checkout <path>          Path to the foreman checkout (default: auto-detected).
   --skip-build                Skip \`bun install && bun run build\`.
 
 Options for init:
@@ -91,7 +91,7 @@ function validateCommandFlags(parsed: ParsedArgs): void {
     parsed.scope ? "--scope" : null,
     parsed.ompMode ? "--omp" : null,
     parsed.githubRepo !== DEFAULT_GITHUB_REPO ? "--repo-source" : null,
-    parsed.repoPath ? "--repo" : null,
+    parsed.checkoutPath ? "--checkout" : null,
     parsed.skipBuild ? "--skip-build" : null,
   ].filter((flag): flag is string => flag !== null);
 
@@ -122,7 +122,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     link: false,
     ompMode: null,
     githubRepo: DEFAULT_GITHUB_REPO,
-    repoPath: null,
+    checkoutPath: null,
     path: null,
     home: null,
     skipBuild: false,
@@ -173,9 +173,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.githubRepo = argv[++i] as string;
         break;
       }
-      case "--repo": {
-        if (argv[i + 1] === undefined) throw new Error("missing value for --repo");
-        parsed.repoPath = argv[++i] as string;
+      case "--checkout": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --checkout");
+        parsed.checkoutPath = argv[++i] as string;
         break;
       }
       case "--path": {
@@ -233,8 +233,8 @@ async function main(): Promise<void> {
 
   /*
    * `repo` owns every argument after it. Delegating before this CLI's own
-   * parser runs is what lets the supervisor keep its flags (`--dry-run`,
-   * `--stage`) without this parser having to know any of them.
+   * parser runs is what lets the supervisor keep its flags (`--mode`,
+   * `--once`) without this parser having to know any of them.
    */
   if (argv[0] === "repo") {
     await runRepo(argv.slice(1));
@@ -243,7 +243,7 @@ async function main(): Promise<void> {
 
   /*
    * `team` owns every argument after it, same rationale as `repo`: the
-   * team-level process keeps its own flags (`--once`, `--dry-run`) without
+   * team-level process keeps its own flags (`--once`, `--verbose`) without
    * this parser having to know any of them.
    */
   if (argv[0] === "team") {
@@ -264,9 +264,9 @@ async function main(): Promise<void> {
 
   try {
     /*
-     * `init` deliberately skips `resolveRepoRoot`: that resolves the *foreman
-     * checkout* (it looks for `packages/omp-plugin`) and would reject the
-     * arbitrary product repo `init` is meant to register.
+     * `init` deliberately skips `resolveCheckoutRoot`: that resolves the
+     * *foreman checkout* (it looks for `packages/omp-plugin`) and would reject
+     * the arbitrary product repo `init` is meant to register.
      */
     if (args.command === "init") {
       await runInit(
@@ -283,12 +283,12 @@ async function main(): Promise<void> {
       return;
     }
 
-    const repoRoot = resolveRepoRoot(args.repoPath);
+    const checkoutRoot = resolveCheckoutRoot(args.checkoutPath);
     const requestedMode: PluginMode | null = args.link ? "link" : args.ompMode;
     await runWizard(
       {
         home: args.home ?? homedir(),
-        repoRoot,
+        checkoutRoot,
         githubRepo: args.githubRepo,
         scope: args.scope,
         ompMode: nonInteractive ? (requestedMode ?? "install") : requestedMode,

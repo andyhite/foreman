@@ -278,7 +278,7 @@ describe("renderStatusConsole", () => {
     proposalsAwaiting: { count: 2, issueIds: ["ENG-10", "ENG-11"] },
     agents: [{ agent: "foreman-implement", state: "running", issueId: "ENG-9" }],
     loop: {
-      stage: "implement",
+      mode: "confirm",
       workers: [{ worker: "implement", lastRunAt: "2026-08-28T00:00:00Z", dispatchCount: 3 }],
     },
     backpressure: { tripped: true, reason: "Blocked (human) queue exceeds threshold of 5" },
@@ -286,7 +286,7 @@ describe("renderStatusConsole", () => {
 
   it("leads with a bold summary line before every section", () => {
     const output = renderStatusConsole(state);
-    expect(output.startsWith("**1 blocked · 2 proposals awaiting · 1 locks (1 past TTL) · stage implement**")).toBe(
+    expect(output.startsWith("**1 blocked · 2 proposals awaiting · 1 locks (1 past TTL) · mode confirm**")).toBe(
       true,
     );
   });
@@ -312,7 +312,7 @@ describe("renderStatusConsole", () => {
       locks: [],
       proposalsAwaiting: { count: 0, issueIds: [] },
       agents: [],
-      loop: { stage: "idle", workers: [] },
+      loop: { mode: "yolo", workers: [] },
       backpressure: { tripped: false, reason: null },
     };
     const output = renderStatusConsole(empty);

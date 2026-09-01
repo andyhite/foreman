@@ -54,7 +54,8 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
     });
     if (!classification.orphaned) continue;
 
-    if (!ctx.dryRun) {
+    const summary = `release the stale agent lock on ${issue.identifier}`;
+    if (await ctx.confirm({ kind: "linear-write", summary })) {
       try {
         const runningLabelIds = issue.labels
           .filter((label) => label.name === AGENT_LABEL.running)

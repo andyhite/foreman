@@ -20,10 +20,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   defaultAndValidateGlobalConfig,
-  isLoopStage,
+  isLoopMode,
   loadGlobalConfig,
   type ControlHandlers,
-  type LoopStage,
+  type LoopMode,
 } from "@foreman/core";
 import type { Supervisor } from "./supervisor.ts";
 
@@ -90,15 +90,15 @@ export function createControlHandlers(options: ControlHandlersOptions): ControlH
 
     tick: (workers) => supervisor.requestTick(workers),
 
-    setStage: (stage: LoopStage) => {
-      if (!isLoopStage(stage)) throw new Error(`invalid loop stage: ${String(stage)}`);
-      supervisor.setStage(stage);
+    setMode: (mode: LoopMode) => {
+      if (!isLoopMode(mode)) throw new Error(`invalid loop mode: ${String(mode)}`);
+      supervisor.setMode(mode);
     },
 
     patchConfig: (patch) => {
       patchAndWriteGlobalConfig(patch, home);
       const { config } = loadGlobalConfig({ home });
-      if (!isLoopStage(config.loop.stage)) throw new Error(`invalid loop stage: ${String(config.loop.stage)}`);
+      if (!isLoopMode(config.loop.mode)) throw new Error(`invalid loop mode: ${String(config.loop.mode)}`);
       supervisor.reloadConfig(config);
       options.onConfigReloaded?.();
     },

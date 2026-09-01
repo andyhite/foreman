@@ -24,6 +24,7 @@ import {
   newDispatchId,
   parseAgentOutput,
   resolveTeamKey,
+  YOLO_CONFIRMER,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
@@ -416,9 +417,16 @@ export default function createForemanExtension(pi: ExtensionAPI) {
             "the resolved team key no longer matches a team the credential can reach",
           ]);
         }
+        /*
+         * `YOLO_CONFIRMER`: `loop.mode` governs the supervisor's own terminal
+         * (SPEC §17.9), and this ensure pass runs at `session_start` inside an
+         * omp session with no operator to ask. The gate that applies here is
+         * the agent session's own `approvalMode`, not the loop's.
+         */
         const reports = await ensureMaintenanceProjects(linear, {
           initiativeIds: entry.initiativeIds,
           teamId: teamRef.id,
+          confirmer: YOLO_CONFIRMER,
         });
         for (const report of reports) {
           if (report.created) {

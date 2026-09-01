@@ -36,6 +36,10 @@ import {
   resolveTeamKey,
   runApplyPass,
   writeStatusFile,
+  TtyConfirmer,
+  YOLO_CONFIRMER,
+  type ConfirmRequest,
+  type Confirmer,
   type ControlEvent,
   type ControlHandlers,
   type Dispatcher,
@@ -62,9 +66,8 @@ import { LOOP_VERSION } from "./version.ts";
 interface ParsedArgs {
   team: string | null;
   once: boolean;
-  dryRun: boolean;
   verbose: boolean;
-  configPath: string | null;
+  homePath: string | null;
   noControl: boolean;
   help: boolean;
 }
@@ -75,7 +78,6 @@ Usage: foreman team [key] [options]
 
   [key]                   Linear team key. Defaults to the sole team the credential can reach.
   --once                  Run one tick, then exit.
-  --dry-run               Log what would be dispatched; dispatch nothing.
   --verbose               Log every skip, not just dispatch counts.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
   --no-control            Skip the control-plane socket/status.json; --once already implies this.
@@ -89,9 +91,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     team: null,
     once: false,
-    dryRun: false,
     verbose: false,
-    configPath: null,
+    homePath: null,
     noControl: false,
     help: false,
   };
@@ -100,9 +101,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     switch (arg) {
       case "--once":
         parsed.once = true;
-        break;
-      case "--dry-run":
-        parsed.dryRun = true;
         break;
       case "--verbose":
         parsed.verbose = true;
@@ -114,7 +112,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         if (i + 1 >= argv.length) throw new Error("missing value for --home");
         const value = argv[++i];
         if (!value) throw new Error("--home requires a path");
-        parsed.configPath = value;
+        parsed.homePath = value;
         break;
       }
       case "--help":
@@ -191,7 +189,7 @@ export interface IntakeContext {
   team: string;
   now: () => Date;
   log: (message: string) => void;
-  dryRun: boolean;
+  confirm(request: ConfirmRequest): Promise<boolean>;
 }
 
 export interface IntakeTickReport {
@@ -201,8 +199,8 @@ export interface IntakeTickReport {
   proposedCount: number;
   applyPassRan: boolean;
   appliedCount: number;
-  /** Set only in dry-run: how many approved proposals the apply pass would have applied, had it run. */
-  wouldApplyCount: number;
+  /** How many approved proposals were left unapplied because the operator declined the apply-pass confirmation. */
+  declinedApplyCount: number;
 }
 
 /**
@@ -235,27 +233,39 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
       const inbox = await ctx.linear.issues({ filter: INBOX_FILTER, limit: ctx.config.intake.batchSize });
       if (inbox.length === 0) {
         skipReason = "inbox empty";
-      } else if (!ctx.dryRun) {
+      } else {
         const dispatchId = newDispatchId("foreman-triage", "batch", now);
         const scratchCwd = `${expandHome(ctx.config.loop.stateDir)}/intake/scratch`;
         const identifiers = inbox.map((issue) => issue.identifier).join(" ");
-        try {
-          const handle = await ctx.dispatcher.dispatch({
-            agent: "foreman-triage",
-            issueId: null,
-            command: `${DISPATCH_COMMAND.triage} ${identifiers}`,
-            dispatchId,
-            cwd: scratchCwd,
-          });
-          void handle;
-          ctx.bookkeeping.setLastTriageRun(now);
-          ctx.bookkeeping.setLastRun("intake", now);
-          dispatched = true;
-        } catch (error) {
-          skipReason = `dispatch ${DISPATCH_COMMAND.triage} failed: ${String(error)}`;
+        const command = `${DISPATCH_COMMAND.triage} --stale-low-days ${ctx.config.intake.staleLowDays} ${identifiers}`;
+        const approved = await ctx.confirm({
+          kind: "dispatch",
+          summary: `dispatch foreman-triage for the triage batch (${inbox.length} items)`,
+          detail: [`command: ${command}`, `cwd: ${scratchCwd}`],
+        });
+        if (!approved) {
+          skipReason = "operator declined";
+        } else {
+          try {
+            const handle = await ctx.dispatcher.dispatch({
+              agent: "foreman-triage",
+              issueId: null,
+              // The triage agent holds no config-reading tool, so the dispatch
+              // command is the only channel that carries `intake.staleLowDays`
+              // (SPEC §3.10, §3.12) — the same channel `intake.batchSize`
+              // already uses to size `identifiers` above.
+              command,
+              dispatchId,
+              cwd: scratchCwd,
+            });
+            void handle;
+            ctx.bookkeeping.setLastTriageRun(now);
+            ctx.bookkeeping.setLastRun("intake", now);
+            dispatched = true;
+          } catch (error) {
+            skipReason = `dispatch ${DISPATCH_COMMAND.triage} failed: ${String(error)}`;
+          }
         }
-      } else {
-        dispatched = true;
       }
     }
   }
@@ -277,44 +287,43 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
   // scan's cost. `INBOX_FILTER` already encodes exactly that state filter,
   // so it is reused rather than re-declaring the state name.
   //
-  // `--dry-run`/`loop.stage=dry-run` must never mutate Linear (SPEC
-  // §17.9): `runApplyPass` sets state, labels, priority, project,
-  // relations and posts a comment, so dry-run reports the count it would
-  // have applied via the read-only `findApprovedUnapplied` instead of
-  // calling it. A single bad proposal (e.g. a Linear 4xx applying one
+  // `runApplyPass` sets state, labels, priority, project, relations and
+  // posts a comment — a Linear mutation, so it goes through `ctx.confirm`
+  // first (SPEC §17.9) using the count `findApprovedUnapplied` already
+  // reads read-only. A single bad proposal (e.g. a Linear 4xx applying one
   // issue) must not stop this tick's bookkeeping from being saved, so
   // failures are logged and swallowed here the same way a failed triage
   // dispatch above is.
   let appliedCount = 0;
-  let wouldApplyCount = 0;
-  if (ctx.dryRun) {
-    try {
-      const candidates = await findApprovedUnapplied(ctx.linear, { filter: INBOX_FILTER });
-      wouldApplyCount = candidates.length;
-      ctx.log(
-        wouldApplyCount === 0
-          ? `${style("dim", "○")} apply pass (dry run): no approvals pending.`
-          : `${style("yellow", "~")} apply pass (dry run): would apply ${wouldApplyCount} approved proposal(s).`,
-      );
-    } catch (error) {
-      ctx.log(`apply pass (dry run) failed to count approvals: ${String(error)}`);
-    }
-  } else {
-    try {
-      const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
-      appliedCount = applied.length;
-      if (applied.length === 0) {
-        ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+  let declinedApplyCount = 0;
+  try {
+    const candidates = await findApprovedUnapplied(ctx.linear, { filter: INBOX_FILTER });
+    if (candidates.length === 0) {
+      ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+    } else {
+      const approved = await ctx.confirm({
+        kind: "linear-write",
+        summary: `apply ${candidates.length} approved triage proposal(s)`,
+      });
+      if (!approved) {
+        declinedApplyCount = candidates.length;
+        ctx.log(style("yellow", `~ apply pass: operator declined applying ${candidates.length} approved proposal(s).`));
       } else {
-        const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
-        ctx.log(`${style("green", "✓")} apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+        const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
+        appliedCount = applied.length;
+        if (applied.length === 0) {
+          ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+        } else {
+          const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
+          ctx.log(`${style("green", "✓")} apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+        }
+        for (const failure of failures) {
+          ctx.log(style("red", `apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`));
+        }
       }
-      for (const failure of failures) {
-        ctx.log(style("red", `apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`));
-      }
-    } catch (error) {
-      ctx.log(`apply pass failed: ${String(error)}`);
     }
+  } catch (error) {
+    ctx.log(`apply pass failed: ${String(error)}`);
   }
 
   ctx.bookkeeping.save();
@@ -326,7 +335,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
     proposedCount,
     applyPassRan: true,
     appliedCount,
-    wouldApplyCount,
+    declinedApplyCount,
   };
 }
 
@@ -388,7 +397,6 @@ function buildIntakeSnapshot(ctx: IntakeContext, runtime: IntakeRuntime, version
     version,
     config: ctx.config,
     runState: runtime.runState,
-    dryRun: ctx.dryRun,
     dispatcherKind: ctx.dispatcher.kind,
     pausedAt: runtime.pausedAt,
     lastTickAt: runtime.lastTickAt,
@@ -451,8 +459,8 @@ function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime,
       runtime.tickRequested = true;
       runtime.wake?.();
     },
-    setStage: () => {
-      throw new Error("intake has no stage — it always runs at the operator's configured autonomy; see loop.stage for a repo loop instead");
+    setMode: () => {
+      throw new Error("intake has no mode — it always runs at the operator's configured autonomy; see loop.mode for a repo loop instead");
     },
     patchConfig: (patch) => {
       patchAndWriteGlobalConfig(patch, home);
@@ -480,23 +488,34 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   }
 
   const { config: loadedConfig, warnings } = loadGlobalConfig(
-    args.configPath ? { home: args.configPath } : undefined,
+    args.homePath ? { home: args.homePath } : undefined,
   );
   for (const warning of warnings) console.error(style("yellow", `[foreman-team] ${warning}`));
 
-  const config = {
-    ...loadedConfig,
-    loop: {
-      ...loadedConfig.loop,
-      stage: args.dryRun ? ("dry-run" as const) : loadedConfig.loop.stage,
-    },
-  };
+  const config = loadedConfig;
 
   const apiKey = resolveLinearApiKey(config);
 
   const log = (message: string): void => {
     console.log(`${style("cyan", "[foreman-team]")} ${message}`);
   };
+
+  // A confirm-mode loop with no operator on the other end of stdin would
+  // block on the first dispatch or Linear write forever — nobody is there
+  // to answer. Fail loudly at startup instead of hanging silently. `foreman
+  // team` has no per-worker overrides (SPEC §3.12), so `loop.mode` alone
+  // decides.
+  if (config.loop.mode === "confirm" && !process.stdin.isTTY) {
+    console.error(
+      style(
+        "red",
+        "[foreman-team] loop.mode is \"confirm\" but stdin is not a TTY — there is nobody to ask. " +
+          "Set loop.mode to \"yolo\" in ~/.foreman/config.json, or run this from an interactive terminal.",
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   // Team resolution mirrors `foreman repo` via the shared `resolveTeamKey`
   // (SPEC §3.11): the positional team key first, then `null` — the team
@@ -506,7 +525,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
 
-  const controlPaths = loopPaths(config, INTAKE_LOOP_ID, args.configPath ?? undefined);
+  const controlPaths = loopPaths(config, INTAKE_LOOP_ID, args.homePath ?? undefined);
   const intakeStateDir = controlPaths.dir;
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(intakeStateDir));
 
@@ -517,6 +536,8 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     },
     log,
   );
+
+  const confirmer: Confirmer = config.loop.mode === "confirm" ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
 
   const lock = new SupervisorLock(lockPathFor(intakeStateDir));
   lock.acquire(process.pid, new Date());
@@ -531,18 +552,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     team,
     now: () => new Date(),
     log,
-    // `foreman team` respects `loop.stage`, not just its own `--dry-run`
-    // (SPEC §17.9): a fresh install's config defaults `loop.stage` to
-    // `"dry-run"`, and `setStage` on this process throws — the team process
-    // runs at the operator's configured autonomy, so a config left at the
-    // safe default must not dispatch live triage agents just because
-    // `--dry-run` itself was never passed. A getter, not a field snapshotted
-    // once here: `patchConfig`/`reload` (below) replace `ctx.config` in
-    // place, and a frozen boolean would then silently stop tracking the
-    // operator's live autonomy rung.
-    get dryRun(): boolean {
-      return args.dryRun || ctx.config.loop.stage === "dry-run";
-    },
+    confirm: (request) => confirmer.confirm(request),
   };
   const runtime = new IntakeRuntime();
 
@@ -555,7 +565,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
    */
   let controlServer: ControlServer | null = null;
   try {
-    const home = args.configPath ?? homedir();
+    const home = args.homePath ?? homedir();
     controlServer = args.once || args.noControl
       ? null
       : new ControlServer({
@@ -607,12 +617,11 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
 
     log(style("bold", `starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`));
 
-    if (ctx.dryRun) {
+    if (config.loop.mode === "confirm") {
       const rule = style("yellow", "─".repeat(62));
       log(rule);
-      log(style("yellow", "DRY RUN — foreman team will not act on issues."));
-      log(style("yellow", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-      log(style("yellow", "or omit --dry-run, to let it dispatch."));
+      log(style("yellow", "CONFIRM MODE — every dispatch and Linear write needs your approval."));
+      log(style("yellow", "Set loop.mode to \"yolo\" in ~/.foreman/config.json to run unattended."));
       log(rule);
     }
 
@@ -654,6 +663,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     runtime.runState = "stopped";
     lock.release();
     await controlServer?.close();
+    confirmer.close();
   }
 }
 

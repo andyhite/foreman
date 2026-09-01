@@ -28,8 +28,9 @@ For each item, in order:
 3. **Attempt repro, by reading only.** No exec tool is held — confirm or
    refute by reading the relevant code paths, not by running anything.
 4. **Propose a Priority** with severity reasoning in `severityReasoning`. An
-   un-actioned `Low` item older than 90 days defaults to a `Canceled`
-   recommendation.
+   un-actioned `Low` item older than the `--stale-low-days` threshold on the
+   dispatch (the operator's configured `intake.staleLowDays`, default 90)
+   defaults to a `Canceled` recommendation.
 5. **Flag missing information** in `missingInfo` when repro or scoping is
    incomplete.
 6. **Propose `blocked by` relations** in `proposedBlockedBy` where a

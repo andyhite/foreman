@@ -72,24 +72,30 @@ export const RepoSettingsOverrideSchema = Type.Object(
 
 export type RepoSettingsOverride = Static<typeof RepoSettingsOverrideSchema>;
 
-const LoopStageValueSchema = Type.Union([
-  Type.Literal("dry-run"),
-  Type.Literal("read-only"),
-  Type.Literal("full"),
-]);
+/**
+ * How much the loop may do without asking (SPEC §17.9).
+ *
+ * Not to be confused with `agent.approvalMode`, which is omp's own approval
+ * setting handed to each *dispatched agent's* session. This one governs the
+ * supervisor process itself: `confirm` makes the loop ask its operator before
+ * every dispatch and every Linear write, `yolo` lets it act on its own
+ * decisions. Both happen to spell "act without asking" as `yolo`; they are
+ * separate settings at separate layers and neither implies the other.
+ */
+export const LoopModeSchema = Type.Union([Type.Literal("confirm"), Type.Literal("yolo")], {
+  default: "confirm",
+});
 
-export const LoopStageSchema = Type.Union(
-  [Type.Literal("dry-run"), Type.Literal("read-only"), Type.Literal("full")],
-  { default: "dry-run" },
-);
-/** Optional per-worker autonomy overrides; omitted workers inherit `loop.stage`. */
-export const WorkerStagesSchema = Type.Partial(
+const LoopModeValueSchema = Type.Union([Type.Literal("confirm"), Type.Literal("yolo")]);
+
+/** Optional per-worker overrides; omitted workers inherit `loop.mode`. */
+export const WorkerModesSchema = Type.Partial(
   Type.Object(
     {
-      plan: LoopStageValueSchema,
-      refine: LoopStageValueSchema,
-      implement: LoopStageValueSchema,
-      review: LoopStageValueSchema,
+      plan: LoopModeValueSchema,
+      refine: LoopModeValueSchema,
+      implement: LoopModeValueSchema,
+      review: LoopModeValueSchema,
     },
     { additionalProperties: false },
   ),
@@ -121,15 +127,17 @@ export const LoopSettingsSchema = Type.Object(
     reviewCycleCap: Type.Integer({ default: 2, minimum: 1 }),
     cadenceMinutes: Type.Integer({ default: 5, minimum: 1 }),
     /**
-     * Autonomy staging (SPEC §17.9). Defaults to the safest rung, so a loop
-     * started before its operator is ready logs instead of dispatching.
+     * How much this loop may do unattended (SPEC §17.9). Defaults to
+     * `confirm`, so a loop started before its operator is ready asks before
+     * it acts rather than acting.
      */
-    stage: LoopStageSchema,
+    mode: LoopModeSchema,
     /**
-     * Per-worker autonomy overrides. A missing key retains the global
-     * `loop.stage` fallback, allowing workers to be enabled independently.
+     * Per-worker overrides. A missing key inherits `loop.mode`, so a single
+     * worker can be trusted ahead of the others — `{ "review": "yolo" }`
+     * lets reviews flow while everything else still asks.
      */
-    workerStages: WorkerStagesSchema,
+    workerModes: WorkerModesSchema,
     /**
      * Poll merged PRs and move issues to Done. Required when `pr.required` is
      * false, and on by default regardless: Linear's GitHub integration only
@@ -230,7 +238,8 @@ export type InitiativeBinding = Static<typeof InitiativeBindingSchema>;
 
 /**
  * One `repos` registry entry, keyed by alias (SPEC §3.10). The alias is the
- * `--repo` argument, the herdr workspace name, and the state-dir segment.
+ * positional alias argument to `foreman repo`, the herdr workspace name, and
+ * the state-dir segment.
  *
  * Carries optional `RepoSettings` overrides that deep-merge over
  * `repoDefaults`, entry wins. Those overrides MUST stay sparse: they are

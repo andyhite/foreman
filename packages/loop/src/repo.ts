@@ -4,7 +4,7 @@
  * Named for the scope it manages — one process per repo — distinct from
  * `foreman team` (`team.ts`), which manages the shared team-wide Triage
  * inbox. The supervisor mechanism itself keeps the "loop" vocabulary
- * (`Supervisor`, `LOOP_VERSION`, `loop.stage` in config) because that
+ * (`Supervisor`, `LOOP_VERSION`, `loop.mode` in config) because that
  * describes how it runs, not what it's scoped to.
  *
  * Hand-rolled argument parsing — the workspace's sole runtime dependency is
@@ -34,9 +34,13 @@ import {
   resolveRepoEntry,
   resolveTeamKey,
   style,
+  TtyConfirmer,
+  YOLO_CONFIRMER,
+  type LoopMode,
 } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping.ts";
 import { createControlHandlers } from "./control.ts";
+import { confirmationRequired } from "./routing.ts";
 import { Supervisor, bookkeepingPathFor, resolveDispatcher } from "./supervisor.ts";
 import { refineWorker } from "./workers/refine.ts";
 import { planWorker } from "./workers/plan.ts";
@@ -49,8 +53,7 @@ import type { Worker } from "./workers/types.ts";
 import { LOOP_VERSION } from "./version.ts";
 
 interface ParsedArgs {
-  dryRun: boolean;
-  stage: "dry-run" | "read-only" | "full" | null;
+  mode: LoopMode | null;
   once: boolean;
   workerNames: string[];
   repo: string | null;
@@ -65,8 +68,7 @@ const HELP_TEXT = `foreman repo — Foreman per-repo supervisor (SPEC §17, §3.
 Usage: foreman repo [alias] [options]
 
   [alias]                 Registry alias to run as (default: resolved from cwd).
-  --dry-run              Log what each worker would dispatch; dispatch nothing.
-  --stage <s>             Override loop.stage: dry-run | read-only | full.
+  --mode <m>              Override loop.mode: confirm | yolo.
   --once                  Run one tick of the selected workers, then exit.
   --worker <name>          Restrict to this worker; repeatable.
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
@@ -74,10 +76,9 @@ Usage: foreman repo [alias] [options]
   --no-control             Skip the control-plane socket/status.json; --once already implies this.
   --help                   Show this text.
 
-Stages (loop.stage in ~/.foreman/config.json; --stage overrides):
-  dry-run     Decide and log; dispatch nothing. The default.
-  read-only   Dispatch agents that only comment and label.
-  full        Dispatch the whole pipeline.
+Modes (loop.mode in ~/.foreman/config.json; --mode overrides):
+  confirm     Ask before every dispatch and every Linear write. The default.
+  yolo        Act without asking.
 
 Triage is not part of this process — the shared Triage inbox is consumed by
 \`foreman team\`, one process per team. Run \`foreman team --help\`.
@@ -85,8 +86,7 @@ Triage is not part of this process — the shared Triage inbox is consumed by
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
-    dryRun: false,
-    stage: null,
+    mode: null,
     once: false,
     workerNames: [],
     repo: null,
@@ -99,16 +99,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     switch (arg) {
-      case "--dry-run":
-        parsed.dryRun = true;
-        break;
-      case "--stage": {
-        if (i + 1 >= argv.length) throw new Error("missing value for --stage");
+      case "--mode": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --mode");
         const value = argv[++i];
-        if (value !== "dry-run" && value !== "read-only" && value !== "full") {
-          throw new Error(`--stage must be one of dry-run|read-only|full, got "${value ?? ""}"`);
+        if (value !== "confirm" && value !== "yolo") {
+          throw new Error(`--mode must be one of confirm|yolo, got "${value ?? ""}"`);
         }
-        parsed.stage = value;
+        parsed.mode = value;
         break;
       }
       case "--once":
@@ -165,13 +162,13 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   );
   for (const warning of warnings) console.error(style("yellow", `[foreman-repo] ${warning}`));
 
-  // `--dry-run` / `--stage` are the operator's explicit override of the
-  // autonomy rung (SPEC §17.9); they win over the config file for this run.
+  // `--mode` is the operator's explicit override of the autonomy mode
+  // (SPEC §17.9); it wins over the config file for this run.
   const config = {
     ...loadedConfig,
     loop: {
       ...loadedConfig.loop,
-      stage: args.dryRun ? ("dry-run" as const) : (args.stage ?? loadedConfig.loop.stage),
+      mode: args.mode ?? loadedConfig.loop.mode,
     },
   };
 
@@ -226,6 +223,21 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     console.log(`${style("cyan", `[foreman-repo:${entry.alias}]`)} ${message}`);
   };
 
+  // A confirm-mode loop with no operator on the other end of stdin would
+  // block on the first dispatch or Linear write forever — nobody is there
+  // to answer. Fail loudly at startup instead of hanging silently.
+  if (confirmationRequired(config.loop) && !process.stdin.isTTY) {
+    console.error(
+      style(
+        "red",
+        "[foreman-repo] loop.mode is \"confirm\" (or a worker override is) but stdin is not a TTY — " +
+          "there is nobody to ask. Pass --mode yolo, or run this from an interactive terminal.",
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
   const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
 
@@ -237,6 +249,8 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     log,
   );
 
+  const confirmer = confirmationRequired(config.loop) ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
+
   const supervisor = new Supervisor({
     config,
     linear,
@@ -245,10 +259,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     bookkeeping,
     stateDir,
     entry,
-    // Preserve the raw CLI flag independently from the effective stage:
-    // `setStage("full")` must never turn a process launched with
-    // `--dry-run` into a mutating loop.
-    dryRun: args.dryRun,
+    confirmer,
     log,
     loopId: repoLoopId(entry.alias),
     statusPath: args.once || args.noControl ? null : controlPaths.status,
@@ -340,17 +351,16 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
       style(
         "bold",
         `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
-          `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
+          `initiatives=[${entry.initiativeIds.join(",")}] mode=${config.loop.mode} ` +
           `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
       ),
     );
 
-    if (config.loop.stage === "dry-run") {
+    if (confirmationRequired(config.loop)) {
       const rule = style("yellow", "─".repeat(62));
       log(rule);
-      log(style("yellow", "DRY RUN — stage=dry-run. No agent will be dispatched."));
-      log(style("yellow", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-      log(style("yellow", "or pass --stage full, to let workers act."));
+      log(style("yellow", "CONFIRM MODE — every dispatch and Linear write needs your approval."));
+      log(style("yellow", "Set loop.mode to \"yolo\" in ~/.foreman/config.json, or pass --mode yolo, to run unattended."));
       log(rule);
     }
 
@@ -370,12 +380,12 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
       const ensureReports = await ensureMaintenanceProjects(linear, {
         initiativeIds: entry.initiativeIds,
         teamId: teamRef.id,
-        dryRun: config.loop.stage !== "full",
+        confirmer,
       });
       for (const report of ensureReports) {
         log(
           report.projectId === null
-            ? `${style("yellow", "!")} ensure: initiative=${report.initiativeName} (${report.initiativeId}) would create a Maintenance project (stage=${config.loop.stage})`
+            ? `${style("yellow", "!")} ensure: initiative=${report.initiativeName} (${report.initiativeId}) Maintenance project not created (declined)`
             : `${style("green", "✓")} ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
                 `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
         );
@@ -400,5 +410,6 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   } finally {
     supervisor.stop();
     await controlServer?.close();
+    confirmer.close();
   }
 }

@@ -6,8 +6,8 @@ import { defaultAndValidateGlobalConfig } from "../src/config/load.ts";
 import type { GlobalConfig } from "../src/config/schema.ts";
 import { ControlClient, probeSocket, waitForSocket } from "../src/control/client.ts";
 import { discoverLoops, readStatusFile, writeStatusFile } from "../src/control/registry.ts";
-import { FrameDecoder, LOOP_STAGES, emptyBoardCounts, isLoopStage } from "../src/control/protocol.ts";
-import type { ControlOp, LoopSnapshot, LoopStage, ServerInfo } from "../src/control/protocol.ts";
+import { FrameDecoder, LOOP_MODES, emptyBoardCounts, isLoopMode } from "../src/control/protocol.ts";
+import type { ControlOp, LoopSnapshot, LoopMode, ServerInfo } from "../src/control/protocol.ts";
 import { ControlServer, type ControlHandlers } from "../src/control/server.ts";
 import { INTAKE_LOOP_ID, loopPaths, repoLoopId } from "../src/control/paths.ts";
 
@@ -42,8 +42,7 @@ function makeSnapshot(overrides: Partial<LoopSnapshot> = {}): LoopSnapshot {
     },
     runtime: {
       state: "running",
-      stage: "full",
-      dryRun: false,
+      mode: "yolo",
       dispatcher: "print",
       pausedAt: null,
       lastTickAt: null,
@@ -95,8 +94,8 @@ function makeHandlers(snapshot: LoopSnapshot, calls: HandlerCall[]): ControlHand
     tick: (workers) => {
       calls.push({ op: "tick", args: [workers] });
     },
-    setStage: (stage: LoopStage) => {
-      calls.push({ op: "setStage", args: [stage] });
+    setMode: (mode: LoopMode) => {
+      calls.push({ op: "setMode", args: [mode] });
     },
     patchConfig: (patch) => {
       calls.push({ op: "patchConfig", args: [patch] });
@@ -129,12 +128,12 @@ describe("ControlServer / ControlClient round trip", () => {
       await client.request("pause");
       await client.request("resume");
       await client.request("tick", { workers: ["refine"] });
-      await client.request("setStage", { stage: "read-only" });
+      await client.request("setMode", { mode: "confirm" });
       expect(calls).toEqual([
         { op: "pause", args: [] },
         { op: "resume", args: [] },
         { op: "tick", args: [["refine"]] },
-        { op: "setStage", args: ["read-only"] },
+        { op: "setMode", args: ["confirm"] },
       ]);
     } finally {
       client.close();
@@ -153,7 +152,7 @@ describe("ControlServer / ControlClient round trip", () => {
       resume: () => {},
       stop: () => {},
       tick: () => {},
-      setStage: () => {},
+      setMode: () => {},
       patchConfig: () => {},
       reload: () => {},
       attachAgent: () => {},
@@ -474,7 +473,7 @@ describe("ControlServer / ControlClient backpressure and frame validation", () =
     }
   });
 
-  it("rejects setStage with a non-LoopStage value instead of forwarding it to the handler", async () => {
+  it("rejects setMode with a non-LoopMode value instead of forwarding it to the handler", async () => {
     const dir = tempDir();
     const socketPath = join(dir, "control.sock");
     const snapshot = makeSnapshot();
@@ -484,7 +483,7 @@ describe("ControlServer / ControlClient backpressure and frame validation", () =
     const client = new ControlClient({ socketPath });
     try {
       await client.connect();
-      await expect(client.request("setStage", { stage: "full-autonomy" })).rejects.toThrow();
+      await expect(client.request("setMode", { mode: "full-autonomy" })).rejects.toThrow();
       expect(calls).toEqual([]);
     } finally {
       client.close();
@@ -493,15 +492,15 @@ describe("ControlServer / ControlClient backpressure and frame validation", () =
   });
 });
 
-describe("isLoopStage / LOOP_STAGES", () => {
-  it("accepts every declared stage and rejects everything else", () => {
-    for (const stage of LOOP_STAGES) {
-      expect(isLoopStage(stage)).toBe(true);
+describe("isLoopMode / LOOP_MODES", () => {
+  it("accepts every declared mode and rejects everything else", () => {
+    for (const mode of LOOP_MODES) {
+      expect(isLoopMode(mode)).toBe(true);
     }
-    expect(isLoopStage("full-autonomy")).toBe(false);
-    expect(isLoopStage(null)).toBe(false);
-    expect(isLoopStage(undefined)).toBe(false);
-    expect(isLoopStage(3)).toBe(false);
+    expect(isLoopMode("full-autonomy")).toBe(false);
+    expect(isLoopMode(null)).toBe(false);
+    expect(isLoopMode(undefined)).toBe(false);
+    expect(isLoopMode(3)).toBe(false);
   });
 });
 
@@ -641,7 +640,7 @@ describe("writeStatusFile validation", () => {
     const statusPath = join(dir, "status.json");
     const good = makeSnapshot();
     writeStatusFile(statusPath, good);
-    const invalid = { ...good, runtime: { ...good.runtime, stage: "not-a-real-stage" } } as unknown as LoopSnapshot;
+    const invalid = { ...good, runtime: { ...good.runtime, mode: "not-a-real-mode" } } as unknown as LoopSnapshot;
     writeStatusFile(statusPath, invalid);
     const statusFile = readStatusFile(statusPath);
     expect(statusFile?.snapshot).toEqual(good);

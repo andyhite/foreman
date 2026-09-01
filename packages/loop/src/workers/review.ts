@@ -120,43 +120,46 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...candidateSkips);
 
-  if (ctx.dispatchPermitted) {
-    for (const decision of decisions) {
-      if (!decision.issueId) continue;
-      const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
-      if (!candidate) continue;
+  for (const decision of decisions) {
+    if (!decision.issueId) continue;
+    const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
+    if (!candidate) continue;
 
-      const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
-      try {
-        const handle = await ctx.dispatcher.dispatch({
-          agent: decision.agent,
-          issueId: decision.issueId,
-          command: decision.command,
-          dispatchId,
-          cwd: ctx.entry.repoPath,
-        });
-        ctx.bookkeeping.recordDispatch({
-          agent: decision.agent,
-          issueId: decision.issueId,
-          dispatchId: handle.dispatchId,
-          startedAt: handle.startedAt,
-          stage: "review",
-        });
-        ctx.watchSettle(handle, "review");
-        dispatched.push(decision);
-        const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
-        if (previousSha !== null && previousSha !== candidate.headSha) {
-          const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
-          if (pending) {
-            errors.push(...(await applyPendingDecisions(ctx, [pending])));
-            ctx.bookkeeping.drainPendingDecisions();
-            continue;
-          }
+    const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
+    const summary = `dispatch ${decision.agent} for ${decision.issueId}`;
+    if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
+      skipped.push({ stage: "review", issueId: decision.issueId, code: "dispatch-declined", message: `Operator declined: ${summary}` });
+      continue;
+    }
+    try {
+      const handle = await ctx.dispatcher.dispatch({
+        agent: decision.agent,
+        issueId: decision.issueId,
+        command: decision.command,
+        dispatchId,
+        cwd: ctx.entry.repoPath,
+      });
+      ctx.bookkeeping.recordDispatch({
+        agent: decision.agent,
+        issueId: decision.issueId,
+        dispatchId: handle.dispatchId,
+        startedAt: handle.startedAt,
+        stage: "review",
+      });
+      ctx.watchSettle(handle, "review");
+      dispatched.push(decision);
+      const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
+      if (previousSha !== null && previousSha !== candidate.headSha) {
+        const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
+        if (pending) {
+          errors.push(...(await applyPendingDecisions(ctx, [pending])));
+          ctx.bookkeeping.drainPendingDecisions();
+          continue;
         }
-        ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
-      } catch (error) {
-        errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       }
+      ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
+    } catch (error) {
+      errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
     }
   }
 

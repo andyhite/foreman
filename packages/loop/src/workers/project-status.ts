@@ -29,9 +29,9 @@ async function runProjectStatus(ctx: WorkerContext): Promise<WorkerReport> {
           status.type,
           issues.map((issue) => issue.state.type),
         );
-        // Native project-status transitions are workflow mutations, not the
-        // comments/labels permitted by the read-only rung.
-        if (next && !ctx.dryRun && ctx.config.loop.stage !== "read-only") {
+        // Native project-status transitions are Linear writes, gated the
+        // same as any other action outside this process (SPEC §17.9).
+        if (next && (await ctx.confirm({ kind: "linear-write", summary: `set project ${project.name} status to ${next}` }))) {
           await ctx.linear.updateProjectStatus({ projectId: project.id, type: next });
         }
       } catch (error) {

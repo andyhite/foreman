@@ -36,7 +36,7 @@ export interface WorkerLoopState {
 }
 
 export interface LoopState {
-  stage: string;
+  mode: string;
   workers: WorkerLoopState[];
 }
 
@@ -72,7 +72,7 @@ export function renderStatusConsole(state: StatusState): string {
   const pastTtlCount = state.locks.filter((lock) => lock.pastTtl).length;
   sections.push(
     `**${state.blocked.length} blocked · ${state.proposalsAwaiting.count} proposals awaiting · ` +
-      `${state.locks.length} locks (${pastTtlCount} past TTL) · stage ${state.loop.stage}**`,
+      `${state.locks.length} locks (${pastTtlCount} past TTL) · mode ${state.loop.mode}**`,
   );
 
   sections.push("## Blocked (human)");
@@ -124,8 +124,8 @@ export function renderStatusConsole(state: StatusState): string {
           )
           .join("\n")
       : "_none_";
-  const stageLine = `Stage: ${state.loop.stage}${state.loop.stage === "dry-run" ? " _(dispatching nothing)_" : ""}`;
-  sections.push(`${stageLine}\n${workerLines}`);
+  const modeLine = `Mode: ${state.loop.mode}${state.loop.mode === "confirm" ? " _(every write needs approval)_" : ""}`;
+  sections.push(`${modeLine}\n${workerLines}`);
 
   sections.push("## Backpressure");
   sections.push(

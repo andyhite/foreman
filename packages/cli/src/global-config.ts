@@ -47,6 +47,19 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
 export interface ExistingConfig {
   repos: Record<string, RepoEntry>;
   apiKeyFile: string | null;
+  /**
+   * `repoDefaults.baseBranch` as it would be seen after schema defaulting —
+   * the value a `repos` entry actually inherits when it omits its own
+   * `baseBranch` override. Derived through `defaultAndValidateGlobalConfig`
+   * rather than hand-rolled so this never drifts from the schema default.
+   *
+   * Validated in isolation from `repos`: a config that's merely incomplete
+   * (or has `repos` entries this reader isn't ready to fully validate) must
+   * still produce a usable default here, since callers use this to show
+   * wizard prompt defaults and to decide what to sparsely write, not to
+   * assert the whole file is valid.
+   */
+  effectiveBaseBranch: string;
 }
 
 /** Reads whatever is already on disk, defaulted for the wizard to show as prompt defaults. */
@@ -54,9 +67,11 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
   const configPath = join(home, ".foreman", "config.json");
   const existing = readExistingConfig(configPath);
   const linear = (existing.linear as Record<string, unknown> | undefined) ?? {};
+  const defaulted = defaultAndValidateGlobalConfig({ repoDefaults: existing.repoDefaults ?? {} }, configPath);
   return {
     repos: (existing.repos as Record<string, RepoEntry> | undefined) ?? {},
     apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
+    effectiveBaseBranch: defaulted.repoDefaults.baseBranch,
   };
 }
 

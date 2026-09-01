@@ -23,22 +23,18 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { LoopId, LoopKind } from "./paths.ts";
 
-export type LoopStage = "dry-run" | "read-only" | "full";
+export type LoopMode = "confirm" | "yolo";
 export type RunState = "starting" | "running" | "paused" | "draining" | "stopped";
 export type AgentStatus = "starting" | "running" | "settled" | "lost" | "unknown";
 
-const LoopStageSchema = Type.Union([
-  Type.Literal("dry-run"),
-  Type.Literal("read-only"),
-  Type.Literal("full"),
-]);
+const LoopModeSchema = Type.Union([Type.Literal("confirm"), Type.Literal("yolo")]);
 
-/** Every valid `LoopStage`, in the order the loop escalates through them. */
-export const LOOP_STAGES: readonly LoopStage[] = ["dry-run", "read-only", "full"];
+/** Every valid `LoopMode`, least autonomous first. */
+export const LOOP_MODES: readonly LoopMode[] = ["confirm", "yolo"];
 
-/** Narrows an arbitrary value (e.g. a control-request param) to a `LoopStage`, rejecting everything else. */
-export function isLoopStage(value: unknown): value is LoopStage {
-  return typeof value === "string" && (LOOP_STAGES as readonly string[]).includes(value);
+/** Narrows an arbitrary value (e.g. a control-request param) to a `LoopMode`, rejecting everything else. */
+export function isLoopMode(value: unknown): value is LoopMode {
+  return typeof value === "string" && (LOOP_MODES as readonly string[]).includes(value);
 }
 const RunStateSchema = Type.Union([
   Type.Literal("starting"),
@@ -197,8 +193,7 @@ export const LoopSnapshotSchema = Type.Object(
     runtime: Type.Object(
       {
         state: RunStateSchema,
-        stage: LoopStageSchema,
-        dryRun: Type.Boolean(),
+        mode: LoopModeSchema,
         dispatcher: Type.Union([Type.Literal("herdr"), Type.Literal("print"), Type.Literal("none")]),
         pausedAt: Type.Union([Type.String(), Type.Null()]),
         lastTickAt: Type.Union([Type.String(), Type.Null()]),
@@ -279,7 +274,7 @@ const ControlOpSchema = Type.Union([
   Type.Literal("resume"),
   Type.Literal("stop"),
   Type.Literal("tick"),
-  Type.Literal("setStage"),
+  Type.Literal("setMode"),
   Type.Literal("patchConfig"),
   Type.Literal("reload"),
   Type.Literal("attachAgent"),
