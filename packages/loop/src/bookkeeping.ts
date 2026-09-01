@@ -15,7 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { ForemanAgentName } from "@foreman/core";
+import { style, type ForemanAgentName } from "@foreman/core";
 import type { StageName } from "./routing.ts";
 
 export interface AttemptRecord {
@@ -106,7 +106,7 @@ export class Bookkeeping {
       const parsed = JSON.parse(raw) as Partial<BookkeepingState>;
       return new Bookkeeping(path, { ...emptyBookkeepingState(), ...parsed });
     } catch (error) {
-      log(`failed to load corrupt bookkeeping at ${path}; starting with empty state: ${String(error)}`);
+      log(style("yellow", `failed to load corrupt bookkeeping at ${path}; starting with empty state: ${String(error)}`));
       return new Bookkeeping(path, emptyBookkeepingState());
     }
   }

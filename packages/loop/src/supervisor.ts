@@ -20,6 +20,7 @@ import {
   isHerdrUnavailable,
   LinearApiError,
   lockTtlMs,
+  style,
   writeStatusFile,
   type AgentStatus,
   type ControlEvent,
@@ -231,7 +232,7 @@ export async function resolveDispatcher(factory: DispatcherFactory, log: (messag
   if (await herdr.available()) {
     return herdr;
   }
-  log("herdr unavailable; falling back to PrintDispatcher.");
+  log(`${style("yellow", "!")} herdr unavailable; falling back to PrintDispatcher.`);
   return factory.createPrint();
 }
 
@@ -646,22 +647,25 @@ export class Supervisor {
         const effective = stage ? effectiveStage(stage, this.#config().loop) : this.#config().loop.stage;
         const launched = new Set(report.dispatched);
         this.#log(
-          `${worker.name} [effective stage: ${effective}]: ${report.dispatched.length} dispatched, ${report.decisions.length - report.dispatched.length} would dispatch, ${report.skipped.length} skipped` +
-            (report.errors.length > 0 ? `, ${report.errors.length} error(s)` : ""),
+          `${worker.name} [effective stage: ${effective}]: ${style("green", `${report.dispatched.length} dispatched`)}, ` +
+            `${style("yellow", `${report.decisions.length - report.dispatched.length} would dispatch`)}, ${report.skipped.length} skipped` +
+            (report.errors.length > 0 ? `, ${style("red", `${report.errors.length} error(s)`)}` : ""),
         );
         for (const decision of report.decisions) {
-          const action = launched.has(decision) ? "dispatched" : "would dispatch";
+          const dispatched = launched.has(decision);
+          const action = dispatched ? "dispatched" : "would dispatch";
+          const marker = dispatched ? style("green", "✓") : style("yellow", "~");
           this.#log(
-            `  ${action} ${worker.name} [effective stage: ${effective}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
+            `  ${marker} ${action} ${worker.name} [effective stage: ${effective}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
           );
         }
         for (const skip of report.skipped) {
           this.#log(
-            `  skip ${worker.name} [effective stage: ${effective}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
+            `  ${style("dim", "○")} skip ${worker.name} [effective stage: ${effective}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
           );
         }
       } catch (error) {
-        this.#log(`${worker.name} failed: ${String(error)}`);
+        this.#log(`${style("red", "✗")} ${worker.name} failed: ${String(error)}`);
         report = {
           worker: worker.name as WorkerReport["worker"],
           ranAt: this.#now().toISOString(),

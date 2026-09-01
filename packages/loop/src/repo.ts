@@ -163,7 +163,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   const { config: loadedConfig, warnings } = loadGlobalConfig(
     args.homePath ? { home: args.homePath } : undefined,
   );
-  for (const warning of warnings) console.error(`[foreman-repo] ${warning}`);
+  for (const warning of warnings) console.error(style("yellow", `[foreman-repo] ${warning}`));
 
   // `--dry-run` / `--stage` are the operator's explicit override of the
   // autonomy rung (SPEC §17.9); they win over the config file for this run.
@@ -186,9 +186,9 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
       : entryForCwd(config, process.cwd(), args.homePath ?? undefined);
   } catch (error) {
     if (error instanceof ConfigError) {
-      console.error(`[foreman-repo] ${error.message}`);
-      for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
-      console.error("[foreman-repo] run `foreman init` to register this repo, then retry.");
+      console.error(style("red", `[foreman-repo] ${error.message}`));
+      for (const problem of error.problems) console.error(style("red", `[foreman-repo]   - ${problem}`));
+      console.error(style("red", "[foreman-repo] run `foreman init` to register this repo, then retry."));
       process.exitCode = 1;
       return;
     }
@@ -209,8 +209,8 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: entry.team });
   } catch (error) {
     if (error instanceof ConfigError) {
-      console.error(`[foreman-repo] ${error.message}`);
-      for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
+      console.error(style("red", `[foreman-repo] ${error.message}`));
+      for (const problem of error.problems) console.error(style("red", `[foreman-repo]   - ${problem}`));
       process.exitCode = 1;
       return;
     }
@@ -223,7 +223,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));
 
   const log = (message: string): void => {
-    console.log(`[foreman-repo:${entry.alias}] ${message}`);
+    console.log(`${style("cyan", `[foreman-repo:${entry.alias}]`)} ${message}`);
   };
 
   const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
@@ -297,14 +297,14 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
         else server.broadcast(event);
       });
       await server.listen();
-      log(`control socket listening at ${controlPaths.socket}`);
+      log(`${style("cyan", "i")} control socket listening at ${controlPaths.socket}`);
     }
 
     let shuttingDown = false;
     const shutdown = (signal: string): void => {
       if (shuttingDown) return;
       shuttingDown = true;
-      log(`received ${signal}, finishing any in-flight tick before releasing the lock.`);
+      log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
       supervisor.requestStop("graceful");
       // When polling, `runForever` reaches its own cleanup immediately after
       // the active tick. `--once` has no poll loop to observe the request.
@@ -337,9 +337,12 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
      * instances are running (SPEC §3.11).
      */
     log(
-      `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
-        `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
-        `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
+      style(
+        "bold",
+        `starting: repo=${entry.alias} path=${entry.repoPath} team=${team} ` +
+          `initiatives=[${entry.initiativeIds.join(",")}] stage=${config.loop.stage} ` +
+          `dispatcher=${dispatcher.kind} workers=[${selected.map((w) => w.name).join(",")}] lockTtlMs=${lockTtlMs(config)}`,
+      ),
     );
 
     if (config.loop.stage === "dry-run") {
@@ -372,15 +375,15 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
       for (const report of ensureReports) {
         log(
           report.projectId === null
-            ? `ensure: initiative=${report.initiativeName} (${report.initiativeId}) would create a Maintenance project (stage=${config.loop.stage})`
-            : `ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
+            ? `${style("yellow", "!")} ensure: initiative=${report.initiativeName} (${report.initiativeId}) would create a Maintenance project (stage=${config.loop.stage})`
+            : `${style("green", "✓")} ensure: initiative=${report.initiativeName} (${report.initiativeId}) ` +
                 `Maintenance project=${report.projectId} ${report.created ? "created" : "already present"}`,
         );
       }
     } catch (error) {
       if (error instanceof ConfigError) {
-        console.error(`[foreman-repo] ${error.message}`);
-        for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
+        console.error(style("red", `[foreman-repo] ${error.message}`));
+        for (const problem of error.problems) console.error(style("red", `[foreman-repo]   - ${problem}`));
         process.exitCode = 1;
         return;
       }

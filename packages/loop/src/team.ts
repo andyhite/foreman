@@ -223,7 +223,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
 
   if (backpressureTripped) {
     skipReason = `team-wide proposal backpressure: ${proposedCount} proposed > threshold ${ctx.config.loop.backpressureThreshold}`;
-    ctx.log(skipReason);
+    ctx.log(style("yellow", skipReason));
   } else {
     const lastRunAt = ctx.bookkeeping.state.lastTriageRunAt;
     const alreadyRanToday = lastRunAt !== null && sameCalendarDay(new Date(lastRunAt), now);
@@ -293,8 +293,8 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
       wouldApplyCount = candidates.length;
       ctx.log(
         wouldApplyCount === 0
-          ? "apply pass (dry run): no approvals pending."
-          : `apply pass (dry run): would apply ${wouldApplyCount} approved proposal(s).`,
+          ? `${style("dim", "○")} apply pass (dry run): no approvals pending.`
+          : `${style("yellow", "~")} apply pass (dry run): would apply ${wouldApplyCount} approved proposal(s).`,
       );
     } catch (error) {
       ctx.log(`apply pass (dry run) failed to count approvals: ${String(error)}`);
@@ -304,13 +304,13 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
       const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
       appliedCount = applied.length;
       if (applied.length === 0) {
-        ctx.log("apply pass: no approvals pending.");
+        ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
       } else {
         const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
-        ctx.log(`apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+        ctx.log(`${style("green", "✓")} apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
       }
       for (const failure of failures) {
-        ctx.log(`apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`);
+        ctx.log(style("red", `apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`));
       }
     } catch (error) {
       ctx.log(`apply pass failed: ${String(error)}`);
@@ -482,7 +482,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   const { config: loadedConfig, warnings } = loadGlobalConfig(
     args.configPath ? { home: args.configPath } : undefined,
   );
-  for (const warning of warnings) console.error(`[foreman-team] ${warning}`);
+  for (const warning of warnings) console.error(style("yellow", `[foreman-team] ${warning}`));
 
   const config = {
     ...loadedConfig,
@@ -495,7 +495,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   const apiKey = resolveLinearApiKey(config);
 
   const log = (message: string): void => {
-    console.log(`[foreman-team] ${message}`);
+    console.log(`${style("cyan", "[foreman-team]")} ${message}`);
   };
 
   // Team resolution mirrors `foreman repo` via the shared `resolveTeamKey`
@@ -579,7 +579,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
         else server.broadcast(event);
       });
       await server.listen();
-      log(`control socket listening at ${controlPaths.socket}`);
+      log(`${style("cyan", "i")} control socket listening at ${controlPaths.socket}`);
     }
 
     // A tick already in flight (`runIntakeTick` awaiting a Linear call) must
@@ -593,7 +593,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     const shutdown = (signal: string): void => {
       if (shuttingDown) return;
       shuttingDown = true;
-      log(`received ${signal}, finishing any in-flight tick before releasing the lock.`);
+      log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
       runtime.stopMode = "graceful";
       runtime.runState = "draining";
       runtime.wake?.();
@@ -605,7 +605,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-    log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
+    log(style("bold", `starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`));
 
     if (ctx.dryRun) {
       const rule = style("yellow", "─".repeat(62));
