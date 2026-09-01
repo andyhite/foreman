@@ -64,7 +64,7 @@ foreman/
   packages/
     core/                       # Linear client, schemas, gate validators
     omp-plugin/                 # below — installed user-scoped in ~/.omp/plugins/
-    loop/                       # `foreman loop` + `foreman intake` CLIs (§3.11, §3.12)
+    loop/                       # `foreman repo` + `foreman team` CLIs (§3.11, §3.12)
 ```
 
 The omp plugin is a Claude/OMP-compatible plugin directory, installed
@@ -265,7 +265,7 @@ the PAL resolve with fallback.
 
 omp has no built-in scheduler. Run the daily triage pass with cron or launchd
 invoking print mode (`omp -p`) against `/foreman:triage` — superseded by
-`foreman intake` once §3.12 exists. Do not run both.
+`foreman team` once §3.12 exists. Do not run both.
 
 ### 3.9 Hindsight memory — decide explicitly
 
@@ -326,7 +326,7 @@ default defined here, not a constant):
   },
 
   "repos": {                                              // the registry (§3.11) — every Foreman-managed repo
-    "plotroom": {                                         // alias: `--repo`, herdr workspace name, state dir
+    "plotroom": {                                         // alias: positional arg to `foreman repo`, herdr workspace name, state dir
       "path": "~/Code/plotroom",
       "team": "PLT",                                      // optional if unambiguous
       "initiatives": [                                    // one or more; monorepos list several
@@ -378,9 +378,9 @@ initiatives bound to that repo in the global `repos` registry (§3.10). A
 monorepo binds several initiatives — the `plotroom` entry binds
 `Plotroom Fleet` and `Plotroom Zero`.
 
-**Invocation.** `foreman loop [--repo <alias>] [--team <KEY>]`, run in the
+**Invocation.** `foreman repo [alias] [--team <KEY>]`, run in the
 repo. The instance's registry entry resolves by matching cwd (symlinks
-resolved) against entry paths; `--repo` overrides, and an unregistered
+resolved) against entry paths; the positional alias overrides, and an unregistered
 directory fails loudly naming the fix (add an entry). Team resolution:
 `--team` flag → the entry's `team` → the sole team the credential can access
 → fail loudly. Manual slash commands resolve the same way from the session's
@@ -422,8 +422,7 @@ state is global too, keyed by the registry alias.
 ### 3.12 Intake — the team-level triage process
 
 One process for the whole team, separate from the per-repo loops:
-`foreman intake`. (Named to avoid colliding with the `foreman-triage` agent it
-dispatches.) The shared Triage inbox is a single queue, and a single consumer
+`foreman team`. The shared Triage inbox is a single queue, and a single consumer
 is strictly simpler than N repo-scoped loops negotiating over it.
 
 **What it does.** The operator files rough material into the inbox — a
@@ -1304,8 +1303,8 @@ standing project organization section.
 
 | Activity | Frequency | Actor | Effort |
 |---|---|---|---|
-| `foreman loop` (per repo) | Every 5–10 min | Scheduler | — |
-| `foreman intake` (team-level) | Daily window | Scheduler | — |
+| `foreman repo` (per repo) | Every 5–10 min | Scheduler | — |
+| `foreman team` (team-level) | Daily window | Scheduler | — |
 | Triage approval | Daily | Operator | ~10 min |
 | Blocked drain (`/foreman:status`) | 1–2× daily | Operator | ~15 min each |
 | Prioritization / roadmap | Weekly | Operator | ~1 hour |
@@ -1317,7 +1316,7 @@ everything downstream: nothing gets refined, implemented, or reviewed until the
 operator sets a priority, which is exactly where the human judgment belongs.
 
 Planning has no cadence row either, for the same reason: `foreman-plan` runs
-inside `foreman loop` (§17.5), dispatched the moment a project is bare — not
+inside `foreman repo` (§17.5), dispatched the moment a project is bare — not
 on a schedule and not something the operator drains.
 
 Retro tuning targets: avoidable blocks, refine outputs that led to bad
@@ -1430,7 +1429,7 @@ makes is already a pure predicate over Linear state — the gate validators in
 adds nondeterminism to something fully determined, and when it misroutes you
 get to debug a prompt instead of reading a function.
 
-The supervisor is a plain Node process — `foreman loop [--team <KEY>]`, run
+The supervisor is a plain Node process — `foreman repo [--team <KEY>]`, run
 in the repo it serves (§3.11) — that imports the same validators as the
 extension. One instance per repo, each scoped to that repo's bound
 initiatives. It contains no model call. When it decides to dispatch, it hands the decision to a Dispatcher
@@ -1507,7 +1506,7 @@ entirely if left at defaults.
 | Workspace | One per repo — the instance and its bound initiatives (§3.11). |
 | Tab | One per in-flight issue, named for the issue (`ENG-142`). |
 | Pane | The agent, `--cwd` set to that issue's worktree. |
-| `foreman` workspace | The `foreman-board` and `foreman intake` panes plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. Each repo workspace holds its own `foreman loop` pane (§3.11). |
+| `foreman` workspace | The `foreman-board` and `foreman team` panes plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. Each repo workspace holds its own `foreman repo` pane (§3.11). |
 
 Tabs are bounded by the WIP limit (§17.6), so at WIP 3 the layout stays legible
 rather than becoming a wall of panes.
@@ -1548,7 +1547,7 @@ single sweep means implement starves waiting for refinement to happen in the
 same pass.
 
 ```
-foreman loop  (one process per repo, one lockfile each, N async workers)
+foreman repo  (one process per repo, one lockfile each, N async workers)
   ├─ reaper           every 5 min   — stale locks (§11)
   ├─ project-status   every 5 min   — sync Linear's native project status (§7.6a)
   ├─ plan             every 5 min   — decompose any bare (zero-issue) project
@@ -1557,8 +1556,8 @@ foreman loop  (one process per repo, one lockfile each, N async workers)
   └─ review           every 5 min   — PRs whose head SHA has no ReviewResult
 ```
 
-Triage is not a loop worker — it belongs to the team-level intake process
-(§3.12).
+Triage is not a loop worker — it belongs to the team-level `foreman team`
+process (§3.12).
 
 Each worker owns one transition and evaluates only its own predicate:
 
@@ -1690,10 +1689,10 @@ Do not go from manual commands to a full loop. Each stage runs until it's
 boring:
 
 1. **Manual.** Commands only. The loop doesn't exist yet.
-2. **Dry run.** `foreman loop --dry-run` logs what each worker would dispatch and does
+2. **Dry run.** `foreman repo --dry-run` logs what each worker would dispatch and does
    nothing. Run for a week. Read the log every morning. This is where routing
    bugs surface for free.
-3. **Read-only auto.** `foreman intake` goes live (propose-only by
+3. **Read-only auto.** `foreman team` goes live (propose-only by
    construction) and the loop dispatches `foreman-review` only. Both are
    non-mutating, so a bad dispatch costs tokens and nothing else.
 4. **Full loop.** Add `foreman-refine` and `foreman-implement`, WIP 3,
@@ -1735,7 +1734,7 @@ than better.
    `/foreman:status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
    agent — retrofitted, one agent gets a "just ask the user" fallback and it
    becomes the default.
-3. **`foreman intake` + `foreman-triage`, propose-only.** The team-level
+3. **`foreman team` + `foreman-triage`, propose-only.** The team-level
    process (§3.12): registry-derived repo lookup, daily window, the drafting
    agent, and the apply pass — creating nothing without approval. ~1 day. **Run it for a
    week before building anything else.** Its bad proposals — especially the
@@ -1747,7 +1746,7 @@ than better.
    implement skill, the findings route with its cycle cap (§7.4), both merge
    modes and `/foreman:merge` (§3.10). ~1.5 days, most of it in worktree
    lifecycle and the fix cycle.
-6. **`foreman loop` + `PrintDispatcher` + autonomy staging (§17).** The CLI
+6. **`foreman repo` + `PrintDispatcher` + autonomy staging (§17).** The CLI
    with team resolution (§3.11), supervisor, per-repo lockfile, bookkeeping
    file, the three stage workers plus reaper, per-instance cap and per-stage
    sub-limits, Ready buffer target, team-wide backpressure, retry counter,
@@ -1826,7 +1825,7 @@ a status-reading client render a stopped loop's board without special-casing
 it, and it is why the write happens at exactly the two moments state can have
 changed: `reconcile()` and each tick, never on a timer of its own.
 
-`foreman loop --no-control` disables the socket for a given process and skips
+`foreman repo --no-control` disables the socket for a given process and skips
 straight to writing `status.json` — an escape hatch for running a loop where a
 listening socket is unwanted, not the normal path.
 

@@ -92,7 +92,7 @@ describe("runInit", () => {
       expect(config.repos).toEqual({
         plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
       });
-      expect(logs.some((line) => line.includes("foreman loop --dry-run --once"))).toBe(true);
+      expect(logs.some((line) => line.includes("foreman repo --dry-run --once"))).toBe(true);
 
       const loaded = loadGlobalConfig({ home });
       expect(loaded.config.repos.plotroom?.path).toBe("/repos/plotroom");

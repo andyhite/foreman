@@ -8,7 +8,7 @@
  * which meant installing a plugin and registering a repo could not be done
  * independently — re-running to add a repo re-ran the whole installer.
  *
- * Hand-rolled argument parsing, same rationale as `foreman-loop`: the
+ * Hand-rolled argument parsing, same rationale as `foreman repo`: the
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
@@ -16,7 +16,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { nodeRunner } from "@foreman/core";
-import { runIntake, runLoop } from "@foreman/loop";
+import { runRepo, runTeam } from "@foreman/loop";
 import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { DEFAULT_GITHUB_REPO, type OmpScope } from "./plugin-commands.ts";
@@ -50,10 +50,10 @@ Usage: foreman <command> [options]
 Commands:
   setup                    Per-machine install: Linear credential, omp plugin.
   init                     Per-repo: register this directory in the repos registry.
-  loop                     Run the supervisor; \`foreman loop --help\` for its flags.
-  intake                   Run the team-level triage process; \`foreman intake --help\` for its flags.
+  repo                     Run the per-repo supervisor; \`foreman repo --help\` for its flags.
+  team                     Run the team-level triage process; \`foreman team --help\` for its flags.
 
-Run \`setup\` once per machine, \`init\` once per repo, then \`loop\` per repo.
+Run \`setup\` once per machine, \`init\` once per repo, then \`repo\` per repo.
 
 Options for setup:
   --link                     Dev mode: link the omp plugin and the foreman CLI to this checkout's source (no rebuild-to-see-changes).
@@ -232,22 +232,22 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
   /*
-   * `loop` owns every argument after it. Delegating before this CLI's own
+   * `repo` owns every argument after it. Delegating before this CLI's own
    * parser runs is what lets the supervisor keep its flags (`--dry-run`,
    * `--stage`) without this parser having to know any of them.
    */
-  if (argv[0] === "loop") {
-    await runLoop(argv.slice(1));
+  if (argv[0] === "repo") {
+    await runRepo(argv.slice(1));
     return;
   }
 
   /*
-   * `intake` owns every argument after it, same rationale as `loop`: the
-   * team-level process keeps its own flags (`--team`, `--once`) without this
-   * parser having to know any of them.
+   * `team` owns every argument after it, same rationale as `repo`: the
+   * team-level process keeps its own flags (`--once`, `--dry-run`) without
+   * this parser having to know any of them.
    */
-  if (argv[0] === "intake") {
-    await runIntake(argv.slice(1));
+  if (argv[0] === "team") {
+    await runTeam(argv.slice(1));
     return;
   }
 

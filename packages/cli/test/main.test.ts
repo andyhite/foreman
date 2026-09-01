@@ -134,27 +134,27 @@ describe("parseArgs", () => {
   });
 });
 
-describe("foreman loop delegation", () => {
+describe("foreman repo delegation", () => {
   /*
-   * The reason `main` hands `loop` its argv before calling `parseArgs`: this
+   * The reason `main` hands `repo` its argv before calling `parseArgs`: this
    * parser knows neither the subcommand nor the supervisor's flags, and
-   * teaching it both vocabularies would put every loop flag in two places.
+   * teaching it both vocabularies would put every supervisor flag in two places.
    */
   it("cannot parse the subcommand or the supervisor's flags", () => {
-    expect(() => parseArgs(["loop"])).toThrow(/Unknown command "loop"/);
+    expect(() => parseArgs(["repo"])).toThrow(/Unknown command "repo"/);
     expect(() => parseArgs(["--dry-run"])).toThrow(/Unrecognized argument: --dry-run/);
     expect(() => parseArgs(["--stage", "full"])).toThrow(/Unrecognized argument: --stage/);
   });
 
-  it("routes `loop --help` to the supervisor's help, not the CLI's", async () => {
-    const proc = Bun.spawn(["bun", "run", entrypoint(), "loop", "--help"], {
+  it("routes `repo --help` to the supervisor's help, not the CLI's", async () => {
+    const proc = Bun.spawn(["bun", "run", entrypoint(), "repo", "--help"], {
       cwd: repoRoot(),
       stdout: "pipe",
       stderr: "pipe",
     });
     const stdout = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
-    expect(stdout).toContain("foreman loop — Foreman supervisor");
+    expect(stdout).toContain("foreman repo — Foreman per-repo supervisor");
     expect(stdout).toContain("--dry-run");
     expect(stdout).not.toContain("Interactive installer");
   });
@@ -168,6 +168,6 @@ describe("foreman loop delegation", () => {
     const stdout = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     expect(stdout).toContain("Usage: foreman <command>");
-    expect(stdout).toContain("loop  ");
+    expect(stdout).toContain("repo  ");
   });
 });

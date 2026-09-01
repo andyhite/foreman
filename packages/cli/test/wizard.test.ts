@@ -318,7 +318,7 @@ describe("runWizard", () => {
     }
   });
 
-  it("closing message names `foreman init` as the next step, not `foreman loop`", async () => {
+  it("closing message names `foreman init` as the next step, not `foreman repo`", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
       const logs: string[] = [];
@@ -329,7 +329,7 @@ describe("runWizard", () => {
       });
 
       expect(logs.some((line) => line.includes("foreman init"))).toBe(true);
-      expect(logs.some((line) => line.includes("foreman loop"))).toBe(false);
+      expect(logs.some((line) => line.includes("foreman repo"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

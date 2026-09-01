@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { SupervisorLock } from "../src/supervisor.ts";
-import { pastIntakeWindow, repoEntryForIssue, runIntakeTick, type IntakeContext } from "../src/intake.ts";
+import { pastIntakeWindow, repoEntryForIssue, runIntakeTick, type IntakeContext } from "../src/team.ts";
 
 // ---- fixtures --------------------------------------------------------------
 

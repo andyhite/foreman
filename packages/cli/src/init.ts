@@ -330,5 +330,5 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
 
   printSection(deps.log, "Next step");
-  deps.log("  foreman loop --dry-run --once");
+  deps.log("  foreman repo --dry-run --once");
 }

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Foreman supervisor: stage workers over Linear state, reached as `foreman loop`",
+  "description": "Foreman supervisor and team-triage process: stage workers over Linear state, reached as `foreman repo` and `foreman team`",
   "dependencies": {
     "@foreman/core": "workspace:*"
   },

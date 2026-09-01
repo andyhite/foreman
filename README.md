@@ -153,14 +153,14 @@ entry, is skipped rather than guessed at. A monorepo lists several
 initiatives on one entry.
 
 Order of operations: `foreman setup` once per machine, `foreman init` once
-per repo, then Foreman is **one `foreman loop` instance per repo**: run
-`foreman loop [--repo <alias>] [--team <KEY>]` inside each Foreman-managed
+per repo, then Foreman is **one `foreman repo` instance per repo**: run
+`foreman repo [alias] [--team <KEY>]` inside each Foreman-managed
 repo — the instance's entry resolves by matching cwd against registry paths,
-or `--repo` overrides. The shared Triage inbox is consumed separately, by one
-team-level `foreman intake [--team <KEY>]` process — not by any loop
+or the positional alias overrides. The shared Triage inbox is consumed separately, by one
+team-level `foreman team [key]` process — not by any repo
 instance.
 
-Once installed, day-to-day use is `foreman loop` (below) and the `/foreman:*`
+Once installed, day-to-day use is `foreman repo` (below) and the `/foreman:*`
 slash commands inside any omp session. See [Development](#development) below
 if you want to hack on Foreman itself instead of just running it.
 
@@ -169,9 +169,9 @@ if you want to hack on Foreman itself instead of just running it.
 The supervisor polls Linear and dispatches whatever the gates allow.
 
 ```bash
-foreman loop --dry-run --once   # decide and log, dispatch nothing
-foreman loop --stage read-only  # comment and label, no code
-foreman loop --stage full       # the whole pipeline
+foreman repo --dry-run --once   # decide and log, dispatch nothing
+foreman repo --stage read-only  # comment and label, no code
+foreman repo --stage full       # the whole pipeline
 ```
 
 `loop.stage` is the global fallback and defaults to `dry-run`, so a loop started
@@ -180,24 +180,24 @@ individual worker in `loop.workerStages` when you want to validate the pipeline
 one step at a time: `dry-run` evaluates and logs only, `read-only` runs review
 only, and `full` permits that worker to dispatch. Every tick logs a per-worker
 summary plus each dispatch intent and every routing skip to stdout, so there is
-nothing for a `--verbose` flag to reveal and `foreman loop` does not take one.
-`foreman intake` still does, where it adds the skip reason for each triaged
+nothing for a `--verbose` flag to reveal and `foreman repo` does not take one.
+`foreman team` still does, where it adds the skip reason for each triaged
 issue.
 
 ```
-[foreman-loop] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
-[foreman-loop]   would dispatch plan [effective stage: dry-run] (batch): "Plotroom" has no issues yet.
-[foreman-loop]   skip plan [effective stage: dry-run] (batch): wip-stage-full — plan WIP cap (1) reached.
+[foreman-repo] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
+[foreman-repo]   would dispatch plan [effective stage: dry-run] (batch): "Plotroom" has no issues yet.
+[foreman-repo]   skip plan [effective stage: dry-run] (batch): wip-stage-full — plan WIP cap (1) reached.
 ```
 
-The `foreman-loop` prefix names the long-lived process, not the command — the
+The `foreman-repo` prefix names the long-lived process, not the command — the
 same spelling herdr uses for its pane. The loop is a singleton: a second one
 refuses to start while the first holds the lock.
 
 ### Control plane
 
-Each loop process — a repo's `foreman loop` and the team-level `foreman
-intake` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
+Each loop process — a repo's `foreman repo` and the team-level `foreman
+team` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
 speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
 after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
 `subscribe`, `pause`, `resume`, `stop`, `tick`, `setStage`, `patchConfig`,
@@ -208,7 +208,7 @@ every worker in the pass; `"now"` cuts the tick short between workers, wakes
 the poll wait immediately, and leaves in-flight dispatches to expire at lock
 TTL. The socket is live control; the file is the fallback a client reads
 when nothing is listening, which lets a status-reading client render a
-stopped loop's last-known state instead of an error. Run `foreman loop
+stopped loop's last-known state instead of an error. Run `foreman repo
 --no-control` to skip the socket entirely.
 
 ## Operator surface

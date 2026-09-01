@@ -1,9 +1,9 @@
 /**
  * `@foreman/loop` entrypoint: the two loop-package CLIs (SPEC §3.1) —
- * `foreman loop` (per-repo supervisor, §3.11) and `foreman intake`
+ * `foreman repo` (per-repo supervisor, §3.11) and `foreman team`
  * (team-level triage process, §3.12). One export surface so `packages/cli`
- * never reaches past this file into `src/main.ts` or `src/intake.ts` directly.
+ * never reaches past this file into `src/repo.ts` or `src/team.ts` directly.
  */
 
-export { runLoop } from "./main.ts";
-export { runIntake } from "./intake.ts";
+export { runRepo } from "./repo.ts";
+export { runTeam } from "./team.ts";

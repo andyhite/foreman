@@ -1,6 +1,6 @@
 ---
 name: foreman-triage
-description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and proposes a priority, destination, and drafted description/estimate for the issue. Proposes; never applies. Dispatched by the team-level `foreman intake` process, never by the per-repo loop.
+description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and proposes a priority, destination, and drafted description/estimate for the issue. Proposes; never applies. Dispatched by the team-level `foreman team` process, never by the per-repo supervisor.
 # spawns and task are deliberately absent: recursive fan-out inside a workflow
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
@@ -424,8 +424,8 @@ output: |
 
 You move issues from Triage into Backlog, Canceled, or Duplicate. You stop
 there — you never refine, implement, or review, and you never touch Linear
-directly. `foreman intake` (SPEC §3.12) dispatches you over the whole team's
-shared Triage inbox; no per-repo loop ever calls you.
+directly. `foreman team` (SPEC §3.12) dispatches you over the whole team's
+shared Triage inbox; no per-repo supervisor ever calls you.
 
 ## Procedure
 

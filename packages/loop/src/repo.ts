@@ -1,20 +1,21 @@
 /**
- * The supervisor, reached as `foreman loop` (SPEC §17.5, §17.9, §18, §3.11).
+ * The supervisor, reached as `foreman repo` (SPEC §17.5, §17.9, §18, §3.11).
  *
- * SPEC §17 names a `foreman-loop` binary; it was written before a `foreman`
- * CLI existed, and two binaries split by a hyphen is not a surface (see
- * docs/VERIFIED.md). The log prefix and the herdr pane label keep the
- * `foreman-loop` spelling, because those name the long-lived process, not the
- * command an operator types.
+ * Named for the scope it manages — one process per repo — distinct from
+ * `foreman team` (`team.ts`), which manages the shared team-wide Triage
+ * inbox. The supervisor mechanism itself keeps the "loop" vocabulary
+ * (`Supervisor`, `LOOP_VERSION`, `loop.stage` in config) because that
+ * describes how it runs, not what it's scoped to.
  *
  * Hand-rolled argument parsing — the workspace's sole runtime dependency is
  * `@sinclair/typebox` (config validation), so no CLI framework here.
  *
  * One process per repo (SPEC §3.11): the instance's registry entry resolves
- * either from `--repo <alias>` or by matching `process.cwd()` against the
- * registry, and the team resolves from `--team`, the entry's `team`, or the
- * sole team the credential can reach. Triage is not part of this loop —
- * `foreman intake` (`index.ts`) owns the shared Triage inbox (SPEC §3.12).
+ * either from a positional alias argument or by matching `process.cwd()`
+ * against the registry, and the team resolves from `--team`, the entry's
+ * `team`, or the sole team the credential can reach. Triage is not part of
+ * this process — `foreman team` (`team.ts`) owns the shared Triage inbox
+ * (SPEC §3.12).
  */
 
 import {
@@ -59,15 +60,15 @@ interface ParsedArgs {
   help: boolean;
 }
 
-const HELP_TEXT = `foreman loop — Foreman supervisor (SPEC §17, §3.11)
+const HELP_TEXT = `foreman repo — Foreman per-repo supervisor (SPEC §17, §3.11)
 
-Usage: foreman loop [options]
+Usage: foreman repo [alias] [options]
 
+  [alias]                 Registry alias to run as (default: resolved from cwd).
   --dry-run              Log what each worker would dispatch; dispatch nothing.
   --stage <s>             Override loop.stage: dry-run | read-only | full.
   --once                  Run one tick of the selected workers, then exit.
   --worker <name>          Restrict to this worker; repeatable.
-  --repo <alias>           Registry alias to run as (default: resolved from cwd).
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
   --home <path>            Home directory containing .foreman/config.json (default: real home).
   --no-control             Skip the control-plane socket/status.json; --once already implies this.
@@ -78,8 +79,8 @@ Stages (loop.stage in ~/.foreman/config.json; --stage overrides):
   read-only   Dispatch agents that only comment and label.
   full        Dispatch the whole pipeline.
 
-Triage is not part of this loop — the shared Triage inbox is consumed by
-\`foreman intake\`, one process per team. Run \`foreman intake --help\`.
+Triage is not part of this process — the shared Triage inbox is consumed by
+\`foreman team\`, one process per team. Run \`foreman team --help\`.
 `;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -120,13 +121,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.workerNames.push(value);
         break;
       }
-      case "--repo": {
-        if (i + 1 >= argv.length) throw new Error("missing value for --repo");
-        const value = argv[++i];
-        if (!value) throw new Error("--repo requires an alias");
-        parsed.repo = value;
-        break;
-      }
       case "--team": {
         if (i + 1 >= argv.length) throw new Error("missing value for --team");
         const value = argv[++i];
@@ -148,14 +142,18 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "-h":
         parsed.help = true;
         break;
-      default:
-        throw new Error(`Unrecognized argument: ${arg}`);
+      default: {
+        if (!arg || arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg ?? ""}`);
+        if (parsed.repo !== null) throw new Error(`Unexpected positional argument: ${arg}`);
+        parsed.repo = arg;
+        break;
+      }
     }
   }
   return parsed;
 }
 
-export async function runLoop(argv: readonly string[]): Promise<void> {
+export async function runRepo(argv: readonly string[]): Promise<void> {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(HELP_TEXT);
@@ -165,7 +163,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   const { config: loadedConfig, warnings } = loadGlobalConfig(
     args.homePath ? { home: args.homePath } : undefined,
   );
-  for (const warning of warnings) console.error(`[foreman-loop] ${warning}`);
+  for (const warning of warnings) console.error(`[foreman-repo] ${warning}`);
 
   // `--dry-run` / `--stage` are the operator's explicit override of the
   // autonomy rung (SPEC §17.9); they win over the config file for this run.
@@ -177,10 +175,10 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     },
   };
 
-  // Instance resolution (SPEC §3.11): `--repo` names a registry alias
-  // directly; otherwise the entry is inferred from cwd. A `ConfigError` here
-  // must exit loudly before anything is dispatched — an unresolvable
-  // instance has nothing safe to do.
+  // Instance resolution (SPEC §3.11): a positional alias argument names a
+  // registry alias directly; otherwise the entry is inferred from cwd. A
+  // `ConfigError` here must exit loudly before anything is dispatched — an
+  // unresolvable instance has nothing safe to do.
   let entry;
   try {
     entry = args.repo
@@ -188,9 +186,9 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       : entryForCwd(config, process.cwd(), args.homePath ?? undefined);
   } catch (error) {
     if (error instanceof ConfigError) {
-      console.error(`[foreman-loop] ${error.message}`);
-      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
-      console.error("[foreman-loop] run `foreman init` to register this repo, then retry.");
+      console.error(`[foreman-repo] ${error.message}`);
+      for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
+      console.error("[foreman-repo] run `foreman init` to register this repo, then retry.");
       process.exitCode = 1;
       return;
     }
@@ -211,8 +209,8 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: entry.team });
   } catch (error) {
     if (error instanceof ConfigError) {
-      console.error(`[foreman-loop] ${error.message}`);
-      for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+      console.error(`[foreman-repo] ${error.message}`);
+      for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
       process.exitCode = 1;
       return;
     }
@@ -225,7 +223,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));
 
   const log = (message: string): void => {
-    console.log(`[foreman-loop:${entry.alias}] ${message}`);
+    console.log(`[foreman-repo:${entry.alias}] ${message}`);
   };
 
   const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
@@ -269,7 +267,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
    * (a 401 from `linear.teams()` is the common case). The listening socket
    * then kept the event loop alive with `process.exitCode` set but nothing
    * left to run: the loop became a zombie holding `loop.lock`, and every
-   * later `foreman loop` in that repo failed with `LoopLockHeldError`.
+   * later `foreman repo` in that repo failed with `LoopLockHeldError`.
    */
   let controlServer: ControlServer | null = null;
   try {
@@ -381,8 +379,8 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       }
     } catch (error) {
       if (error instanceof ConfigError) {
-        console.error(`[foreman-loop] ${error.message}`);
-        for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+        console.error(`[foreman-repo] ${error.message}`);
+        for (const problem of error.problems) console.error(`[foreman-repo]   - ${problem}`);
         process.exitCode = 1;
         return;
       }

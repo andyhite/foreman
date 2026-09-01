@@ -82,7 +82,7 @@ function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Reco
 /**
  * Writes the merged config to `<home>/.foreman/config.json`, validating the
  * fully-defaulted result against `GlobalConfigSchema` first — a typo here
- * must fail before it reaches disk, not the next time `foreman-loop` starts.
+ * must fail before it reaches disk, not the next time `foreman repo` starts.
  */
 export function writeGlobalConfig(patch: ConfigPatch, home: string = homedir()): string {
   const dir = join(home, ".foreman");

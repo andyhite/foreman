@@ -1,14 +1,14 @@
 /**
  * Regression test for the zombie-loop bug (SPEC §17.4, §17.5).
  *
- * `runLoop` (packages/loop/src/main.ts) and `runIntake`
- * (packages/loop/src/intake.ts) each acquire the singleton `loop.lock`, then
+ * `runRepo` (packages/loop/src/repo.ts) and `runTeam`
+ * (packages/loop/src/team.ts) each acquire the singleton `loop.lock`, then
  * start a `ControlServer` listening on a unix socket, then run an "ensure
  * pass" that makes the process's first real Linear call. That ensure pass
  * used to `return` on a fatal `ConfigError` from a point *outside* any
  * cleanup — the listening socket kept the event loop alive with nothing left
  * to run, so the process never exited, `loop.lock` was never released, and
- * every later `foreman loop`/`foreman intake` in that repo failed with
+ * every later `foreman repo`/`foreman team` in that repo failed with
  * `LoopLockHeldError`. The fix wraps everything after lock acquisition in one
  * `try`/`finally` (see the comment above that block in both files) so the
  * lock is released and the socket is closed no matter how the run ends.
@@ -17,7 +17,7 @@
  * bug is precisely about process lifetime (does the process exit?) and open
  * OS handles (is the socket file gone?), neither of which an in-process call
  * can see — an in-process call runs in the *test's* event loop, which stays
- * alive regardless of what `runLoop` does to its own resources.
+ * alive regardless of what `runRepo` does to its own resources.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -107,9 +107,9 @@ function configForPaths(): GlobalConfig {
 
 describe("startup cleanup (zombie-loop regression)", () => {
   it("a fatal ensure-pass error releases the lock and unlinks the socket", async () => {
-    const proc = spawnForeman(["loop", "--home", home, "--repo", "demo", "--team", "ENG"]);
+    const proc = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG"]);
     const [exitCode, stderr] = await Promise.all([
-      waitForExit(proc, "foreman loop"),
+      waitForExit(proc, "foreman repo"),
       readAll(proc.stderr),
     ]);
 
@@ -121,18 +121,18 @@ describe("startup cleanup (zombie-loop regression)", () => {
   });
 
   it("two consecutive runs both fail the same way, never LoopLockHeldError", async () => {
-    const first = spawnForeman(["loop", "--home", home, "--repo", "demo", "--team", "ENG"]);
+    const first = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG"]);
     const [firstExit, firstOut, firstErr] = await Promise.all([
-      waitForExit(first, "foreman loop (run 1)"),
+      waitForExit(first, "foreman repo (run 1)"),
       readAll(first.stdout),
       readAll(first.stderr),
     ]);
     expect(firstExit).not.toBe(0);
     expect(firstOut + firstErr).not.toContain("LoopLockHeldError");
 
-    const second = spawnForeman(["loop", "--home", home, "--repo", "demo", "--team", "ENG"]);
+    const second = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG"]);
     const [secondExit, secondOut, secondErr] = await Promise.all([
-      waitForExit(second, "foreman loop (run 2)"),
+      waitForExit(second, "foreman repo (run 2)"),
       readAll(second.stdout),
       readAll(second.stderr),
     ]);
@@ -140,23 +140,23 @@ describe("startup cleanup (zombie-loop regression)", () => {
     expect(secondOut + secondErr).not.toContain("LoopLockHeldError");
   });
 
-  it("the same holds for foreman intake --once", async () => {
+  it("the same holds for foreman team --once", async () => {
     // `--once` runs a single tick outside the continuous poll loop's
     // per-tick isolation (SPEC §17.5), so a persistently bad credential is
     // still fatal here — the same "must not hang, must not zombie the lock"
-    // guarantee the `loop` tests above assert.
-    const first = spawnForeman(["intake", "--home", home, "--team", "ENG", "--once", "--no-control"]);
+    // guarantee the `repo` tests above assert.
+    const first = spawnForeman(["team", "ENG", "--home", home, "--once", "--no-control"]);
     const [firstExit, firstOut, firstErr] = await Promise.all([
-      waitForExit(first, "foreman intake (run 1)"),
+      waitForExit(first, "foreman team (run 1)"),
       readAll(first.stdout),
       readAll(first.stderr),
     ]);
     expect(firstExit).not.toBe(0);
     expect(firstOut + firstErr).not.toContain("LoopLockHeldError");
 
-    const second = spawnForeman(["intake", "--home", home, "--team", "ENG", "--once", "--no-control"]);
+    const second = spawnForeman(["team", "ENG", "--home", home, "--once", "--no-control"]);
     const [secondExit, secondOut, secondErr] = await Promise.all([
-      waitForExit(second, "foreman intake (run 2)"),
+      waitForExit(second, "foreman team (run 2)"),
       readAll(second.stdout),
       readAll(second.stderr),
     ]);
@@ -168,25 +168,25 @@ describe("startup cleanup (zombie-loop regression)", () => {
     expect(existsSync(paths.socket)).toBe(false);
   });
 
-  it("foreman intake in continuous mode survives a persistent tick error and still cleans up on SIGTERM", async () => {
-    // SPEC §17.5's per-worker isolation, mirrored for intake: a transient (or
-    // even persistent) Linear error during a tick must not crash the
-    // unattended process — it logs and retries on the next cadence. This
-    // process is still alive and well-behaved, so a graceful SIGTERM (not a
-    // crash) is what releases the lock and closes the socket.
-    const proc = spawnForeman(["intake", "--home", home, "--team", "ENG"]);
+  it("foreman team in continuous mode survives a persistent tick error and still cleans up on SIGTERM", async () => {
+    // SPEC §17.5's per-worker isolation, mirrored for the team process: a
+    // transient (or even persistent) Linear error during a tick must not
+    // crash the unattended process — it logs and retries on the next
+    // cadence. This process is still alive and well-behaved, so a graceful
+    // SIGTERM (not a crash) is what releases the lock and closes the socket.
+    const proc = spawnForeman(["team", "ENG", "--home", home]);
     const paths = loopPaths(configForPaths(), INTAKE_LOOP_ID, home);
     const deadline = Date.now() + SPAWN_TIMEOUT_MS;
     while (!existsSync(paths.lock)) {
       if (Date.now() > deadline) {
         proc.kill();
-        throw new Error("foreman intake never acquired its lock");
+        throw new Error("foreman team never acquired its lock");
       }
       await Bun.sleep(20);
     }
     proc.kill("SIGTERM");
     const [, out, err] = await Promise.all([
-      waitForExit(proc, "foreman intake (SIGTERM)"),
+      waitForExit(proc, "foreman team (SIGTERM)"),
       readAll(proc.stdout),
       readAll(proc.stderr),
     ]);
@@ -196,8 +196,8 @@ describe("startup cleanup (zombie-loop regression)", () => {
   });
 
   it("--no-control still cleans up the lock (and never created a socket)", async () => {
-    const proc = spawnForeman(["loop", "--home", home, "--repo", "demo", "--team", "ENG", "--no-control"]);
-    const exitCode = await waitForExit(proc, "foreman loop --no-control");
+    const proc = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG", "--no-control"]);
+    const exitCode = await waitForExit(proc, "foreman repo --no-control");
 
     expect(exitCode).not.toBe(0);
     const paths = loopPaths(configForPaths(), repoLoopId("demo"), home);

@@ -1,14 +1,16 @@
 /**
- * `foreman intake` — the team-level triage process (SPEC §3.12).
+ * `foreman team` — the team-level triage process (SPEC §3.12).
  *
- * One process for the whole team, separate from the per-repo `foreman loop`
- * instances (§3.11): the shared Triage inbox is a single queue, and a single
- * consumer is strictly simpler than N repo-scoped loops negotiating over it.
+ * Named for the scope it manages — one process per team — distinct from
+ * `foreman repo` (`repo.ts`), which manages a single repo. One process for
+ * the whole team, separate from the per-repo `foreman repo` instances
+ * (§3.11): the shared Triage inbox is a single queue, and a single consumer
+ * is strictly simpler than N repo-scoped instances negotiating over it.
  * It is a singleton (its own lockfile), dispatches `foreman-triage` on its
  * own window, and runs the apply pass (§7.1) on every tick so approvals are
  * picked up without a manual `/foreman-apply`.
  *
- * Hand-rolled argument parsing, same rationale as `foreman-loop`: the
+ * Hand-rolled argument parsing, same rationale as `foreman repo`: the
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
@@ -67,11 +69,11 @@ interface ParsedArgs {
   help: boolean;
 }
 
-const HELP_TEXT = `foreman intake — team-level triage process (SPEC §3.12)
+const HELP_TEXT = `foreman team — team-level triage process (SPEC §3.12)
 
-Usage: foreman intake [options]
+Usage: foreman team [key] [options]
 
-  --team <KEY>            Linear team key. Defaults to the sole team the credential can reach.
+  [key]                   Linear team key. Defaults to the sole team the credential can reach.
   --once                  Run one tick, then exit.
   --dry-run               Log what would be dispatched; dispatch nothing.
   --verbose               Log every skip, not just dispatch counts.
@@ -80,7 +82,7 @@ Usage: foreman intake [options]
   --help                  Show this text.
 
 Team-level: one process per team, not per repo. Per-repo work is
-\`foreman loop\`.
+\`foreman repo\`.
 `;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -96,13 +98,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     switch (arg) {
-      case "--team": {
-        if (i + 1 >= argv.length) throw new Error("missing value for --team");
-        const value = argv[++i];
-        if (!value) throw new Error("--team requires a key");
-        parsed.team = value;
-        break;
-      }
       case "--once":
         parsed.once = true;
         break;
@@ -126,8 +121,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "-h":
         parsed.help = true;
         break;
-      default:
-        throw new Error(`Unrecognized argument: ${arg}`);
+      default: {
+        if (!arg || arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg ?? ""}`);
+        if (parsed.team !== null) throw new Error(`Unexpected positional argument: ${arg}`);
+        parsed.team = arg;
+        break;
+      }
     }
   }
   return parsed;
@@ -465,15 +464,15 @@ function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime,
       ctx.config = config;
     },
     attachAgent: () => {
-      throw new Error("foreman intake dispatches only the shared triage batch; there is no per-agent pane to attach");
+      throw new Error("foreman team dispatches only the shared triage batch; there is no per-agent pane to attach");
     },
     killAgent: () => {
-      throw new Error("foreman intake dispatches only the shared triage batch; there is no per-agent process to kill");
+      throw new Error("foreman team dispatches only the shared triage batch; there is no per-agent process to kill");
     },
   };
 }
 
-export async function runIntake(argv: readonly string[]): Promise<void> {
+export async function runTeam(argv: readonly string[]): Promise<void> {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(HELP_TEXT);
@@ -483,7 +482,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const { config: loadedConfig, warnings } = loadGlobalConfig(
     args.configPath ? { home: args.configPath } : undefined,
   );
-  for (const warning of warnings) console.error(`[foreman-intake] ${warning}`);
+  for (const warning of warnings) console.error(`[foreman-team] ${warning}`);
 
   const config = {
     ...loadedConfig,
@@ -496,13 +495,13 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   const apiKey = resolveLinearApiKey(config);
 
   const log = (message: string): void => {
-    console.log(`[foreman-intake] ${message}`);
+    console.log(`[foreman-team] ${message}`);
   };
 
-  // Team resolution mirrors `foreman loop` via the shared `resolveTeamKey`
-  // (SPEC §3.11): `--team` flag first, then the entry's team — but intake
-  // has no registry entry, so `entryTeam` is always null and the fallback is
-  // the sole team the credential can reach.
+  // Team resolution mirrors `foreman repo` via the shared `resolveTeamKey`
+  // (SPEC §3.11): the positional team key first, then `null` — the team
+  // process has no registry entry, so `entryTeam` is always null and the
+  // fallback is the sole team the credential can reach.
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
@@ -532,9 +531,9 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     team,
     now: () => new Date(),
     log,
-    // `foreman intake` respects `loop.stage`, not just its own `--dry-run`
+    // `foreman team` respects `loop.stage`, not just its own `--dry-run`
     // (SPEC §17.9): a fresh install's config defaults `loop.stage` to
-    // `"dry-run"`, and `setStage` on this process throws — intake always
+    // `"dry-run"`, and `setStage` on this process throws — the team process
     // runs at the operator's configured autonomy, so a config left at the
     // safe default must not dispatch live triage agents just because
     // `--dry-run` itself was never passed. A getter, not a field snapshotted
@@ -550,9 +549,9 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
   /*
    * The lock is held from here on, and the control socket keeps the event
    * loop alive once it is listening — so both live inside one `finally`.
-   * `controlServer.listen()` rejecting when another intake already holds the
-   * socket must still release the lock, or the next run fails on a lock whose
-   * owner never started. Same reasoning as `main.ts`.
+   * `controlServer.listen()` rejecting when another team process already
+   * holds the socket must still release the lock, or the next run fails on
+   * a lock whose owner never started. Same reasoning as `repo.ts`.
    */
   let controlServer: ControlServer | null = null;
   try {
@@ -611,7 +610,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     if (ctx.dryRun) {
       const rule = style("yellow", "─".repeat(62));
       log(rule);
-      log(style("yellow", "DRY RUN — foreman intake will not act on issues."));
+      log(style("yellow", "DRY RUN — foreman team will not act on issues."));
       log(style("yellow", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
       log(style("yellow", "or omit --dry-run, to let it dispatch."));
       log(rule);

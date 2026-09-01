@@ -76,10 +76,11 @@ semantics while surviving every normalizer. `parseAgentOutput` enforces the
 was written before the spec had a `foreman` CLI at all — §18 puts the supervisor
 at build step 6 and the installer nowhere. Two installed binaries whose names
 differ by a hyphen is not a surface an operator can hold, so the supervisor is
-the `loop` subcommand of `foreman`, which owns every argument after it. What
-keeps the `foreman-loop` spelling is the log prefix and the herdr pane label
-(§17.3, §17.5) — those name a long-lived process, which is exactly what §17
-describes, and the pane label is what the startup guard matches on.
+the `repo` subcommand of `foreman`, which owns every argument after it. The
+team-level triage process is likewise the `team` subcommand. The log prefix
+and the herdr pane label (§17.3, §17.5) track those names — `foreman-repo` and
+`foreman-team` — naming the long-lived process, not the command, which is
+exactly what §17 describes.
 
 ## Verified runtime facts worth keeping
 

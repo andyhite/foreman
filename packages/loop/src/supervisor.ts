@@ -104,7 +104,7 @@ export interface LoopLockInfo {
 
 export class LoopLockHeldError extends Error {
   constructor(info: LoopLockInfo, path: string) {
-    super(`foreman-loop already running (pid ${info.pid}, started ${info.startedAt}). Lock file: ${path}`);
+    super(`a foreman process is already running (pid ${info.pid}, started ${info.startedAt}). Lock file: ${path}`);
     this.name = "LoopLockHeldError";
   }
 }
@@ -317,7 +317,7 @@ export class Supervisor {
     this.#printDispatcher = options.printDispatcher ?? null;
     this.#bookkeeping = options.bookkeeping;
     this.#entry = options.entry;
-    const writeLog = options.log ?? ((message: string) => console.log(`[foreman-loop] ${message}`));
+    const writeLog = options.log ?? ((message: string) => console.log(`[foreman-repo] ${message}`));
     this.#log = (message) => {
       writeLog(message);
       this.#emit({ event: "log", level: "info", line: message });

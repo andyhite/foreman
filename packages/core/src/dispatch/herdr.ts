@@ -6,8 +6,8 @@
  * initiatives from the registry, §3.11), one tab per in-flight issue named
  * for the issue, one pane per agent with `--cwd` set to the issue's
  * worktree, and a `foreman` workspace holding the board and `foreman
- * intake` panes and a scratch tab for the worktree-less triage/refine/review
- * agents — each repo workspace holds its own `foreman loop` pane.
+ * team` panes and a scratch tab for the worktree-less triage/refine/review
+ * agents — each repo workspace holds its own `foreman repo` pane.
  *
  * Everything herdr returns is read from its own JSON output — ids are never
  * predicted, because `pane move` changes a pane's qualified id and only the
