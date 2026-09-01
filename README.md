@@ -66,8 +66,11 @@ curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/insta
 It's re-runnable — running it again pulls the latest checkout and re-runs
 setup on top of your existing `~/.foreman/config.json`. An already-registered
 marketplace is reported as a skip instead of failing. Extra arguments pass
-straight through to `foreman setup`, e.g. `... | bash -s -- --yes`. Prefer
-to do it by hand:
+straight through to `foreman setup`, e.g. `... | bash -s -- --yes`. To bring an
+already-installed machine current after Foreman changes land on GitHub, don't
+re-run the installer — use `foreman update` (below); it pulls, rebuilds, and
+upgrades every registered repo's plugin in the one order that's actually safe.
+Prefer to do it by hand:
 
 ```bash
 git clone https://github.com/andyhite/foreman
@@ -137,6 +140,33 @@ omp plugin uninstall --scope user foreman@foreman
 Then run `foreman init` in each repo that should actually have Foreman — it
 installs the plugin project-scoped, into just that repo.
 
+## Updating
+
+After pushing plugin or CLI changes to GitHub, `foreman update` is the single
+command that brings a machine current — it pulls the checkout, rebuilds the
+CLI, refreshes the marketplace catalog, and upgrades the omp plugin in every
+repo registered in `~/.foreman/config.json`:
+
+```bash
+foreman update
+```
+
+Flags:
+
+| Flag | Does |
+| --- | --- |
+| `--checkout <path>` | Path to the foreman checkout (default: auto-detected). |
+| `--skip-pull` | Refresh plugins and rebuild without touching git. |
+| `--skip-plugin` | Update the checkout only; leave omp alone. |
+| `--home <path>` | Home directory for `~/.foreman` (default: real home; test hook). |
+
+`--checkout` is shared with `setup`; `--skip-plugin` is shared with `init`;
+`--home` is shared by all three. Don't reach for a bare `omp plugin
+marketplace update foreman` or a manual `git pull` — `foreman update` runs
+those steps in the order the plugin cache actually requires (see `docs/SPEC.md`
+§3.1) and upgrades every registered repo together, not just the one you're
+standing in.
+
 `foreman init` writes an entry like this to `~/.foreman/config.json`'s
 `repos` table — or edit it directly:
 
@@ -164,7 +194,8 @@ entry, is skipped rather than guessed at. A monorepo lists several
 initiatives on one entry.
 
 Order of operations: `foreman setup` once per machine, `foreman init` once
-per repo, then Foreman is **one `foreman repo` instance per repo**: run
+per repo, `foreman update` whenever Foreman changes on GitHub need to reach
+this machine, then Foreman is **one `foreman repo` instance per repo**: run
 `foreman repo [alias] [--team <KEY>]` inside each Foreman-managed
 repo — the instance's entry resolves by matching cwd against registry paths,
 or the positional alias overrides. The shared Triage inbox is consumed separately, by one

@@ -25,9 +25,10 @@ import { DEFAULT_GITHUB_REPO } from "./plugin-commands.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
 import { resolveCheckoutRoot } from "./checkout.ts";
 import { runWizard } from "./wizard.ts";
+import { runUpdate } from "./update.ts";
 
 interface ParsedArgs {
-  command: "setup" | "init" | null;
+  command: "setup" | "init" | "update" | null;
   yes: boolean;
   /** Link the foreman CLI itself to this checkout's source; setup-only. */
   link: boolean;
@@ -36,8 +37,10 @@ interface ParsedArgs {
   path: string | null;
   home: string | null;
   skipLinear: boolean;
-  /** Skip installing the omp plugin; init-only. */
+  /** Skip the omp plugin; init installs none, update refreshes none. */
   skipPlugin: boolean;
+  /** Refresh without touching git; update-only. */
+  skipPull: boolean;
   help: boolean;
   initiatives: string[];
   alias: string | null;
@@ -51,10 +54,12 @@ Usage: foreman <command> [options]
 Commands:
   setup                    Per-machine install: tool preflight, Linear credential, omp marketplace catalog.
   init                     Per-repo: register this directory in the repos registry and install the omp plugin for it.
+  update                   Pull Foreman's source, rebuild the CLI, and re-sync the omp plugin in every registered repo.
   repo                     Run the per-repo supervisor; \`foreman repo --help\` for its flags.
   team                     Run the team-level triage process; \`foreman team --help\` for its flags.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`repo\` per repo.
+Run \`update\` after pulling or pushing changes to bring the machine current.
 
 Options for setup:
   --link                     Dev mode: link the foreman CLI to this checkout's source (no rebuild-to-see-changes).
@@ -68,38 +73,48 @@ Options for init:
   --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
   --skip-plugin               Skip installing the omp plugin for this repo.
 
-Options for both:
+Options for update:
+  --checkout <path>          Path to the foreman checkout (default: auto-detected).
+  --skip-pull                Rebuild and refresh plugins without touching git.
+  --skip-plugin               Update the checkout only; leave omp alone.
+
+Options for all commands:
   -y, --yes                 Accept defaults for every prompt (non-interactive).
   --home <path>              Home directory for ~/.foreman (default: real home; test hook).
   --skip-linear               Skip Linear API access.
   --help, -h                  Show this text.
 `;
 
+/**
+ * Rejects a flag aimed at the wrong command. Table-driven rather than the
+ * previous pair of "setup-only"/"init-only" lists: with a third command and
+ * flags deliberately shared by two of them — `--checkout` by setup and
+ * update, `--skip-plugin` by init and update — a pairwise scheme no longer
+ * describes the surface, and silently accepting a misaimed flag is how an
+ * operator ends up believing they skipped a step they didn't.
+ */
 function validateCommandFlags(parsed: ParsedArgs): void {
-  if (!parsed.command) return;
+  const command = parsed.command;
+  if (!command) return;
 
-  const setupOnly = [
-    parsed.link ? "--link" : null,
-    parsed.githubRepo !== DEFAULT_GITHUB_REPO ? "--repo-source" : null,
-    parsed.checkoutPath ? "--checkout" : null,
-  ].filter((flag): flag is string => flag !== null);
+  const flags: { flag: string; supplied: boolean; commands: readonly string[] }[] = [
+    { flag: "--link", supplied: parsed.link, commands: ["setup"] },
+    { flag: "--repo-source", supplied: parsed.githubRepo !== DEFAULT_GITHUB_REPO, commands: ["setup"] },
+    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "update"] },
+    { flag: "--path", supplied: parsed.path !== null, commands: ["init"] },
+    { flag: "--initiative", supplied: parsed.initiatives.length > 0, commands: ["init"] },
+    { flag: "--alias", supplied: parsed.alias !== null, commands: ["init"] },
+    { flag: "--team", supplied: parsed.team !== null, commands: ["init"] },
+    { flag: "--skip-linear", supplied: parsed.skipLinear, commands: ["setup", "init"] },
+    { flag: "--skip-plugin", supplied: parsed.skipPlugin, commands: ["init", "update"] },
+    { flag: "--skip-pull", supplied: parsed.skipPull, commands: ["update"] },
+  ];
 
-  const initOnly = [
-    parsed.path ? "--path" : null,
-    parsed.initiatives.length > 0 ? "--initiative" : null,
-    parsed.alias ? "--alias" : null,
-    parsed.team !== null ? "--team" : null,
-    parsed.skipPlugin ? "--skip-plugin" : null,
-  ].filter((flag): flag is string => flag !== null);
-
-  if (parsed.command === "init" && setupOnly.length > 0) {
+  for (const entry of flags) {
+    if (!entry.supplied || entry.commands.includes(command)) continue;
+    const owners = entry.commands.map((name) => `\`foreman ${name}\``).join(" or ");
     throw new Error(
-      `${setupOnly[0]} applies to \`foreman setup\`, not \`foreman init\`. Run \`foreman --help\` for the command list.`,
-    );
-  }
-  if (parsed.command === "setup" && initOnly.length > 0) {
-    throw new Error(
-      `${initOnly[0]} applies to \`foreman init\`, not \`foreman setup\`. Run \`foreman --help\` for the command list.`,
+      `${entry.flag} applies to ${owners}, not \`foreman ${command}\`. Run \`foreman --help\` for the command list.`,
     );
   }
 }
@@ -115,13 +130,14 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     home: null,
     skipLinear: false,
     skipPlugin: false,
+    skipPull: false,
     help: false,
     initiatives: [],
     alias: null,
     team: null,
   };
 
-  const setCommand = (command: "setup" | "init"): void => {
+  const setCommand = (command: "setup" | "init" | "update"): void => {
     if (parsed.command) {
       throw new Error(`Multiple commands supplied: "${parsed.command}" and "${command}".`);
     }
@@ -134,11 +150,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     switch (arg) {
       case "setup":
       case "init":
+      case "update":
         setCommand(arg);
         break;
       case "-y":
       case "--yes":
         parsed.yes = true;
+        break;
+      case "--skip-pull":
+        parsed.skipPull = true;
         break;
       case "--link":
         parsed.link = true;
@@ -252,6 +272,24 @@ async function main(): Promise<void> {
           team: args.team ?? undefined,
         },
         { prompter, log, git: nodeRunner, runner: processRunner },
+      );
+      return;
+    }
+
+    /*
+     * `update` resolves the checkout the same way `setup` does — it rebuilds
+     * that source tree — but takes no prompts: every step is derived from the
+     * registry and the checkout's git state, so there is nothing to ask.
+     */
+    if (args.command === "update") {
+      await runUpdate(
+        {
+          checkoutRoot: resolveCheckoutRoot(args.checkoutPath),
+          home: args.home ?? homedir(),
+          skipPull: args.skipPull,
+          skipPlugin: args.skipPlugin,
+        },
+        { runner: processRunner, log },
       );
       return;
     }

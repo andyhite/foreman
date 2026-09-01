@@ -30,7 +30,14 @@ import { basename } from "node:path";
 import { looksLikeForemanRoot } from "./checkout.ts";
 import { readGlobalConfig, writeGlobalConfig } from "./global-config.ts";
 import type { Runner } from "./exec.ts";
-import { DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME, ompInstallArgv, ompPluginListArgv, ompUninstallUserArgv } from "./plugin-commands.ts";
+import {
+  DEFAULT_OMP_PLUGIN_NAME,
+  FOREMAN_MARKETPLACE_NAME,
+  findPluginScopes,
+  ompInstallArgv,
+  ompPluginListArgv,
+  ompUninstallUserArgv,
+} from "./plugin-commands.ts";
 import { linkProjectPluginToCheckout } from "./plugin-link.ts";
 import type { CheckboxChoice, Prompter } from "./prompt.ts";
 import { printSection, style } from "./tui.ts";
@@ -228,19 +235,6 @@ async function detectBaseBranch(repoRoot: string, git: CommandRunner): Promise<s
     const { stdout } = await git.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
     return stdout.trim();
   }
-}
-
-/** Scans `omp plugin list` output for a plugin@marketplace entry's scope(s). */
-function findPluginScopes(stdout: string, pluginName: string, marketplace: string): { project: boolean; user: boolean } {
-  const needle = `${pluginName}@${marketplace}`;
-  let project = false;
-  let user = false;
-  for (const line of stdout.split("\n")) {
-    if (!line.includes(needle)) continue;
-    if (line.includes("project")) project = true;
-    if (line.includes("user")) user = true;
-  }
-  return { project, user };
 }
 
 /**

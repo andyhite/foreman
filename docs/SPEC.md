@@ -88,6 +88,34 @@ than an omp command, for the reason above — see `packages/cli/src/plugin-link.
 `/reload-plugins` applies Markdown changes (agents, skills, commands, rules)
 without a restart either way; a changed extension needs `bun run build`.
 
+**`foreman update` — the machine-refresh contract.** After Foreman changes
+land on GitHub, `foreman update` is the only supported way to bring a
+machine current; a hand-rolled `omp plugin marketplace update` or `git pull`
+is not equivalent and MUST NOT be recommended in its place. It runs, in this
+fixed order: (1) pull the Foreman checkout (`git pull --ff-only`, skippable
+with `--skip-pull`); (2) rebuild it (`bun install && bun run build`); (3)
+refresh the omp marketplace catalog (`omp plugin marketplace update
+foreman`); (4) upgrade the omp plugin (`omp plugin upgrade foreman@foreman`)
+in every repo listed in the `repos` registry (§3.10) that has it installed,
+skippable entirely with `--skip-plugin`. Steps 3 and 4 MUST run in that
+order and MUST NOT be reordered or split across separate invocations,
+because `omp plugin upgrade` never fetches from GitHub — it only re-copies
+the marketplace clone already on disk, so upgrading before the marketplace
+refresh silently reinstalls stale content. Step 2 MUST precede any use of
+the `foreman` binary the pull produced, because the installed `foreman`
+command is a symlink to `packages/cli/dist/main.js`; a pull without a
+rebuild leaves the operator running the previous build under the new
+source. Step 4 MUST run against every registered repo in the same pass, not
+just the repo the operator happens to be standing in: the plugin cache is
+version-keyed (`~/.omp/plugins/cache/plugins/foreman___foreman___<version>`),
+every repo's project-scoped install is a symlink into that one shared
+directory, and upgrading a single repo past a version bump deletes the
+superseded cache directory — stranding every other registered repo's
+symlink. `foreman update` treats a marketplace-refresh failure as fatal to
+the whole run (it stops before touching any repo, per the invariant above)
+and treats each repo's plugin upgrade as independently best-effort, so one
+repo missing project scope or failing to upgrade does not block the rest.
+
 ```
 packages/omp-plugin/
   .claude-plugin/plugin.json

@@ -1,5 +1,6 @@
 /**
- * Pure argv builders for the omp plugin CLI (SPEC §3.1, §17.4).
+ * The omp plugin CLI surface Foreman drives: argv builders and the one
+ * parser for its output (SPEC §3.1, §17.4).
  *
  * Kept separate from execution so `foreman init`'s command choices are
  * testable without a live omp install. The plugin is always installed
@@ -43,4 +44,37 @@ export function ompInstallArgv(pluginName: string): string[] {
 /** Removes a stray machine-wide install, e.g. one left over from before this project-scope cutover. */
 export function ompUninstallUserArgv(pluginName: string): string[] {
   return ["plugin", "uninstall", "--scope", "user", `${pluginName}@${FOREMAN_MARKETPLACE_NAME}`];
+}
+
+/**
+ * Pulls the marketplace's GitHub clone. Required before any upgrade: omp's
+ * `upgrade` re-copies whatever the local clone already holds and never
+ * fetches, so without this a "successful" upgrade reinstalls stale bits
+ * (verified against omp 18.1.2).
+ */
+export function ompMarketplaceUpdateArgv(): string[] {
+  return ["plugin", "marketplace", "update", FOREMAN_MARKETPLACE_NAME];
+}
+
+/**
+ * Re-copies the refreshed clone into the version-keyed plugin cache and
+ * repoints this repo's link at it. Must be run in *every* registered repo,
+ * not just one: upgrading a repo to a new version deletes the superseded
+ * cache directory, and any repo still linked to it is left dangling.
+ */
+export function ompUpgradeArgv(pluginName: string): string[] {
+  return ["plugin", "upgrade", `${pluginName}@${FOREMAN_MARKETPLACE_NAME}`];
+}
+
+/** Scans `omp plugin list` output for a plugin@marketplace entry's scope(s). */
+export function findPluginScopes(stdout: string, pluginName: string, marketplace: string): { project: boolean; user: boolean } {
+  const needle = `${pluginName}@${marketplace}`;
+  let project = false;
+  let user = false;
+  for (const line of stdout.split("\n")) {
+    if (!line.includes(needle)) continue;
+    if (line.includes("project")) project = true;
+    if (line.includes("user")) user = true;
+  }
+  return { project, user };
 }
