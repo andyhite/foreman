@@ -101,8 +101,6 @@ export interface AppState {
   logs: LogLine[];
   logFollow: boolean;
   logFilter: string;
-  /** Whether `logs` merges both loops or shows only the focused one — view-local UI state, not config. */
-  logsAllLoops: boolean;
   /** The `pipeline` view's id/title substring filter — view-local UI state, not config. */
   pipelineFilter: string;
   settingsEdits: Record<string, string | number | boolean>;
@@ -121,7 +119,7 @@ export type Action =
   | { type: "nextView" }
   | { type: "prevView" }
   | { type: "focusLoop"; index: number }
-  | { type: "cycleLoop" }
+  | { type: "cycleLoop"; direction?: 1 | -1 }
   | { type: "moveCursor"; view: string; delta: number; max: number }
   | { type: "setCursor"; view: string; index: number }
   | { type: "setScroll"; view: string; scroll: number }
@@ -137,7 +135,6 @@ export type Action =
   | { type: "modalInput"; value: string }
   | { type: "setLogFollow"; follow: boolean }
   | { type: "setLogFilter"; filter: string }
-  | { type: "setLogsAllLoops"; value: boolean }
   | { type: "setPipelineFilter"; filter: string }
   | { type: "editSetting"; key: string; value: string | number | boolean }
   | { type: "deleteSettingEdit"; key: string }
@@ -171,7 +168,6 @@ export function initialState(input: {
     logs: [],
     logFollow: true,
     logFilter: "",
-    logsAllLoops: false,
     pipelineFilter: "",
     settingsEdits: {},
     settingsError: null,
@@ -236,11 +232,14 @@ export function reduce(state: AppState, action: Action): AppState {
     case "focusLoop":
       return { ...state, focusedLoop: clampIndex(action.index, state.loops.length) };
 
-    case "cycleLoop":
+    case "cycleLoop": {
+      const direction = action.direction ?? 1;
       return {
         ...state,
-        focusedLoop: state.loops.length === 0 ? 0 : (state.focusedLoop + 1) % state.loops.length,
+        focusedLoop:
+          state.loops.length === 0 ? 0 : (state.focusedLoop + direction + state.loops.length) % state.loops.length,
       };
+    }
 
     case "moveCursor": {
       const current = state.cursor[action.view] ?? 0;
@@ -330,12 +329,6 @@ export function reduce(state: AppState, action: Action): AppState {
     case "setLogFilter":
       return { ...state, logFilter: action.filter };
 
-    case "setLogsAllLoops":
-      return {
-        ...state,
-        logsAllLoops: action.value,
-        logFollow: true,
-      };
 
     case "setPipelineFilter":
       return { ...state, pipelineFilter: action.filter };
@@ -367,6 +360,12 @@ export function reduce(state: AppState, action: Action): AppState {
   }
 }
 
+/**
+ * The single loop every view and operator command is scoped to.
+ *
+ * The tab bar makes this selection explicit; callers still use this narrow
+ * accessor so no view can accidentally recover a second loop from state.
+ */
 export function focusedPane(state: AppState): LoopPane | null {
   return state.loops[state.focusedLoop] ?? null;
 }

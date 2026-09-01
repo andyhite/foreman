@@ -2,9 +2,8 @@
  * Merged event stream (contract §Views/logs.ts).
  *
  * Logs arrive over the control socket per loop and get merged in the store;
- * this view is the tail of that merge, filtered to the focused loop by
- * default because the two loops' logs interleaved by wall clock are rarely
- * what the operator wants to read together.
+ * this view is the tail of that merge, filtered to the active scope because
+ * interleaved logs from two loops are rarely useful to read together.
  */
 import type { Canvas, Key, Rect } from "@foreman/core";
 import type { LogViewLine } from "@foreman/core";
@@ -15,13 +14,6 @@ import type { View, ViewContext } from "../view.ts";
 
 const VIEW_ID = "logs";
 
-function showAllLoops(ctx: ViewContext): boolean {
-  return ctx.state.logsAllLoops;
-}
-
-function logsScrollKey(ctx: ViewContext): string {
-  return showAllLoops(ctx) ? "logs:all" : "logs:focused";
-}
 
 function toneFor(level: "info" | "warn" | "error"): "danger" | "warn" | undefined {
   if (level === "error") return "danger";
@@ -38,10 +30,9 @@ interface WindowedLogs {
  * any of it into styled segments — the segment mapping allocates a theme
  * lookup per line, which is wasted work for every line scrolled out of view. */
 function windowedLines(ctx: ViewContext, focusedLoopId: string | null, height: number, storedScroll: number): WindowedLogs {
-  const all = showAllLoops(ctx);
   const needle = ctx.state.logFilter.toLowerCase();
   const filtered = ctx.state.logs.filter((line) => {
-    if (!all && line.loopId !== focusedLoopId) return false;
+    if (line.loopId !== focusedLoopId) return false;
     if (needle && !line.line.toLowerCase().includes(needle)) return false;
     return true;
   });
@@ -55,7 +46,6 @@ function windowedLines(ctx: ViewContext, focusedLoopId: string | null, height: n
       { text: " " },
       { text: line.level.padEnd(5), sgr: tone ? ctx.theme.toneSgr(tone) : "" },
       { text: " " },
-      ...(all ? [{ text: `${line.loopId} `, sgr: ctx.theme.toneSgr("accent") }] : []),
       { text: line.line },
     ];
     return segments;
@@ -74,7 +64,7 @@ export const logsView: View = {
 
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
-    const title = showAllLoops(ctx) ? "logs — both loops" : `logs — ${pane?.label ?? "—"}`;
+    const title = `logs — ${pane?.label ?? "—"}`;
     const followLabel = ctx.state.logFollow ? "following" : "pinned";
     const filterLabel = ctx.state.logFilter ? ` · /${ctx.state.logFilter}` : "";
     const inner = panel(canvas, rect, {
@@ -83,7 +73,7 @@ export const logsView: View = {
       focused: true,
       footer: `${followLabel}${filterLabel}`,
     });
-    const scrollKey = logsScrollKey(ctx);
+    const scrollKey = VIEW_ID;
     const stored = ctx.state.scroll[scrollKey] ?? 0;
     const { lines, scroll } = windowedLines(ctx, pane?.id ?? null, inner.height, stored);
     logView(canvas, inner, { theme: ctx.theme, lines, scroll: 0, follow: ctx.state.logFollow });
@@ -91,7 +81,7 @@ export const logsView: View = {
   },
 
   handleKey(key: Key, ctx: ViewContext): boolean {
-    const scrollKey = logsScrollKey(ctx);
+    const scrollKey = VIEW_ID;
     if (matchesKey(key, "f")) {
       ctx.dispatch({ type: "setLogFollow", follow: !ctx.state.logFollow });
       return true;
@@ -111,10 +101,6 @@ export const logsView: View = {
     }
     if (matchesKey(key, "escape") && ctx.state.logFilter) {
       ctx.dispatch({ type: "setLogFilter", filter: "" });
-      return true;
-    }
-    if (matchesKey(key, "A")) {
-      ctx.dispatch({ type: "setLogsAllLoops", value: !showAllLoops(ctx) });
       return true;
     }
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
@@ -153,7 +139,6 @@ export const logsView: View = {
     return [
       ["f", ctx.state.logFollow ? "unfollow" : "follow"],
       ["/", "filter"],
-      ["A", showAllLoops(ctx) ? "this loop" : "both loops"],
     ];
   },
 };

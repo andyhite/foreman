@@ -132,7 +132,7 @@ describe("views — no style leaks", () => {
 const CONTENT_RECT: Rect = { x: 0, y: 0, width: 160, height: 50 };
 
 describe("views — content", () => {
-  it("overview shows both loops, run state, stage, pid, wip, board counts, workers, backpressure reason", () => {
+  it("overview shows the scoped loop's run state, stage, pid, wip, board counts, workers, and backpressure reason", () => {
     const state = makeLiveState();
     const ctx = makeContext(state);
     const canvas = canvasFor(CONTENT_RECT);
@@ -140,7 +140,7 @@ describe("views — content", () => {
     const text = stripAnsi(canvas.toLines().join("\n"));
 
     expect(text).toContain("demo");
-    expect(text).toContain("intake");
+    expect(text).not.toContain("intake");
     expect(text).toContain("running");
     expect(text).toContain("full");
     expect(text).toContain("pid 4242");
@@ -233,6 +233,25 @@ describe("views — content", () => {
     const hidden = stripAnsi(filteredCanvas.toLines().join("\n"));
     expect(hidden).not.toContain("starting up");
     expect(hidden).not.toContain("widget exploded");
+  });
+
+  it("logs stay scoped and no longer handles A", () => {
+    const state = makeLiveState();
+    const [active, inactive] = state.loops;
+    if (!active || !inactive) throw new Error("expected two loop fixtures");
+    const scoped = {
+      ...state,
+      logs: [
+        { seq: 1, at: "2026-08-29T00:00:00.000Z", level: "info" as const, loopId: active.id, line: "active log" },
+        { seq: 2, at: "2026-08-29T00:00:01.000Z", level: "info" as const, loopId: inactive.id, line: "other loop log" },
+      ],
+    };
+    const canvas = canvasFor(CONTENT_RECT);
+    logsView.render(canvas, CONTENT_RECT, makeContext(scoped));
+    const text = stripAnsi(canvas.toLines().join("\n"));
+    expect(text).toContain("active log");
+    expect(text).not.toContain("other loop log");
+    expect(logsView.handleKey(key("A"), makeContext(scoped))).toBe(false);
   });
 
   it("overview identifies each worker's effective stage when a worker overrides the fallback", () => {

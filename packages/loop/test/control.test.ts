@@ -169,7 +169,17 @@ describe("createControlHandlers — delegation", () => {
     supervisor.acquireLock();
     const handlers = createControlHandlers({ supervisor });
 
-    expect(await handlers.snapshot()).toEqual(supervisor.snapshot());
+    /*
+     * `runtime.uptimeMs` is derived from the wall clock at snapshot time, so
+     * two snapshots taken microseconds apart differ by design. Comparing the
+     * whole object made this assertion fail whenever the two calls straddled
+     * a millisecond boundary. Delegation is what is under test: that the
+     * handler returns the supervisor's own snapshot rather than building one.
+     */
+    const delegated = await handlers.snapshot();
+    const direct = supervisor.snapshot();
+    expect({ ...delegated.runtime, uptimeMs: 0 }).toEqual({ ...direct.runtime, uptimeMs: 0 });
+    expect(delegated.loop).toEqual(direct.loop);
 
     handlers.setStage("read-only");
     expect(supervisor.snapshot().runtime.stage).toBe("read-only");

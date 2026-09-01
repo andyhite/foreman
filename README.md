@@ -221,17 +221,29 @@ foreman tui
 Run it inside a repo already registered with `foreman init`. It attaches to
 — or, unless started with `--no-start`, launches — two loops: this repo's
 own (`repo:<alias>`) and the shared, team-wide `foreman intake` process
-(above), each over the control plane described above. Seven views, cycled
-with `tab`/`shift-tab` or jumped to directly with `1`-`7`:
+(above), each over the control plane described above.
+
+**Every view is scoped to exactly one loop.** The scope is a segmented
+control leading the tab bar, so what you are looking at is never a mode you
+have to remember:
+
+```
+┃ demo live ┃ intake offline ┃│ 1 overview │ 2 agents │ 3 pipeline │ …
+```
+
+`L` cycles the scope; `[` and `]` step it. Both loops stay on screen with
+their connection state, so an intake loop that died is visible while you
+work on the repo loop. Seven views, cycled with `tab`/`shift-tab` or jumped
+to directly with `1`-`7`:
 
 | View | Shows |
 | --- | --- |
-| `overview` | Both loops side by side: run state, stage, WIP gauges, board counts, dispatch sparkline, and the per-worker table of last run, next run, dispatched, skipped, errors |
+| `overview` | The scoped loop: run state, stage, WIP gauges, board counts, dispatch sparkline, and the per-worker table of last run, next run, dispatched, skipped, errors |
 | `agents` | In-flight dispatches with age and lock TTL; `enter` attaches the herdr pane, `x` kills one |
 | `pipeline` | The board — Backlog, Todo, In Progress, In Review depth, and the issues behind them |
 | `blocks` | The `blocked:*` queue, with each `BlockRecord`'s question, options, and recommendation |
 | `proposals` | The `agent:proposed` queue awaiting approval |
-| `logs` | The merged event and log stream from the focused loop |
+| `logs` | The scoped loop's event and log stream; `f` follows the tail, `/` filters |
 | `settings` | The config table below, edited live |
 
 Each data view distinguishes live, file-backed, reconnecting, and offline
@@ -249,12 +261,13 @@ them in sync.
 | `1-7` | jump to view | — |
 | `tab` | next view | — |
 | `shift-tab` | previous view | — |
-| `L` | cycle focused loop | — |
+| `] / L` | next loop scope | — |
+| `[` | previous loop scope | — |
 | `r` | refresh snapshot | — |
-| `s` | start focused loop | — |
-| `S` | stop focused loop | — |
-| `p` | pause / resume focused loop | — |
-| `t` | tick focused loop | — |
+| `s` | start the scoped loop | — |
+| `S` | stop the scoped loop | — |
+| `p` | pause / resume the scoped loop | — |
+| `t` | tick the scoped loop | — |
 | `g` | cycle autonomy stage | — |
 | `↑↓` | select row | agents |
 | `enter / a` | attach agent | agents |
@@ -275,7 +288,6 @@ them in sync.
 | `y` | copy apply command | proposals |
 | `f` | follow / pin tail | logs |
 | `/` | substring filter | logs |
-| `A` | focused / all loops | logs |
 | `enter` | edit field | settings |
 | `←/→` | adjust value | settings |
 | `space` | toggle boolean | settings |

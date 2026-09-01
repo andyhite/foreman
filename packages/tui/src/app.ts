@@ -126,13 +126,16 @@ export class TuiHost {
     const segments: Array<{ text: string; tone?: "header" | "warn" }> = [{ text: "foreman", tone: "header" }];
     if (this.#state.repoAlias) segments.push({ text: this.#state.repoAlias });
     if (this.#state.team) segments.push({ text: this.#state.team });
+    /*
+     * The scope control in the tab bar already names every loop and carries
+     * each one's connection chip, so repeating the active loop's label and
+     * chip here painted the same two facts twice — and read as a duplicate
+     * (`foreman  demo  acme  demo  live`) whenever the repo alias and the
+     * loop label coincide, which is the common case. What stays is what the
+     * scope chip has no room for: how the active loop is dispatching, and
+     * why it is not running.
+     */
     if (pane) {
-      segments.push({ text: pane.label });
-      const chip = connectionChip(pane, this.#state.now);
-      segments.push({
-        text: chip,
-        tone: pane.connection === "live" ? undefined : "warn",
-      });
       const runtime = pane.snapshot?.runtime;
       if (runtime) {
         segments.push({ text: runtime.dispatcher });
@@ -143,13 +146,6 @@ export class TuiHost {
       if (pane.error) {
         segments.push({ text: pane.error, tone: "warn" });
       }
-    }
-    for (const loopPane of this.#state.loops) {
-      if (loopPane === pane) continue;
-      segments.push({
-        text: `${loopPane.label}:${connectionChip(loopPane, this.#state.now)}`,
-        tone: loopPane.connection === "live" ? undefined : "warn",
-      });
     }
     // Paint each segment as plain text plus its own sgr — a pre-styled
     // joined string would burn one canvas column per escape byte and
@@ -166,7 +162,15 @@ export class TuiHost {
   #renderTabs(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const labels = this.#views.map((view) => view.title);
     const badges = this.#views.map((view) => view.badge?.(ctx) ?? null);
-    tabsBar(canvas, rect, { theme: this.#theme, labels, active: this.#state.activeView, badges });
+    const leading = {
+      segments: this.#state.loops.map((pane) => ({
+        label: pane.label,
+        badge: connectionChip(pane, this.#state.now),
+        tone: pane.connection === "live" ? undefined : ("warn" as const),
+      })),
+      active: this.#state.focusedLoop,
+    };
+    tabsBar(canvas, rect, { theme: this.#theme, labels, active: this.#state.activeView, badges, leading });
   }
 
   #renderFooter(canvas: Canvas, rect: Rect, ctx: ViewContext, view: View | undefined): void {
@@ -277,8 +281,12 @@ export class TuiHost {
         return;
       }
     }
-    if (matchesKey(key, "L")) {
-      this.#dispatch({ type: "cycleLoop" });
+    if (matchesKey(key, "L") || matchesKey(key, "]")) {
+      this.#dispatch({ type: "cycleLoop", direction: 1 });
+      return;
+    }
+    if (matchesKey(key, "[")) {
+      this.#dispatch({ type: "cycleLoop", direction: -1 });
       return;
     }
     if (matchesKey(key, "r")) {

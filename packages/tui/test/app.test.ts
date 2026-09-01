@@ -142,6 +142,20 @@ describe("TuiHost — start/stop/pause the focused loop", () => {
   });
 });
 
+describe("TuiHost — loop scope", () => {
+  it("switches scope with L, ] and [", () => {
+    const { session } = makeFakeSession();
+    const host = makeHost(session);
+
+    host.handleKey(key("]"));
+    expect(host.state.focusedLoop).toBe(1);
+    host.handleKey(key("L"));
+    expect(host.state.focusedLoop).toBe(0);
+    host.handleKey(key("["));
+    expect(host.state.focusedLoop).toBe(1);
+  });
+});
+
 describe("TuiHost — modals", () => {
   it("q dismisses the help modal", () => {
     const { session } = makeFakeSession();

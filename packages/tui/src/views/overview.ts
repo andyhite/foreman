@@ -1,19 +1,19 @@
 /**
- * `overview` — the landing view and the answer to "what is my loop doing
- * right now" for both the repo loop and the intake loop side by side.
+ * `overview` — the landing view and the answer to "what is my active loop
+ * doing right now."
  *
- * Every other view acts on one focused loop; this one deliberately never
- * does, because an operator's first question after opening the TUI is
- * always about both processes at once, not whichever happened to be
- * focused last session.
+ * Scope is selected in the chrome, not inferred from this view. Keeping the
+ * overview inside that same scope means its dense worker table can use the
+ * whole body instead of making two loops compete for a few visible rows.
  */
 
-import type { AgentView, Canvas, Rect } from "@foreman/core";
-import { BOX, gauge, matchesKey, panel, sparkline, splitHorizontal, splitVertical, table } from "@foreman/core";
+import type { AgentView, Canvas, LoopSnapshot, Rect } from "@foreman/core";
+import { gauge, matchesKey, panel, sparkline, splitVertical, table } from "@foreman/core";
 import { countdown, duration, relativeTime } from "../format.ts";
-import type { LoopPane } from "../store.ts";
-import { cursorFor } from "../store.ts";
+import { listDetailLayout } from "../layout.ts";
 import { displaySnapshot, paneIdleMessage, staleWatermark } from "../pane.ts";
+import type { LoopPane } from "../store.ts";
+import { cursorFor, focusedPane } from "../store.ts";
 import type { View, ViewContext } from "../view.ts";
 
 interface WorkerRow {
@@ -26,13 +26,52 @@ interface WorkerRow {
   lastSkips: Array<{ issueId: string | null; code: string; message: string }>;
 }
 
-function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext, focused: boolean): void {
+/**
+ * Places complete facts on successive lines rather than relying on Canvas
+ * clipping. At normal widths this is one line; when the terminal narrows, a
+ * worker's effective stage remains legible instead of the rightmost stages
+ * silently disappearing.
+ */
+function packLines(parts: readonly string[], width: number): string[] {
+  if (width <= 0) return [];
+  const lines: string[] = [];
+  let line = "";
+  for (const part of parts) {
+    const next = line ? `${line} · ${part}` : part;
+    if (line && next.length > width) {
+      lines.push(line);
+      line = part;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function boardLines(board: LoopSnapshot["board"], ctx: ViewContext, width: number): string[] {
+  return packLines(
+    [
+      `backlog ${board.backlog}`,
+      `todo ${board.todo}`,
+      `in-progress ${board.inProgress}`,
+      `in-review ${board.inReview}`,
+      `blocked ${board.blocked}`,
+      `proposals ${board.proposals}`,
+      `ready ${board.readyBuffer}/${ctx.state.config.loop?.readyBufferTarget ?? "?"}`,
+      `triage ${board.triageInbox}`,
+    ],
+    width,
+  );
+}
+
+function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext): void {
   const theme = ctx.theme;
   const inner = panel(canvas, rect, {
     theme,
     title: pane.label,
     subtitle: pane.kind === "intake" ? "team-wide Triage inbox" : undefined,
-    focused,
+    focused: true,
   });
   if (inner.width <= 0 || inner.height <= 0) return;
 
@@ -41,89 +80,106 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
     const { line1, line2 } = paneIdleMessage(pane);
     const y = inner.y + Math.floor(inner.height / 2);
     canvas.text(inner.x + 1, y, line1, theme.toneSgr("muted"));
-    if (line2) canvas.text(inner.x + 1, y + 1, line2, theme.toneSgr("muted"));
+    if (line2 && y + 1 < inner.y + inner.height) canvas.text(inner.x + 1, y + 1, line2, theme.toneSgr("muted"));
     return;
   }
-  const watermark = staleWatermark(pane, ctx.state.now);
-  if (watermark) {
-    canvas.text(inner.x + 1, inner.y, watermark, theme.toneSgr("warn"));
-  }
-
-  const rows = splitVertical(inner, [
-    { fixed: 3 },
-    { fixed: 2 + snapshot.wip.byStage.length },
-    { fixed: 3 },
-    { fixed: 2 },
-    { flex: 1 },
-    { fixed: snapshot.backpressure.tripped ? 1 : 0 },
-  ]);
-  const [stateBlock, wipBlock, boardBlock, sparkBlock, workerBlock, alertBlock] = rows as [
-    Rect,
-    Rect,
-    Rect,
-    Rect,
-    Rect,
-    Rect,
-  ];
 
   const { runtime } = snapshot;
   const workerStages =
     pane.kind === "repo"
-      ? ["plan", "refine", "implement", "review"]
-          .map((worker) => `${worker} ${ctx.state.config.loop.workerStages[worker as keyof typeof ctx.state.config.loop.workerStages] ?? runtime.stage}`)
-          .join(" · ")
-      : null;
-  const stageLabel = workerStages ? `${workerStages} · fallback ${runtime.stage}` : runtime.stage;
-  /*
-   * Two panes share the terminal, so this line has roughly half the width to
-   * work with. `status.json 2m old` is the honest phrasing but truncates to
-   * `status.js` at 120 columns — which reads as a stray filename rather than
-   * a staleness warning, the one thing this badge exists to convey. `stale`
-   * plus the age survives the truncation the header chip cannot.
-   */
-  const connBadge =
-    pane.connection === "file"
-      ? `stale ${relativeTime(snapshot.runtime.lastTickAt, ctx.state.now)}`
-      : pane.connection;
-  canvas.text(stateBlock.x, stateBlock.y, `${runtime.state} · ${stageLabel} · ${runtime.dispatcher}`, theme.sgr());
-  canvas.text(
-    stateBlock.x,
-    stateBlock.y + 1,
-    `pid ${snapshot.loop.pid}  uptime ${duration(runtime.uptimeMs)}  ticks ${runtime.ticks}  next ${countdown(runtime.nextTickAt, ctx.state.now)}  ${connBadge}`,
-    theme.toneSgr("muted"),
-  );
+      ? ["plan", "refine", "implement", "review"].map(
+          (worker) =>
+            `${worker} ${ctx.state.config.loop.workerStages[worker as keyof typeof ctx.state.config.loop.workerStages] ?? runtime.stage}`,
+        )
+      : [runtime.stage];
+  const statusLines = [
+    ...packLines([runtime.state, ...workerStages, `fallback ${runtime.stage}`, runtime.dispatcher], inner.width),
+    ...packLines(
+      [
+        `pid ${snapshot.loop.pid}`,
+        `uptime ${duration(runtime.uptimeMs)}`,
+        `ticks ${runtime.ticks}`,
+        `next ${countdown(runtime.nextTickAt, ctx.state.now)}`,
+        /*
+         * `stale` plus its age survives the narrowest status line where
+         * `status.json 2m old` becomes a meaningless filename fragment.
+         */
+        pane.connection === "file" ? `stale ${relativeTime(runtime.lastTickAt, ctx.state.now)}` : pane.connection,
+      ],
+      inner.width,
+    ),
+  ];
+  const watermark = staleWatermark(pane, ctx.state.now);
+  const showBoard = inner.width >= 36;
+  const stackedMetrics = inner.width < 100;
+  const boardWidth = stackedMetrics ? inner.width : Math.floor((inner.width * 2) / 5);
+  const compactBoardLines = showBoard ? boardLines(snapshot.board, ctx, boardWidth) : [];
+  const wipRows = 1 + snapshot.wip.byStage.length;
+  const metricHeight = stackedMetrics ? wipRows + compactBoardLines.length : Math.max(wipRows, compactBoardLines.length);
+  const showSpark = inner.width >= 110;
+  const rows = splitVertical(inner, [
+    { fixed: statusLines.length + (watermark ? 1 : 0) },
+    { fixed: metricHeight },
+    { fixed: showSpark ? 1 : 0 },
+    { flex: 1 },
+    { fixed: snapshot.backpressure.tripped ? 1 : 0 },
+  ]);
+  const [statusBlock, metricsBlock, sparkBlock, workerBlock, alertBlock] = rows as [Rect, Rect, Rect, Rect, Rect];
 
-  gauge(canvas, { x: wipBlock.x, y: wipBlock.y, width: wipBlock.width, height: 1 }, {
+  let statusY = statusBlock.y;
+  if (watermark && statusBlock.height > 0) {
+    canvas.text(statusBlock.x, statusY, watermark, theme.toneSgr("warn"));
+    statusY += 1;
+  }
+  for (const line of statusLines) {
+    if (statusY >= statusBlock.y + statusBlock.height) break;
+    canvas.text(statusBlock.x, statusY, line, theme.sgr());
+    statusY += 1;
+  }
+
+  /*
+   * Gauges need five rows while board counts usually need two. Wide terminals
+   * put those independent summaries beside one another; below the shared
+   * list/detail threshold they stack. The metrics block reserves both stacked
+   * heights before splitting, so the board never disappears merely because
+   * the gauges happened to claim every fixed row.
+   */
+  const [wipBlock, boardBlock] = listDetailLayout(
+    metricsBlock,
+    [{ flex: 3 }, { flex: 2 }],
+    [{ fixed: wipRows }, { flex: 1 }],
+  );
+  /*
+   * `listDetailLayout` abuts the two columns, which reads as one run of text
+   * when a gauge's `2/3` suffix lands flush against `backlog 12`. The gutter
+   * is taken off the gauge column because a gauge is elastic and the counts
+   * line is not. Gauges are also capped: past roughly 60 columns a longer bar
+   * conveys nothing further about a 0..3 value, and the ink crowds the
+   * counts beside it.
+   */
+  const gaugeWidth = Math.max(1, Math.min(wipBlock.width - 2, 60));
+  gauge(canvas, { x: wipBlock.x, y: wipBlock.y, width: gaugeWidth, height: 1 }, {
     theme,
     value: snapshot.wip.global.used,
     max: snapshot.wip.global.cap,
     label: "wip",
   });
   snapshot.wip.byStage.forEach((stage, index) => {
-    gauge(canvas, { x: wipBlock.x, y: wipBlock.y + 1 + index, width: wipBlock.width, height: 1 }, {
+    gauge(canvas, { x: wipBlock.x, y: wipBlock.y + 1 + index, width: gaugeWidth, height: 1 }, {
       theme,
       value: stage.used,
       max: stage.cap,
       label: stage.stage,
     });
   });
+  compactBoardLines.forEach((line, index) => {
+    if (index < boardBlock.height) canvas.text(boardBlock.x, boardBlock.y + index, line, theme.sgr());
+  });
 
-  const board = snapshot.board;
-  const counts = [
-    `backlog ${board.backlog}`,
-    `todo ${board.todo}`,
-    `in-progress ${board.inProgress}`,
-    `in-review ${board.inReview}`,
-    `blocked ${board.blocked}`,
-    `proposals ${board.proposals}`,
-    `ready ${board.readyBuffer}/${ctx.state.config.loop?.readyBufferTarget ?? "?"}`,
-    `triage ${board.triageInbox}`,
-  ];
-  canvas.text(boardBlock.x, boardBlock.y, counts.slice(0, 4).join("  "), theme.sgr());
-  canvas.text(boardBlock.x, boardBlock.y + 1, counts.slice(4).join("  "), theme.sgr());
-
-  const spark = sparkline(snapshot.history.dispatchesPerTick, Math.max(1, sparkBlock.width - 14));
-  canvas.text(sparkBlock.x, sparkBlock.y, `dispatch/tick ${spark}`, theme.sgr());
+  if (showSpark && sparkBlock.height > 0) {
+    const spark = sparkline(snapshot.history.dispatchesPerTick, Math.max(1, sparkBlock.width - 14));
+    canvas.text(sparkBlock.x, sparkBlock.y, `dispatch/tick ${spark}`, theme.sgr());
+  }
 
   const workerRows: WorkerRow[] = snapshot.workers.map((worker) => ({
     name: worker.name,
@@ -137,7 +193,7 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
   const selected = cursorFor(ctx.state, `overview:${pane.id}`);
   table(canvas, workerBlock, {
     theme,
-    focused,
+    focused: true,
     selected,
     columns: [
       { header: "worker", width: { flex: 1, min: 10 }, render: (row) => row.name },
@@ -175,26 +231,18 @@ export const overviewView: View = {
   title: "overview",
 
   badge(ctx) {
-    const total = ctx.state.loops.reduce((sum, pane) => sum + findAgentsForPane(pane).length, 0);
+    const pane = focusedPane(ctx.state);
+    const total = pane ? findAgentsForPane(pane).length : 0;
     return total > 0 ? String(total) : null;
   },
 
   render(canvas, rect, ctx) {
-    if (ctx.state.loops.length === 0) {
+    const pane = focusedPane(ctx.state);
+    if (!pane) {
       canvas.text(rect.x + 1, rect.y + 1, "no loops discovered", ctx.theme.toneSgr("muted"));
       return;
     }
-    const columns = splitHorizontal(
-      rect,
-      ctx.state.loops.map(() => ({ flex: 1 })),
-      1,
-    );
-    ctx.state.loops.forEach((pane, index) => {
-      const paneRect = columns[index];
-      if (!paneRect) return;
-      renderPane(canvas, paneRect, pane, ctx, index === ctx.state.focusedLoop);
-    });
-    void BOX;
+    renderPane(canvas, rect, pane, ctx);
   },
 
   handleKey(key, ctx) {

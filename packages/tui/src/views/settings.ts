@@ -10,11 +10,10 @@
  *
  * Two `settingsEdits` keys are reserved for this view's own editing state,
  * not for config: `ui.editingPath` (which field, if any, is mid-edit) and
- * `ui.draft:<path>` (its in-progress typed value). Every other view parks
- * transient UI state the same way (`ui.pipelineFilter`, `ui.logsAllLoops`);
- * this file is the one place that must filter every `ui.*` key back out
- * before it builds a config patch, since it is the only view that writes
- * to real config paths at all.
+ * `ui.draft:<path>` (its in-progress typed value). The pipeline view also
+ * parks transient UI state here; this file is the one place that must filter
+ * every `ui.*` key back out before it builds a config patch, since it is the
+ * only view that writes to real config paths at all.
  */
 import type { Canvas, FieldSpec, GlobalConfig, Key, Rect } from "@foreman/core";
 import { applyFieldKey, fieldRow, kvRows, matchesKey, panel } from "@foreman/core";

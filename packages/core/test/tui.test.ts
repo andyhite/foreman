@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Canvas, charWidth, padTo, stringWidth, wrapText } from "../src/tui/index.ts";
+import { Canvas, charWidth, createTheme, padTo, stringWidth, stripAnsi, tabsBar, wrapText } from "../src/tui/index.ts";
 import { splitHorizontal } from "../src/tui/layout.ts";
 
 describe("TUI width", () => {
@@ -87,5 +87,52 @@ describe("keyHints", () => {
     ];
     keyHints(canvas, { x: 0, y: 0, width: 24, height: 1 }, theme, hints);
     expect(canvas.toLines()[0]).toContain("…?");
+  });
+});
+
+describe("tabsBar", () => {
+  it("keeps scope chips ahead of truncated view tabs and warns for an inactive offline loop", () => {
+    const canvas = new Canvas(60, 1);
+    tabsBar(canvas, { x: 0, y: 0, width: 60, height: 1 }, {
+      theme: createTheme(true),
+      labels: ["overview", "agents", "pipeline"],
+      active: 0,
+      leading: {
+        segments: [
+          { label: "demo", badge: "live" },
+          { label: "intake", badge: "offline", tone: "warn" },
+        ],
+        active: 0,
+      },
+    });
+
+    const rendered = canvas.toLines()[0] ?? "";
+    expect(stripAnsi(rendered)).toContain("┃ demo live ┃ intake offline ┃│ 1 overview");
+    expect(rendered).toContain("\x1b[7m┃ demo live\x1b[0m");
+    expect(rendered).toContain("\x1b[33moffline\x1b[0m");
+    // The invariant is the priority, not the column where the ellipsis lands:
+    // both scope chips survive whole while the last view label is clipped.
+    const plain = stripAnsi(rendered);
+    expect(plain).toContain("┃ demo live ┃ intake offline ┃");
+    expect(plain).toContain("…");
+    expect(plain).not.toContain("3 pipeline");
+  });
+
+  it("moves reverse-video to the selected scope", () => {
+    const canvas = new Canvas(60, 1);
+    tabsBar(canvas, { x: 0, y: 0, width: 60, height: 1 }, {
+      theme: createTheme(true),
+      labels: ["overview"],
+      active: 0,
+      leading: {
+        segments: [
+          { label: "demo", badge: "live" },
+          { label: "intake", badge: "live" },
+        ],
+        active: 1,
+      },
+    });
+
+    expect(canvas.toLines()[0]).toContain("\x1b[7m ┃ intake live ┃\x1b[0m");
   });
 });
