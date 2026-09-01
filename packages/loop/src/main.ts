@@ -20,7 +20,6 @@
 import {
   ConfigError,
   ControlServer,
-  defaultTheme,
   ensureMaintenanceProjects,
   HerdrDispatcher,
   LinearClient,
@@ -33,6 +32,7 @@ import {
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
+  style,
 } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping.ts";
 import { createControlHandlers } from "./control.ts";
@@ -345,11 +345,11 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     );
 
     if (config.loop.stage === "dry-run") {
-      const rule = defaultTheme.tone("warn", "─".repeat(62));
+      const rule = style("yellow", "─".repeat(62));
       log(rule);
-      log(defaultTheme.tone("warn", "DRY RUN — stage=dry-run. No agent will be dispatched."));
-      log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-      log(defaultTheme.tone("warn", "or pass --stage full, to let workers act."));
+      log(style("yellow", "DRY RUN — stage=dry-run. No agent will be dispatched."));
+      log(style("yellow", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+      log(style("yellow", "or pass --stage full, to let workers act."));
       log(rule);
     }
 

@@ -22,7 +22,6 @@ import {
   LinearClient,
   PrintDispatcher,
   PROPOSALS_FILTER,
-  defaultTheme,
   emptyBoardCounts,
   expandHome,
   findApprovedUnapplied,
@@ -45,6 +44,7 @@ import {
   type LoopSnapshot,
   type ResolvedRepoEntry,
   type RunState,
+  style,
 } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping";
 import { patchAndWriteGlobalConfig } from "./control";
@@ -609,11 +609,11 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
     log(`starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`);
 
     if (ctx.dryRun) {
-      const rule = defaultTheme.tone("warn", "─".repeat(62));
+      const rule = style("yellow", "─".repeat(62));
       log(rule);
-      log(defaultTheme.tone("warn", "DRY RUN — foreman intake will not act on issues."));
-      log(defaultTheme.tone("warn", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
-      log(defaultTheme.tone("warn", "or omit --dry-run, to let it dispatch."));
+      log(style("yellow", "DRY RUN — foreman intake will not act on issues."));
+      log(style("yellow", "Set loop.stage to \"read-only\" or \"full\" in ~/.foreman/config.json,"));
+      log(style("yellow", "or omit --dry-run, to let it dispatch."));
       log(rule);
     }
 

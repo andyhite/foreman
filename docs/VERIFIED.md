@@ -132,7 +132,7 @@ describes, and the pane label is what the startup guard matches on.
   `Project.initiatives` (above): reading an initiative's projects is one
   query, no fan-out needed.
 
-## Verified building the command center and control plane
+## Verified building the control plane
 
 - **macOS caps a unix socket path at 104 bytes.** A `stateDir` nested a few
   levels deep (a long home directory, a long repo alias) can push

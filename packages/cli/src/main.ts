@@ -17,7 +17,6 @@ import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { nodeRunner } from "@foreman/core";
 import { runIntake, runLoop } from "@foreman/loop";
-import { runTui } from "@foreman/tui";
 import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { DEFAULT_GITHUB_REPO, type OmpScope } from "./plugin-commands.ts";
@@ -53,7 +52,6 @@ Commands:
   init                     Per-repo: register this directory in the repos registry.
   loop                     Run the supervisor; \`foreman loop --help\` for its flags.
   intake                   Run the team-level triage process; \`foreman intake --help\` for its flags.
-  tui                      Open the command center for this repo's loop and intake.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`loop\` per repo.
 
@@ -250,16 +248,6 @@ async function main(): Promise<void> {
    */
   if (argv[0] === "intake") {
     await runIntake(argv.slice(1));
-    return;
-  }
-
-  /*
-   * `tui` owns every argument after it, same rationale as `loop`/`intake`:
-   * the command center keeps its own flags (`--repo`, `--no-start`) without
-   * this parser having to know any of them.
-   */
-  if (argv[0] === "tui") {
-    await runTui(argv.slice(1));
     return;
   }
 

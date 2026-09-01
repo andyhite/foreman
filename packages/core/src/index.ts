@@ -27,5 +27,5 @@ export * from "./render/index.ts";
 export * from "./repo.ts";
 export * from "./schemas/index.ts";
 export * from "./schemas/parse.ts";
+export * from "./style.ts";
 export * from "./team.ts";
-export * from "./tui/index.ts";

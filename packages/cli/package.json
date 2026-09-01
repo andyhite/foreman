@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@foreman/core": "workspace:*",
-    "@foreman/loop": "workspace:*",
-    "@foreman/tui": "workspace:*"
+    "@foreman/loop": "workspace:*"
   }
 }

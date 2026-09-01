@@ -179,10 +179,10 @@ before you are ready logs its intentions instead of acting on them. Override an
 individual worker in `loop.workerStages` when you want to validate the pipeline
 one step at a time: `dry-run` evaluates and logs only, `read-only` runs review
 only, and `full` permits that worker to dispatch. Every tick logs a per-worker
-summary plus each dispatch intent and every routing skip to stdout; the TUI Logs
-view receives the same lines, so there is nothing for a `--verbose` flag to
-reveal and `foreman loop` does not take one. `foreman intake` still does, where
-it adds the skip reason for each triaged issue.
+summary plus each dispatch intent and every routing skip to stdout, so there is
+nothing for a `--verbose` flag to reveal and `foreman loop` does not take one.
+`foreman intake` still does, where it adds the skip reason for each triaged
+issue.
 
 ```
 [foreman-loop] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
@@ -206,106 +206,11 @@ after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
 lock once shutdown completes. `"graceful"` lets the in-flight tick finish
 every worker in the pass; `"now"` cuts the tick short between workers, wakes
 the poll wait immediately, and leaves in-flight dispatches to expire at lock
-TTL. The socket
-is live control; the
-file is the fallback a client reads when nothing is listening, which is what
-lets `foreman tui` (below) render a stopped loop's last-known state instead of
-an error. Run `foreman loop --no-control` to skip the socket entirely.
+TTL. The socket is live control; the file is the fallback a client reads
+when nothing is listening, which lets a status-reading client render a
+stopped loop's last-known state instead of an error. Run `foreman loop
+--no-control` to skip the socket entirely.
 
-## Command center
-
-```bash
-foreman tui
-```
-
-Run it inside a repo already registered with `foreman init`. It attaches to
-— or, unless started with `--no-start`, launches — two loops: this repo's
-own (`repo:<alias>`) and the shared, team-wide `foreman intake` process
-(above), each over the control plane described above.
-
-**Every view is scoped to exactly one loop.** The scope is a segmented
-control leading the tab bar, so what you are looking at is never a mode you
-have to remember:
-
-```
-┃ demo live ┃ intake offline ┃│ 1 overview │ 2 agents │ 3 pipeline │ …
-```
-
-`L` cycles the scope; `[` and `]` step it. Both loops stay on screen with
-their connection state, so an intake loop that died is visible while you
-work on the repo loop. Seven views, cycled with `tab`/`shift-tab` or jumped
-to directly with `1`-`7`:
-
-| View | Shows |
-| --- | --- |
-| `overview` | The scoped loop: run state, stage, WIP gauges, board counts, dispatch sparkline, and the per-worker table of last run, next run, dispatched, skipped, errors |
-| `agents` | In-flight dispatches with age and lock TTL; `enter` attaches the herdr pane, `x` kills one |
-| `pipeline` | The board — Backlog, Todo, In Progress, In Review depth, and the issues behind them |
-| `blocks` | The `blocked:*` queue, with each `BlockRecord`'s question, options, and recommendation |
-| `proposals` | The `agent:proposed` queue awaiting approval |
-| `logs` | The scoped loop's event and log stream; `f` follows the tail, `/` filters |
-| `settings` | The config table below, edited live |
-
-Each data view distinguishes live, file-backed, reconnecting, and offline
-connection state; a dead loop's last `status.json` snapshot is watermarked
-with its age instead of being painted as if the process were still running.
-
-Key bindings below are generated from `packages/tui/src/keymap.ts` — keep
-them in sync.
-
-| Key | Does | View |
-| --- | --- | --- |
-| `?` | toggle help | — |
-| `q` | quit (confirm when loops run) | — |
-| `ctrl-c` | quit (confirm when loops run) | — |
-| `1-7` | jump to view | — |
-| `tab` | next view | — |
-| `shift-tab` | previous view | — |
-| `] / L` | next loop scope | — |
-| `[` | previous loop scope | — |
-| `r` | refresh snapshot | — |
-| `s` | start the scoped loop | — |
-| `S` | stop the scoped loop | — |
-| `p` | pause / resume the scoped loop | — |
-| `t` | tick the scoped loop | — |
-| `g` | cycle autonomy stage | — |
-| `↑↓` | select row | agents |
-| `enter / a` | attach agent | agents |
-| `x` | kill agent | agents |
-| `o` | open issue | agents |
-| `↑↓` | select worker | overview |
-| `enter` | skip to agents | overview |
-| `↑↓` | select issue | pipeline |
-| `enter` | issue detail | pipeline |
-| `o` | open issue | pipeline |
-| `/` | filter | pipeline |
-| `↑↓` | select block | blocks |
-| `enter / u` | reply command | blocks |
-| `y` | copy unblock command | blocks |
-| `↑↓` | select proposal | proposals |
-| `enter` | proposal detail | proposals |
-| `y / n` | approve / reject command | proposals |
-| `y` | copy apply command | proposals |
-| `f` | follow / pin tail | logs |
-| `/` | substring filter | logs |
-| `enter` | edit field | settings |
-| `←/→` | adjust value | settings |
-| `space` | toggle boolean | settings |
-| `ctrl-s` | save config | settings |
-| `esc` | discard edits | settings |
-
-Flags: `--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop`
-and `foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
-`--no-start` attaches to already-running loops instead of starting them;
-`--no-color` disables the 16-color output.
-
-`blocks` and `proposals` never mutate Linear. They show the queue and name
-the exact command that acts — `/foreman:unblock` or `/foreman:apply` — rather
-than offering a keypress that answers or approves in place. `y` copies that
-command to the clipboard (OSC 52) so acting it is one paste away. This is by
-design: the loop process holds no operator-write path to Linear, the same
-split the agents themselves live under (above), so the interactive surface
-built on top of it doesn't get one either.
 ## Operator surface
 
 Slash commands, inside any omp session:

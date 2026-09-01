@@ -1802,7 +1802,7 @@ that dispatches confidently into a routing bug.
 
 ---
 
-## 20. The command center and control plane
+## 20. The control plane
 
 ### 20.1 Two loop kinds, one control surface
 
@@ -1822,7 +1822,7 @@ The socket is the control channel. The file is the fallback: a client that
 cannot reach the socket — the loop process is down, or a client asks before
 the loop has ever registered a control server — still gets a truthful "last
 known state" by reading `status.json` instead of an error. This is what lets
-the command center (§20.4) render a stopped loop's board without special-casing
+a status-reading client render a stopped loop's board without special-casing
 it, and it is why the write happens at exactly the two moments state can have
 changed: `reconcile()` and each tick, never on a timer of its own.
 
@@ -1878,47 +1878,3 @@ control plane's behalf: those actions have exactly one path each, the ones
 §10 and §9 already define, and the control plane is not a second one. A
 client with a live socket connection has exactly the leverage an operator
 editing the config file and sending `SIGHUP` would have — nothing more.
-
-### 20.4 The command center (`foreman tui`)
-
-`foreman tui`, run inside a repo registered per §3.11, is the interactive,
-full-screen counterpart to the `/foreman:*` commands of §9. It attaches to —
-or, unless started with `--no-start`, launches — two loops: the repo's own
-(`repo:<alias>`) and the shared intake process (`id: intake`, §3.12), each
-over the control channel of §20.1. Seven views, cycled with `tab`/`shift-tab`
-or jumped to directly with `1`–`7`:
-
-| View | Shows |
-|---|---|
-| `overview` | Both loops' identity, stage, and recent log lines at a glance |
-| `agents` | In-flight dispatches; `enter` attaches the herdr pane (§17.3), `x` kills one |
-| `pipeline` | The per-worker table of §17.5 — last run, in-flight, next run |
-| `blocks` | The `blocked:*` queue of §9 |
-| `proposals` | The `agent:proposed` queue awaiting `/foreman:apply` |
-| `logs` | The tailed loop log, filterable |
-| `settings` | The config table of §3.10, edited live |
-
-Global keys: `q` quits the TUI without touching either loop, `?` opens a help
-modal, `L` cycles which loop has focus for the operations below, `r` refreshes
-the current view's data, `s` starts the focused loop, `S` stops it after a
-confirmation, `p` pauses or resumes it, `t` requests an immediate `tick`, and
-`g` cycles `loop.stage` through `dry-run → read-only → full` (§17.9),
-confirming before the move to `full`. Every one of these is a `patchConfig` or
-direct op call from §20.2 — the TUI holds no path to Linear or to a loop's
-internals that a `/foreman:*` command or a hand-edited config file lacks.
-
-**`blocks` and `proposals` never mutate Linear.** They render the same queues
-`/foreman:status` does and name the exact command that acts — `/foreman:unblock
-<id> <reply>` for a block, `/foreman:apply <id> --approve` or `--reject` for a
-proposal — rather than offering a keypress that approves or answers in place.
-This is the same split that governs the agents themselves (§2, principle 9):
-the loop process is not a Linear writer, so the surface built on top of it
-isn't one either. Making an exception for the interactive client would mean
-two write paths into Linear instead of one, which is the exact failure mode
-§10 and §13 exist to prevent.
-
-`--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop` and
-`foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
-`--no-start` attaches to already-running loops and exits rather than starting
-them if neither is up; `--no-color` disables the 16-color SGR output for
-terminals or recordings that can't take it.
