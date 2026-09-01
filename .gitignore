@@ -4,5 +4,12 @@ dist-types/
 *.tsbuildinfo
 .DS_Store
 
+# Project-scoped omp plugin runtime state, written by `foreman init`
+# (`omp plugin install --scope project`): a node_modules symlink into the
+# marketplace cache plus this machine's enable/version lock. Machine-local,
+# like node_modules/ above — the repo's binding to Foreman lives in
+# ~/.foreman/config.json's `repos` table, not here.
+.omp/plugins/
+
 # bun.lock is committed: CI installs with --frozen-lockfile.
 bun.lockb

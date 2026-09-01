@@ -1,14 +1,16 @@
 /**
  * `foreman init` — registers the current repo as an entry in the global
- * `config.repos` registry (SPEC §3.10, §3.11).
+ * `config.repos` registry, and installs the omp plugin scoped to that repo
+ * (SPEC §3.10, §3.11).
  *
- * Unlike `foreman setup` (tool preflight, the Linear key, plugin install),
- * this runs *inside* a target repo and only ever touches that repo's own
- * registry entry: no preflight, no key prompt/write (it reads whatever
- * `foreman setup` already configured), no plugin install, no build. Running
- * it a second time for the same repo updates the existing entry instead of
- * creating a duplicate, which is how a monorepo grows a second bound
- * initiative over time.
+ * Unlike `foreman setup` (tool preflight, the Linear key, the marketplace
+ * catalog), this runs *inside* a target repo and only ever touches that
+ * repo's own registry entry plus its own project-scoped plugin install: no
+ * preflight, no key prompt/write (it reads whatever `foreman setup` already
+ * configured). Running it a second time for the same repo updates the
+ * existing registry entry instead of creating a duplicate, which is how a
+ * monorepo grows a second bound initiative over time, and leaves an
+ * already-installed plugin alone.
  */
 
 import {
@@ -25,7 +27,11 @@ import {
   type TeamRef,
 } from "@foreman/core";
 import { basename } from "node:path";
+import { looksLikeForemanRoot } from "./checkout.ts";
 import { readGlobalConfig, writeGlobalConfig } from "./global-config.ts";
+import type { Runner } from "./exec.ts";
+import { DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME, ompInstallArgv, ompPluginListArgv, ompUninstallUserArgv } from "./plugin-commands.ts";
+import { linkProjectPluginToCheckout } from "./plugin-link.ts";
 import type { CheckboxChoice, Prompter } from "./prompt.ts";
 import { printSection, style } from "./tui.ts";
 
@@ -35,6 +41,8 @@ export interface InitOptions {
   home: string;
   /** Skip Linear entirely and take manual initiative ids. */
   skipLinear: boolean;
+  /** Skip installing the omp plugin for this repo. */
+  skipPlugin: boolean;
   /** Non-interactive initiative bindings (`<uuid>` or `<uuid>:<subdir>`). */
   initiatives?: string[];
   /** Non-interactive registry alias override. */
@@ -48,6 +56,8 @@ export interface InitDeps {
   log: (message: string) => void;
   /** `nodeRunner` from `@foreman/core`; captures stdout, unlike cli's own `Runner`. */
   git: CommandRunner;
+  /** cli's own `Runner`, for the omp plugin install/list probes. */
+  runner: Runner;
 }
 
 /** Parses `--initiative <uuid>` or `--initiative <uuid>:<subdir>`. */
@@ -220,6 +230,92 @@ async function detectBaseBranch(repoRoot: string, git: CommandRunner): Promise<s
   }
 }
 
+/** Scans `omp plugin list` output for a plugin@marketplace entry's scope(s). */
+function findPluginScopes(stdout: string, pluginName: string, marketplace: string): { project: boolean; user: boolean } {
+  const needle = `${pluginName}@${marketplace}`;
+  let project = false;
+  let user = false;
+  for (const line of stdout.split("\n")) {
+    if (!line.includes(needle)) continue;
+    if (line.includes("project")) project = true;
+    if (line.includes("user")) user = true;
+  }
+  return { project, user };
+}
+
+/**
+ * Installs the omp plugin scoped to `repoRoot`, run once the registry entry
+ * above has already been written successfully. A failed or skipped install
+ * never rolls that back — the operator can always install the plugin by
+ * hand later, but a repo that failed to register at all has nothing to
+ * install into.
+ */
+async function installProjectPlugin(deps: InitDeps, options: InitOptions, repoRoot: string): Promise<void> {
+  printSection(deps.log, "omp plugin (this repo only)");
+  const needle = `${DEFAULT_OMP_PLUGIN_NAME}@${FOREMAN_MARKETPLACE_NAME}`;
+
+  if (options.skipPlugin) {
+    deps.log("  skipped (--skip-plugin).");
+    return;
+  }
+  if (!(await deps.runner.exists("omp"))) {
+    deps.log(
+      `  ${style("dim", "○")} omp not found on PATH — skipped. Install omp, then run \`omp ${ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME).join(" ")}\` from this repo.`,
+    );
+    return;
+  }
+
+  const listResult = await deps.runner.capture("omp", ompPluginListArgv(), { cwd: repoRoot });
+  const scopes = listResult.code === 0 ? findPluginScopes(listResult.stdout, DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME) : { project: false, user: false };
+  if (scopes.project) {
+    deps.log(`  ${style("cyan", "i")} "${needle}" is already installed at project scope.`);
+  } else {
+    const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME);
+    const installCode = await deps.runner.run("omp", installArgv, { cwd: repoRoot });
+    if (installCode !== 0) {
+      deps.log(
+        `  ${style("yellow", "!")} omp plugin install failed (exit ${installCode}): \`omp ${installArgv.join(" ")}\`. ` +
+          "The repo is still registered above; run that command by hand from this repo when ready.",
+      );
+      return;
+    }
+    deps.log(`  ${style("green", "✓")} installed "${needle}" at project scope.`);
+  }
+
+  // Warned on every run, not just a fresh install: a lingering machine-wide
+  // install is exactly as harmful on the tenth `foreman init` as the first,
+  // and re-running init is how an operator would expect to be told.
+  if (scopes.user) {
+    const uninstallArgv = ompUninstallUserArgv(DEFAULT_OMP_PLUGIN_NAME);
+    deps.log(
+      `  ${style("yellow", "!")} a machine-wide (user-scope) install of "${needle}" is still active and will keep firing ` +
+        "Foreman's rules, agents, and skills in every other repo you work in.",
+    );
+    deps.log(`  ${style("yellow", "!")} remove it: omp ${uninstallArgv.join(" ")}`);
+  }
+
+  /*
+   * Foreman's own checkout runs its working tree, not the published release:
+   * see plugin-link.ts. Detected rather than flagged, because the condition
+   * is not a preference — only the checkout that owns `packages/omp-plugin`
+   * can be linked to itself, and when you are registering it you are working
+   * on it.
+   */
+  if (!looksLikeForemanRoot(repoRoot)) return;
+  const link = linkProjectPluginToCheckout(repoRoot, repoRoot);
+  deps.log(
+    link.changed
+      ? `  ${style("green", "✓")} linked to this checkout's working tree (dev mode), replacing the published copy.`
+      : `  ${style("cyan", "i")} already linked to this checkout's working tree (dev mode).`,
+  );
+  if (link.bundleMissing) {
+    deps.log(
+      `  ${style("yellow", "!")} packages/omp-plugin/dist/extension.js is missing — run \`bun run build\`, ` +
+        "or the plugin's slash commands and guards won't load.",
+    );
+  }
+}
+
 export async function runInit(options: InitOptions, deps: InitDeps): Promise<void> {
   printSection(deps.log, "Register this repo (config.repos)");
 
@@ -330,6 +426,8 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     .map((binding) => (typeof binding === "string" ? binding : binding.id))
     .map((id) => picked.names.get(id) ?? id);
   deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
+
+  await installProjectPlugin(deps, options, repoRoot);
 
   printSection(deps.log, "Next step");
   deps.log("  foreman repo --once");

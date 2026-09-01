@@ -49,7 +49,6 @@ class ScriptedPrompter implements Prompter {
 class RecordingRunner implements Runner {
   calls: Array<{ bin: string; argv: string[] }> = [];
   marketplaceRegistered = false;
-  pluginInstalled = false;
   private readonly missing: Set<string>;
   private readonly failing: Set<string>;
 
@@ -71,7 +70,6 @@ class RecordingRunner implements Runner {
         argv[1] === "marketplace" &&
         argv[2] === "list" &&
         "foreman\n") ||
-      (this.pluginInstalled && argv[0] === "plugin" && argv[1] === "list" && "foreman@foreman\n") ||
       "";
     return Promise.resolve({ code: this.failing.has(bin) ? 1 : 0, stdout, stderr: "" });
   }
@@ -86,30 +84,25 @@ function baseOptions(overrides: Partial<WizardOptions>, home: string, checkoutRo
     home,
     checkoutRoot,
     githubRepo: "andyhite/foreman",
-    scope: "user",
-    ompMode: null,
-    skipBuild: false,
+    linkCli: false,
     skipLinear: true,
     ...overrides,
   };
 }
 
 describe("runWizard", () => {
-  it("links the omp plugin and builds first", async () => {
+  it("registers the omp marketplace catalog", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
       const runner = new RecordingRunner();
-      const logs: string[] = [];
-      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
+      await runWizard(baseOptions({}, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner,
-        log: (message) => logs.push(message),
+        log: () => {},
       });
 
       const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
-      expect(binSeq).toContain("bun install");
-      expect(binSeq).toContain("bun run build");
-      expect(binSeq).toContain("omp plugin link /repo/packages/omp-plugin --scope user");
+      expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
 
       const configPath = join(home, ".foreman", "config.json");
       expect(JSON.parse(readFileSync(configPath, "utf8"))).toBeTruthy();
@@ -118,15 +111,85 @@ describe("runWizard", () => {
     }
   });
 
-  it("links the foreman CLI to source in dev mode, on top of the omp plugin", async () => {
+  it("never installs or links the omp plugin — that's foreman init's job", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
-      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
+      const runner = new RecordingRunner();
+      await runWizard(baseOptions({ linkCli: true }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: () => {},
+      });
+
+      for (const call of runner.calls) {
+        expect(call.argv.slice(0, 2)).not.toEqual(["plugin", "install"]);
+        expect(call.argv.slice(0, 2)).not.toEqual(["plugin", "link"]);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips marketplace add when the foreman marketplace is already registered", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const runner = new RecordingRunner();
+      runner.marketplaceRegistered = true;
+      await runWizard(baseOptions({}, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: () => {},
+      });
+
+      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
+      expect(binSeq).toContain("omp plugin marketplace list");
+      expect(binSeq).not.toContain("omp plugin marketplace add andyhite/foreman");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips marketplace registration and explains why when omp is absent", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const runner = new RecordingRunner({ missing: ["omp"] });
+      const logs: string[] = [];
+      await runWizard(baseOptions({}, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: (message) => logs.push(message),
+      });
+
+      expect(runner.calls.map((call) => call.bin)).not.toContain("omp");
+      expect(logs.some((line) => line.includes("omp not found on PATH"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when the omp marketplace add command fails", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const runner = new RecordingRunner({ failing: ["omp"] });
+      await expect(
+        runWizard(baseOptions({}, home, "/repo"), {
+          prompter: new ScriptedPrompter(),
+          runner,
+          log: () => {},
+        }),
+      ).rejects.toThrow(/omp plugin marketplace add failed/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("links the foreman CLI to source when --link is passed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      await runWizard(baseOptions({ linkCli: true }, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
-        log: () => {
-          // discard
-        },
+        log: () => {},
       });
 
       const binPath = join(cliBinDir(home), "foreman");
@@ -138,95 +201,16 @@ describe("runWizard", () => {
     }
   });
 
-  it("does not link the foreman CLI when installing from GitHub", async () => {
+  it("does not link the foreman CLI without --link", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
-      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
+      await runWizard(baseOptions({ linkCli: false }, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
-        log: () => {
-          // discard
-        },
-      });
-
-      expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(false);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("installs from GitHub and skips the local build", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner();
-      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner,
-        log: () => {
-          // discard
-        },
-      });
-
-      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
-      expect(binSeq).not.toContain("bun install");
-      expect(binSeq).not.toContain("bun run build");
-      expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
-      expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("skips marketplace add when the foreman marketplace is already registered", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner();
-      runner.marketplaceRegistered = true;
-      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner,
         log: () => {},
       });
 
-      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
-      expect(binSeq).toContain("omp plugin marketplace list");
-      expect(binSeq).not.toContain("omp plugin marketplace add andyhite/foreman");
-      expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("links the foreman CLI even when omp isn't installed", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const logs: string[] = [];
-      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner: new RecordingRunner({ missing: ["omp"] }),
-        log: (message) => logs.push(message),
-      });
-
-      expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(true);
-      expect(logs.some((line) => line.includes("omp is not installed"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("throws when the omp plugin link command fails", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner({ failing: ["omp"] });
-      await expect(
-        runWizard(baseOptions({ ompMode: "link", skipBuild: true }, home, "/repo"), {
-          prompter: new ScriptedPrompter(),
-          runner,
-          log: () => {
-            // discard
-          },
-        }),
-      ).rejects.toThrow(/omp plugin link failed/);
+      expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -239,10 +223,11 @@ describe("runWizard", () => {
 
     try {
       const prompter = new ScriptedPrompter();
-      await runWizard(
-        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
-        { prompter, runner: new RecordingRunner(), log: () => {} },
-      );
+      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: () => {},
+      });
 
       expect(prompter.confirmCalls).not.toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
@@ -262,10 +247,11 @@ describe("runWizard", () => {
 
     try {
       const prompter = new ScriptedPrompter([false]);
-      await runWizard(
-        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
-        { prompter, runner: new RecordingRunner(), log: () => {} },
-      );
+      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: () => {},
+      });
 
       expect(prompter.confirmCalls).toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
@@ -285,10 +271,11 @@ describe("runWizard", () => {
       const prompter = new ScriptedPrompter([true]);
       prompter.secretAnswer = "   ";
       const logs: string[] = [];
-      await runWizard(
-        baseOptions({ ompMode: "skip", skipLinear: false, skipBuild: true }, home, "/repo"),
-        { prompter, runner: new RecordingRunner(), log: (message) => logs.push(message) },
-      );
+      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
 
       expect(logs.some((line) => line.includes("no key entered"))).toBe(true);
       expect(() => readFileSync(join(home, ".foreman", "linear-api-key"), "utf8")).toThrow();
@@ -299,30 +286,11 @@ describe("runWizard", () => {
     }
   });
 
-  it("skips the plugin when omp is absent and explains why", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner({ missing: ["omp"] });
-      const logs: string[] = [];
-      await runWizard(baseOptions({ ompMode: "link" }, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner,
-        log: (message) => logs.push(message),
-      });
-
-      expect(runner.calls.map((call) => call.bin)).not.toContain("omp");
-      expect(runner.calls.map((call) => call.bin)).not.toContain("bun");
-      expect(logs.some((line) => line.includes("omp is not installed") && line.includes("skipped"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
   it("closing message names `foreman init` as the next step, not `foreman repo`", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     try {
       const logs: string[] = [];
-      await runWizard(baseOptions({ ompMode: "skip" }, home, "/repo"), {
+      await runWizard(baseOptions({}, home, "/repo"), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
         log: (message) => logs.push(message),

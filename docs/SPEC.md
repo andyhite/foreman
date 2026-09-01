@@ -2,7 +2,8 @@
 
 An omp-native plugin that runs a single-operator agile SDLC over Linear.
 
-**Harness:** omp (oh-my-pi), installed as a user-scoped plugin.
+**Harness:** omp (oh-my-pi), installed as a project-scoped plugin, once per
+repo, by `foreman init`.
 **Substrate:** Linear (Triage inbox enabled), git worktrees, GitHub PRs.
 **Scope:** the operator's personal projects. Single Linear org, single credential
 set, no multi-tenant concerns.
@@ -63,14 +64,29 @@ the agents start disagreeing about whether an issue is ready.
 foreman/
   packages/
     core/                       # Linear client, schemas, gate validators
-    omp-plugin/                 # below — installed user-scoped in ~/.omp/plugins/
+    omp-plugin/                 # below — installed project-scoped per repo, never user-wide
     loop/                       # `foreman repo` + `foreman team` CLIs (§3.11, §3.12)
 ```
 
-The omp plugin is a Claude/OMP-compatible plugin directory, installed
-**user-scoped** so it applies across all personal repos. During development, add
-its containing directory as a local marketplace source; `/reload-plugins` picks
-up changes without a restart.
+The omp plugin is a Claude/OMP-compatible plugin directory. It is **always
+installed project-scoped**, into the specific repo `foreman init` registers —
+never user-scoped. A user-scoped install would put Foreman's agents, skills,
+TTSR rules, and slash commands into every omp session on the machine,
+including repos that never use Foreman; Foreman is per-repo by construction —
+the `repos` registry (§3.10) binds specific repos — so machine-wide is never
+the right scope. It is also the only scope omp's CLI can reach: `--scope` is
+honored for a marketplace install (`name@marketplace`) alone, while `omp
+plugin link <dir>` and installs from a local path are unconditionally
+user-wide regardless of any flag passed.
+
+Every managed repo therefore runs the *published* plugin. Foreman's own
+checkout is the one exception: `foreman init` detects that it is registering
+the tree that owns `packages/omp-plugin` and repoints the installed symlink
+at the working copy, so plugin development does not need a publish
+round-trip per edit. That is a direct rewrite of omp's install layout rather
+than an omp command, for the reason above — see `packages/cli/src/plugin-link.ts`.
+`/reload-plugins` applies Markdown changes (agents, skills, commands, rules)
+without a restart either way; a changed extension needs `bun run build`.
 
 ```
 packages/omp-plugin/
@@ -290,8 +306,10 @@ trade-off is accepted deliberately: repo settings no longer travel with a
 clone, which matters for teams and not for one operator — and the file itself
 can live in the dotfiles repo like any other machine config. `foreman init`,
 run once per repo inside that repo, is the command that produces one `repos`
-entry — it never runs global setup and `foreman setup` never touches this
-table.
+entry **and** installs the omp plugin project-scoped into that repo (§3.1);
+`foreman setup` never runs global setup and never touches this table — it
+installs no plugin at all, only the marketplace catalog the later `init`
+installs from.
 
 The registry key is named `repos`, not `projects` — in this document
 "project" means a Linear milestone (§4.1), and overloading it for repo

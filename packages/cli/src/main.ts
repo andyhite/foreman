@@ -2,11 +2,13 @@
 /**
  * `foreman` CLI entrypoint.
  *
- * Two installer commands with disjoint scope: `setup` is per-machine (Linear
- * credential, omp plugin) and `init` is per-repo (writes
- * one `config.repos` entry). They were one command with `init` as an alias,
- * which meant installing a plugin and registering a repo could not be done
- * independently — re-running to add a repo re-ran the whole installer.
+ * Two installer commands with disjoint scope: `setup` is per-machine (tool
+ * preflight, Linear credential, omp marketplace catalog) and `init` is
+ * per-repo (writes one `config.repos` entry and installs the omp plugin
+ * scoped to that repo). They were one command with `init` as an alias,
+ * which meant installing the machine-level pieces and registering a repo
+ * could not be done independently — re-running to add a repo re-ran the
+ * whole installer.
  *
  * Hand-rolled argument parsing, same rationale as `foreman repo`: the
  * workspace's sole runtime dependency is `@sinclair/typebox`.
@@ -19,24 +21,23 @@ import { nodeRunner } from "@foreman/core";
 import { runRepo, runTeam } from "@foreman/loop";
 import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
-import { DEFAULT_GITHUB_REPO, type OmpScope } from "./plugin-commands.ts";
+import { DEFAULT_GITHUB_REPO } from "./plugin-commands.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
 import { resolveCheckoutRoot } from "./checkout.ts";
-import type { PluginMode } from "./wizard.ts";
 import { runWizard } from "./wizard.ts";
 
 interface ParsedArgs {
   command: "setup" | "init" | null;
   yes: boolean;
-  scope: OmpScope | null;
+  /** Link the foreman CLI itself to this checkout's source; setup-only. */
   link: boolean;
-  ompMode: "install" | "skip" | null;
   githubRepo: string;
   checkoutPath: string | null;
   path: string | null;
   home: string | null;
-  skipBuild: boolean;
   skipLinear: boolean;
+  /** Skip installing the omp plugin; init-only. */
+  skipPlugin: boolean;
   help: boolean;
   initiatives: string[];
   alias: string | null;
@@ -48,26 +49,24 @@ const HELP_TEXT = `foreman — Foreman CLI
 Usage: foreman <command> [options]
 
 Commands:
-  setup                    Per-machine install: Linear credential, omp plugin.
-  init                     Per-repo: register this directory in the repos registry.
+  setup                    Per-machine install: tool preflight, Linear credential, omp marketplace catalog.
+  init                     Per-repo: register this directory in the repos registry and install the omp plugin for it.
   repo                     Run the per-repo supervisor; \`foreman repo --help\` for its flags.
   team                     Run the team-level triage process; \`foreman team --help\` for its flags.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`repo\` per repo.
 
 Options for setup:
-  --link                     Dev mode: link the omp plugin and the foreman CLI to this checkout's source (no rebuild-to-see-changes).
-  --scope <user|project>     omp plugin install scope (default: prompted, "user").
-  --omp <install|skip>       omp plugin mode when not using --link (default: prompted, "install").
-  --repo-source <owner/repo>  GitHub source for "install" mode (default: ${DEFAULT_GITHUB_REPO}).
+  --link                     Dev mode: link the foreman CLI to this checkout's source (no rebuild-to-see-changes).
+  --repo-source <owner/repo>  GitHub source for the omp marketplace catalog (default: ${DEFAULT_GITHUB_REPO}).
   --checkout <path>          Path to the foreman checkout (default: auto-detected).
-  --skip-build                Skip \`bun install && bun run build\`.
 
 Options for init:
   --path <dir>               Directory to register (default: the current directory).
   --initiative <id>          Initiative to bind; repeat for multiple. Accepts <uuid> or <uuid>:<subdir>.
   --alias <name>             Registry alias override (default: derived from the repo directory name).
   --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
+  --skip-plugin               Skip installing the omp plugin for this repo.
 
 Options for both:
   -y, --yes                 Accept defaults for every prompt (non-interactive).
@@ -76,23 +75,13 @@ Options for both:
   --help, -h                  Show this text.
 `;
 
-function parseMode(name: string, value: string | undefined): "install" | "skip" {
-  if (value !== "install" && value !== "skip") {
-    throw new Error(`${name} must be one of install|skip, got "${value ?? ""}"`);
-  }
-  return value;
-}
-
 function validateCommandFlags(parsed: ParsedArgs): void {
   if (!parsed.command) return;
 
   const setupOnly = [
     parsed.link ? "--link" : null,
-    parsed.scope ? "--scope" : null,
-    parsed.ompMode ? "--omp" : null,
     parsed.githubRepo !== DEFAULT_GITHUB_REPO ? "--repo-source" : null,
     parsed.checkoutPath ? "--checkout" : null,
-    parsed.skipBuild ? "--skip-build" : null,
   ].filter((flag): flag is string => flag !== null);
 
   const initOnly = [
@@ -100,6 +89,7 @@ function validateCommandFlags(parsed: ParsedArgs): void {
     parsed.initiatives.length > 0 ? "--initiative" : null,
     parsed.alias ? "--alias" : null,
     parsed.team !== null ? "--team" : null,
+    parsed.skipPlugin ? "--skip-plugin" : null,
   ].filter((flag): flag is string => flag !== null);
 
   if (parsed.command === "init" && setupOnly.length > 0) {
@@ -118,15 +108,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     command: null,
     yes: false,
-    scope: null,
     link: false,
-    ompMode: null,
     githubRepo: DEFAULT_GITHUB_REPO,
     checkoutPath: null,
     path: null,
     home: null,
-    skipBuild: false,
     skipLinear: false,
+    skipPlugin: false,
     help: false,
     initiatives: [],
     alias: null,
@@ -152,21 +140,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--yes":
         parsed.yes = true;
         break;
-      case "--scope": {
-        if (argv[i + 1] === undefined) throw new Error("missing value for --scope");
-        const value = argv[++i];
-        if (value !== "user" && value !== "project") {
-          throw new Error(`--scope must be one of user|project, got "${value}"`);
-        }
-        parsed.scope = value;
-        break;
-      }
       case "--link":
         parsed.link = true;
-        break;
-      case "--omp":
-        if (argv[i + 1] === undefined) throw new Error("missing value for --omp");
-        parsed.ompMode = parseMode("--omp", argv[++i]);
         break;
       case "--repo-source": {
         if (argv[i + 1] === undefined) throw new Error("missing value for --repo-source");
@@ -188,11 +163,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.home = argv[++i] as string;
         break;
       }
-      case "--skip-build":
-        parsed.skipBuild = true;
-        break;
       case "--skip-linear":
         parsed.skipLinear = true;
+        break;
+      case "--skip-plugin":
+        parsed.skipPlugin = true;
         break;
       case "--initiative": {
         if (argv[i + 1] === undefined) throw new Error("missing value for --initiative");
@@ -220,9 +195,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         }
         throw new Error(`Unexpected positional argument "${arg}"; expected a command or an option value.`);
     }
-  }
-  if (parsed.link && parsed.ompMode) {
-    throw new Error("--link and --omp are mutually exclusive; --link already links the omp plugin.");
   }
   validateCommandFlags(parsed);
   return parsed;
@@ -274,25 +246,23 @@ async function main(): Promise<void> {
           cwd: args.path ?? process.cwd(),
           home: args.home ?? homedir(),
           skipLinear: args.skipLinear,
+          skipPlugin: args.skipPlugin,
           initiatives: args.initiatives.length > 0 ? args.initiatives : undefined,
           alias: args.alias ?? undefined,
           team: args.team ?? undefined,
         },
-        { prompter, log, git: nodeRunner },
+        { prompter, log, git: nodeRunner, runner: processRunner },
       );
       return;
     }
 
     const checkoutRoot = resolveCheckoutRoot(args.checkoutPath);
-    const requestedMode: PluginMode | null = args.link ? "link" : args.ompMode;
     await runWizard(
       {
         home: args.home ?? homedir(),
         checkoutRoot,
         githubRepo: args.githubRepo,
-        scope: args.scope,
-        ompMode: nonInteractive ? (requestedMode ?? "install") : requestedMode,
-        skipBuild: args.skipBuild,
+        linkCli: args.link,
         skipLinear: args.skipLinear,
       },
       { prompter, runner: processRunner, log },

@@ -23,10 +23,9 @@ describe("parseArgs", () => {
   });
 
   it("finds a command after flags while skipping their consumed values", () => {
-    const args = parseArgs(["--checkout", "/tmp/setup", "--scope", "project", "setup"]);
+    const args = parseArgs(["--checkout", "/tmp/setup", "setup"]);
     expect(args.command).toBe("setup");
     expect(args.checkoutPath).toBe("/tmp/setup");
-    expect(args.scope).toBe("project");
   });
 
   it("reports misplaced positionals and duplicate commands with their cause", () => {
@@ -40,7 +39,6 @@ describe("parseArgs", () => {
   });
 
   it("rejects setup-only flags on init", () => {
-    expect(() => parseArgs(["init", "--scope", "user"])).toThrow(/--scope applies to `foreman setup`/);
     expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
     expect(() => parseArgs(["init", "--path", "/tmp", "--checkout", "/tmp/checkout"])).toThrow(
       /--checkout applies to `foreman setup`/,
@@ -52,6 +50,7 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["setup", "--initiative", "i1"])).toThrow(/--initiative applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--alias", "mine"])).toThrow(/--alias applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--team", "ENG"])).toThrow(/--team applies to `foreman init`/);
+    expect(() => parseArgs(["setup", "--skip-plugin"])).toThrow(/--skip-plugin applies to `foreman init`/);
   });
 
   it("parses repeatable --initiative, --alias, and --team for init", () => {
@@ -71,32 +70,26 @@ describe("parseArgs", () => {
     expect(args.team).toBe("ENG");
   });
 
-  it("defaults githubRepo and every mode to unset", () => {
+  it("parses --skip-plugin for init", () => {
+    expect(parseArgs(["init"]).skipPlugin).toBe(false);
+    expect(parseArgs(["init", "--skip-plugin"]).skipPlugin).toBe(true);
+  });
+
+  it("defaults githubRepo and link to unset", () => {
     const args = parseArgs(["setup"]);
     expect(args.githubRepo).toBe("andyhite/foreman");
-    expect(args.ompMode).toBeNull();
     expect(args.link).toBe(false);
-    expect(args.scope).toBeNull();
   });
 
-  it("parses --link as a standalone flag, not nested under --omp", () => {
+  it("parses --link as a standalone flag meaning 'link the foreman CLI to source'", () => {
     const args = parseArgs(["setup", "--link"]);
     expect(args.link).toBe(true);
-    expect(args.ompMode).toBeNull();
   });
 
-  it("rejects --link combined with --omp", () => {
-    expect(() => parseArgs(["setup", "--link", "--omp", "skip"])).toThrow(/--link and --omp are mutually exclusive/);
-  });
-
-  it("parses --yes, --omp, --scope, --repo-source, --checkout, --home", () => {
+  it("parses --yes, --repo-source, --checkout, --home", () => {
     const args = parseArgs([
       "setup",
       "--yes",
-      "--omp",
-      "install",
-      "--scope",
-      "project",
       "--repo-source",
       "someone/fork",
       "--checkout",
@@ -105,23 +98,15 @@ describe("parseArgs", () => {
       "/tmp/home",
     ]);
     expect(args.yes).toBe(true);
-    expect(args.ompMode).toBe("install");
-    expect(args.scope).toBe("project");
     expect(args.githubRepo).toBe("someone/fork");
     expect(args.checkoutPath).toBe("/tmp/checkout");
     expect(args.home).toBe("/tmp/home");
   });
 
-  it("rejects an invalid --omp mode", () => {
-    expect(() => parseArgs(["setup", "--omp", "bogus"])).toThrow(/--omp must be one of/);
-  });
-
-  it("rejects --omp link now that dev mode is --link", () => {
-    expect(() => parseArgs(["setup", "--omp", "link"])).toThrow(/--omp must be one of/);
-  });
-
-  it("rejects an invalid --scope", () => {
-    expect(() => parseArgs(["setup", "--scope", "bogus"])).toThrow(/--scope must be one of/);
+  it("rejects --scope, --omp, and --skip-build now that the plugin install lives in init", () => {
+    expect(() => parseArgs(["setup", "--scope", "project"])).toThrow(/Unrecognized argument/);
+    expect(() => parseArgs(["setup", "--omp", "install"])).toThrow(/Unrecognized argument/);
+    expect(() => parseArgs(["setup", "--skip-build"])).toThrow(/Unrecognized argument/);
   });
 
   it("rejects an unknown flag", () => {

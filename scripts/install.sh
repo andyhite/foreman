@@ -11,7 +11,7 @@
 #
 # Extra arguments are forwarded to `foreman setup`, e.g.:
 #
-#   curl -fsSL .../install.sh | bash -s -- --yes --omp install --scope user
+#   curl -fsSL .../install.sh | bash -s -- --yes --repo-source myfork/foreman
 #
 # Env overrides: FOREMAN_REPO_URL, FOREMAN_INSTALL_DIR, FOREMAN_BIN_DIR.
 

@@ -29,7 +29,8 @@ export class CheckoutNotFoundError extends Error {
   }
 }
 
-function looksLikeForemanRoot(dir: string): boolean {
+/** True when `dir` is a Foreman checkout: the monorepo root that owns `packages/omp-plugin`. */
+export function looksLikeForemanRoot(dir: string): boolean {
   const pkgPath = join(dir, "package.json");
   if (!existsSync(pkgPath)) return false;
   try {
