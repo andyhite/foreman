@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "../src/global-config.ts";
@@ -104,6 +104,32 @@ describe("writeGlobalConfig", () => {
           home,
         ),
       ).toThrow(/Invalid global config/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("names the config path when JSON is malformed", () => {
+    const home = makeHome();
+    try {
+      const configDir = join(home, ".foreman");
+      mkdirSync(configDir);
+      writeFileSync(join(configDir, "config.json"), "{not json", "utf8");
+      expect(() => writeGlobalConfig({ linear: { apiKeyFile: "~/.foreman/linear-api-key" } }, home)).toThrow(
+        /Malformed config at .*config\.json/,
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("writes atomically via rename without leaving temp files behind", () => {
+    const home = makeHome();
+    try {
+      const configPath = writeGlobalConfig({ linear: { apiKeyFile: "~/.foreman/linear-api-key" } }, home);
+      const dirEntries = readdirSync(join(home, ".foreman"));
+      expect(dirEntries).toEqual(["config.json"]);
+      expect(readFileSync(configPath, "utf8")).toContain("linear-api-key");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

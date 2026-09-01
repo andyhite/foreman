@@ -71,6 +71,8 @@ export interface TaskGuardDeps {
   entry: ResolvedRepoEntry;
   now: () => Date;
   newDispatchId: (agent: string, issueId: string, now: Date) => string;
+  /** Registers a dispatch id as live in this process — called for every claimed lock, inherited or minted. */
+  registerLiveDispatch: (dispatchId: string) => void;
   ensureWorktree: (input: {
     repoPath: string;
     worktreePath: string;
@@ -97,6 +99,11 @@ const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
 // cross-reference can never match. Taken once per process and cleared: a
 // session that prepares several items must not reuse one inherited id.
 let inheritedDispatchId: string | null = process.env.FOREMAN_DISPATCH_ID ?? null;
+
+/** Test seam: inject or clear the one-shot inherited dispatch id without reloading the module. */
+export function __setInheritedDispatchIdForTest(id: string | null): void {
+  inheritedDispatchId = id;
+}
 
 type Stage = "triage" | "plan" | "refine" | "implement" | "review";
 
@@ -275,6 +282,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   const now = deps.now();
   const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, identifier, now);
   inheritedDispatchId = null;
+  deps.registerLiveDispatch(dispatchId);
   const ttlMs = lockTtlMs(deps.config);
 
   let worktreePath: string | null = null;

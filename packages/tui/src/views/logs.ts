@@ -19,6 +19,10 @@ function showAllLoops(ctx: ViewContext): boolean {
   return ctx.state.logsAllLoops;
 }
 
+function logsScrollKey(ctx: ViewContext): string {
+  return showAllLoops(ctx) ? "logs:all" : "logs:focused";
+}
+
 function toneFor(level: "info" | "warn" | "error"): "danger" | "warn" | undefined {
   if (level === "error") return "danger";
   if (level === "warn") return "warn";
@@ -71,17 +75,23 @@ export const logsView: View = {
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
     const title = showAllLoops(ctx) ? "logs — both loops" : `logs — ${pane?.label ?? "—"}`;
-    const inner = panel(canvas, rect, { theme: ctx.theme, title, focused: true });
-    const stored = ctx.state.scroll[VIEW_ID] ?? 0;
+    const followLabel = ctx.state.logFollow ? "following" : "pinned";
+    const filterLabel = ctx.state.logFilter ? ` · /${ctx.state.logFilter}` : "";
+    const inner = panel(canvas, rect, {
+      theme: ctx.theme,
+      title,
+      focused: true,
+      footer: `${followLabel}${filterLabel}`,
+    });
+    const scrollKey = logsScrollKey(ctx);
+    const stored = ctx.state.scroll[scrollKey] ?? 0;
     const { lines, scroll } = windowedLines(ctx, pane?.id ?? null, inner.height, stored);
-    logView(canvas, inner, { theme: ctx.theme, lines, scroll: 0, follow: false });
-    // Clamping is idempotent (same input always clamps to the same
-    // output), so this dispatch only fires once per out-of-range scroll —
-    // unlike settings' render-time dispatch it cannot oscillate.
-    if (scroll !== stored) ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll });
+    logView(canvas, inner, { theme: ctx.theme, lines, scroll: 0, follow: ctx.state.logFollow });
+    if (scroll !== stored) ctx.dispatch({ type: "setScroll", view: scrollKey, scroll });
   },
 
   handleKey(key: Key, ctx: ViewContext): boolean {
+    const scrollKey = logsScrollKey(ctx);
     if (matchesKey(key, "f")) {
       ctx.dispatch({ type: "setLogFollow", follow: !ctx.state.logFollow });
       return true;
@@ -109,27 +119,27 @@ export const logsView: View = {
     }
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       ctx.dispatch({ type: "setLogFollow", follow: false });
-      ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: (ctx.state.scroll[VIEW_ID] ?? 0) - 1 });
+      ctx.dispatch({ type: "setScroll", view: scrollKey, scroll: (ctx.state.scroll[scrollKey] ?? 0) - 1 });
       return true;
     }
     if (matchesKey(key, "down") || matchesKey(key, "j")) {
       ctx.dispatch({ type: "setLogFollow", follow: false });
-      ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: (ctx.state.scroll[VIEW_ID] ?? 0) + 1 });
+      ctx.dispatch({ type: "setScroll", view: scrollKey, scroll: (ctx.state.scroll[scrollKey] ?? 0) + 1 });
       return true;
     }
     if (matchesKey(key, "pageup")) {
       ctx.dispatch({ type: "setLogFollow", follow: false });
-      ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: (ctx.state.scroll[VIEW_ID] ?? 0) - 10 });
+      ctx.dispatch({ type: "setScroll", view: scrollKey, scroll: (ctx.state.scroll[scrollKey] ?? 0) - 10 });
       return true;
     }
     if (matchesKey(key, "pagedown")) {
       ctx.dispatch({ type: "setLogFollow", follow: false });
-      ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: (ctx.state.scroll[VIEW_ID] ?? 0) + 10 });
+      ctx.dispatch({ type: "setScroll", view: scrollKey, scroll: (ctx.state.scroll[scrollKey] ?? 0) + 10 });
       return true;
     }
     if (matchesKey(key, "home")) {
       ctx.dispatch({ type: "setLogFollow", follow: false });
-      ctx.dispatch({ type: "setScroll", view: VIEW_ID, scroll: 0 });
+      ctx.dispatch({ type: "setScroll", view: scrollKey, scroll: 0 });
       return true;
     }
     if (matchesKey(key, "end")) {

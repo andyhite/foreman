@@ -92,7 +92,7 @@ describe("runInit", () => {
       expect(config.repos).toEqual({
         plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
       });
-      expect(logs.some((line) => line.includes("foreman loop --dry-run --once --verbose"))).toBe(true);
+      expect(logs.some((line) => line.includes("foreman loop --dry-run --once"))).toBe(true);
 
       const loaded = loadGlobalConfig({ home });
       expect(loaded.config.repos.plotroom?.path).toBe("/repos/plotroom");
@@ -329,6 +329,42 @@ describe("runInit", () => {
       await expect(runInit(baseOptions({}, home, "/tmp/not-a-repo"), { prompter, git, log: () => {} })).rejects.toThrow(
         /must be run inside a git repository/,
       );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("registers a fresh repo non-interactively via --initiative flags", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+      await runInit(
+        baseOptions({ initiatives: ["i1", "i2:apps/zero"], alias: "plotroom", team: "ENG" }, home, "/repos/plotroom"),
+        { prompter, git, log: () => {} },
+      );
+
+      expect(readConfig(home).repos).toEqual({
+        plotroom: {
+          path: "/repos/plotroom",
+          team: "ENG",
+          initiatives: ["i1", { id: "i2", path: "apps/zero" }],
+        },
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects empty --initiative values", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+
+      await expect(
+        runInit(baseOptions({ initiatives: [":subdir"] }, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
+      ).rejects.toThrow(/Invalid --initiative/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

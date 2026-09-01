@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { defaultAndValidateGlobalConfig } from "../src/config/load.ts";
 import type { GlobalConfig } from "../src/config/schema.ts";
 import { ControlClient, probeSocket, waitForSocket } from "../src/control/client.ts";
@@ -545,6 +545,46 @@ describe("ControlClient resilience", () => {
     }
   });
 
+
+  it("delivers a broadcast that arrives while subscribe is in flight", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    try {
+      await client.connect();
+      const { promise: gotRace, resolve: resolveRace } = Promise.withResolvers<void>();
+      const subscribePromise = client.subscribe((event) => {
+        if (event.event === "log" && event.line === "during subscribe") resolveRace();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      server.publishLog("info", "during subscribe");
+      await subscribePromise;
+      await gotRace;
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
+  it("invokes each close handler only once when error and close both fire", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(makeSnapshot(), []), info: makeInfo() });
+    await server.listen();
+    const client = new ControlClient({ socketPath });
+    await client.connect();
+    let closeCount = 0;
+    const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>();
+    client.onClose(() => {
+      closeCount += 1;
+      resolveClosed();
+    });
+    await server.close();
+    await closed;
+    expect(closeCount).toBe(1);
+  });
   it("a throwing close handler does not prevent a later close handler from running", async () => {
     const dir = tempDir();
     const socketPath = join(dir, "control.sock");
@@ -559,6 +599,39 @@ describe("ControlClient resilience", () => {
     client.onClose(() => resolveClosed());
     await server.close();
     await closed;
+  });
+});
+
+
+describe("ControlServer lockPath", () => {
+  it("names the holder from lockPath, not dirname(socketPath), when the socket is already held", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "runtime", "foreman.sock");
+    const lockPath = join(dir, "state", "loop.lock");
+    mkdirSync(dirname(socketPath), { recursive: true });
+    mkdirSync(dirname(lockPath), { recursive: true });
+
+    const first = new ControlServer({
+      socketPath,
+      lockPath,
+      handlers: makeHandlers(makeSnapshot(), []),
+      info: makeInfo(),
+    });
+    await first.listen();
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: 4242, startedAt: "2026-01-01T00:00:00.000Z", token: "t" }),
+      "utf8",
+    );
+
+    const second = new ControlServer({
+      socketPath,
+      lockPath,
+      handlers: makeHandlers(makeSnapshot(), []),
+      info: makeInfo(),
+    });
+    await expect(second.listen()).rejects.toThrow(/pid 4242/);
+    await first.close();
   });
 });
 

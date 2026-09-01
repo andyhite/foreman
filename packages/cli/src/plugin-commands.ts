@@ -22,8 +22,16 @@ export function ompLinkArgv(pluginDir: string, scope: OmpScope): string[] {
   return ["plugin", "link", pluginDir, "--scope", scope];
 }
 
+export function ompMarketplaceListArgv(): string[] {
+  return ["plugin", "marketplace", "list"];
+}
+
 export function ompMarketplaceAddArgv(githubRepo: string): string[] {
   return ["plugin", "marketplace", "add", githubRepo];
+}
+
+export function ompPluginListArgv(): string[] {
+  return ["plugin", "list"];
 }
 
 export function ompInstallArgv(pluginName: string, scope: OmpScope): string[] {

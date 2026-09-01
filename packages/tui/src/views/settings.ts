@@ -18,7 +18,6 @@
  */
 import type { Canvas, FieldSpec, GlobalConfig, Key, Rect } from "@foreman/core";
 import { applyFieldKey, fieldRow, kvRows, matchesKey, panel } from "@foreman/core";
-import { focusedPane } from "../store.ts";
 import { duration } from "../format.ts";
 import type { View, ViewContext } from "../view.ts";
 
@@ -298,14 +297,15 @@ export const settingsView: View = {
       }
       if (result.committed) {
         const error = validate(descriptor, result.spec.value);
-        ctx.dispatch({ type: "deleteSettingEdit", key: EDITING_PATH_KEY });
-        ctx.dispatch({ type: "deleteSettingEdit", key: `ui.draft:${descriptor.path}` });
         if (error) {
           ctx.dispatch({ type: "settingsError", message: error });
-        } else {
-          ctx.dispatch({ type: "settingsError", message: null });
-          ctx.dispatch({ type: "editSetting", key: descriptor.path, value: result.spec.value });
+          ctx.dispatch({ type: "editSetting", key: `ui.draft:${descriptor.path}`, value: result.spec.value });
+          return true;
         }
+        ctx.dispatch({ type: "deleteSettingEdit", key: EDITING_PATH_KEY });
+        ctx.dispatch({ type: "deleteSettingEdit", key: `ui.draft:${descriptor.path}` });
+        ctx.dispatch({ type: "settingsError", message: null });
+        ctx.dispatch({ type: "editSetting", key: descriptor.path, value: result.spec.value });
       }
       return true;
     }
@@ -341,20 +341,11 @@ export const settingsView: View = {
     if (matchesKey(key, "ctrl-s")) {
       const edits = pendingEdits(ctx);
       if (edits.length === 0) return true;
-      const patch: Record<string, unknown> = {};
       const changeLines: string[] = [];
       for (const { descriptor: fieldDescriptor, value } of edits) {
-        setPath(patch, fieldDescriptor.path, value);
         const oldValue = configValue(ctx.state.config, fieldDescriptor.path);
         changeLines.push(`${fieldDescriptor.path}: ${String(oldValue)} → ${String(value)}`);
       }
-      const pane = focusedPane(ctx.state);
-      if (!pane) {
-        ctx.toast("warn", "no loop to save through");
-        return true;
-      }
-      // The patch rides on the modal's `effect`: it must not be written until
-      // the operator has seen the `old → new` list and agreed to it.
       ctx.dispatch({
         type: "openModal",
         modal: {
@@ -362,7 +353,7 @@ export const settingsView: View = {
           title: "Save config changes?",
           body: changeLines,
           confirmLabel: "Save",
-          effect: { loopId: pane.id, op: "patchConfig", params: { patch } },
+          persistSettings: true,
           onConfirm: { type: "clearSettingEdits" },
         },
       });

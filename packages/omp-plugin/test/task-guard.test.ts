@@ -18,7 +18,7 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
-import { prepareTaskCall, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
+import { prepareTaskCall, __setInheritedDispatchIdForTest, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = {
@@ -182,6 +182,7 @@ function makeConfig(): GlobalConfig {
       cadenceMinutes: 5,
       stage: "dry-run",
       dispatcher: "print",
+      workerStages: {},
       mergeDetection: true,
       stateDir: "~/.foreman/state",
     },
@@ -225,6 +226,7 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
 }
 
 function makeDeps(linear: LinearWriter, overrides: Partial<TaskGuardDeps> = {}): TaskGuardDeps {
+  const registered: string[] = [];
   return {
     linear,
     github: new GitHubClient(),
@@ -232,10 +234,16 @@ function makeDeps(linear: LinearWriter, overrides: Partial<TaskGuardDeps> = {}):
     entry: makeEntry(),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     newDispatchId: (agent, issueId) => `${agent}-${issueId}-dispatch-1`,
+    registerLiveDispatch: (dispatchId) => {
+      if (!registered.includes(dispatchId)) registered.push(dispatchId);
+    },
     ensureWorktree: async (input) => ({ created: true, branchExisted: false, worktreePath: input.worktreePath }),
     writeDiffFile: async () => "/tmp/diff.patch",
-    liveDispatchIds: () => [],
-    releaseLiveDispatch: () => {},
+    liveDispatchIds: () => registered,
+    releaseLiveDispatch: (dispatchId) => {
+      const index = registered.indexOf(dispatchId);
+      if (index >= 0) registered.splice(index, 1);
+    },
     contextDigest: async () => "## Project Context\nSome context.",
     ...overrides,
   };
@@ -451,6 +459,25 @@ describe("prepareTaskCall — lock provenance", () => {
     const decision = await prepareTaskCall(implementTask(), deps);
     expect(decision.block).toBe(true);
     expect(decision.reason).toMatch(/agent:running.*held/);
+  });
+
+  it("registers an inherited FOREMAN_DISPATCH_ID as live after prepareItem", async () => {
+    const inheritedId = "foreman-implement-ENG-1-20260101T000000Z-abc123";
+    __setInheritedDispatchIdForTest(inheritedId);
+    try {
+      const issue = makeIssue({ labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
+      const linear = new FakeLinear([issue]);
+      const deps = makeDeps(linear, {
+        newDispatchId: () => {
+          throw new Error("prepareItem must not mint a new dispatch id when one is inherited");
+        },
+      });
+      const decision = await prepareTaskCall(implementTask(), deps);
+      expect(decision.block).toBeUndefined();
+      expect(deps.liveDispatchIds()).toContain(inheritedId);
+    } finally {
+      __setInheritedDispatchIdForTest(null);
+    }
   });
 });
 

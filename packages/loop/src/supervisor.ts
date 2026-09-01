@@ -17,6 +17,8 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   IN_FLIGHT_FILTER,
+  isHerdrUnavailable,
+  LinearApiError,
   lockTtlMs,
   writeStatusFile,
   type AgentStatus,
@@ -47,6 +49,48 @@ function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
   const { promise, resolve } = Promise.withResolvers<void>();
   const timer = setTimeout(resolve, ms);
   return { promise, cancel: () => clearTimeout(timer) };
+}
+
+interface LinearHealth {
+  ok: boolean;
+  lastPollAt: string | null;
+  lastError: string | null;
+  requests: number;
+}
+
+/** Wraps every Linear call to record health for `status.json` without changing the writer interface. */
+function trackLinearHealth(linear: LinearWriter, health: LinearHealth, now: () => Date): LinearWriter {
+  const record = (error?: unknown): void => {
+    health.requests += 1;
+    health.lastPollAt = now().toISOString();
+    if (error === undefined) {
+      health.ok = true;
+      health.lastError = null;
+      return;
+    }
+    health.ok = false;
+    if (error instanceof LinearApiError && error.status === 429) {
+      health.lastError = `rate limited: ${error.message}`;
+    } else {
+      health.lastError = `outage: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
+  return new Proxy(linear, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => {
+        try {
+          const result = await value.apply(target, args);
+          record();
+          return result;
+        } catch (error) {
+          record(error);
+          throw error;
+        }
+      };
+    },
+  });
 }
 
 // ---- singleton lockfile (SPEC §17.4) -------------------------------------
@@ -197,6 +241,8 @@ export interface SupervisorOptions {
   config: GlobalConfig;
   linear: LinearWriter;
   dispatcher: Dispatcher;
+  /** Print dispatcher used when herdr becomes unreachable mid-run (SPEC §17.2). */
+  printDispatcher?: Dispatcher;
   bookkeeping: Bookkeeping;
   stateDir: string;
   /** This instance's resolved registry entry (SPEC §3.11), threaded to every worker. */
@@ -204,8 +250,6 @@ export interface SupervisorOptions {
   now?: () => Date;
   log?: (message: string) => void;
   dryRun: boolean;
-  /** Logs per-worker skip records in `runTick`, not just dispatch counts (SPEC §17.9). */
-  verbose?: boolean;
   /** This loop's control-plane identity (contract §I/§J): who `status.json` and every broadcast event say they are. */
   loopId: LoopId;
   statusPath: string | null;
@@ -225,6 +269,7 @@ export class Supervisor {
   readonly #config0: { current: GlobalConfig };
   readonly #linear: LinearWriter;
   readonly #dispatcher: Dispatcher;
+  readonly #printDispatcher: Dispatcher | null;
   readonly #entry: ResolvedRepoEntry;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
@@ -246,6 +291,7 @@ export class Supervisor {
   #tickRequest: readonly string[] | null | undefined = undefined;
   #stopMode: "graceful" | "now" | null = null;
   #stopped = false;
+  #fellBackFromHerdr = false;
 
   readonly #workerMeta = new Map<string, { cadenceMs: number }>();
   readonly #runningWorkers = new Set<string>();
@@ -265,11 +311,12 @@ export class Supervisor {
 
   constructor(options: SupervisorOptions) {
     this.#config0 = { current: options.config };
-    this.#linear = options.linear;
+    this.#now = options.now ?? (() => new Date());
+    this.#linear = trackLinearHealth(options.linear, this.#linearHealth, this.#now);
     this.#dispatcher = options.dispatcher;
+    this.#printDispatcher = options.printDispatcher ?? null;
     this.#bookkeeping = options.bookkeeping;
     this.#entry = options.entry;
-    this.#now = options.now ?? (() => new Date());
     const writeLog = options.log ?? ((message: string) => console.log(`[foreman-loop] ${message}`));
     this.#log = (message) => {
       writeLog(message);
@@ -302,6 +349,27 @@ export class Supervisor {
 
   #dryRun(): boolean {
     return this.#cliDryRun || this.#config().loop.stage === "dry-run";
+  }
+
+  #fallbackFromHerdr(): Dispatcher {
+    if (this.#dispatcher.kind !== "herdr") return this.#dispatcher;
+    if (!this.#printDispatcher) {
+      throw new Error("herdr unavailable and no print dispatcher configured for fallback");
+    }
+    if (!this.#fellBackFromHerdr) {
+      this.#fellBackFromHerdr = true;
+      this.#log("herdr unavailable; falling back to print dispatcher for remainder of this run");
+    }
+    return this.#printDispatcher;
+  }
+
+  async #dispatchWithFallback<T>(fn: (dispatcher: Dispatcher) => Promise<T>): Promise<T> {
+    try {
+      return await fn(this.#dispatcher);
+    } catch (error) {
+      if (!isHerdrUnavailable(error)) throw error;
+      return fn(this.#fallbackFromHerdr());
+    }
   }
 
   acquireLock(probe?: ProcessProbe): void {
@@ -463,6 +531,9 @@ export class Supervisor {
   requestStop(mode: "graceful" | "now"): void {
     this.#stopMode = mode;
     this.#runState = "draining";
+    if (mode === "now") {
+      this.#log("stop requested (now): aborting between workers; in-flight dispatches rely on lock TTL");
+    }
     this.#emit({ event: "state", runtime: this.snapshot().runtime });
     this.#wake?.();
   }
@@ -540,13 +611,13 @@ export class Supervisor {
     return {
       kind: inner.kind,
       dispatch: async (request) => {
-        const handle = await inner.dispatch(request);
+        const handle = await this.#dispatchWithFallback((dispatcher) => dispatcher.dispatch(request));
         this.#handles.set(handle.dispatchId, handle);
         this.#statuses.set(handle.dispatchId, "starting");
         return handle;
       },
-      status: (handle) => inner.status(handle),
-      settle: (handle) => inner.settle(handle),
+      status: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.status(handle)),
+      settle: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.settle(handle)),
       attach: inner.attach ? async (handle) => void (await inner.attach?.(handle)) : undefined,
       available: () => inner.available(),
     };
@@ -563,7 +634,8 @@ export class Supervisor {
       // the control plane's `tick`) may run before `start()` flips "starting" to
       // "running" — only an operator-requested halt should cut the tick short.
       const runState = this.#currentRunState();
-      if (runState === "paused" || runState === "draining" || runState === "stopped") break;
+      if (runState === "paused" || runState === "stopped") break;
+      if (runState === "draining" && this.#stopMode === "now") break;
       this.#workerMeta.set(worker.name, { cadenceMs: worker.cadenceMs });
       const beforeIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
       this.#runningWorkers.add(worker.name);

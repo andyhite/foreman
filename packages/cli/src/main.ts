@@ -39,6 +39,9 @@ interface ParsedArgs {
   skipBuild: boolean;
   skipLinear: boolean;
   help: boolean;
+  initiatives: string[];
+  alias: string | null;
+  team: string | null;
 }
 
 const HELP_TEXT = `foreman — Foreman CLI
@@ -64,6 +67,9 @@ Options for setup:
 
 Options for init:
   --path <dir>               Directory to register (default: the current directory).
+  --initiative <id>          Initiative to bind; repeat for multiple. Accepts <uuid> or <uuid>:<subdir>.
+  --alias <name>             Registry alias override (default: derived from the repo directory name).
+  --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
 
 Options for both:
   -y, --yes                 Accept defaults for every prompt (non-interactive).
@@ -77,6 +83,37 @@ function parseMode(name: string, value: string | undefined): "install" | "skip" 
     throw new Error(`${name} must be one of install|skip, got "${value ?? ""}"`);
   }
   return value;
+}
+
+function validateCommandFlags(parsed: ParsedArgs): void {
+  if (!parsed.command) return;
+
+  const setupOnly = [
+    parsed.link ? "--link" : null,
+    parsed.scope ? "--scope" : null,
+    parsed.ompMode ? "--omp" : null,
+    parsed.githubRepo !== DEFAULT_GITHUB_REPO ? "--repo-source" : null,
+    parsed.repoPath ? "--repo" : null,
+    parsed.skipBuild ? "--skip-build" : null,
+  ].filter((flag): flag is string => flag !== null);
+
+  const initOnly = [
+    parsed.path ? "--path" : null,
+    parsed.initiatives.length > 0 ? "--initiative" : null,
+    parsed.alias ? "--alias" : null,
+    parsed.team !== null ? "--team" : null,
+  ].filter((flag): flag is string => flag !== null);
+
+  if (parsed.command === "init" && setupOnly.length > 0) {
+    throw new Error(
+      `${setupOnly[0]} applies to \`foreman setup\`, not \`foreman init\`. Run \`foreman --help\` for the command list.`,
+    );
+  }
+  if (parsed.command === "setup" && initOnly.length > 0) {
+    throw new Error(
+      `${initOnly[0]} applies to \`foreman init\`, not \`foreman setup\`. Run \`foreman --help\` for the command list.`,
+    );
+  }
 }
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -93,6 +130,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     skipBuild: false,
     skipLinear: false,
     help: false,
+    initiatives: [],
+    alias: null,
+    team: null,
   };
 
   const setCommand = (command: "setup" | "init"): void => {
@@ -156,18 +196,37 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--skip-linear":
         parsed.skipLinear = true;
         break;
+      case "--initiative": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --initiative");
+        parsed.initiatives.push(argv[++i] as string);
+        break;
+      }
+      case "--alias": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --alias");
+        parsed.alias = argv[++i] as string;
+        break;
+      }
+      case "--team": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --team");
+        parsed.team = argv[++i] as string;
+        break;
+      }
       case "--help":
       case "-h":
         parsed.help = true;
         break;
       default:
         if (arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg}`);
+        if (!parsed.command) {
+          throw new Error(`Unknown command "${arg}". Run \`foreman --help\` for the command list.`);
+        }
         throw new Error(`Unexpected positional argument "${arg}"; expected a command or an option value.`);
     }
   }
   if (parsed.link && parsed.ompMode) {
     throw new Error("--link and --omp are mutually exclusive; --link already links the omp plugin.");
   }
+  validateCommandFlags(parsed);
   return parsed;
 }
 
@@ -227,6 +286,9 @@ async function main(): Promise<void> {
           cwd: args.path ?? process.cwd(),
           home: args.home ?? homedir(),
           skipLinear: args.skipLinear,
+          initiatives: args.initiatives.length > 0 ? args.initiatives : undefined,
+          alias: args.alias ?? undefined,
+          team: args.team ?? undefined,
         },
         { prompter, log, git: nodeRunner },
       );
@@ -241,7 +303,7 @@ async function main(): Promise<void> {
         repoRoot,
         githubRepo: args.githubRepo,
         scope: args.scope,
-        ompMode: nonInteractive ? (requestedMode ?? "link") : requestedMode,
+        ompMode: nonInteractive ? (requestedMode ?? "install") : requestedMode,
         skipBuild: args.skipBuild,
         skipLinear: args.skipLinear,
       },

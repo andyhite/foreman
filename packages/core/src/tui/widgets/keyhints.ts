@@ -20,11 +20,15 @@ export function keyHints(canvas: Canvas, rect: Rect, theme: Theme, hints: readon
 
   const segments: Array<{ key: string; label: string }> = [];
   let used = 0;
+  let truncated = false;
   for (const [key, label] of hints) {
     const plain = `${key} ${label}`;
     const separator = segments.length > 0 ? " · " : "";
     const additional = stringWidth(separator) + stringWidth(plain);
-    if (used + additional > rect.width) break;
+    if (used + additional > rect.width) {
+      truncated = true;
+      break;
+    }
     segments.push({ key, label });
     used += additional;
   }
@@ -36,4 +40,8 @@ export function keyHints(canvas: Canvas, rect: Rect, theme: Theme, hints: readon
     x += canvas.text(x, rect.y, " ", theme.sgr());
     x += canvas.text(x, rect.y, segment.label, theme.toneSgr("muted"));
   });
+  if (truncated && used + stringWidth(" · …?") <= rect.width) {
+    x += canvas.text(x, rect.y, " · ", theme.sgr());
+    x += canvas.text(x, rect.y, "…?", theme.toneSgr("muted"));
+  }
 }

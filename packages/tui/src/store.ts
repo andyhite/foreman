@@ -76,6 +76,8 @@ export type ModalState =
       onConfirm?: Action;
       /** Sent to the loop after the operator confirms, never before. */
       effect?: ConfirmEffect;
+      /** When true, confirm persists `settingsEdits` via Session instead of a pre-built patch. */
+      persistSettings?: boolean;
     }
   | {
       kind: "input";
@@ -281,11 +283,12 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case "connection": {
-      const loops = state.loops.map((pane) =>
-        pane.id === action.loopId
-          ? { ...pane, connection: action.connection, error: action.error ?? null }
-          : pane,
-      );
+      const loops = state.loops.map((pane) => {
+        if (pane.id !== action.loopId) return pane;
+        const connection = action.connection;
+        const snapshot = connection === "offline" ? null : pane.snapshot;
+        return { ...pane, connection, error: action.error ?? null, snapshot };
+      });
       return { ...state, loops };
     }
 
@@ -328,7 +331,11 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, logFilter: action.filter };
 
     case "setLogsAllLoops":
-      return { ...state, logsAllLoops: action.value };
+      return {
+        ...state,
+        logsAllLoops: action.value,
+        logFollow: true,
+      };
 
     case "setPipelineFilter":
       return { ...state, pipelineFilter: action.filter };

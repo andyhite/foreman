@@ -275,6 +275,9 @@ export class ControlServer {
     const response = await this.#run(connection, request.op, request.params);
     const payload: ControlResponse = { id: request.id, ...response } as ControlResponse;
     this.#send(connection, encodeFrame(payload));
+    if (request.op === "subscribe" && response.ok) {
+      connection.subscribed = true;
+    }
   }
 
 
@@ -288,7 +291,6 @@ export class ControlServer {
         case "hello":
           return { ok: true, data: this.#info };
         case "subscribe":
-          connection.subscribed = true;
           return { ok: true, data: { recentLogs: this.recentLogs() } };
         case "logs": {
           const sinceSeq = params?.sinceSeq ?? 0;

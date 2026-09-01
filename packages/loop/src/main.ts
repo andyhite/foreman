@@ -55,7 +55,6 @@ interface ParsedArgs {
   repo: string | null;
   team: string | null;
   homePath: string | null;
-  verbose: boolean;
   noControl: boolean;
   help: boolean;
 }
@@ -71,7 +70,6 @@ Usage: foreman loop [options]
   --repo <alias>           Registry alias to run as (default: resolved from cwd).
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
   --home <path>            Home directory containing .foreman/config.json (default: real home).
-  --verbose                Log every skip, not just dispatch counts.
   --no-control             Skip the control-plane socket/status.json; --once already implies this.
   --help                   Show this text.
 
@@ -93,7 +91,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     repo: null,
     team: null,
     homePath: null,
-    verbose: false,
     noControl: false,
     help: false,
   };
@@ -144,9 +141,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.homePath = value;
         break;
       }
-      case "--verbose":
-        parsed.verbose = true;
-        break;
       case "--no-control":
         parsed.noControl = true;
         break;
@@ -196,6 +190,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     if (error instanceof ConfigError) {
       console.error(`[foreman-loop] ${error.message}`);
       for (const problem of error.problems) console.error(`[foreman-loop]   - ${problem}`);
+      console.error("[foreman-loop] run `foreman init` to register this repo, then retry.");
       process.exitCode = 1;
       return;
     }
@@ -233,10 +228,13 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     console.log(`[foreman-loop:${entry.alias}] ${message}`);
   };
 
+  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
+  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
+
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
-      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
+      createPrint: () => printDispatcher,
+      createHerdr: () => herdrDispatcher,
     },
     log,
   );
@@ -245,6 +243,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     config,
     linear,
     dispatcher,
+    printDispatcher,
     bookkeeping,
     stateDir,
     entry,
@@ -252,7 +251,6 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
     // `setStage("full")` must never turn a process launched with
     // `--dry-run` into a mutating loop.
     dryRun: args.dryRun,
-    verbose: args.verbose,
     log,
     loopId: repoLoopId(entry.alias),
     statusPath: args.once || args.noControl ? null : controlPaths.status,
@@ -282,6 +280,7 @@ export async function runLoop(argv: readonly string[]): Promise<void> {
       ? null
       : new ControlServer({
           socketPath: controlPaths.socket,
+          lockPath: controlPaths.lock,
           handlers: createControlHandlers({ supervisor }),
           info: {
             loopId: repoLoopId(entry.alias),

@@ -13,7 +13,7 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
-import { applyBoundResult, blockedOutcome, handleCaptured, __resetAppliedDispatchIdsForTest } from "../src/extension.ts";
+import { applyBoundResult, blockedOutcome, handleCaptured, __resetAppliedDispatchIdsForTest, __resetInFlightCapturesForTest } from "../src/extension.ts";
 import type { ApplyDeps, AgentOutcome } from "../src/results/apply.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
@@ -21,6 +21,7 @@ const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Pr
 
 afterEach(() => {
   __resetAppliedDispatchIdsForTest();
+  __resetInFlightCapturesForTest();
 });
 
 function label(name: string): IssueLabel {
@@ -384,3 +385,34 @@ describe("handleCaptured — appliedDispatchIds is not poisoned by a throwing ap
     expect(commentCallCount).toBe(2);
   });
 });
+
+describe("handleCaptured — concurrent deliveries dedupe in-process", () => {
+  it("applies a refine result only once when two channels deliver the same dispatch id", async () => {
+    const issue = makeIssue({
+      id: "issue-1",
+      identifier: "ENG-1",
+      state: STATE_TODO,
+      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
+    });
+    const linear = new FakeLinear([issue]);
+    const deps = makeDeps(linear);
+    const dispatchId = "foreman-refine-ENG-1-20260101T000000Z-abc123";
+    const payload = {
+      blocked: false,
+      result: makeRefineResult(),
+      block: null,
+    };
+    const tracker = {
+      wasApplied: async () => false,
+    };
+
+    await Promise.all([
+      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, () => {}, deps, tracker),
+      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, () => {}, deps, tracker),
+    ]);
+
+    const descriptionUpdates = linear.updateCalls.filter((call) => call.input.description !== undefined);
+    expect(descriptionUpdates).toHaveLength(1);
+  });
+});
+

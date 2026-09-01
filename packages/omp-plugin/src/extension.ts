@@ -54,11 +54,17 @@ import {
 
 const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 const appliedDispatchIds = new Set<string>();
+const inFlightCaptures = new Map<string, Promise<void>>();
 const reviewDiffDirs = new Map<string, string>();
 
 /** Test-only seam: clears the in-process applied-dispatch dedup set between test cases. */
 export function __resetAppliedDispatchIdsForTest(): void {
   appliedDispatchIds.clear();
+}
+
+/** Test-only seam: clears in-flight capture mutexes between test cases. */
+export function __resetInFlightCapturesForTest(): void {
+  inFlightCaptures.clear();
 }
 
 function toApplyDeps(): ApplyDeps {
@@ -72,11 +78,8 @@ function toGuardDeps(): TaskGuardDeps {
     config: getConfig(),
     entry: getEntry(),
     now: () => new Date(),
-    newDispatchId: (agent, issueId, now) => {
-      const dispatchId = newDispatchId(agent, issueId, now);
-      registerLiveDispatch(dispatchId);
-      return dispatchId;
-    },
+    newDispatchId: (agent, issueId, now) => newDispatchId(agent, issueId, now),
+    registerLiveDispatch,
     ensureWorktree: (input) => ensureWorktree(input),
     writeDiffFile: async (issueId, diff) => {
       const prior = reviewDiffDirs.get(issueId);
@@ -206,57 +209,77 @@ export async function handleCaptured(
   deps: ApplyDeps = toApplyDeps(),
   tracker: AppliedTracker = markerAppliedTracker(),
 ): Promise<void> {
-  if (!isForemanAgentName(agent) || appliedDispatchIds.has(dispatchId)) return;
-  const target = lockedIssueId ?? issueIdFromDispatchId(dispatchId);
-  try {
-    const parsed = parseAgentOutput(agent, data);
-    if (parsed.kind === "invalid") {
-      if (isBudgetTruncation({ aborted, problems: parsed.problems })) {
-        if (target) {
-          await applyOutcome(deps, blockedOutcome(agent, {
-            blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
-            whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
-            options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
-            costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
-          }, target));
+  if (!isForemanAgentName(agent)) return;
+  if (appliedDispatchIds.has(dispatchId)) return;
+
+  const existing = inFlightCaptures.get(dispatchId);
+  if (existing) {
+    await existing;
+    return;
+  }
+
+  const work = (async () => {
+    if (appliedDispatchIds.has(dispatchId)) return;
+    const target = lockedIssueId ?? issueIdFromDispatchId(dispatchId);
+    try {
+      const parsed = parseAgentOutput(agent, data);
+      if (parsed.kind === "invalid") {
+        if (isBudgetTruncation({ aborted, problems: parsed.problems })) {
+          if (target) {
+            await applyOutcome(deps, blockedOutcome(agent, {
+              blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
+              whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
+              options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
+              costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
+            }, target));
+          }
+        } else {
+          const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
+          if (issue) {
+            await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
+            const running = issue.labels.find((label) => label.name === "agent:running");
+            const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
+            if (running) mutation.removedLabelIds = [running.id];
+            // The guard already moved this issue Todo → In Progress (implement
+            // only); removing `agent:running` alone would strand it there with
+            // no live agent and no retry, since `routeImplement` only selects
+            // Todo. Restore the dispatch's recorded pre-claim state — a no-op
+            // for refine/review, which never move state (Step 5 item 1).
+            if (previousStateId && issue.state.id !== previousStateId) mutation.stateId = previousStateId;
+            if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
+          }
+          notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
         }
-      } else {
-        const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
-        if (issue) {
-          await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
-          const running = issue.labels.find((label) => label.name === "agent:running");
-          const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
-          if (running) mutation.removedLabelIds = [running.id];
-          // The guard already moved this issue Todo → In Progress (implement
-          // only); removing `agent:running` alone would strand it there with
-          // no live agent and no retry, since `routeImplement` only selects
-          // Todo. Restore the dispatch's recorded pre-claim state — a no-op
-          // for refine/review, which never move state (Step 5 item 1).
-          if (previousStateId && issue.state.id !== previousStateId) mutation.stateId = previousStateId;
-          if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
-        }
-        notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
+        appliedDispatchIds.add(dispatchId);
+        return;
       }
+      await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
+        const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
+        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, notify);
+      });
+      // Recorded only after the sink callback (applyOutcome + markApplied)
+      // resolves: if either throws, the id must not stay poisoned in the set,
+      // or a redelivery of the same result through the other subscribed
+      // channel is dropped with no durable marker ever written (Step 5 item
+      // 2). The Linear-backed `markerAppliedTracker` remains the durable dedup.
       appliedDispatchIds.add(dispatchId);
-      return;
+    } catch (error) {
+      appliedDispatchIds.delete(dispatchId);
+      throw error;
+    } finally {
+      releaseLiveDispatch(dispatchId);
+      const dir = target ? reviewDiffDirs.get(target) : undefined;
+      if (dir && target) { rmSync(dir, { recursive: true, force: true }); reviewDiffDirs.delete(target); }
     }
-    await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
-      const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-      await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, notify);
-    });
-    // Recorded only after the sink callback (applyOutcome + markApplied)
-    // resolves: if either throws, the id must not stay poisoned in the set,
-    // or a redelivery of the same result through the other subscribed
-    // channel is dropped with no durable marker ever written (Step 5 item
-    // 2). The Linear-backed `markerAppliedTracker` remains the durable dedup.
-    appliedDispatchIds.add(dispatchId);
-  } catch (error) {
-    appliedDispatchIds.delete(dispatchId);
-    throw error;
+  })();
+
+  inFlightCaptures.set(dispatchId, work);
+  try {
+    await work;
   } finally {
-    releaseLiveDispatch(dispatchId);
-    const dir = target ? reviewDiffDirs.get(target) : undefined;
-    if (dir && target) { rmSync(dir, { recursive: true, force: true }); reviewDiffDirs.delete(target); }
+    if (inFlightCaptures.get(dispatchId) === work) {
+      inFlightCaptures.delete(dispatchId);
+    }
   }
 }
 

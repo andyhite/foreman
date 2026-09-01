@@ -9,10 +9,12 @@
  * apply the answer itself.
  */
 import type { BlockedItem, Canvas, Column, Key, Rect } from "@foreman/core";
-import { matchesKey, panel, splitHorizontal, table, truncate, wrapText } from "@foreman/core";
+import { copyToClipboard, matchesKey, panel, table, truncate, wrapText } from "@foreman/core";
 import { cursorFor, focusedPane } from "../store.ts";
 import { relativeTime } from "../format.ts";
 import type { View, ViewContext } from "../view.ts";
+import { listDetailLayout } from "../layout.ts";
+import { displaySnapshot, isFileBacked, paneIdleMessage, staleWatermark } from "../pane.ts";
 
 const VIEW_ID = "blocks";
 
@@ -33,28 +35,37 @@ export const blocksView: View = {
 
   badge(ctx: ViewContext): string | null {
     const pane = focusedPane(ctx.state);
-    const count = pane?.snapshot?.queues.blocked.length ?? 0;
+    const snapshot = pane ? displaySnapshot(pane) : null;
+    const count = snapshot?.queues.blocked.length ?? 0;
     return count > 0 ? String(count) : null;
   },
 
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    if (!pane) {
+      canvas.text(rect.x + 1, rect.y + Math.floor(rect.height / 2), "no loop focused", ctx.theme.toneSgr("muted"));
+      return;
+    }
+    const snapshot = displaySnapshot(pane);
     if (!snapshot) {
-      const message = pane ? "loop not running — press s to start" : "no snapshot yet";
-      canvas.text(
-        rect.x + Math.max(0, Math.floor((rect.width - message.length) / 2)),
-        rect.y + Math.floor(rect.height / 2),
-        message,
-        ctx.theme.toneSgr("muted"),
-      );
+      const { line1, line2 } = paneIdleMessage(pane);
+      const y = rect.y + Math.floor(rect.height / 2);
+      canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line1.length) / 2)), y, line1, ctx.theme.toneSgr("muted"));
+      if (line2) canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line2.length) / 2)), y + 1, line2, ctx.theme.toneSgr("muted"));
+      if (pane.error) canvas.text(rect.x + 1, y + 2, pane.error, ctx.theme.toneSgr("warn"));
       return;
     }
 
     const items = snapshot.queues.blocked;
-    const [listRect, detailRect] = splitHorizontal(rect, [{ flex: 45 }, { flex: 55 }]) as [Rect, Rect];
+    const [listRect, detailRect] = listDetailLayout(rect, [{ flex: 45 }, { flex: 55 }], [{ flex: 55 }, { flex: 45 }]);
 
-    const listInner = panel(canvas, listRect, { theme: ctx.theme, title: "blocked", focused: true });
+    const listInner = panel(canvas, listRect, {
+      theme: ctx.theme,
+      title: "blocked",
+      focused: true,
+      footer: staleWatermark(pane, ctx.state.now) ?? undefined,
+      tone: isFileBacked(pane) ? "warn" : undefined,
+    });
     const columns: readonly Column<BlockedItem>[] = COLUMNS.map((col) =>
       col.header === "detected" ? { ...col, render: (row: BlockedItem) => relativeTime(row.detectedAt, ctx.state.now) } : col,
     );
@@ -121,7 +132,7 @@ export const blocksView: View = {
 
   handleKey(key: Key, ctx: ViewContext): boolean {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    const snapshot = pane ? displaySnapshot(pane) : null;
     if (!snapshot) return false;
     const items = snapshot.queues.blocked;
     const max = items.length - 1;
@@ -152,6 +163,12 @@ export const blocksView: View = {
     }
 
     const item = selectedBlock(ctx, items);
+    if (matchesKey(key, "y") && item) {
+      const command = `/foreman:unblock ${item.issueId} <reply>`;
+      copyToClipboard(command);
+      ctx.toast("ok", `copied: ${command}`);
+      return true;
+    }
     if ((matchesKey(key, "enter") || matchesKey(key, "u")) && item) {
       const command = `/foreman:unblock ${item.issueId} <reply>`;
       ctx.dispatch({
@@ -172,6 +189,8 @@ export const blocksView: View = {
     return [
       ["↑↓", "select"],
       ["enter", "reply"],
+      ["u", "reply"],
+      ["y", "copy command"],
     ];
   },
 };

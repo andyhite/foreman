@@ -39,7 +39,7 @@ export class ControlClient {
   readonly #closeHandlers = new Set<(error: Error | null) => void>();
   #socket: Socket | null = null;
   #nextId = 1;
-
+  #closeNotified = false;
   constructor(options: ControlClientOptions) {
     this.#socketPath = options.socketPath;
     this.#timeoutMs = options.timeoutMs ?? 2000;
@@ -60,6 +60,7 @@ export class ControlClient {
     }, this.#timeoutMs);
     socket.once("connect", () => {
       clearTimeout(timer);
+      this.#closeNotified = false;
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => this.#onData(chunk));
       socket.on("close", () => this.#onClose(null));
@@ -112,6 +113,8 @@ export class ControlClient {
   }
 
   #onClose(error: Error | null): void {
+    if (this.#closeNotified) return;
+    this.#closeNotified = true;
     this.#socket = null;
     for (const pending of this.#pending.values()) {
       pending.reject(error ?? new Error(`control socket ${this.#socketPath} closed`));
@@ -153,20 +156,25 @@ export class ControlClient {
     handler: (event: ControlEvent) => void,
     onSubscribed?: (response: { recentLogs: Array<{ seq: number; at: string; level: string; line: string }> }) => void,
   ): Promise<() => void> {
-    const response = await this.request<{ recentLogs: Array<{ seq: number; at: string; level: string; line: string }> }>(
-      "subscribe",
-    );
-    if (onSubscribed) {
-      try {
-        onSubscribed(response);
-      } catch (error) {
-        console.error(`control client subscription handler threw: ${(error as Error).message}`);
-      }
-    }
     this.#subscribers.add(handler);
-    return () => {
+    try {
+      const response = await this.request<{ recentLogs: Array<{ seq: number; at: string; level: string; line: string }> }>(
+        "subscribe",
+      );
+      if (onSubscribed) {
+        try {
+          onSubscribed(response);
+        } catch (error) {
+          console.error(`control client subscription handler threw: ${(error as Error).message}`);
+        }
+      }
+      return () => {
+        this.#subscribers.delete(handler);
+      };
+    } catch (error) {
       this.#subscribers.delete(handler);
-    };
+      throw error;
+    }
   }
 
   onClose(handler: (error: Error | null) => void): () => void {

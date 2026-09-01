@@ -20,6 +20,22 @@ import type { ControlEvent, ControlOp, GlobalConfig, LoopId, LoopSnapshot } from
 import { ControlClient, loadGlobalConfig, loopHandle, loopPaths, readStatusFile, statusStaleThresholdMs } from "@foreman/core";
 import type { Action } from "./store.ts";
 import { startLoop } from "./supervise.ts";
+function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const part = parts[i]!;
+    const next = cursor[part];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      const child: Record<string, unknown> = {};
+      cursor[part] = child;
+      cursor = child;
+    } else {
+      cursor = next as Record<string, unknown>;
+    }
+  }
+  cursor[parts[parts.length - 1]!] = value;
+}
 
 const BACKOFF_STEPS_MS = [1000, 2000, 4000, 8000];
 const SNAPSHOT_POLL_MS = 3000;
@@ -122,6 +138,36 @@ export class Session {
     for (const connection of this.#connections.values()) {
       await this.#refreshOne(connection);
     }
+  }
+
+  /**
+   * Persists pending settings edits through a deterministic loop target (repo
+   * loop first — config is global, focus must not decide the writer). Re-reads
+   * config immediately before building the patch so a concurrent `foreman init`
+   * is not clobbered.
+   */
+  async saveSettingsFromEdits(edits: Record<string, string | number | boolean>): Promise<boolean> {
+    const { config } = loadGlobalConfig(this.#home ? { home: this.#home } : undefined);
+    this.#config = config;
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(edits)) {
+      if (key.startsWith("ui.")) continue;
+      setPath(patch, key, value);
+    }
+    const loopId = this.#configLoopTarget();
+    if (!loopId) {
+      this.#onAction({ type: "toast", kind: "warn", message: "no loop to save through" });
+      return false;
+    }
+    return this.send(loopId, "patchConfig", { patch });
+  }
+
+  #configLoopTarget(): LoopId | null {
+    const repo = this.#loopIds.find((id) => id.startsWith("repo:"));
+    if (repo) return repo;
+    const intake = this.#loopIds.find((id) => id === "intake");
+    if (intake) return intake;
+    return this.#loopIds[0] ?? null;
   }
 
   updateConfig(config: GlobalConfig): void {

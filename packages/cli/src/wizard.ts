@@ -15,10 +15,13 @@ import type { Runner } from "./exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import {
   DEFAULT_OMP_PLUGIN_NAME,
+  FOREMAN_MARKETPLACE_NAME,
   type OmpScope,
   ompInstallArgv,
   ompLinkArgv,
   ompMarketplaceAddArgv,
+  ompMarketplaceListArgv,
+  ompPluginListArgv,
 } from "./plugin-commands.ts";
 import type { Prompter } from "./prompt.ts";
 import { printBanner, printSection, style } from "./tui.ts";
@@ -168,6 +171,19 @@ async function resolvePluginMode(
   );
 }
 
+async function marketplaceAlreadyRegistered(deps: WizardDeps, githubRepo: string): Promise<boolean> {
+  const { code, stdout } = await deps.runner.capture("omp", ompMarketplaceListArgv());
+  if (code !== 0) return false;
+  return stdout.includes(FOREMAN_MARKETPLACE_NAME) || stdout.includes(githubRepo);
+}
+
+async function pluginAlreadyInstalled(deps: WizardDeps): Promise<boolean> {
+  const { code, stdout } = await deps.runner.capture("omp", ompPluginListArgv());
+  if (code !== 0) return false;
+  const needle = `${DEFAULT_OMP_PLUGIN_NAME}@${FOREMAN_MARKETPLACE_NAME}`;
+  return stdout.includes(needle) || stdout.includes(DEFAULT_OMP_PLUGIN_NAME);
+}
+
 async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: PluginMode): Promise<void> {
   printSection(deps.log, "omp plugin");
   if (mode === "skip") {
@@ -201,22 +217,34 @@ async function setupOmpPlugin(deps: WizardDeps, options: WizardOptions, mode: Pl
   }
 
   const marketplaceArgv = ompMarketplaceAddArgv(options.githubRepo);
-  const marketplaceCode = await deps.runner.run("omp", marketplaceArgv);
-  if (marketplaceCode !== 0) {
-    throw new Error(
-      `omp plugin marketplace add failed (exit ${marketplaceCode}): \`omp ${marketplaceArgv.join(" ")}\`. ` +
-        "The command's output is above. Common causes: no network, or `omp` not authenticated.",
-    );
+  const alreadyRegistered = await marketplaceAlreadyRegistered(deps, options.githubRepo);
+  if (!alreadyRegistered) {
+    const marketplaceCode = await deps.runner.run("omp", marketplaceArgv);
+    if (marketplaceCode !== 0 && !(await marketplaceAlreadyRegistered(deps, options.githubRepo))) {
+      throw new Error(
+        `omp plugin marketplace add failed (exit ${marketplaceCode}): \`omp ${marketplaceArgv.join(" ")}\`. ` +
+          "The command's output is above. Common causes: no network, or `omp` not authenticated.",
+      );
+    }
+  } else {
+    deps.log(`  ${style("cyan", "i")} marketplace "${FOREMAN_MARKETPLACE_NAME}" is already registered.`);
   }
   const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME, scope);
-  const installCode = await deps.runner.run("omp", installArgv);
-  if (installCode !== 0) {
-    throw new Error(
-      `omp plugin install failed (exit ${installCode}): \`omp ${installArgv.join(" ")}\`. ` +
-        "The command's output is above. Common causes: no network, or `omp` not authenticated.",
-    );
+  const alreadyInstalled = await pluginAlreadyInstalled(deps);
+  if (!alreadyInstalled) {
+    const installCode = await deps.runner.run("omp", installArgv);
+    if (installCode !== 0 && !(await pluginAlreadyInstalled(deps))) {
+      throw new Error(
+        `omp plugin install failed (exit ${installCode}): \`omp ${installArgv.join(" ")}\`. ` +
+          "The command's output is above. Common causes: no network, or `omp` not authenticated.",
+      );
+    }
+  } else {
+    deps.log(`  ${style("cyan", "i")} plugin "${DEFAULT_OMP_PLUGIN_NAME}@${FOREMAN_MARKETPLACE_NAME}" is already installed.`);
   }
-  deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo} (scope: ${scope})`);
+  if (!alreadyInstalled) {
+    deps.log(`  ${style("green", "✓")} installed from ${options.githubRepo} (scope: ${scope})`);
+  }
 }
 
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
@@ -226,7 +254,7 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
 
   let requestedMode: PluginMode;
   if (hasOmp) {
-    requestedMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "link");
+    requestedMode = await resolvePluginMode(deps.prompter, "omp plugin (agents, commands, gates)", options.ompMode, "install");
   } else {
     // Asking which strategy to use and then discarding the answer wastes an
     // interactive prompt on an outcome already decided for the *plugin* —

@@ -35,6 +35,12 @@ export interface InitOptions {
   home: string;
   /** Skip Linear entirely and take manual initiative ids. */
   skipLinear: boolean;
+  /** Non-interactive initiative bindings (`<uuid>` or `<uuid>:<subdir>`). */
+  initiatives?: string[];
+  /** Non-interactive registry alias override. */
+  alias?: string;
+  /** Non-interactive Linear team key. */
+  team?: string;
 }
 
 export interface InitDeps {
@@ -42,6 +48,20 @@ export interface InitDeps {
   log: (message: string) => void;
   /** `nodeRunner` from `@foreman/core`; captures stdout, unlike cli's own `Runner`. */
   git: CommandRunner;
+}
+
+/** Parses `--initiative <uuid>` or `--initiative <uuid>:<subdir>`. */
+function parseInitiativeArg(raw: string): InitiativeBinding {
+  const colon = raw.indexOf(":");
+  if (colon === -1) {
+    const id = raw.trim();
+    if (id.length === 0) throw new Error(`Invalid --initiative "${raw}": initiative id is required.`);
+    return id;
+  }
+  const id = raw.slice(0, colon).trim();
+  const subdir = raw.slice(colon + 1).trim();
+  if (id.length === 0) throw new Error(`Invalid --initiative "${raw}": missing id before ":".`);
+  return subdir.length > 0 ? { id, path: subdir } : id;
 }
 
 /** `git rev-parse --show-toplevel`, so running from a subdirectory still registers the repo root. */
@@ -208,7 +228,10 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   const existingByPath = findEntryByPath(existing.repos, repoRoot, options.home);
 
   const defaultAlias = existingByPath?.alias ?? deriveAlias(repoRoot);
-  const aliasInput = await deps.prompter.text("Registry alias for this repo", defaultAlias);
+  const aliasInput =
+    options.alias !== undefined
+      ? options.alias
+      : await deps.prompter.text("Registry alias for this repo", defaultAlias);
   const alias = aliasInput.length > 0 ? aliasInput : defaultAlias;
 
   // Prefer an entry already filed at this path; fall back to one already filed
@@ -236,11 +259,18 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     for (const id of boundInitiativeIds(entry)) boundElsewhere.set(id, otherAlias);
   }
   const apiKey = await resolveConfiguredApiKey(options);
-  const picked = apiKey
-    ? await pickInitiativeIds(deps, apiKey, boundIds, boundElsewhere)
-    : await pickInitiativeIdsManually(deps, boundIds);
+  const cliInitiatives = options.initiatives?.map(parseInitiativeArg) ?? null;
+  const picked = cliInitiatives
+    ? {
+        ids: cliInitiatives.map((binding) => (typeof binding === "string" ? binding : binding.id)),
+        names: new Map<string, string>(),
+        soleTeamKey: null,
+      }
+    : apiKey
+      ? await pickInitiativeIds(deps, apiKey, boundIds, boundElsewhere)
+      : await pickInitiativeIdsManually(deps, boundIds);
 
-  const bindings = await pickInitiativeBindings(deps, picked.ids, existingEntry, picked.names);
+  const bindings = cliInitiatives ?? (await pickInitiativeBindings(deps, picked.ids, existingEntry, picked.names));
 
   /*
    * An entry with no initiatives is rejected by the loader's own validation, so
@@ -252,13 +282,15 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     throw new Error(
       `No initiatives selected, so "${alias}" would resolve to no Linear work. ` +
         "Re-run `foreman init` and pick at least one initiative, " +
-        "or use --skip-linear to type the ids by hand.",
+        "pass one or more --initiative flags, or use --skip-linear to type the ids by hand.",
     );
   }
 
   const defaultTeam = existingEntry?.team ?? picked.soleTeamKey ?? "";
-  const teamInput = await deps.prompter.text("Linear team key for this repo (blank = resolve at runtime)", defaultTeam);
-  const team = teamInput.trim();
+  const team =
+    options.team !== undefined
+      ? options.team.trim()
+      : (await deps.prompter.text("Linear team key for this repo (blank = resolve at runtime)", defaultTeam)).trim();
 
   const baseBranch = await detectBaseBranch(repoRoot, deps.git);
 
@@ -298,5 +330,5 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
 
   printSection(deps.log, "Next step");
-  deps.log("  foreman loop --dry-run --once --verbose");
+  deps.log("  foreman loop --dry-run --once");
 }

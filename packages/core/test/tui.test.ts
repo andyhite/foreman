@@ -70,3 +70,22 @@ describe("layout distribute", () => {
     }
   });
 });
+
+describe("keyHints", () => {
+  it("shows an overflow cue when hints do not fit", async () => {
+    const { keyHints } = await import("../src/tui/widgets/keyhints.ts");
+    const { createTheme } = await import("../src/tui/theme.ts");
+    const canvas = new Canvas(24, 1);
+    const theme = createTheme(false);
+    const hints: Array<readonly [string, string]> = [
+      ["?", "help"],
+      ["tab", "view"],
+      ["L", "loop"],
+      ["s", "start"],
+      ["S", "stop"],
+      ["p", "pause/resume"],
+    ];
+    keyHints(canvas, { x: 0, y: 0, width: 24, height: 1 }, theme, hints);
+    expect(canvas.toLines()[0]).toContain("…?");
+  });
+});

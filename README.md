@@ -64,28 +64,31 @@ curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/insta
 ```
 
 It's re-runnable — running it again pulls the latest checkout and re-runs
-setup on top of your existing `~/.foreman/config.json`. Extra arguments pass
-straight through to `foreman setup`, e.g.
-`... | bash -s -- --yes --omp install --scope user`. Prefer to do it by hand:
+setup on top of your existing `~/.foreman/config.json`. An already-registered
+marketplace or an already-installed plugin is reported as a skip instead of
+failing. Extra arguments pass straight through to `foreman setup`, e.g.
+`... | bash -s -- --yes --scope user`. Prefer to do it by hand:
 
 ```bash
 git clone https://github.com/andyhite/foreman
 cd foreman
 bun install && bun run build
-bun run packages/cli/dist/main.js setup --yes --omp install --scope user
+bun run packages/cli/dist/main.js setup --yes --scope user
 ```
 
 `foreman setup` is the one-time-per-machine installer: it checks for
 `bun`/`git`/`gh`/`omp`/`herdr`, walks you through the Linear API key, and
 installs the plugin(s) you choose. It never touches repos, initiatives, or
 teams — that's `foreman init`'s job (below), run once per repo instead. If
-`$LINEAR_API_KEY` is already set, setup skips the key prompt entirely and
-uses it straight away to confirm you're pointed at the right workspace;
-without a key (or without network access to Linear), setup falls back to a
-manual prompt for where to store one. `--omp install` (shown above) is the
-production path — it registers the omp plugin from `andyhite/foreman` on
-GitHub rather than linking back to this checkout. Drop `--yes` to be walked
-through the prompts interactively instead:
+`$LINEAR_API_KEY` is already set, setup skips the key prompt entirely — the
+loop and extension resolve the key the same way at runtime, so setup does
+not call Linear to validate it. Without a key (or without network access to
+Linear), setup falls back to a manual prompt for where to store one. The
+default plugin mode is `install` from `andyhite/foreman` on GitHub (both
+interactively and under `--yes`, including the piped `curl | bash` path when
+stdin is not a TTY). Pass `--link` to symlink this checkout's omp plugin and
+the `foreman` CLI instead — dev mode. Drop `--yes` to be walked through the
+prompts interactively instead:
 
 `--scope user` (the default) installs the omp plugin across every repo you
 work in; `--scope project` scopes it to the current repo.
@@ -107,14 +110,21 @@ foreman init
 
 `foreman init` resolves the repo root with `git rev-parse --show-toplevel`,
 then lists every product (initiative) in your Linear workspace as a checkbox
-picker (`↑`/`↓` to move, `space` to toggle, `enter` to confirm) — pre-checking
-any already mapped to this repo — and asks for the team and alias. You
-confirm or edit every choice before it's written to `~/.foreman/config.json`.
-`--skip-linear` takes manual initiative ids instead of querying the API;
-`--path <dir>` registers a directory other than the current one; `-y`/`--yes`
-accepts every default and pre-checked value non-interactively; `--home
-<path>` overrides `~/.foreman` for testing. `foreman init` never prompts for
-or writes the Linear API key — that's `foreman setup`'s job.
+picker (`↑`/`↓` to move, `space` to toggle, `a` to toggle all, `enter` to
+confirm) — pre-checking any already mapped to this repo — and scrolls with
+`↑ N more` / `↓ N more` when the list is taller than the terminal. It then
+asks for the team and alias. You confirm or edit every choice before it's
+written to `~/.foreman/config.json`. `--initiative <uuid>[:subdir]` binds
+one or more initiatives (repeat the flag; the optional `:subdir` is the
+per-initiative subdirectory binding); `--alias <name>` and `--team <KEY>`
+override the registry alias and Linear team key. `--skip-linear` takes manual
+initiative ids instead of querying the API; `--path <dir>` registers a
+directory other than the current one; `-y`/`--yes` accepts every default and
+pre-checked value non-interactively — on a repo with no prior registration
+that means nothing is selected and init fails unless you also pass
+`--initiative`; `--home <path>` overrides `~/.foreman` for testing. `foreman
+init` never prompts for or writes the Linear API key — that's `foreman setup`'s
+job.
 
 `foreman init` writes an entry like this to `~/.foreman/config.json`'s
 `repos` table — or edit it directly:
@@ -159,18 +169,20 @@ if you want to hack on Foreman itself instead of just running it.
 The supervisor polls Linear and dispatches whatever the gates allow.
 
 ```bash
-foreman loop --dry-run --once --verbose   # decide and log, dispatch nothing
-foreman loop --stage read-only            # comment and label, no code
-foreman loop --stage full                 # the whole pipeline
+foreman loop --dry-run --once   # decide and log, dispatch nothing
+foreman loop --stage read-only  # comment and label, no code
+foreman loop --stage full       # the whole pipeline
 ```
 
 `loop.stage` is the global fallback and defaults to `dry-run`, so a loop started
 before you are ready logs its intentions instead of acting on them. Override an
 individual worker in `loop.workerStages` when you want to validate the pipeline
 one step at a time: `dry-run` evaluates and logs only, `read-only` runs review
-only, and `full` permits that worker to dispatch. The TUI Logs view receives
-every intended dispatch and every routing skip; `--verbose` is no longer needed
-to see why work did not run.
+only, and `full` permits that worker to dispatch. Every tick logs a per-worker
+summary plus each dispatch intent and every routing skip to stdout; the TUI Logs
+view receives the same lines, so there is nothing for a `--verbose` flag to
+reveal and `foreman loop` does not take one. `foreman intake` still does, where
+it adds the skip reason for each triaged issue.
 
 ```
 [foreman-loop] plan [effective stage: dry-run]: 0 dispatched, 1 would dispatch, 43 skipped
@@ -189,7 +201,13 @@ intake` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
 speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
 after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
 `subscribe`, `pause`, `resume`, `stop`, `tick`, `setStage`, `patchConfig`,
-`reload`, `attachAgent`, `killAgent`, `logs`. The socket is live control; the
+`reload`, `attachAgent`, `killAgent`, `logs`. `stop` takes
+`mode: "graceful" | "now"`: both transition to `draining` and release the
+lock once shutdown completes. `"graceful"` lets the in-flight tick finish
+every worker in the pass; `"now"` cuts the tick short between workers, wakes
+the poll wait immediately, and leaves in-flight dispatches to expire at lock
+TTL. The socket
+is live control; the
 file is the fallback a client reads when nothing is listening, which is what
 lets `foreman tui` (below) render a stopped loop's last-known state instead of
 an error. Run `foreman loop --no-control` to skip the socket entirely.
@@ -216,19 +234,53 @@ with `tab`/`shift-tab` or jumped to directly with `1`-`7`:
 | `logs` | The merged event and log stream from the focused loop |
 | `settings` | The config table below, edited live |
 
-| Key | Does |
-| --- | --- |
-| `q` | Quit — loops keep running |
-| `?` | Help modal |
-| `1`-`7` | Jump to a view |
-| `tab` / `shift-tab` | Cycle views |
-| `L` | Cycle which loop has focus |
-| `r` | Refresh |
-| `s` | Start the focused loop |
-| `S` | Stop the focused loop (confirm) |
-| `p` | Pause / resume |
-| `t` | Tick now |
-| `g` | Cycle the focused loop's global fallback stage `dry-run → read-only → full` (confirm on `full`) |
+Each data view distinguishes live, file-backed, reconnecting, and offline
+connection state; a dead loop's last `status.json` snapshot is watermarked
+with its age instead of being painted as if the process were still running.
+
+Key bindings below are generated from `packages/tui/src/keymap.ts` — keep
+them in sync.
+
+| Key | Does | View |
+| --- | --- | --- |
+| `?` | toggle help | — |
+| `q` | quit (confirm when loops run) | — |
+| `ctrl-c` | quit (confirm when loops run) | — |
+| `1-7` | jump to view | — |
+| `tab` | next view | — |
+| `shift-tab` | previous view | — |
+| `L` | cycle focused loop | — |
+| `r` | refresh snapshot | — |
+| `s` | start focused loop | — |
+| `S` | stop focused loop | — |
+| `p` | pause / resume focused loop | — |
+| `t` | tick focused loop | — |
+| `g` | cycle autonomy stage | — |
+| `↑↓` | select row | agents |
+| `enter / a` | attach agent | agents |
+| `x` | kill agent | agents |
+| `o` | open issue | agents |
+| `↑↓` | select worker | overview |
+| `enter` | skip to agents | overview |
+| `↑↓` | select issue | pipeline |
+| `enter` | issue detail | pipeline |
+| `o` | open issue | pipeline |
+| `/` | filter | pipeline |
+| `↑↓` | select block | blocks |
+| `enter / u` | reply command | blocks |
+| `y` | copy unblock command | blocks |
+| `↑↓` | select proposal | proposals |
+| `enter` | proposal detail | proposals |
+| `y / n` | approve / reject command | proposals |
+| `y` | copy apply command | proposals |
+| `f` | follow / pin tail | logs |
+| `/` | substring filter | logs |
+| `A` | focused / all loops | logs |
+| `enter` | edit field | settings |
+| `←/→` | adjust value | settings |
+| `space` | toggle boolean | settings |
+| `ctrl-s` | save config | settings |
+| `esc` | discard edits | settings |
 
 Flags: `--repo <alias>` and `--team <KEY>` resolve the same way `foreman loop`
 and `foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
@@ -237,134 +289,16 @@ and `foreman intake` do; `--home <path>` overrides `~/.foreman` for testing;
 
 `blocks` and `proposals` never mutate Linear. They show the queue and name
 the exact command that acts — `/foreman:unblock` or `/foreman:apply` — rather
-than offering a keypress that answers or approves in place. This is by
+than offering a keypress that answers or approves in place. `y` copies that
+command to the clipboard (OSC 52) so acting it is one paste away. This is by
 design: the loop process holds no operator-write path to Linear, the same
 split the agents themselves live under (above), so the interactive surface
 built on top of it doesn't get one either.
-
 ## Operator surface
 
 Slash commands, inside any omp session:
 
 | Command | Does |
 | --- | --- |
-| `/foreman:status` | Board state, WIP, backpressure, last run per worker |
-| `/foreman:apply` | Review staged proposals; `--yes` to execute the batch |
-| `/foreman:apply ENG-1 --approve` | Accept one proposal |
-| `/foreman:apply ENG-1 --reject <reason>` | Reject one, with the reason recorded |
-| `/foreman:merge` | Merge what is mergeable, then move issues to Done |
-| `/foreman:unblock ENG-1 <reply>` | Answer a `BlockRecord` and release the issue |
 
-Four dispatch commands run one agent by hand: `/foreman:triage`,
-`/foreman:refine`, `/foreman:implement`, `/foreman:review`.
-
-When [herdr](https://github.com/andyhite/herdr) is available and its server is
-reachable, the loop automatically dispatches agents into real herdr panes
-instead of headless processes — no config flag needed; it falls back to
-print mode automatically otherwise.
-
-`foreman tui` (above) is the interactive counterpart to these commands.
-`/foreman:status` reads the same published `status.json` the control plane
-writes.
-
-## Configuration
-
-`~/.foreman/config.json` holds everything — one global file, no per-repo
-config. Defaults are chosen so that an empty config is a safe config.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `loop.stage` | `dry-run` | Global autonomy fallback: `dry-run`, `read-only`, `full` |
-| `loop.workerStages` | `{}` | Optional per-worker overrides for `plan`, `refine`, `implement`, and `review`; unset uses `loop.stage` |
-| `loop.wipGlobal` | `3` | Hard cap on concurrent agents, per instance |
-| `loop.wip` | `1/2/3/2` | Per-stage caps: plan, refine, implement, review (triage is not a loop worker) |
-| `loop.backpressureThreshold` | `5` | Team-wide blocked depth at which all dispatch stops |
-| `loop.readyBufferTarget` | `5` | How deep refine keeps the Todo buffer |
-| `loop.reviewCycleCap` | `2` | Review round trips before it escalates to you |
-| `intake.window` | `06:00` | When the daily intake batch may start |
-| `loop.cadenceMinutes` | `5` | Poll interval |
-| `repoDefaults.pr.required` | `true` | Open a PR rather than pushing to the base branch |
-| `repoDefaults.merge.strategy` | `squash` | `merge`, `squash`, or `rebase` |
-| `agent.maxRuntimeMs` | `7200000` | Mirrors omp's cap; the lock TTL derives from it |
-
-Config tunes parameters. It never removes an invariant: there is no key that
-disables a gate, a WIP limit, backpressure, the lock protocol, or
-propose-before-apply.
-
-## Labels
-
-Foreman reads and writes a small vocabulary, and every label in it is consumed by
-a gate or a worker predicate.
-
-- `type:` — `bug`, `feature`, `chore`, `spike`, `docs`. Required to leave Triage.
-- `agent:` — `ready`, `running`, `proposed`, `hands-off`. Lifecycle control,
-  written only by the extension. `agent:hands-off` is yours: it means no agent
-  touches this issue.
-- `blocked:` — `needs-input`, `needs-decision`, `external`. The interrupt queue.
-
-## Layout
-
-```
-packages/
-  core/          Linear client, config, gate validators, lock protocol, schemas,
-                 the control-plane contract, and the terminal toolkit
-  omp-plugin/    The plugin: agents, skills, commands, rules, extension
-  loop/           The supervisor and its seven workers
-  tui/           The command center
-  cli/            The foreman CLI — setup, init, and delegates `loop` to packages/loop
-```
-
-`packages/core` is the single source of truth for every contract. The five agent
-output schemas are defined once in TypeBox there and generated into each agent's
-frontmatter — CI fails if the two drift.
-
-## Development
-
-Same clone as above, but link instead of install: `--link` is a standalone
-flag (not an `--omp` value) because it links two things, not one — this
-checkout's `packages/omp-plugin` and the `foreman` CLI itself.
-
-```bash
-git clone https://github.com/andyhite/foreman
-cd foreman
-bun install && bun run build
-bun run setup
-```
-
-`bun run setup` runs `setup --link` straight from source (no prebuilt
-`@foreman/cli` needed); everything after `setup` still prompts, so it's the
-same tool-preflight-and-Linear-key walkthrough as the top-level install, just
-wired to link the plugin back to this checkout instead of installing from
-GitHub. `--link` also drops a `foreman` wrapper on `$PATH` (same
-`~/.local/bin` default, `$FOREMAN_BIN_DIR` override) that execs
-`packages/cli/src/main.ts` straight from source through `bun` instead of a
-prebuilt `dist/main.js` — like the plugin symlink, a source edit needs no
-rebuild to show up, so `foreman init` (and every other command) always runs
-today's checkout. Without `omp` installed, the plugin half is skipped but
-`--link` still links the CLI, since that half doesn't need `omp` at all.
-
-`omp plugin link` registers the checkout but skips its build step, so every
-source change to the *plugin* needs `bun run build` (or `bun run --filter
-'@foreman/omp-plugin' build` for one package) before `/reload-plugins` picks
-it up — the CLI wrapper above is the one piece dev mode never needs rebuilt.
-
-```bash
-bun run typecheck   # tsc --build across the workspace
-bun test            # 597 tests
-bun run contract    # agent/skill/schema wiring check
-bun run schemas     # regenerate output schemas into agent frontmatter
-bun run check       # all three
-```
-
-`bun run contract` catches the failures that are silent at runtime: a tool name
-omp does not have, an `autoloadSkills` entry with no matching skill, a skill
-shadowed by a higher-priority provider, or a frontmatter schema that has drifted
-from its TypeBox definition. None of these produce a warning when omp loads the
-plugin; the agent just runs without its procedure.
-
-## Documentation
-
-- [`docs/SPEC.md`](docs/SPEC.md) — the build specification this implements
-- [`docs/VERIFIED.md`](docs/VERIFIED.md) — what was measured against the real omp,
-  herdr, and Linear APIs during the build, including the four places the spec was
-  wrong and what the code does instead
+[Showing lines 1-300 of 440. Use :301 to continue]

@@ -44,6 +44,7 @@ export class Screen {
   #keyHandlers = new Set<(key: Key) => void>();
   #resizeHandlers = new Set<(columns: number, rows: number) => void>();
   #priorRawMode: boolean | null = null;
+  #priorEncoding: BufferEncoding | null = null;
   #onData: ((chunk: string) => void) | null = null;
   #onResize: (() => void) | null = null;
   #exitHandlers: Array<() => void> = [];
@@ -75,7 +76,8 @@ export class Screen {
     this.#priorRawMode = this.#stdin.isRaw ?? null;
     if (this.#stdin.setRawMode) this.#stdin.setRawMode(true);
     this.#stdin.resume();
-    this.#stdin.setEncoding("utf8");
+    this.#priorEncoding = this.#stdin.readableEncoding ?? null;
+    if (this.#stdin.setEncoding) this.#stdin.setEncoding("utf8");
 
     this.#onData = (chunk: string) => {
       const combined = this.#pendingInput + chunk;
@@ -112,24 +114,31 @@ export class Screen {
     };
     this.#stdout.on("resize", this.#onResize);
 
+    const interruptOnSignal = () => {
+      const ctrlC = {
+        name: "c",
+        char: "\x03",
+        ctrl: true,
+        alt: false,
+        shift: false,
+        raw: "\x03",
+      };
+      for (const handler of this.#keyHandlers) handler(ctrlC);
+    };
     const leaveOnSignal = (signal: NodeJS.Signals) => {
       this.leave();
-      // Registering a listener suppresses Node/Bun's default terminate
-      // action, so the process must re-raise its own exit; SIGHUP has no
-      // conventional exit code, this mirrors the shell convention of
-      // 128 + signal number for INT (2), TERM (15), HUP (1).
       const signo = signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1;
       process.exit(128 + signo);
     };
     const exitHandler = () => this.leave();
     process.on("exit", exitHandler);
-    process.on("SIGINT", leaveOnSignal);
+    process.on("SIGINT", interruptOnSignal);
     process.on("SIGTERM", leaveOnSignal);
     process.on("SIGHUP", leaveOnSignal);
     const proc: NodeJS.EventEmitter = process;
     this.#exitHandlers = [
       () => proc.removeListener("exit", exitHandler),
-      () => proc.removeListener("SIGINT", leaveOnSignal),
+      () => proc.removeListener("SIGINT", interruptOnSignal),
       () => proc.removeListener("SIGTERM", leaveOnSignal),
       () => proc.removeListener("SIGHUP", leaveOnSignal),
     ];
@@ -143,6 +152,11 @@ export class Screen {
     if (this.#stdin.setRawMode && this.#priorRawMode !== null) {
       this.#stdin.setRawMode(this.#priorRawMode);
     }
+    if (this.#stdin.setEncoding) {
+      if (this.#priorEncoding) this.#stdin.setEncoding(this.#priorEncoding);
+      else this.#stdin.setEncoding(null as unknown as BufferEncoding);
+    }
+    this.#priorEncoding = null;
     this.#stdin.pause();
 
     if (this.#onData) this.#stdin.removeListener("data", this.#onData);

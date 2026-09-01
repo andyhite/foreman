@@ -41,6 +41,30 @@ export interface Prompter {
 
 type Keypress = { name?: string; ctrl?: boolean } | undefined;
 
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function terminalSize(): { rows: number; columns: number } {
+  return {
+    rows: process.stdout.rows && process.stdout.rows > 0 ? process.stdout.rows : 24,
+    columns: process.stdout.columns && process.stdout.columns > 0 ? process.stdout.columns : 80,
+  };
+}
+
+function physicalLineCount(line: string, columns: number): number {
+  const visible = stripAnsi(line);
+  if (visible.length === 0) return 1;
+  return Math.max(1, Math.ceil(visible.length / columns));
+}
+
+function truncateVisible(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (text.length <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  return `${text.slice(0, maxWidth - 1)}…`;
+}
+
 /** Prompts on a real terminal: default hints in `[brackets]`, secrets masked with `*`. */
 export class InteractivePrompter implements Prompter {
   private readonly rl: readline.Interface;
@@ -73,16 +97,26 @@ export class InteractivePrompter implements Prompter {
   }
 
   async select<T extends string>(question: string, choices: Array<Choice<T>>, defaultValue: T): Promise<T> {
-    this.log(`${style("cyan", "?")} ${style("bold", question)}`);
-    choices.forEach((choice, index) => {
-      const marker = choice.value === defaultValue ? style("green", "●") : style("dim", "○");
-      this.log(`  ${marker} ${index + 1}) ${choice.label}`);
-    });
     const defaultIndex = choices.findIndex((choice) => choice.value === defaultValue) + 1;
-    const answer = (await this.ask(`${style("dim", `Choice [${defaultIndex}]`)}: `)).trim();
-    if (answer.length === 0) return defaultValue;
-    const chosen = choices[Number.parseInt(answer, 10) - 1];
-    return chosen ? chosen.value : defaultValue;
+    while (true) {
+      this.log(`${style("cyan", "?")} ${style("bold", question)}`);
+      choices.forEach((choice, index) => {
+        const marker = choice.value === defaultValue ? style("green", "●") : style("dim", "○");
+        this.log(`  ${marker} ${index + 1}) ${choice.label}`);
+      });
+      const answer = (await this.ask(`${style("dim", `Choice [${defaultIndex}]`)}: `)).trim();
+      if (answer.length === 0) return defaultValue;
+      const index = Number.parseInt(answer, 10);
+      if (Number.isFinite(index) && index >= 1 && index <= choices.length) {
+        return choices[index - 1]!.value;
+      }
+      this.log(
+        style(
+          "yellow",
+          `  Invalid choice "${answer}"; enter a number from 1 to ${choices.length}, or press Enter for the default.`,
+        ),
+      );
+    }
   }
 
   /** Masks input by intercepting the interface's own output writer while the answer is typed. */
@@ -107,10 +141,15 @@ export class InteractivePrompter implements Prompter {
   }
 
   /** Renders `lines` in place: `redraw` overwrites the previous frame instead of scrolling. */
-  private redraw(lines: string[], previousLineCount: number): number {
-    if (previousLineCount > 0) process.stdout.write(`\x1b[${previousLineCount}A\x1b[0J`);
-    process.stdout.write(`${lines.join("\n")}\n`);
-    return lines.length;
+  private redraw(lines: string[], previousPhysicalRows: number): number {
+    const { columns } = terminalSize();
+    if (previousPhysicalRows > 0) process.stdout.write(`\x1b[${previousPhysicalRows}A\x1b[0J`);
+    let physicalRows = 0;
+    for (const line of lines) {
+      process.stdout.write(`${line}\n`);
+      physicalRows += physicalLineCount(line, columns);
+    }
+    return physicalRows;
   }
 
   async multiSelect<T extends string>(question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
@@ -120,20 +159,40 @@ export class InteractivePrompter implements Prompter {
 
     const checked = choices.map((choice) => choice.checked);
     let cursor = 0;
+    let scrollTop = 0;
     let linesPrinted = 0;
 
     const frame = (): string[] => {
+      const { rows, columns } = terminalSize();
+      const headerLines = 2;
+      const scrollHintReserve = 2;
+      const maxVisible = Math.max(1, rows - headerLines - scrollHintReserve);
+      if (cursor < scrollTop) scrollTop = cursor;
+      if (cursor >= scrollTop + maxVisible) scrollTop = cursor - maxVisible + 1;
+
       const lines = [
         `${style("cyan", "?")} ${style("bold", question)}`,
         style("dim", "  ↑/↓ move   space toggle   a select all   enter confirm"),
       ];
-      choices.forEach((choice, index) => {
+      if (scrollTop > 0) {
+        lines.push(style("dim", `  ↑ ${scrollTop} more`));
+      }
+
+      const visibleEnd = Math.min(choices.length, scrollTop + maxVisible);
+      for (let index = scrollTop; index < visibleEnd; index += 1) {
+        const choice = choices[index]!;
         const box = checked[index] ? style("green", "[x]") : style("dim", "[ ]");
         const pointer = index === cursor ? style("cyan", "›") : " ";
-        const label = index === cursor ? style("bold", choice.label) : choice.label;
+        const plainLabel = truncateVisible(choice.label, Math.max(1, columns - 8));
+        const label = index === cursor ? style("bold", plainLabel) : plainLabel;
         const hint = choice.hint ? style("dim", `  ${choice.hint}`) : "";
         lines.push(`  ${pointer} ${box} ${label}${hint}`);
-      });
+      }
+
+      const below = choices.length - visibleEnd;
+      if (below > 0) {
+        lines.push(style("dim", `  ↓ ${below} more`));
+      }
       return lines;
     };
 

@@ -21,6 +21,8 @@ import {
   truncateMiddle as _truncateMiddle,
 } from "../format.ts";
 import type { View, ViewContext } from "../view.ts";
+import { listDetailLayout } from "../layout.ts";
+import { displaySnapshot, isFileBacked, paneIdleMessage, staleWatermark } from "../pane.ts";
 
 const VIEW_ID = "agents";
 
@@ -93,24 +95,34 @@ export const agentsView: View = {
 
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    if (!pane) {
+      canvas.text(rect.x + 1, rect.y + Math.floor(rect.height / 2), "no loop focused", ctx.theme.toneSgr("muted"));
+      return;
+    }
+    const snapshot = displaySnapshot(pane);
     if (!snapshot) {
-      const message = pane ? "loop not running — press s to start" : "no snapshot yet";
-      canvas.text(
-        rect.x + Math.max(0, Math.floor((rect.width - message.length) / 2)),
-        rect.y + Math.floor(rect.height / 2),
-        message,
-        ctx.theme.toneSgr("muted"),
-      );
+      const { line1, line2 } = paneIdleMessage(pane);
+      const y = rect.y + Math.floor(rect.height / 2);
+      canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line1.length) / 2)), y, line1, ctx.theme.toneSgr("muted"));
+      if (line2) {
+        canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line2.length) / 2)), y + 1, line2, ctx.theme.toneSgr("muted"));
+      }
+      if (pane.error) {
+        canvas.text(rect.x + 1, y + 2, pane.error, ctx.theme.toneSgr("warn"));
+      }
       return;
     }
 
     const agents = snapshot.agents;
-    const listWidth = Math.floor(rect.width * 0.6);
-    const listRect: Rect = { x: rect.x, y: rect.y, width: listWidth, height: rect.height };
-    const detailRect: Rect = { x: rect.x + listWidth, y: rect.y, width: rect.width - listWidth, height: rect.height };
+    const [listRect, detailRect] = listDetailLayout(rect, [{ flex: 60 }, { flex: 40 }], [{ flex: 55 }, { flex: 45 }]);
 
-    const listInner = panel(canvas, listRect, { theme: ctx.theme, title: "agents", focused: true });
+    const listInner = panel(canvas, listRect, {
+      theme: ctx.theme,
+      title: "agents",
+      focused: true,
+      footer: staleWatermark(pane, ctx.state.now) ?? undefined,
+      tone: isFileBacked(pane) ? "warn" : undefined,
+    });
     const selected = cursorFor(ctx.state, VIEW_ID);
     table(canvas, listInner, {
       theme: ctx.theme,
@@ -162,7 +174,7 @@ export const agentsView: View = {
 
   handleKey(key: Key, ctx: ViewContext): boolean {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    const snapshot = pane ? displaySnapshot(pane) : null;
     if (!snapshot) return false;
     const agents = snapshot.agents;
     const max = agents.length - 1;

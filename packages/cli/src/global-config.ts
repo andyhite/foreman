@@ -9,7 +9,7 @@
  */
 
 import { defaultAndValidateGlobalConfig, type RepoEntry } from "@foreman/core";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -31,7 +31,17 @@ export interface ConfigPatch {
 function readExistingConfig(configPath: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {};
   const raw = readFileSync(configPath, "utf8");
-  return raw.trim().length > 0 ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  if (raw.trim().length === 0) return {};
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Malformed config at ${configPath}: ${detail}. ` +
+        "Fix the JSON syntax or move the file aside and re-run setup/init.",
+      { cause: error },
+    );
+  }
 }
 
 export interface ExistingConfig {
@@ -83,7 +93,10 @@ export function writeGlobalConfig(patch: ConfigPatch, home: string = homedir()):
   defaultAndValidateGlobalConfig(structuredClone(merged), configPath);
 
   mkdirSync(dir, { recursive: true });
-  writeFileSync(configPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  const payload = `${JSON.stringify(merged, null, 2)}\n`;
+  const tempPath = join(dir, `.config.json.tmp-${process.pid}`);
+  writeFileSync(tempPath, payload, "utf8");
+  renameSync(tempPath, configPath);
   return configPath;
 }
 

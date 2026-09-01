@@ -16,7 +16,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGENT_OUTPUT_SCHEMAS } from "@foreman/core";
+import { AGENT_OUTPUT_SCHEMAS, SCHEMA_FILENAMES } from "@foreman/core";
 import { stageFor } from "../src/enforce/task-guard.ts";
 
 // Defaults to this plugin. An explicit argument lets the check run against a
@@ -265,6 +265,39 @@ for (const file of agentFiles.sort()) {
   }
 }
 
+for (const [agent, filename] of Object.entries(SCHEMA_FILENAMES) as [keyof typeof SCHEMA_FILENAMES, string][]) {
+  const schemaPath = join(pluginRoot, "schemas", filename);
+  if (!existsSync(schemaPath)) {
+    problems.push(`schemas/${filename}: missing — run \`bun run schemas\``);
+    continue;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(schemaPath, "utf8"));
+  } catch (error) {
+    problems.push(`schemas/${filename}: not valid JSON: ${String(error)}`);
+    continue;
+  }
+  const expected = {
+    $schema: "http://json-schema.org/draft-07/schema#",
+    ...AGENT_OUTPUT_SCHEMAS[agent],
+  };
+  if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
+    const wantKeys = new Set(Object.keys(expected as Record<string, unknown>));
+    const gotKeys = new Set(Object.keys((parsed ?? {}) as Record<string, unknown>));
+    const missing = [...wantKeys].filter((key) => !gotKeys.has(key));
+    const extra = [...gotKeys].filter((key) => !wantKeys.has(key));
+    const drift = [
+      missing.length > 0 ? `missing keys: ${missing.join(", ")}` : null,
+      extra.length > 0 ? `extra keys: ${extra.join(", ")}` : null,
+      missing.length === 0 && extra.length === 0 ? "content drift (same top-level keys)" : null,
+    ]
+      .filter((part): part is string => part !== null)
+      .join("; ");
+    problems.push(`schemas/${filename}: drifted from AGENT_OUTPUT_SCHEMAS (${drift}) — run \`bun run schemas\``);
+  }
+}
+
 for (const dir of skillDirs) {
   const path = join(pluginRoot, "skills", dir, "SKILL.md");
   if (!existsSync(path)) {
@@ -336,5 +369,5 @@ if (problems.length > 0) {
 
 console.log(
   `agent contract OK: ${agentFiles.length} agents, ${skillDirs.size} skills, ` +
-    `schemas match AGENT_OUTPUT_SCHEMAS`,
+    `schemas match AGENT_OUTPUT_SCHEMAS (agents + schemas/*.json)`,
 );

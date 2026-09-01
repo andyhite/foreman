@@ -537,6 +537,20 @@ describe("runApplyCommand — --approve", () => {
     expect(result.message).toContain("already");
   });
 
+  it("keeps agent:proposed when applyProposal throws", async () => {
+    const item = makeTriageItem({ destinationProject: "Missing Project" });
+    const issue = makeIssue({
+      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.proposed)],
+      comments: [proposalComment(item, "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([issue]);
+    linear.projectsList = [{ id: "project-roadmap", name: "Roadmap" }];
+    const result = await runApplyCommand(linear, ["ENG-1", "--approve"]);
+    expect(result.ok).toBe(false);
+    expect(issue.labels.some((entry) => entry.name === AGENT_LABEL.proposed)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.removedLabelIds !== undefined)).toBe(false);
+  });
+
   it("resolves destinationProject to a project id, matching case-insensitively", async () => {
     const item = makeTriageItem({ destinationProject: "roadmap" });
     const issue = makeIssue({

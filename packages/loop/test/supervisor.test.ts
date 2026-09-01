@@ -262,7 +262,7 @@ function makeStubWorker(): Worker {
   };
 }
 
-function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
+function makeSupervisor(logs: string[]): Supervisor {
   const stateDir = tempStateDir();
   return new Supervisor({
     config: makeConfig("full"),
@@ -274,7 +274,6 @@ function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: (message) => logs.push(message),
     dryRun: false,
-    verbose,
     loopId: repoLoopId("acme"),
     statusPath: join(stateDir, "status.json"),
     version: "0.1.0-test",
@@ -283,9 +282,9 @@ function makeSupervisor(verbose: boolean, logs: string[]): Supervisor {
 }
 
 describe("Supervisor.runTick — decision observability", () => {
-  it("logs actual dispatches and every skip regardless of verbose", async () => {
+  it("logs actual dispatches and every skip", async () => {
     const logs: string[] = [];
-    const supervisor = makeSupervisor(false, logs);
+    const supervisor = makeSupervisor(logs);
     await supervisor.runTick([makeStubWorker()]);
     expect(logs.some((line) => line.includes("effective stage: full") && line.includes("1 dispatched"))).toBe(true);
     expect(logs.some((line) => line.includes("dispatched refine [effective stage: full] ENG-1"))).toBe(true);
@@ -293,7 +292,7 @@ describe("Supervisor.runTick — decision observability", () => {
   });
 
   it("publishes decision logs to control subscribers", async () => {
-    const supervisor = makeSupervisor(false, []);
+    const supervisor = makeSupervisor([]);
     const events: ControlEvent[] = [];
     supervisor.onEvent((event) => events.push(event));
     await supervisor.runTick([makeStubWorker()]);
@@ -303,7 +302,7 @@ describe("Supervisor.runTick — decision observability", () => {
 
   it("uses would dispatch for CLI dry-run decisions without counting a dispatch", async () => {
     const logs: string[] = [];
-    const supervisor = makeSupervisor(false, logs);
+    const supervisor = makeSupervisor(logs);
     await supervisor.runTick([makeStubWorker()]);
     expect(logs.some((line) => line.includes("would dispatch refine [effective stage: full] ENG-1"))).toBe(false);
     const drySupervisor = new Supervisor({

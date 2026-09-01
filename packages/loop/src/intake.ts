@@ -561,6 +561,7 @@ export async function runIntake(argv: readonly string[]): Promise<void> {
       ? null
       : new ControlServer({
           socketPath: controlPaths.socket,
+          lockPath: controlPaths.lock,
           handlers: createIntakeControlHandlers(ctx, runtime, home, statusPath),
           info: {
             loopId: INTAKE_LOOP_ID,

@@ -44,6 +44,24 @@ function makeSnapshot(): LoopSnapshot {
   return { loop: { id: "repo:demo" } } as unknown as LoopSnapshot;
 }
 
+describe("reduce — connection", () => {
+  it("clears snapshot when connection becomes offline", () => {
+    const state = reduce(makeState(), {
+      type: "loops",
+      handles: [makeHandle("repo:demo" as LoopId, { running: true })],
+    });
+    const withSnapshot = reduce(state, { type: "snapshot", loopId: "repo:demo" as LoopId, snapshot: makeSnapshot() });
+    const offline = reduce(withSnapshot, {
+      type: "connection",
+      loopId: "repo:demo" as LoopId,
+      connection: "offline",
+      error: "status.json is stale (5m old)",
+    });
+    expect(offline.loops[0]?.snapshot).toBeNull();
+    expect(offline.loops[0]?.error).toBe("status.json is stale (5m old)");
+  });
+});
+
 describe("reduce — purity", () => {
   it("returns a new object and leaves the input untouched", () => {
     const state = makeState();

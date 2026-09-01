@@ -31,7 +31,7 @@ import type {
   LinearReader,
   LinearWriter,
 } from "./api.ts";
-import { LinearApiError } from "./api.ts";
+import { LinearApiError, LinearPaginationError } from "./api.ts";
 import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
@@ -154,7 +154,7 @@ export interface LinearClientOptions {
   timeoutMs?: number;
 }
 
-/** Hard ceiling on pagination loops — a full page every time up to this cap logs a warning rather than looping forever on a misbehaving cursor. */
+/** Hard ceiling on pagination loops — exhausting it with more pages remaining is a hard error, never a silent partial result. */
 const MAX_PAGES = 50;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
@@ -303,6 +303,12 @@ export class LinearClient implements LinearWriter {
     }
     return 1000;
   }
+
+  /** Pagination must run to completion or fail loudly — partial pages corrupt lock/reconcile decisions. */
+  private refusePartialPage(operation: string, pages: number, partialCount: number): never {
+    throw new LinearPaginationError(operation, pages, partialCount);
+  }
+
 
 
   private mapStateRef(state: WireStateRef): { id: LinearId; name: string; type: WorkflowState["type"] } {
@@ -457,14 +463,12 @@ export class LinearClient implements LinearWriter {
       }
       if (!data.issues.pageInfo.hasNextPage || !data.issues.pageInfo.endCursor) break;
       if (data.issues.pageInfo.endCursor === after) {
-        console.warn(`issues(): cursor did not advance after ${results.length} results; stopping`);
-        break;
+        this.refusePartialPage("issues()", pages, results.length);
       }
       after = data.issues.pageInfo.endCursor;
       pages += 1;
       if (pages >= MAX_PAGES) {
-        console.warn(`issues(): stopped after ${MAX_PAGES} pages (${results.length} results so far)`);
-        break;
+        this.refusePartialPage("issues()", pages, results.length);
       }
     }
     return results;
@@ -496,14 +500,12 @@ export class LinearClient implements LinearWriter {
       }
       if (!data.issue.comments.pageInfo.hasNextPage || !data.issue.comments.pageInfo.endCursor) break;
       if (data.issue.comments.pageInfo.endCursor === cursor) {
-        console.warn(`paginateComments(${issueId}): cursor did not advance after ${results.length} comments; stopping`);
-        break;
+        this.refusePartialPage(`paginateComments(${issueId})`, pages, results.length);
       }
       cursor = data.issue.comments.pageInfo.endCursor;
       pages += 1;
       if (pages >= MAX_PAGES) {
-        console.warn(`paginateComments(${issueId}): stopped after ${MAX_PAGES} pages (${results.length} comments so far)`);
-        break;
+        this.refusePartialPage(`paginateComments(${issueId})`, pages, results.length);
       }
     }
     return results;
@@ -765,14 +767,12 @@ export class LinearClient implements LinearWriter {
       results.push(...data.issueLabels.nodes);
       if (!data.issueLabels.pageInfo.hasNextPage || !data.issueLabels.pageInfo.endCursor) break;
       if (data.issueLabels.pageInfo.endCursor === after) {
-        console.warn(`fetchRawLabels(): cursor did not advance after ${results.length} labels; stopping`);
-        break;
+        this.refusePartialPage("fetchRawLabels()", pages, results.length);
       }
       after = data.issueLabels.pageInfo.endCursor;
       pages += 1;
       if (pages >= MAX_PAGES) {
-        console.warn(`fetchRawLabels(): stopped after ${MAX_PAGES} pages (${results.length} labels so far)`);
-        break;
+        this.refusePartialPage("fetchRawLabels()", pages, results.length);
       }
     }
     return teamId ? results.filter((label) => label.team === null || label.team.id === teamId) : results;

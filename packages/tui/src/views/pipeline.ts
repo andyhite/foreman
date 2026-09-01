@@ -12,6 +12,7 @@ import { gauge, matchesKey, panel, table, truncate } from "@foreman/core";
 import { cursorFor, focusedPane } from "../store.ts";
 import { priorityGlyph, relativeTime } from "../format.ts";
 import type { View, ViewContext } from "../view.ts";
+import { displaySnapshot, isFileBacked, paneIdleMessage, staleWatermark } from "../pane.ts";
 
 const VIEW_ID = "pipeline";
 
@@ -59,15 +60,17 @@ export const pipelineView: View = {
 
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    if (!pane) {
+      canvas.text(rect.x + 1, rect.y + Math.floor(rect.height / 2), "no loop focused", ctx.theme.toneSgr("muted"));
+      return;
+    }
+    const snapshot = displaySnapshot(pane);
     if (!snapshot) {
-      const message = pane ? "loop not running — press s to start" : "no snapshot yet";
-      canvas.text(
-        rect.x + Math.max(0, Math.floor((rect.width - message.length) / 2)),
-        rect.y + Math.floor(rect.height / 2),
-        message,
-        ctx.theme.toneSgr("muted"),
-      );
+      const { line1, line2 } = paneIdleMessage(pane);
+      const y = rect.y + Math.floor(rect.height / 2);
+      canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line1.length) / 2)), y, line1, ctx.theme.toneSgr("muted"));
+      if (line2) canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line2.length) / 2)), y + 1, line2, ctx.theme.toneSgr("muted"));
+      if (pane.error) canvas.text(rect.x + 1, y + 2, pane.error, ctx.theme.toneSgr("warn"));
       return;
     }
 
@@ -91,7 +94,13 @@ export const pipelineView: View = {
     const rows = filteredRows(ctx, snapshot.queues.pipeline);
     const filter = currentFilter(ctx);
     const title = filter ? `pipeline — filter "${filter}"` : "pipeline";
-    const inner = panel(canvas, tableRect, { theme: ctx.theme, title, focused: true });
+    const inner = panel(canvas, tableRect, {
+      theme: ctx.theme,
+      title,
+      focused: true,
+      footer: staleWatermark(pane, ctx.state.now) ?? undefined,
+      tone: isFileBacked(pane) ? "warn" : undefined,
+    });
 
     const columns: readonly Column<QueueItem>[] = COLUMNS.map((col) =>
       col.header === "updated" ? { ...col, render: (row: QueueItem) => relativeTime(row.updatedAt, ctx.state.now) } : col,
@@ -109,7 +118,7 @@ export const pipelineView: View = {
 
   handleKey(key: Key, ctx: ViewContext): boolean {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    const snapshot = pane ? displaySnapshot(pane) : null;
     if (!snapshot) return false;
     const rows = filteredRows(ctx, snapshot.queues.pipeline);
     const max = rows.length - 1;

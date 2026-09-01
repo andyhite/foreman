@@ -326,6 +326,24 @@ describe("LinearClient pagination", () => {
 
     expect(issue?.comments.map((comment) => comment.id)).toEqual(["comment-1", "comment-2"]);
   });
+
+  it("throws LinearPaginationError when the page cap is exhausted with more pages remaining", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(200, {
+        data: {
+          issues: {
+            nodes: [baseWireIssue({ id: `issue-${calls}`, identifier: `ENG-${calls}` })],
+            pageInfo: { hasNextPage: true, endCursor: `cursor-${calls}` },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.issues({ limit: 10_000 })).rejects.toThrow(/refusing partial results/);
+    expect(calls).toBeGreaterThanOrEqual(50);
+  });
 });
 
 describe("LinearClient team scope", () => {

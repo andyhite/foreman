@@ -62,11 +62,21 @@ export async function sweep(
   now: Date = new Date(),
   liveDispatchIds: readonly string[] = [],
 ): Promise<ReapedLock[]> {
+  let viewerId: string | null;
+  try {
+    viewerId = await linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  // Without a viewer id we cannot tell our lock markers from forged ones —
+  // same fail-closed posture as `checkLockFree` in the task guard.
+  if (viewerId === null) return [];
+
   const issues = await linear.issues({ filter: IN_FLIGHT_FILTER, includeComments: true });
   const reaped: ReapedLock[] = [];
 
   for (const issue of issues) {
-    const found = readLockComment(issue.comments);
+    const found = readLockComment(issue.comments, viewerId);
     if (!found) continue;
     const state = lockState(found.data, { now, liveDispatchIds });
     if (!state.orphaned) continue;

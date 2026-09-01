@@ -22,6 +22,7 @@ import { overviewView } from "../src/views/overview.ts";
 import { pipelineView } from "../src/views/pipeline.ts";
 import { proposalsView } from "../src/views/proposals.ts";
 import { settingsView } from "../src/views/settings.ts";
+import { isStackedListDetail } from "../src/layout.ts";
 import { key, makeContext, makeLiveState, makeOfflineState } from "./fixtures.ts";
 
 const VIEWS: readonly View[] = [
@@ -65,6 +66,26 @@ describe("views — render safety", () => {
       });
     }
   }
+});
+
+describe("views — responsive layout", () => {
+  it("agents stacks list over detail below the width threshold", () => {
+    const wide = { x: 0, y: 0, width: 120, height: 40 };
+    const narrow = { x: 0, y: 0, width: 80, height: 40 };
+    expect(isStackedListDetail(wide)).toBe(false);
+    expect(isStackedListDetail(narrow)).toBe(true);
+
+    const ctx = makeContext(makeLiveState());
+    const canvasWide = canvasFor(wide);
+    const canvasNarrow = canvasFor(narrow);
+    agentsView.render(canvasWide, wide, ctx);
+    agentsView.render(canvasNarrow, narrow, ctx);
+    const wideText = stripAnsi(canvasWide.toLines().join("\n"));
+    const narrowText = stripAnsi(canvasNarrow.toLines().join("\n"));
+    expect(wideText).toContain("detail");
+    expect(narrowText).toContain("detail");
+    expect(narrowText.indexOf("agents")).toBeLessThan(narrowText.indexOf("detail"));
+  });
 });
 
 describe("views — no style leaks", () => {
@@ -277,7 +298,6 @@ describe("views — content", () => {
     if (hours > 0) expect(text).toContain(`${hours}h`);
   });
 
-});
 
   it("footer contains every global hint", () => {
     const canvas = new Canvas(200, 24);
@@ -290,12 +310,14 @@ describe("views — content", () => {
       requestRender: () => {},
       quit: () => {},
     });
+    host.dispatch({ type: "setView", index: 1 });
     host.render({ canvas, rect: { x: 0, y: 0, width: 200, height: 24 }, tick: 0 });
     const text = stripAnsi(canvas.toLines().join("\n"));
-    for (const label of ["help", "view", "loop", "start", "stop", "pause/resume", "tick", "stage", "quit"]) {
+    for (const label of ["help", "view", "loop", "quit"]) {
       expect(text).toContain(label);
     }
   });
+});
 
 describe("views — keys", () => {
   const CURSOR_VIEWS: ReadonlyArray<{ view: View; id: string }> = [
@@ -389,24 +411,18 @@ describe("views — keys", () => {
     expect(settingsView.handleKey(key("ctrl-s"), ctx)).toBe(true);
     const modal = ctx.state.modal;
     if (modal?.kind !== "confirm") throw new Error("expected a save confirmation");
-    expect(modal.effect).toEqual({
-      loopId: "repo:demo",
-      op: "patchConfig",
-      params: { patch: { loop: { workerStages: { plan: "read-only" } } } },
-    });
+    expect(modal.persistSettings).toBe(true);
+    expect(modal.effect).toBeUndefined();
   });
 
-  it("settings: committing an invalid value dispatches settingsError, not editSetting", () => {
+  it("settings: invalid commit keeps the draft and surfaces settingsError inline", () => {
     const ctx = makeContext(makeLiveState());
-    // `intake.window` is the one field settings.ts validates itself (a
-    // number field cannot reach `handleKey`'s commit branch out of range —
-    // `applyFieldKey` clamps every number commit to its `min` before
-    // `validate()` ever runs, so that branch of `validate()` is unreachable
-    // through the UI and is not exercised here).
     const index = 16; // intake.window — see SECTIONS in settings.ts
     ctx.dispatch({ type: "setCursor", view: "settings", index });
     expect(settingsView.handleKey(key("enter"), ctx)).toBe(true);
-    expect(ctx.state.settingsEdits["ui.editingPath"]).toBe("intake.window");
+    for (let i = 0; i < 5; i += 1) {
+      settingsView.handleKey(key("backspace"), ctx);
+    }
     for (const ch of "not-a-time") {
       settingsView.handleKey(key(ch), ctx);
     }
@@ -415,6 +431,8 @@ describe("views — keys", () => {
     const dispatched = ctx.actions.slice(before);
     expect(dispatched.some((action) => action.type === "settingsError" && action.message)).toBe(true);
     expect(dispatched.some((action) => action.type === "editSetting" && action.key === "intake.window")).toBe(false);
+    expect(ctx.state.settingsEdits["ui.draft:intake.window"]).toBe("not-a-time");
+    expect(ctx.state.settingsError).toBeTruthy();
   });
 
   it("settings: cancelling an edit clears editingPath entirely, so global keys are no longer swallowed", () => {

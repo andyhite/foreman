@@ -28,6 +28,20 @@ import type {
   DispatchStatus,
 } from "./types.ts";
 
+/** Every herdr subprocess gets this ceiling — a hung CLI must not wedge dispatch or settle. */
+export const HERDR_EXEC_TIMEOUT_MS = 30_000;
+
+export class HerdrUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HerdrUnavailableError";
+  }
+}
+
+export function isHerdrUnavailable(error: unknown): error is HerdrUnavailableError {
+  return error instanceof HerdrUnavailableError;
+}
+
 interface HerdrRunner {
   run(argv: string[]): Promise<{ stdout: string; stderr: string; code: number }>;
 }
@@ -41,17 +55,32 @@ const nodeHerdrRunner: HerdrRunner = {
       code: number;
     }>();
     if (!command) {
-      reject(new Error("empty argv"));
+      reject(new HerdrUnavailableError("empty herdr argv"));
       return promise;
     }
-    execFile(command, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error && typeof error.code !== "number") {
-        reject(error);
-        return;
-      }
-      const code = error ? ((error.code as number | undefined) ?? 1) : 0;
-      resolve({ stdout, stderr, code });
-    });
+    execFile(
+      command,
+      args,
+      { maxBuffer: 16 * 1024 * 1024, timeout: HERDR_EXEC_TIMEOUT_MS, killSignal: "SIGKILL" },
+      (error, stdout, stderr) => {
+        if (error) {
+          if (error.killed || error.code === "ETIMEDOUT") {
+            reject(
+              new HerdrUnavailableError(
+                `herdr ${args.join(" ")} timed out after ${HERDR_EXEC_TIMEOUT_MS}ms`,
+              ),
+            );
+            return;
+          }
+          if (typeof error.code !== "number") {
+            reject(new HerdrUnavailableError(`herdr ${args.join(" ")} failed: ${error.message}`));
+            return;
+          }
+        }
+        const code = error ? ((error.code as number | undefined) ?? 1) : 0;
+        resolve({ stdout, stderr, code });
+      },
+    );
     return promise;
   },
 };

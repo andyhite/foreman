@@ -18,37 +18,9 @@ import type { Action, AppState, LoopPane, Toast } from "./store.ts";
 import { focusedPane, reduce, scrollFor } from "./store.ts";
 import type { View, ViewContext } from "./view.ts";
 import type { Session } from "./session.ts";
+import { GLOBAL_KEY_HINTS, HELP_ENTRIES } from "./keymap.ts";
+import { connectionChip } from "./pane.ts";
 
-const GLOBAL_HINTS: ReadonlyArray<readonly [string, string]> = [
-  ["?", "help"],
-  ["tab", "view"],
-  ["L", "loop"],
-  ["s", "start"],
-  ["S", "stop"],
-  ["p", "pause/resume"],
-  ["t", "tick"],
-  ["g", "stage"],
-  ["q", "quit"],
-];
-
-const HELP_HINTS: ReadonlyArray<readonly [string, string]> = [
-  ["?", "toggle help"],
-  ["q / ctrl-c", "quit"],
-  ["1-7", "jump to view"],
-  ["tab / shift-tab", "next / previous view"],
-  ["L", "cycle focused loop"],
-  ["r", "refresh snapshot"],
-  ["s / S", "start / stop focused loop"],
-  ["p / t", "pause-resume / tick focused loop"],
-  ["g", "cycle autonomy stage"],
-  ["agents", "↑↓ select · enter attach · x kill · o open"],
-  ["overview", "↑↓ worker · enter skips"],
-  ["pipeline", "↑↓ select · enter detail · o open · / filter"],
-  ["blocks", "↑↓ select · enter reply command"],
-  ["proposals", "↑↓ select · enter detail · y approve · n reject"],
-  ["logs", "f follow · / filter · A focused/all loops"],
-  ["settings", "enter edit · ←/→ adjust · space toggle · ctrl-s save"],
-];
 
 export class TuiHost {
   #state: AppState;
@@ -156,6 +128,11 @@ export class TuiHost {
     if (this.#state.team) segments.push({ text: this.#state.team });
     if (pane) {
       segments.push({ text: pane.label });
+      const chip = connectionChip(pane, this.#state.now);
+      segments.push({
+        text: chip,
+        tone: pane.connection === "live" ? undefined : "warn",
+      });
       const runtime = pane.snapshot?.runtime;
       if (runtime) {
         segments.push({ text: runtime.dispatcher });
@@ -163,6 +140,16 @@ export class TuiHost {
           segments.push({ text: runtime.state, tone: "warn" });
         }
       }
+      if (pane.error) {
+        segments.push({ text: pane.error, tone: "warn" });
+      }
+    }
+    for (const loopPane of this.#state.loops) {
+      if (loopPane === pane) continue;
+      segments.push({
+        text: `${loopPane.label}:${connectionChip(loopPane, this.#state.now)}`,
+        tone: loopPane.connection === "live" ? undefined : "warn",
+      });
     }
     // Paint each segment as plain text plus its own sgr — a pre-styled
     // joined string would burn one canvas column per escape byte and
@@ -183,7 +170,7 @@ export class TuiHost {
   }
 
   #renderFooter(canvas: Canvas, rect: Rect, ctx: ViewContext, view: View | undefined): void {
-    const hints = [...(view?.hints(ctx) ?? []), ...GLOBAL_HINTS];
+    const hints = [...(view?.hints(ctx) ?? []), ...GLOBAL_KEY_HINTS];
     keyHints(canvas, { x: 1, y: rect.y, width: rect.width - 1, height: 1 }, this.#theme, hints);
   }
 
@@ -207,8 +194,8 @@ export class TuiHost {
     const theme = this.#theme;
 
     if (modalState.kind === "help") {
-      const inner = modal(canvas, rect, { theme, title: "keymap", width: 78, height: 20, footer: "esc close" });
-      kvRows(canvas, inner, { theme, entries: HELP_HINTS });
+      const inner = modal(canvas, rect, { theme, title: "keymap", width: 78, height: 20, footer: "esc / q close" });
+      kvRows(canvas, inner, { theme, entries: HELP_ENTRIES });
       return;
     }
 
@@ -239,14 +226,23 @@ export class TuiHost {
     }
 
     if (modalState.kind === "detail") {
-      const inner = modal(canvas, rect, { theme, title: modalState.title, width: 70, height: 20, footer: "esc close" });
-      const [rowsArea, bodyArea] = splitVertical(inner, [{ flex: 1 }, { fixed: modalState.body?.length ?? 0 }]) as [
-        Rect,
-        Rect,
-      ];
+      const inner = modal(canvas, rect, { theme, title: modalState.title, width: 70, height: 20, footer: "esc / q close · ↑↓ scroll" });
+      const bodyLineCount = modalState.body?.length ?? 0;
+      const specs =
+        bodyLineCount > 0
+          ? ([
+              { flex: 3, min: 4 },
+              { flex: 1, min: 3, max: Math.max(3, Math.floor(inner.height * 0.45)) },
+            ] as const)
+          : ([{ flex: 1, min: 1 }] as const);
+      const areas = splitVertical(inner, specs) as Rect[];
+      const rowsArea = areas[0]!;
       kvRows(canvas, rowsArea, { theme, entries: modalState.rows, scroll: scrollFor(this.#state, "modal") });
-      if (modalState.body) {
-        modalState.body.forEach((line, index) => canvas.text(bodyArea.x, bodyArea.y + index, line, theme.toneSgr("muted")));
+      if (bodyLineCount > 0 && areas[1]) {
+        const bodyArea = areas[1];
+        const bodyScroll = scrollFor(this.#state, "modal:body");
+        const visible = modalState.body!.slice(bodyScroll, bodyScroll + bodyArea.height);
+        visible.forEach((line, index) => canvas.text(bodyArea.x, bodyArea.y + index, line, theme.toneSgr("muted")));
       }
     }
     void ctx;
@@ -382,22 +378,25 @@ export class TuiHost {
     if (!modal) return;
 
     if (modal.kind === "help") {
-      if (matchesKey(key, "escape") || matchesKey(key, "?") || matchesKey(key, "enter")) {
+      if (matchesKey(key, "escape") || matchesKey(key, "?") || matchesKey(key, "enter") || matchesKey(key, "q")) {
         this.#dispatch({ type: "closeModal" });
       }
       return;
     }
 
+
     if (modal.kind === "confirm") {
       if (matchesKey(key, "y") || matchesKey(key, "enter")) {
-        const { onConfirm, effect } = modal;
+        const { onConfirm, effect, persistSettings } = modal;
+        const settingsEdits = persistSettings ? { ...this.#state.settingsEdits } : null;
         this.#dispatch({ type: "closeModal" });
-        // The effect first: `onConfirm` is often the bookkeeping that follows
-        // it, e.g. clearing the settings edits the patch just persisted — and
-        // it must only run once that patch actually landed, not on a failed
-        // `ctx.command` the operator never saw fail.
         void (async () => {
-          const succeeded = effect ? await ctx.command(effect.loopId, effect.op, effect.params) : true;
+          let succeeded = true;
+          if (persistSettings && settingsEdits) {
+            succeeded = await this.#session.saveSettingsFromEdits(settingsEdits);
+          } else if (effect) {
+            succeeded = await ctx.command(effect.loopId, effect.op, effect.params);
+          }
           if (!succeeded || !onConfirm) return;
           if (onConfirm.type === "quit") this.#quit(0);
           else this.#dispatch(onConfirm);
@@ -424,12 +423,14 @@ export class TuiHost {
     }
 
     if (modal.kind === "detail") {
-      if (matchesKey(key, "escape") || matchesKey(key, "enter")) {
+      if (matchesKey(key, "escape") || matchesKey(key, "enter") || matchesKey(key, "q")) {
         this.#dispatch({ type: "closeModal" });
       } else if (matchesKey(key, "up")) {
         this.#dispatch({ type: "setScroll", view: "modal", scroll: Math.max(0, scrollFor(this.#state, "modal") - 1) });
+        this.#dispatch({ type: "setScroll", view: "modal:body", scroll: Math.max(0, scrollFor(this.#state, "modal:body") - 1) });
       } else if (matchesKey(key, "down")) {
         this.#dispatch({ type: "setScroll", view: "modal", scroll: scrollFor(this.#state, "modal") + 1 });
+        this.#dispatch({ type: "setScroll", view: "modal:body", scroll: scrollFor(this.#state, "modal:body") + 1 });
       }
       void ctx;
     }

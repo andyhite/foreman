@@ -13,6 +13,7 @@ import { BOX, gauge, matchesKey, panel, sparkline, splitHorizontal, splitVertica
 import { countdown, duration, relativeTime } from "../format.ts";
 import type { LoopPane } from "../store.ts";
 import { cursorFor } from "../store.ts";
+import { displaySnapshot, paneIdleMessage, staleWatermark } from "../pane.ts";
 import type { View, ViewContext } from "../view.ts";
 
 interface WorkerRow {
@@ -35,12 +36,17 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
   });
   if (inner.width <= 0 || inner.height <= 0) return;
 
-  const snapshot = pane.snapshot;
-  if (!pane.handle.running || !snapshot || pane.connection === "offline") {
-    const message = !pane.handle.running ? "not running" : pane.connection === "offline" ? "not running" : "connecting…";
-    canvas.text(inner.x + 1, inner.y + Math.floor(inner.height / 2), message, theme.toneSgr("muted"));
-    canvas.text(inner.x + 1, inner.y + Math.floor(inner.height / 2) + 1, "press s to start", theme.toneSgr("muted"));
+  const snapshot = displaySnapshot(pane);
+  if (!snapshot) {
+    const { line1, line2 } = paneIdleMessage(pane);
+    const y = inner.y + Math.floor(inner.height / 2);
+    canvas.text(inner.x + 1, y, line1, theme.toneSgr("muted"));
+    if (line2) canvas.text(inner.x + 1, y + 1, line2, theme.toneSgr("muted"));
     return;
+  }
+  const watermark = staleWatermark(pane, ctx.state.now);
+  if (watermark) {
+    canvas.text(inner.x + 1, inner.y, watermark, theme.toneSgr("warn"));
   }
 
   const rows = splitVertical(inner, [
@@ -68,9 +74,16 @@ function renderPane(canvas: Canvas, rect: Rect, pane: LoopPane, ctx: ViewContext
           .join(" · ")
       : null;
   const stageLabel = workerStages ? `${workerStages} · fallback ${runtime.stage}` : runtime.stage;
+  /*
+   * Two panes share the terminal, so this line has roughly half the width to
+   * work with. `status.json 2m old` is the honest phrasing but truncates to
+   * `status.js` at 120 columns — which reads as a stray filename rather than
+   * a staleness warning, the one thing this badge exists to convey. `stale`
+   * plus the age survives the truncation the header chip cannot.
+   */
   const connBadge =
     pane.connection === "file"
-      ? `status.json ${relativeTime(snapshot.runtime.lastTickAt, ctx.state.now)} old`
+      ? `stale ${relativeTime(snapshot.runtime.lastTickAt, ctx.state.now)}`
       : pane.connection;
   canvas.text(stateBlock.x, stateBlock.y, `${runtime.state} · ${stageLabel} · ${runtime.dispatcher}`, theme.sgr());
   canvas.text(

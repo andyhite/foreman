@@ -164,12 +164,12 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 describe("createControlHandlers — delegation", () => {
-  it("snapshot/setStage/stop delegate straight to the supervisor", () => {
+  it("snapshot/setStage/stop delegate straight to the supervisor", async () => {
     const supervisor = makeSupervisor();
     supervisor.acquireLock();
     const handlers = createControlHandlers({ supervisor });
 
-    expect(handlers.snapshot()).toEqual(supervisor.snapshot());
+    expect(await handlers.snapshot()).toEqual(supervisor.snapshot());
 
     handlers.setStage("read-only");
     expect(supervisor.snapshot().runtime.stage).toBe("read-only");
@@ -228,6 +228,45 @@ describe("Supervisor pause/requestTick interaction", () => {
 
     supervisor.requestStop("now");
     await done;
+  });
+});
+
+
+describe("Supervisor.requestStop — now mode", () => {
+  it("aborts between workers but lets the current worker finish", async () => {
+    const ran: string[] = [];
+    const supervisor = makeSupervisor();
+    supervisor.acquireLock();
+
+    const emptyReport = (name: string, ctx: WorkerContext): WorkerReport => ({
+      worker: name as WorkerReport["worker"],
+      ranAt: ctx.now().toISOString(),
+      decisions: [],
+      dispatched: [],
+      skipped: [],
+      errors: [],
+    });
+
+    const alpha: Worker = {
+      name: "alpha",
+      cadenceMs: 0,
+      async run(ctx) {
+        supervisor.requestStop("now");
+        ran.push("alpha");
+        return emptyReport("alpha", ctx);
+      },
+    };
+    const beta: Worker = {
+      name: "beta",
+      cadenceMs: 0,
+      async run(ctx) {
+        ran.push("beta");
+        return emptyReport("beta", ctx);
+      },
+    };
+
+    await supervisor.runTick([alpha, beta]);
+    expect(ran).toEqual(["alpha"]);
   });
 });
 

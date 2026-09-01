@@ -35,6 +35,42 @@ describe("parseArgs", () => {
     expect(parseArgs(["--repo", "setup"]).command).toBeNull();
   });
 
+  it("reports unknown commands before any command is set", () => {
+    expect(() => parseArgs(["bogus"])).toThrow(/Unknown command "bogus"/);
+  });
+
+  it("rejects setup-only flags on init", () => {
+    expect(() => parseArgs(["init", "--scope", "user"])).toThrow(/--scope applies to `foreman setup`/);
+    expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
+    expect(() => parseArgs(["init", "--path", "/tmp", "--repo", "/tmp/checkout"])).toThrow(
+      /--repo applies to `foreman setup`/,
+    );
+  });
+
+  it("rejects init-only flags on setup", () => {
+    expect(() => parseArgs(["setup", "--path", "/tmp"])).toThrow(/--path applies to `foreman init`/);
+    expect(() => parseArgs(["setup", "--initiative", "i1"])).toThrow(/--initiative applies to `foreman init`/);
+    expect(() => parseArgs(["setup", "--alias", "mine"])).toThrow(/--alias applies to `foreman init`/);
+    expect(() => parseArgs(["setup", "--team", "ENG"])).toThrow(/--team applies to `foreman init`/);
+  });
+
+  it("parses repeatable --initiative, --alias, and --team for init", () => {
+    const args = parseArgs([
+      "init",
+      "--initiative",
+      "i1",
+      "--initiative",
+      "i2:apps/zero",
+      "--alias",
+      "plotroom",
+      "--team",
+      "ENG",
+    ]);
+    expect(args.initiatives).toEqual(["i1", "i2:apps/zero"]);
+    expect(args.alias).toBe("plotroom");
+    expect(args.team).toBe("ENG");
+  });
+
   it("defaults githubRepo and every mode to unset", () => {
     const args = parseArgs(["setup"]);
     expect(args.githubRepo).toBe("andyhite/foreman");
@@ -105,7 +141,7 @@ describe("foreman loop delegation", () => {
    * teaching it both vocabularies would put every loop flag in two places.
    */
   it("cannot parse the subcommand or the supervisor's flags", () => {
-    expect(() => parseArgs(["loop"])).toThrow(/Unexpected positional argument "loop"/);
+    expect(() => parseArgs(["loop"])).toThrow(/Unknown command "loop"/);
     expect(() => parseArgs(["--dry-run"])).toThrow(/Unrecognized argument: --dry-run/);
     expect(() => parseArgs(["--stage", "full"])).toThrow(/Unrecognized argument: --stage/);
   });

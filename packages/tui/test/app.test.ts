@@ -142,3 +142,14 @@ describe("TuiHost — start/stop/pause the focused loop", () => {
   });
 });
 
+describe("TuiHost — modals", () => {
+  it("q dismisses the help modal", () => {
+    const { session } = makeFakeSession();
+    const host = makeHost(session);
+    host.handleKey(key("?"));
+    expect(host.state.modal?.kind).toBe("help");
+    host.handleKey(key("q"));
+    expect(host.state.modal).toBeNull();
+  });
+});
+

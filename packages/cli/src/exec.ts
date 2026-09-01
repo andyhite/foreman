@@ -9,9 +9,17 @@
 
 import { execFile, spawn } from "node:child_process";
 
+export interface CaptureResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
 export interface Runner {
   /** Streams the child's stdio to the operator's terminal; resolves with its exit code. */
   run(bin: string, argv: string[], options?: { cwd?: string }): Promise<number>;
+  /** Captures stdout/stderr for short probes (e.g. `omp plugin marketplace list`). */
+  capture(bin: string, argv: string[], options?: { cwd?: string }): Promise<CaptureResult>;
   /** True when `bin` is on PATH and runnable. */
   exists(bin: string): Promise<boolean>;
 }
@@ -22,6 +30,22 @@ export const processRunner: Runner = {
     const child = spawn(bin, argv, { cwd: options?.cwd, stdio: "inherit" });
     child.on("error", reject);
     child.on("exit", (code) => resolve(code ?? 1));
+    return promise;
+  },
+
+  capture(bin, argv, options) {
+    const { promise, resolve, reject } = Promise.withResolvers<CaptureResult>();
+    const child = spawn(bin, argv, { cwd: options?.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }));
     return promise;
   },
 

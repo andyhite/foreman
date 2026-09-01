@@ -99,14 +99,14 @@ export async function runApplyCommand(
     }
 
     const proposedLabel = issue.labels.find((label) => label.name === AGENT_LABEL.proposed);
-    if (proposedLabel) {
-      await linear.updateIssue(issue.id, { removedLabelIds: [proposedLabel.id] });
-    }
     try {
       await applyProposal(linear, { issue, item: found.data, proposedAt: found.createdAt });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, mutated: false, message: `Could not apply ${issueId}: ${message}` };
+    }
+    if (proposedLabel) {
+      await linear.updateIssue(issue.id, { removedLabelIds: [proposedLabel.id] });
     }
     return { ok: true, mutated: true, message: `Approved and applied ${issueId}.` };
   }

@@ -14,6 +14,7 @@
  */
 
 export * from "./app.ts";
+export * from "./clipboard.ts";
 export * from "./canvas.ts";
 export * from "./keys.ts";
 export * from "./layout.ts";

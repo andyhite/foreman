@@ -172,3 +172,19 @@ export class LinearApiError extends Error {
     this.name = "LinearApiError";
   }
 }
+
+/** Raised when a paginated query still has a next page after the safety cap — partial data is never returned. */
+export class LinearPaginationError extends LinearApiError {
+  constructor(
+    readonly operation: string,
+    readonly pages: number,
+    readonly partialCount: number,
+  ) {
+    super(
+      `${operation}: pagination incomplete after ${pages} pages (${partialCount} items); refusing partial results`,
+      null,
+      null,
+    );
+    this.name = "LinearPaginationError";
+  }
+}

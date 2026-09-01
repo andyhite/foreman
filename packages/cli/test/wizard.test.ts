@@ -48,6 +48,8 @@ class ScriptedPrompter implements Prompter {
 
 class RecordingRunner implements Runner {
   calls: Array<{ bin: string; argv: string[] }> = [];
+  marketplaceRegistered = false;
+  pluginInstalled = false;
   private readonly missing: Set<string>;
   private readonly failing: Set<string>;
 
@@ -59,6 +61,19 @@ class RecordingRunner implements Runner {
   run(bin: string, argv: string[]): Promise<number> {
     this.calls.push({ bin, argv });
     return Promise.resolve(this.failing.has(bin) ? 1 : 0);
+  }
+
+  capture(bin: string, argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    this.calls.push({ bin, argv });
+    const stdout =
+      (this.marketplaceRegistered &&
+        argv[0] === "plugin" &&
+        argv[1] === "marketplace" &&
+        argv[2] === "list" &&
+        "foreman\n") ||
+      (this.pluginInstalled && argv[0] === "plugin" && argv[1] === "list" && "foreman@foreman\n") ||
+      "";
+    return Promise.resolve({ code: this.failing.has(bin) ? 1 : 0, stdout, stderr: "" });
   }
 
   exists(bin: string): Promise<boolean> {
@@ -156,6 +171,26 @@ describe("runWizard", () => {
       expect(binSeq).not.toContain("bun install");
       expect(binSeq).not.toContain("bun run build");
       expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
+      expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips marketplace add when the foreman marketplace is already registered", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    try {
+      const runner = new RecordingRunner();
+      runner.marketplaceRegistered = true;
+      await runWizard(baseOptions({ ompMode: "install" }, home, "/repo"), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: () => {},
+      });
+
+      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
+      expect(binSeq).toContain("omp plugin marketplace list");
+      expect(binSeq).not.toContain("omp plugin marketplace add andyhite/foreman");
       expect(binSeq).toContain("omp plugin install foreman@foreman --scope user");
     } finally {
       rmSync(home, { recursive: true, force: true });

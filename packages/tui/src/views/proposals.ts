@@ -7,10 +7,12 @@
  * queue and names that command; it does not shortcut it.
  */
 import type { Canvas, Column, Key, ProposalItem, Rect } from "@foreman/core";
-import { kvRows, matchesKey, panel, splitVertical, table, truncate } from "@foreman/core";
+import { copyToClipboard, kvRows, matchesKey, panel, table, truncate } from "@foreman/core";
 import { cursorFor, focusedPane } from "../store.ts";
 import { priorityGlyph, priorityLabel, relativeTime } from "../format.ts";
 import type { View, ViewContext } from "../view.ts";
+import { listDetailLayout } from "../layout.ts";
+import { displaySnapshot, isFileBacked, paneIdleMessage, staleWatermark } from "../pane.ts";
 
 const VIEW_ID = "proposals";
 
@@ -37,32 +39,36 @@ export const proposalsView: View = {
 
   badge(ctx: ViewContext): string | null {
     const pane = focusedPane(ctx.state);
-    const count = pane?.snapshot?.queues.proposals.length ?? 0;
+    const snapshot = pane ? displaySnapshot(pane) : null;
+    const count = snapshot?.queues.proposals.length ?? 0;
     return count > 0 ? String(count) : null;
   },
 
   render(canvas: Canvas, rect: Rect, ctx: ViewContext): void {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    if (!pane) {
+      canvas.text(rect.x + 1, rect.y + Math.floor(rect.height / 2), "no loop focused", ctx.theme.toneSgr("muted"));
+      return;
+    }
+    const snapshot = displaySnapshot(pane);
     if (!snapshot) {
-      const message = pane ? "loop not running — press s to start" : "no snapshot yet";
-      canvas.text(
-        rect.x + Math.max(0, Math.floor((rect.width - message.length) / 2)),
-        rect.y + Math.floor(rect.height / 2),
-        message,
-        ctx.theme.toneSgr("muted"),
-      );
+      const { line1, line2 } = paneIdleMessage(pane);
+      const y = rect.y + Math.floor(rect.height / 2);
+      canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line1.length) / 2)), y, line1, ctx.theme.toneSgr("muted"));
+      if (line2) canvas.text(rect.x + Math.max(0, Math.floor((rect.width - line2.length) / 2)), y + 1, line2, ctx.theme.toneSgr("muted"));
+      if (pane.error) canvas.text(rect.x + 1, y + 2, pane.error, ctx.theme.toneSgr("warn"));
       return;
     }
 
     const items = snapshot.queues.proposals;
-    const [listRect, detailRect] = splitVertical(rect, [{ flex: 70 }, { flex: 30 }]) as [Rect, Rect];
+    const [listRect, detailRect] = listDetailLayout(rect, [{ flex: 70 }, { flex: 30 }], [{ flex: 60 }, { flex: 40 }]);
 
     const listInner = panel(canvas, listRect, {
       theme: ctx.theme,
       title: "proposals",
       focused: true,
-      footer: "applies through /foreman:apply <ISSUE> --approve|--reject",
+      footer: staleWatermark(pane, ctx.state.now) ?? "applies through /foreman:apply <ISSUE> --approve|--reject",
+      tone: isFileBacked(pane) ? "warn" : undefined,
     });
     const columns: readonly Column<ProposalItem>[] = COLUMNS.map((col) =>
       col.header === "proposed" ? { ...col, render: (row: ProposalItem) => relativeTime(row.proposedAt, ctx.state.now) } : col,
@@ -99,7 +105,7 @@ export const proposalsView: View = {
 
   handleKey(key: Key, ctx: ViewContext): boolean {
     const pane = focusedPane(ctx.state);
-    const snapshot = pane?.snapshot ?? null;
+    const snapshot = pane ? displaySnapshot(pane) : null;
     if (!snapshot) return false;
     const items = snapshot.queues.proposals;
     const max = items.length - 1;
@@ -148,21 +154,16 @@ export const proposalsView: View = {
       });
       return true;
     }
-    if (matchesKey(key, "y") || matchesKey(key, "n")) {
-      const issueId = item.issueId;
-      const flag = matchesKey(key, "y") ? "--approve" : "--reject";
-      ctx.dispatch({
-        type: "openModal",
-        modal: {
-          kind: "detail",
-          title: `${matchesKey(key, "y") ? "Approve" : "Reject"} ${issueId}`,
-          rows: [
-            ["destination", item.destination],
-            ["run in an omp session", `/foreman:apply ${issueId} ${flag}`],
-          ],
-          body: ["The TUI does not approve or reject proposals; it only names the command."],
-        },
-      });
+    if (matchesKey(key, "y")) {
+      const command = `/foreman:apply ${item.issueId} --approve`;
+      copyToClipboard(command);
+      ctx.toast("ok", `copied: ${command}`);
+      return true;
+    }
+    if (matchesKey(key, "n")) {
+      const command = `/foreman:apply ${item.issueId} --reject`;
+      copyToClipboard(command);
+      ctx.toast("ok", `copied: ${command}`);
       return true;
     }
     return false;
@@ -172,8 +173,8 @@ export const proposalsView: View = {
     return [
       ["↑↓", "select"],
       ["enter", "detail"],
-      ["y", "approve command"],
-      ["n", "reject command"],
+      ["y", "copy approve"],
+      ["n", "copy reject"],
     ];
   },
 };
