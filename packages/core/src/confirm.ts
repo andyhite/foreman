@@ -123,13 +123,15 @@ export class TtyConfirmer implements Confirmer {
 
     const answer = await new Promise<string | null>((resolve) => {
       let settled = false;
+      const rl = this.#interface();
+      const onClose = (): void => finish(null);
       const finish = (value: string | null): void => {
         if (settled) return;
         settled = true;
+        rl.off("close", onClose);
         resolve(value);
       };
-      const rl = this.#interface();
-      rl.once("close", () => finish(null));
+      rl.once("close", onClose);
       try {
         rl.question("Proceed? [y/N] ", (line) => finish(line));
       } catch {

@@ -25,6 +25,7 @@ import {
   encodeMarker,
   MARKER_KIND,
   resolveState,
+  sanitizeAgentText,
   TYPE_LABEL,
   resolveTeamKey,
 } from "@foreman/core";
@@ -123,7 +124,13 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
   const needsBacklog = result.subIssues.length > 0 || result.spikeCreated !== null;
   const backlog = needsBacklog ? await backlogStateId(deps, issue.team.id) : null;
 
+  // A retry after a mid-sequence failure re-runs this loop from the top; the
+  // dispatch-applied marker is only written once the whole sequence lands, so
+  // an existing child with this title is a completed step, not a duplicate
+  // to create again.
+  const existingChildTitles = new Set(issue.children.map((child) => child.title));
   for (const subIssue of result.subIssues) {
+    if (existingChildTitles.has(subIssue.title)) continue;
     const subDescription = renderIssueDescription({
       context: subIssue.description,
       acceptanceCriteria: subIssue.acceptanceCriteria,
@@ -144,21 +151,29 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
   }
 
   if (result.spikeCreated) {
-    const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
-    const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue.team.id);
-    const spike = await deps.linear.createIssue({
-      teamId: issue.team.id,
-      title: result.spikeCreated.title,
-      description: spikeBody,
-      projectId: issue.project?.id,
-      labelIds: [spikeTypeLabel.id],
-      stateId: backlog ?? undefined,
-    });
-    await deps.linear.createRelation({
-      issueId: spike.id,
-      relatedIssueId: issue.id,
-      type: "blocks",
-    });
+    // The spike is created as a sibling with a `blocks` relation, not a
+    // child, so the retry guard checks the parent's existing relations
+    // instead of `issue.children`.
+    const existingSpike = issue.relations.some(
+      (relation) => relation.type === "blocks" && relation.other.title === result.spikeCreated?.title,
+    );
+    if (!existingSpike) {
+      const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
+      const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue.team.id);
+      const spike = await deps.linear.createIssue({
+        teamId: issue.team.id,
+        title: result.spikeCreated.title,
+        description: spikeBody,
+        projectId: issue.project?.id,
+        labelIds: [spikeTypeLabel.id],
+        stateId: backlog ?? undefined,
+      });
+      await deps.linear.createRelation({
+        issueId: spike.id,
+        relatedIssueId: issue.id,
+        type: "blocks",
+      });
+    }
   }
 
   if (result.readyForImplementation) await moveToState(deps, issue, "todo");
@@ -285,7 +300,7 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
       });
     }
   }
-  const body = renderBlockComment(block);
+  const body = sanitizeAgentText(renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue.id, body });
   await releaseLock(deps, issue);
   await moveToState(deps, issue, "todo");

@@ -95,11 +95,44 @@ describe("Bookkeeping — in-flight tracking", () => {
     // Only ENG-1 still carries agent:running in Linear; ENG-2's lock was
     // released (or expired and swept) while this process wasn't running.
     // The batch dispatch d3 remains only because the dispatcher confirms it live.
-    bookkeeping.reconcile(new Set(["ENG-1"]), new Set(["d3"]), now, 60_000);
+    bookkeeping.reconcile(new Set(["ENG-1"]), new Set(["d3"]), now, 60_000, 0);
 
     expect(bookkeeping.totalInFlight()).toBe(2);
     expect(bookkeeping.countInFlight("implement")).toBe(1);
     expect(bookkeeping.countInFlight("review")).toBe(1);
+  });
+
+  it("reconcile keeps a just-dispatched record inside claimGraceMs even though its issue isn't in the live set yet, and drops it once the grace window has elapsed", () => {
+    const { path: freshPath } = tempPath();
+    const fresh = Bookkeeping.load(freshPath);
+    const now = new Date("2026-03-01T00:00:10.000Z");
+    // Started 10s before `now` — well inside the task guard's claim window,
+    // before `agent:running` has necessarily landed on the issue yet.
+    fresh.recordDispatch({
+      agent: "foreman-implement",
+      issueId: "ENG-7",
+      dispatchId: "d-fresh",
+      startedAt: "2026-03-01T00:00:00.000Z",
+      stage: "implement",
+    });
+    fresh.reconcile(new Set(), new Set(), now, 60_000, 300_000);
+    expect(fresh.totalInFlight()).toBe(1);
+
+    const { path: stalePath } = tempPath();
+    const stale = Bookkeeping.load(stalePath);
+    const later = new Date("2026-03-01T00:10:00.000Z");
+    // Started 10 minutes before `later` — outside the 5-minute grace window,
+    // and its issue still isn't in the live set, so it must be dropped as a
+    // record whose dispatch never actually claimed the lock.
+    stale.recordDispatch({
+      agent: "foreman-implement",
+      issueId: "ENG-7",
+      dispatchId: "d-stale",
+      startedAt: "2026-03-01T00:00:00.000Z",
+      stage: "implement",
+    });
+    stale.reconcile(new Set(), new Set(), later, 60_000, 300_000);
+    expect(stale.totalInFlight()).toBe(0);
   });
 });
 

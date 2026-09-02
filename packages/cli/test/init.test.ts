@@ -355,6 +355,34 @@ describe("runInit", () => {
     }
   });
 
+  it("falls back to repoDefaults.baseBranch when the repo has no commits at all", async () => {
+    const home = makeTempHome();
+    try {
+      mkdirSync(join(home, ".foreman"), { recursive: true });
+      writeFileSync(join(home, ".foreman", "config.json"), JSON.stringify({ repoDefaults: { baseBranch: "trunk" } }));
+
+      // A repo with no commits has neither an origin/HEAD ref nor a current
+      // branch resolvable via `rev-parse --abbrev-ref HEAD`; detectBaseBranch
+      // must fall back to the caller-supplied default instead of throwing.
+      const git = new FakeGit(
+        { "git rev-parse --show-toplevel": "/repos/plotroom\n" },
+        ["git symbolic-ref --short refs/remotes/origin/HEAD", "git rev-parse --abbrev-ref HEAD"],
+      );
+      const runner = new FakeRunner();
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+
+      const config = readConfig(home);
+      // Falls back to "trunk" (repoDefaults.baseBranch), which equals the
+      // effective default, so baseBranch is omitted from the written entry.
+      expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("uses the Linear API to pick initiatives and pre-checks/hints existing bindings", async () => {
     const home = makeTempHome();
     const originalFetch = globalThis.fetch;

@@ -7,6 +7,7 @@ export type {
   WorktreeStatus,
 } from "./worktree.ts";
 export {
+  assertSafeRef,
   branchNameFor,
   diffRange,
   ensureWorktree,

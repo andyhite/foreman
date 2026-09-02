@@ -20,6 +20,7 @@ import {
   lockTtlMs,
   MARKER_KIND,
   resolveRepoEntry,
+  stripControlChars,
   worktreePathFor,
   type AgentStatus,
   type AgentView,
@@ -44,7 +45,7 @@ import type { WorkerReport } from "./workers/types.ts";
 export function toQueueItem(issue: Issue): QueueItem {
   return {
     issueId: issue.identifier,
-    title: issue.title,
+    title: stripControlChars(issue.title),
     state: issue.state.name,
     priority: issue.priority,
     estimate: issue.estimate,
@@ -66,9 +67,9 @@ export function toBlockedItem(issue: Issue): BlockedItem {
     null;
   return {
     issueId: issue.identifier,
-    title: issue.title,
+    title: stripControlChars(issue.title),
     type: labelsInGroup(issue, LABEL_GROUP.blocked)[0] ?? "unknown",
-    question: found?.whatINeed ?? "(no BlockRecord found on this issue)",
+    question: stripControlChars(found?.whatINeed ?? "(no BlockRecord found on this issue)"),
     detectedAt: null,
     options: found?.options ?? [],
     recommendation: found?.recommendation ?? null,
@@ -84,7 +85,7 @@ export function toProposalItem(issue: Issue): ProposalItem {
   }>(MARKER_KIND.proposal, issue.comments);
   return {
     issueId: issue.identifier,
-    title: issue.title,
+    title: stripControlChars(issue.title),
     destination: marker?.data.destination ?? "unknown",
     proposedPriority: marker?.data.proposedPriority ?? null,
     duplicateOf: marker?.data.duplicateOf ?? null,

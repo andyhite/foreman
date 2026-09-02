@@ -185,14 +185,15 @@ export class LinearClient implements LinearWriter {
   private readonly teamScope: IssueFilter | null;
   private readonly timeoutMs: number;
   private readonly onRequest: ((event: LinearRequestEvent) => void) | null;
-  private readonly labelIdCache = new Map<string, IssueLabel>();
+  private static readonly CACHE_TTL_MS = 10 * 60_000;
+  private readonly labelIdCache = new Map<string, { value: IssueLabel; at: number }>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
-  private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
-  /** Every initiative a project belongs to, keyed by project id — same lifetime and invalidation (none) as `projectInitiativeCache`. */
-  private readonly projectInitiativesCache = new Map<string, InitiativeRef[]>();
+  private readonly projectInitiativeCache = new Map<string, { value: InitiativeRef; at: number }>();
+  /** Every initiative a project belongs to, keyed by project id — same lifetime and invalidation (TTL) as `projectInitiativeCache`. */
+  private readonly projectInitiativesCache = new Map<string, { value: InitiativeRef[]; at: number }>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
   private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
-  private viewerIdCache: string | null = null;
+  private viewerIdCache: { value: string; at: number } | null = null;
 
   constructor(options: LinearClientOptions) {
     this.apiKey = options.apiKey;
@@ -251,6 +252,13 @@ export class LinearClient implements LinearWriter {
         const message = `Linear API request timed out after ${this.timeoutMs}ms`;
         trace(null, false, message);
         throw new LinearApiError(message, null, null);
+      }
+      if (attempt < 2 && !signal.aborted) {
+        trace(null, false, `retrying transport failure: ${String(error)}`);
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, 500 * 2 ** attempt);
+        await promise;
+        return this.requestWithRetry<T>(document, variables, attempt + 1, signal);
       }
       trace(null, false, String(error));
       throw error;
@@ -606,15 +614,15 @@ export class LinearClient implements LinearWriter {
    */
   async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
     const cached = this.projectInitiativesCache.get(projectId);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
     const { initiatives } = await this.fetchProjectInitiatives(projectId);
-    this.projectInitiativesCache.set(projectId, initiatives);
+    this.projectInitiativesCache.set(projectId, { value: initiatives, at: Date.now() });
     return initiatives;
   }
 
   async projectInitiative(projectId: string): Promise<InitiativeRef> {
     const cached = this.projectInitiativeCache.get(projectId);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
     const { name, initiatives } = await this.fetchProjectInitiatives(projectId);
     const first = initiatives[0];
     if (first === undefined) {
@@ -633,7 +641,7 @@ export class LinearClient implements LinearWriter {
       );
     }
     const ref: InitiativeRef = { id: first.id, name: first.name };
-    this.projectInitiativeCache.set(projectId, ref);
+    this.projectInitiativeCache.set(projectId, { value: ref, at: Date.now() });
     return ref;
   }
 
@@ -685,11 +693,13 @@ export class LinearClient implements LinearWriter {
     return data.initiatives.nodes;
   }
 
-  /** The Linear user id the API key belongs to, memoized for the process lifetime. */
+  /** The Linear user id the API key belongs to, memoized for `CACHE_TTL_MS`. */
   async viewerId(): Promise<string> {
-    if (this.viewerIdCache !== null) return this.viewerIdCache;
+    if (this.viewerIdCache !== null && Date.now() - this.viewerIdCache.at < LinearClient.CACHE_TTL_MS) {
+      return this.viewerIdCache.value;
+    }
     const data = await this.request<{ viewer: { id: string } }>("query { viewer { id } }", {});
-    this.viewerIdCache = data.viewer.id;
+    this.viewerIdCache = { value: data.viewer.id, at: Date.now() };
     return data.viewer.id;
   }
 
@@ -928,7 +938,7 @@ export class LinearClient implements LinearWriter {
   async ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel> {
     const cacheKey = `${teamId}:${name}`;
     const cached = this.labelIdCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
 
     const matches = (await this.labels(teamId)).filter((label) => label.name === name);
     if (matches.length > 1) {
@@ -940,7 +950,7 @@ export class LinearClient implements LinearWriter {
     }
     const existing = matches[0];
     if (existing) {
-      this.labelIdCache.set(cacheKey, existing);
+      this.labelIdCache.set(cacheKey, { value: existing, at: Date.now() });
       return existing;
     }
 
@@ -950,7 +960,7 @@ export class LinearClient implements LinearWriter {
 
     const created = await this.createLabel({ name: childName, teamId, parentId });
     const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
-    this.labelIdCache.set(cacheKey, label);
+    this.labelIdCache.set(cacheKey, { value: label, at: Date.now() });
     return label;
   }
 

@@ -28,7 +28,6 @@ interface RunningProcess {
   handles: DispatchHandle[];
   outcome: Promise<DispatchOutcome>;
   settled: boolean;
-  prunedBy: Set<string>;
   status: DispatchStatus;
 }
 
@@ -142,7 +141,6 @@ export class PrintDispatcher implements Dispatcher {
       handles,
       status: "starting",
       settled: false,
-      prunedBy: new Set(),
       outcome: outcomeReady,
     };
     this.#running.set(batchId, entry);
@@ -191,18 +189,17 @@ export class PrintDispatcher implements Dispatcher {
     return entry ? entry.status : "settled";
   }
 
-  /** Awaits and prunes the tracked entry once every handle in the batch has settled. */
+  /** Awaits and prunes the tracked entry once the batch's outcome resolves. */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
     const entry = this.#running.get(handle.batchId);
     if (!entry) {
-      // Never tracked (e.g. a handle from another process); nothing to report.
+      // Never tracked (e.g. a handle from another process, or a sibling
+      // handle whose batch entry a prior settle() already pruned); nothing
+      // to report.
       return { handle, status: "settled", exitCode: null, log: "" };
     }
     const outcome = await entry.outcome;
-    entry.prunedBy.add(handle.dispatchId);
-    if (entry.prunedBy.size >= entry.handles.length) {
-      this.#running.delete(handle.batchId);
-    }
+    this.#running.delete(handle.batchId);
     return { ...outcome, handle };
   }
 

@@ -243,6 +243,13 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   // process then goes through a second, team-scoped client (SPEC §3.11) —
   // simpler than threading an optional team through every query site.
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
+  try {
+    if (new URL(config.linear.endpoint).host !== "api.linear.app") {
+      log(style("yellow", `! linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key is being sent there.`));
+    }
+  } catch {
+    log(style("yellow", `! linear.endpoint "${config.linear.endpoint}" is not a valid URL — the API key is being sent there.`));
+  }
 
   let team: string;
   try {
@@ -339,11 +346,8 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
     supervisor.requestStop("graceful");
     // When polling, `runForever` reaches its own cleanup immediately after
-    // the active tick. `--once` has no poll loop to observe the request.
-    if (args.once) {
-      supervisor.stop();
-      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
-    }
+    // the active tick. `--once` finishes its in-flight `runTick` and the
+    // `finally` block below releases the lock and closes the server.
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

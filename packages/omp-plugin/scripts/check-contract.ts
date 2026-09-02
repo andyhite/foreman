@@ -298,7 +298,7 @@ for (const entry of entrypoints) {
 
 for (const file of agentFiles.sort()) {
   const path = join(pluginRoot, "agents", file);
-  const { scalars, blocks } = readFrontmatter(path);
+  const { scalars, blocks, sequences } = readFrontmatter(path);
   const label = `agents/${file}`;
 
   const name = scalars.get("name");
@@ -308,7 +308,7 @@ for (const file of agentFiles.sort()) {
   if (!scalars.get("description")) problems.push(`${label}: missing description`);
 
   for (const forbidden of ["spawns", "schemaMode", "isolated"]) {
-    if (scalars.has(forbidden)) {
+    if (scalars.has(forbidden) || sequences.has(forbidden)) {
       problems.push(
         `${label}: sets \`${forbidden}\`, which must never appear on a Foreman agent ` +
           `(see docs/VERIFIED.md)`,

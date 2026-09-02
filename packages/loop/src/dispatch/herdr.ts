@@ -118,6 +118,10 @@ interface HerdrPaneResult {
 interface HerdrMoveResult {
   result: { move_result: { pane: { pane_id: string }; previous_pane_id: string } };
 }
+/** `herdr pane get` shape — `agent_status` is the only field this class inspects when checking whether a reused workspace's pane still hosts a live agent. */
+interface HerdrPaneGetResult {
+  result: { pane?: { agent_status?: string } };
+}
 /** `herdr agent get`/`agent list` shape — `agent_status` is the only field this class inspects (SPEC §17.3). */
 interface HerdrAgentResult {
   result: { agent: { agent_status: string; pane_id?: string } };
@@ -494,6 +498,24 @@ export class HerdrDispatcher implements Dispatcher {
       // Same story as a reused tab: the workspace's own pane already hosts a
       // prior agent at its idle prompt, not a plain shell.
       const anchor = await this.#findAnchorPaneId(existing.workspace_id, existing.active_tab_id);
+      // `#replacePane` closes the anchor. A workspace whose pane still hosts a
+      // working agent is a live implement session, not a finished one at an
+      // idle prompt — refuse rather than kill it, the same rule
+      // `#resolveSharedAgentPane` applies to a shared orchestrator.
+      const { stdout, code } = await this.#runner.run([this.#config.agent.herdrBin, "pane", "get", anchor]);
+      if (code === 0) {
+        try {
+          const parsed = JSON.parse(stdout) as HerdrPaneGetResult;
+          const status = parsed.result.pane?.agent_status;
+          if (status === "working" || status === "blocked") {
+            throw new OrchestratorBusyError(anchor, `worktree pane ${anchor} still hosts a ${status} agent`);
+          }
+        } catch (error) {
+          if (error instanceof OrchestratorBusyError) throw error;
+          // Unparsable pane payload: fall through and reuse, matching how
+          // `#resolveSharedAgentPane` treats an unreadable `agent get`.
+        }
+      }
       return this.#replacePane(anchor, worktree.path, envArgs);
     }
 

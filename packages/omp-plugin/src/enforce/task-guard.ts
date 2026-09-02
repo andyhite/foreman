@@ -15,6 +15,7 @@ import {
   AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
   assertIssueInScope,
+  assertSafeRef,
   LABEL_GROUP,
   RESERVATIONS_ENV,
   branchNameFor,
@@ -92,7 +93,15 @@ export interface TaskGuardDeps {
 }
 
 const FOREMAN_PREFIX = "foreman-";
-const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
+const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/gm;
+
+/** The last `FOREMAN-ISSUE` (or similarly shaped) marker line: the guard appends its own after stripping the caller's, so the trailing value is the authoritative one. */
+export function lastMarkerValue(re: RegExp, text: string): string | null {
+  re.lastIndex = 0;
+  let value: string | null = null;
+  for (let match = re.exec(text); match !== null; match = re.exec(text)) value = match[1] ?? value;
+  return value;
+}
 
 // The extension mints a dispatch id and hands it to the child via
 // `FOREMAN_DISPATCH_ID` (print) or `--env` (herdr) so the guard's claim uses
@@ -206,11 +215,20 @@ async function claimLock(
   await linear.createComment({ issueId: issue.id, body: comment });
 }
 
+const MARKER_LINE_RE = /^FOREMAN-[A-Z-]+:.*$/gm;
+
+/**
+ * The guard's marker block is authoritative. Task text is assembled from
+ * Linear issue content, so a marker-shaped line in a description would
+ * otherwise be read back by `results/sink.ts` in place of the values the
+ * guard actually claimed against.
+ */
 function appendMarkers(task: string, markers: Record<string, string | undefined>): string {
+  const stripped = task.replace(MARKER_LINE_RE, "").replace(/\n{3,}/g, "\n\n").trimEnd();
   const lines = Object.entries(markers)
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
     .map(([key, value]) => `${key}: ${value}`);
-  return `${task}\n\n${lines.join("\n")}\n`;
+  return `${stripped}\n\n${lines.join("\n")}\n`;
 }
 
 /**
@@ -286,7 +304,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   if (stage === "triage" || stage === "plan") {
     let projectId: string | null = null;
     if (stage === "plan") {
-      projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1] ?? null;
+      projectId = lastMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task);
       if (!projectId) {
         throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
       }
@@ -295,12 +313,11 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     // triage (`packages/loop/src/team.ts`), so an inherited and a minted id
     // read the same way in the log.
     const dispatchId = takeDispatchId(deps, agent, projectId ?? "batch", deps.now());
-    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId });
+    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId, "FOREMAN-PROJECT": projectId ?? undefined });
     return { item: revised, contextDigest: await deps.contextDigest(projectId) };
   }
 
-  const match = ISSUE_MARKER_RE.exec(item.task);
-  const identifier = match?.[1];
+  const identifier = lastMarkerValue(ISSUE_MARKER_RE, item.task);
   if (!identifier) {
     throw new Error(
       `Missing "FOREMAN-ISSUE: <IDENTIFIER>" line in the task text for agent "${agent}".`,
@@ -352,6 +369,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     const repoPath = deps.entry.repoPath;
     baseBranch = deps.entry.baseBranch;
     branch = issue.branchName;
+    assertSafeRef(branch, "issue.branchName");
     const pr = await deps.github.prForBranch(repoPath, branch);
     const diff =
       deps.entry.pr.required && pr
@@ -363,6 +381,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   await claimLock(deps.linear, issue, agent, dispatchId, worktreePath, now, ttlMs);
 
   revised.task = appendMarkers(item.task, {
+    "FOREMAN-ISSUE": identifier,
     "FOREMAN-DISPATCH": dispatchId,
     "FOREMAN-WORKTREE": worktreePath ?? undefined,
     "FOREMAN-BRANCH": branch ?? undefined,
@@ -488,5 +507,5 @@ export async function prepareTaskCall(
 
 /** Shared by the extension's config validation and the unblock/apply commands. */
 export function extractIssueId(task: string): string | null {
-  return ISSUE_MARKER_RE.exec(task)?.[1] ?? null;
+  return lastMarkerValue(ISSUE_MARKER_RE, task);
 }

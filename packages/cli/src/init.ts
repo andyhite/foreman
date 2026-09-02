@@ -223,8 +223,8 @@ async function pickInitiativeBindings(
   return bindings;
 }
 
-/** `origin/HEAD`'s branch, falling back to the current branch when there's no such remote-tracking ref. */
-async function detectBaseBranch(repoRoot: string, git: CommandRunner): Promise<string> {
+/** `origin/HEAD`'s branch, then the current branch, then `fallback` (a repo with no commits has neither). */
+async function detectBaseBranch(repoRoot: string, git: CommandRunner, fallback: string): Promise<string> {
   try {
     const { stdout } = await git.run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], {
       cwd: repoRoot,
@@ -232,8 +232,12 @@ async function detectBaseBranch(repoRoot: string, git: CommandRunner): Promise<s
     const ref = stdout.trim();
     return ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
   } catch {
-    const { stdout } = await git.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
-    return stdout.trim();
+    try {
+      const { stdout } = await git.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
+      return stdout.trim();
+    } catch {
+      return fallback;
+    }
   }
 }
 
@@ -382,7 +386,7 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
       ? options.team.trim()
       : (await deps.prompter.text("Linear team key for this repo (blank = resolve at runtime)", defaultTeam)).trim();
 
-  const baseBranch = await detectBaseBranch(repoRoot, deps.git);
+  const baseBranch = await detectBaseBranch(repoRoot, deps.git, existing.effectiveBaseBranch);
 
   const entry: RepoEntry = {
     path: repoRoot,

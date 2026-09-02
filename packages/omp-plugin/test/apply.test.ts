@@ -311,6 +311,29 @@ describe("applyOutcome — refine", () => {
     expect(linear.createIssueCalls.length).toBe(2);
     expect(linear.createIssueCalls.map((call) => call.title)).toEqual(["Part 1", "Part 2"]);
   });
+
+  it("issues zero createIssue calls when the parent already carries children with matching titles", async () => {
+    const issue = makeIssue({
+      children: [
+        { id: "created-1", identifier: "ENG-created-1", title: "Part 1", state: { id: "state-todo", name: "Todo", type: "unstarted" } },
+        { id: "created-2", identifier: "ENG-created-2", title: "Part 2", state: { id: "state-todo", name: "Todo", type: "unstarted" } },
+      ],
+    });
+    const linear = new FakeLinear([issue]);
+    await applyOutcome(makeDeps(linear), {
+      kind: "result",
+      agent: "foreman-refine",
+      result: makeRefineResult({
+        estimate: 5,
+        readyForImplementation: false,
+        subIssues: [
+          { title: "Part 1", type: "type:feature", description: "Do part 1.", estimate: 2, acceptanceCriteria: ["Part 1 works"] },
+          { title: "Part 2", type: "type:chore", description: "Do part 2.", estimate: 3, acceptanceCriteria: ["Part 2 works"] },
+        ],
+      }),
+    });
+    expect(linear.createIssueCalls.length).toBe(0);
+  });
 });
 
 describe("applyBlock — dependency (Case A)", () => {
@@ -506,7 +529,7 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
 }
 
 function proposalComment(item: TriageItem, createdAt: string): Comment {
-  return { id: `comment-proposal-${createdAt}`, body: encodeMarker(MARKER_KIND.proposal, item, "human text"), createdAt, user: null, parentId: null };
+  return { id: `comment-proposal-${createdAt}`, body: encodeMarker(MARKER_KIND.proposal, item, "human text"), createdAt, user: { id: "bot-1", name: "Foreman", displayName: "Foreman" }, parentId: null };
 }
 
 describe("runApplyCommand — --approve", () => {
@@ -527,7 +550,7 @@ describe("runApplyCommand — --approve", () => {
       labels: [label(TYPE_LABEL.feature)],
       comments: [
         proposalComment(item, proposedAt),
-        { id: "comment-applied", body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1", appliedProposalAt: proposedAt }, "applied"), createdAt: appliedAt, user: null, parentId: null },
+        { id: "comment-applied", body: encodeMarker(MARKER_KIND.applied, { issueId: "ENG-1", appliedProposalAt: proposedAt }, "applied"), createdAt: appliedAt, user: { id: "bot-1", name: "Foreman", displayName: "Foreman" }, parentId: null },
       ],
     });
     const linear = new FakeLinear([issue]);
@@ -639,5 +662,39 @@ describe("runApplyCommand — --yes", () => {
     expect(result.message).toContain("Applied 0 approved proposal(s).");
     expect(result.message).toContain("Missing Project");
     expect(result.message).toContain("ENG-2: failed to apply: Linear unavailable");
+  });
+});
+
+describe("runApplyCommand — --yes scope partition", () => {
+  it("applies only the in-scope candidate and reports the out-of-scope one as skipped", async () => {
+    const inScope = makeIssue({
+      comments: [proposalComment(makeTriageItem(), "2026-01-01T00:00:00.000Z")],
+    });
+    const outOfScope = makeIssue({
+      id: "issue-2",
+      identifier: "ENG-2",
+      project: null,
+      comments: [proposalComment(makeTriageItem({ issueId: "ENG-2" }), "2026-01-01T00:00:00.000Z")],
+    });
+    const linear = new FakeLinear([inScope, outOfScope]);
+    const entry: ResolvedRepoEntry = {
+      alias: "test",
+      repoPath: "/repo",
+      team: "ENG",
+      initiativeIds: ["initiative-1"],
+      baseBranch: "main",
+      pr: { required: true, draft: false, ciRequired: false },
+      merge: { strategy: "squash", deleteBranch: true },
+      branchPattern: "<issue-id>-<slug>",
+      worktreePattern: "../<repo>-<ISSUE-ID>",
+    };
+
+    const result = await runApplyCommand(linear, ["--yes"], entry);
+
+    expect(result.mutated).toBe(true);
+    expect(result.message).toContain("Applied 1 approved proposal(s).");
+    expect(result.message).toContain("1 skipped: not bound to this repo's initiatives.");
+    expect(linear.updateCalls.some((call) => call.id === inScope.id)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.id === outOfScope.id)).toBe(false);
   });
 });

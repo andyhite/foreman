@@ -12,6 +12,8 @@
  * to remove.
  */
 
+import { sanitizeAgentText } from "./sanitize.ts";
+
 export const MARKER_KIND = {
   /** Lock ownership: dispatch id, timestamp, release state. */
   lock: "lock",
@@ -63,7 +65,7 @@ export interface FoundMarker<T> {
   data: T;
 }
 
-const FENCE = /```json\s*\n([\s\S]*?)\n```/g;
+const TRAILING_FENCE = /```json\s*\n([\s\S]*?)\n```\s*$/;
 
 /**
  * Render a comment body: human prose, then the machine copy.
@@ -77,29 +79,27 @@ export function encodeMarker<T>(kind: MarkerKind, data: T, human: string): strin
     version: MARKER_VERSION,
     data,
   } as MarkerEnvelope<T>;
-  return `${human.trimEnd()}\n\n\`\`\`json\n${JSON.stringify(envelope, null, 2)}\n\`\`\``;
+  return `${sanitizeAgentText(human).trimEnd()}\n\n\`\`\`json\n${JSON.stringify(envelope, null, 2)}\n\`\`\``;
 }
 
-/** The payload of the first marker of `kind` in `body`, or null. */
+/** The payload of `body`'s trailing marker fence when it is of `kind`, or null — a fence anywhere earlier in the body is untrusted prose, not a marker. */
 export function decodeMarker<T>(kind: MarkerKind, body: string): T | null {
-  FENCE.lastIndex = 0;
-  for (let match = FENCE.exec(body); match !== null; match = FENCE.exec(body)) {
-    const raw = match[1];
-    if (raw === undefined) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      (parsed as MarkerEnvelope<T>)[MARKER_FIELD] === kind &&
-      (parsed as MarkerEnvelope<T>).version === MARKER_VERSION
-    ) {
-      return (parsed as MarkerEnvelope<T>).data;
-    }
+  const match = TRAILING_FENCE.exec(body);
+  const raw = match?.[1];
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as MarkerEnvelope<T>)[MARKER_FIELD] === kind &&
+    (parsed as MarkerEnvelope<T>).version === MARKER_VERSION
+  ) {
+    return (parsed as MarkerEnvelope<T>).data;
   }
   return null;
 }

@@ -23,6 +23,7 @@
  * mutation.
  */
 
+import { lastMarkerValue } from "../enforce/task-guard.ts";
 import { isRecord, isStructuredOutput } from "../util/guards.ts";
 
 /** What every channel is normalized down to before `apply` sees it. */
@@ -42,16 +43,11 @@ export interface CapturedOutput {
 export function extractDispatchInfo(
   taskText: string,
 ): { agent: string | null; dispatchId: string | null; issueId: string | null; previousStateId: string | null } {
-  const agentMatch = /^FOREMAN-AGENT:\s*(\S+)\s*$/m.exec(taskText);
-  const dispatchMatch = /^FOREMAN-DISPATCH:\s*(\S+)\s*$/m.exec(taskText);
-  const issueMatch = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m.exec(taskText);
-  const prevStateMatch = /^FOREMAN-PREV-STATE:\s*(\S+)\s*$/m.exec(taskText);
-  return {
-    agent: agentMatch?.[1] ?? null,
-    dispatchId: dispatchMatch?.[1] ?? null,
-    issueId: issueMatch?.[1] ?? null,
-    previousStateId: prevStateMatch?.[1] ?? null,
-  };
+  const agent = lastMarkerValue(/^FOREMAN-AGENT:\s*(\S+)\s*$/gm, taskText);
+  const dispatchId = lastMarkerValue(/^FOREMAN-DISPATCH:\s*(\S+)\s*$/gm, taskText);
+  const issueId = lastMarkerValue(/^FOREMAN-ISSUE:\s*(\S+)\s*$/gm, taskText);
+  const previousStateId = lastMarkerValue(/^FOREMAN-PREV-STATE:\s*(\S+)\s*$/gm, taskText);
+  return { agent, dispatchId, issueId, previousStateId };
 }
 
 function taskTextOf(entry: unknown): string {

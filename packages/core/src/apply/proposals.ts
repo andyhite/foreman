@@ -28,7 +28,6 @@ export interface AppliedProposal {
   issueId: string;
   identifier: string;
   destination: string;
-  note: string | null;
 }
 
 /** The newest proposal marker on `issue`, or null. When `authoredBy` is set, markers not authored by that user id are ignored. */
@@ -122,7 +121,6 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
   // resolves which one the issue belongs to. Guessing would silently misfile
   // the issue, so a name that resolves to zero or several projects throws —
   // `runApplyPass` isolates the failure per candidate.
-  let projectNote: string | null = null;
   if (item.destinationProjectId) {
     mutation.projectId = item.destinationProjectId;
   } else if (item.destinationProject) {
@@ -178,11 +176,11 @@ export async function applyProposal(linear: LinearWriter, candidate: ProposalCan
   const body = encodeMarker(
     MARKER_KIND.applied,
     { issueId: issue.identifier, appliedProposalAt: proposedAt },
-    `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.${projectNote ? ` ${projectNote}` : ""}`,
+    `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.`,
   );
   await linear.createComment({ issueId: issue.id, body });
 
-  return { issueId: issue.id, identifier: issue.identifier, destination: item.destination, note: projectNote };
+  return { issueId: issue.id, identifier: issue.identifier, destination: item.destination };
 }
 
 /** A candidate that failed to apply; the caller decides whether to retry next pass. */

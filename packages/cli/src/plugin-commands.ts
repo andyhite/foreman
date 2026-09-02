@@ -73,8 +73,11 @@ export function findPluginScopes(stdout: string, pluginName: string, marketplace
   let user = false;
   for (const line of stdout.split("\n")) {
     if (!line.includes(needle)) continue;
-    if (line.includes("project")) project = true;
-    if (line.includes("user")) user = true;
+    // Scope is its own whitespace-delimited column; substring-testing the
+    // whole line makes any path containing "project" or "user" read as a scope.
+    const fields = line.trim().split(/\s+/);
+    if (fields.includes("project")) project = true;
+    if (fields.includes("user")) user = true;
   }
   return { project, user };
 }

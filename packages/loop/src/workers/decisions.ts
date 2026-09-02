@@ -40,6 +40,11 @@ export async function applyPendingDecisions(
       notes.push(`pending decision for ${decision.issueId} skipped: issue not found`);
       continue;
     }
+    const summary = `mark ${decision.issueId} blocked:needs-decision (${decision.kind})`;
+    if (!(await ctx.confirm({ kind: "linear-write", summary }))) {
+      notes.push(`${decision.issueId}: declined (${decision.kind}); left as-is.`);
+      continue;
+    }
     const removedLabelIds = hasLabel(issue, AGENT_LABEL.running)
       ? issue.labels.filter((label) => label.name === AGENT_LABEL.running).map((label) => label.id)
       : [];

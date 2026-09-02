@@ -54,6 +54,15 @@ function deepMerge(existing: Record<string, unknown>, patch: Record<string, unkn
 }
 
 /**
+ * Only the settings a TUI's config editor legitimately edits. `linear.*`
+ * (endpoint, credential source) and `agent.ompBin`/`herdrBin` are excluded
+ * deliberately: a dispatched agent reaches this socket as the same OS user,
+ * and either key turns a live-config edit into credential exfiltration or
+ * arbitrary-binary substitution at the next process start.
+ */
+const PATCHABLE_TOP_LEVEL_KEYS = new Set(["loop", "intake"]);
+
+/**
  * Validates `patch` deep-merged onto the config already on disk, then
  * writes it — a typo must fail before it reaches disk, exactly like
  * `writeGlobalConfig` (SPEC §3.10).
@@ -61,6 +70,10 @@ function deepMerge(existing: Record<string, unknown>, patch: Record<string, unkn
 export function patchAndWriteGlobalConfig(patch: unknown, home: string): void {
   if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
     throw new Error("patchConfig requires a JSON object");
+  }
+  const rejected = Object.keys(patch).filter((key) => !PATCHABLE_TOP_LEVEL_KEYS.has(key));
+  if (rejected.length > 0) {
+    throw new Error(`patchConfig may only patch ${[...PATCHABLE_TOP_LEVEL_KEYS].join(", ")}; refused: ${rejected.join(", ")}`);
   }
   const dir = join(home, ".foreman");
   const configPath = join(dir, "config.json");

@@ -16,7 +16,7 @@
  * is the same action taken deliberately for one issue.
  */
 
-import type { LinearWriter, ResolvedRepoEntry, TriageItem } from "@foreman/core";
+import type { AppliedProposal, LinearWriter, ResolvedRepoEntry, TriageItem } from "@foreman/core";
 import {
   AGENT_LABEL,
   applyProposal,
@@ -25,7 +25,6 @@ import {
   hasLaterApplied,
   hasLaterReject,
   latestProposal,
-  runApplyPass,
 } from "@foreman/core";
 
 export interface ApplyPlanEntry {
@@ -58,25 +57,79 @@ export async function runApplyCommand(
     return { ok: true, mutated: false, message: usage };
   }
 
+  let viewerId: string | null;
+  try {
+    viewerId = await linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  if (viewerId === null) {
+    return { ok: false, mutated: false, message: "Cannot verify proposal authorship (Linear viewer id unavailable); refusing to apply." };
+  }
+
   if (argv.length === 0) {
-    const candidates = await findApprovedUnapplied(linear);
+    const candidates = await findApprovedUnapplied(linear, { authoredBy: viewerId });
+    const inScope: typeof candidates = [];
+    let outOfScope = 0;
+    for (const candidate of candidates) {
+      if (!entry) {
+        inScope.push(candidate);
+        continue;
+      }
+      try {
+        await assertIssueInScope({ linear, entry }, candidate.issue);
+        inScope.push(candidate);
+      } catch {
+        outOfScope += 1;
+      }
+    }
+    const message = [
+      inScope.length > 0 ? `${inScope.length} approved proposal(s) pending apply.` : "Nothing to apply.",
+      outOfScope > 0 ? `${outOfScope} skipped: not bound to this repo's initiatives.` : null,
+    ]
+      .filter((line): line is string => line !== null)
+      .join(" ");
     return {
       ok: true,
       mutated: false,
-      message: candidates.length > 0 ? `${candidates.length} approved proposal(s) pending apply.` : "Nothing to apply.",
-      plan: candidates.map((candidate) => ({ issueId: candidate.issue.identifier, item: candidate.item })),
+      message,
+      plan: inScope.map((candidate) => ({ issueId: candidate.issue.identifier, item: candidate.item })),
     };
   }
 
   if (argv.length === 1 && argv[0] === "--yes") {
-    const { applied, failures } = await runApplyPass(linear);
-    const lines = [`Applied ${applied.length} approved proposal(s).`];
-    for (const proposal of applied) {
-      if (proposal.note) lines.push(`- ${proposal.identifier}: ${proposal.note}`);
+    const candidates = await findApprovedUnapplied(linear, { authoredBy: viewerId });
+    const inScope: typeof candidates = [];
+    let outOfScope = 0;
+    for (const candidate of candidates) {
+      if (!entry) {
+        inScope.push(candidate);
+        continue;
+      }
+      try {
+        await assertIssueInScope({ linear, entry }, candidate.issue);
+        inScope.push(candidate);
+      } catch {
+        outOfScope += 1;
+      }
     }
+    const applied: AppliedProposal[] = [];
+    const failures: Array<{ identifier: string; error: string }> = [];
+    for (const candidate of inScope) {
+      try {
+        applied.push(await applyProposal(linear, candidate));
+      } catch (error) {
+        failures.push({
+          identifier: candidate.issue.identifier,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const lines = [`Applied ${applied.length} approved proposal(s).`];
     for (const failure of failures) {
       lines.push(`- ${failure.identifier}: failed to apply: ${failure.error}`);
     }
+    if (outOfScope > 0) lines.push(`${outOfScope} skipped: not bound to this repo's initiatives.`);
     return { ok: failures.length === 0, mutated: applied.length > 0, message: lines.join("\n") };
   }
 
@@ -89,12 +142,12 @@ export async function runApplyCommand(
 
 
   if (flag === "--approve" && rest.length === 0) {
-    const found = latestProposal(issue);
+    const found = latestProposal(issue, viewerId);
     if (!found) return { ok: false, mutated: false, message: `${issueId} has no proposal marker.` };
-    if (hasLaterApplied(issue, found.createdAt)) {
+    if (hasLaterApplied(issue, found.createdAt, viewerId)) {
       return { ok: false, mutated: false, message: `${issueId} was already applied.` };
     }
-    if (hasLaterReject(issue, found.createdAt)) {
+    if (hasLaterReject(issue, found.createdAt, viewerId)) {
       return { ok: false, mutated: false, message: `${issueId} has a reject: reply; cannot approve.` };
     }
 

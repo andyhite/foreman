@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   FOREMAN_MARKETPLACE_NAME,
+  findPluginScopes,
   ompInstallArgv,
   ompMarketplaceAddArgv,
   ompUninstallUserArgv,
@@ -29,5 +30,17 @@ describe("omp argv builders", () => {
 
   it("builds an uninstall command scoped to user, for removing a stray machine-wide install", () => {
     expect(ompUninstallUserArgv("foreman")).toEqual(["plugin", "uninstall", "--scope", "user", "foreman@foreman"]);
+  });
+});
+
+describe("findPluginScopes", () => {
+  it("does not misread a path containing 'project' as a project-scoped install", () => {
+    const stdout = "foreman@foreman  /Users/dev/Projects/app  (linked)\n";
+    expect(findPluginScopes(stdout, "foreman", "foreman")).toEqual({ project: false, user: false });
+  });
+
+  it("still matches a genuine project-scoped install", () => {
+    const stdout = "foreman@foreman  project\n";
+    expect(findPluginScopes(stdout, "foreman", "foreman")).toEqual({ project: true, user: false });
   });
 });

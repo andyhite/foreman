@@ -124,6 +124,13 @@ export const LoopSettingsSchema = Type.Object(
      */
     backpressureThreshold: Type.Integer({ default: 5, minimum: 0 }),
     retryCap: Type.Integer({ default: 2, minimum: 1 }),
+    /**
+     * How long a just-dispatched record is kept by `reconcile` before its
+     * issue is required to carry `agent:running`. The dispatched session's
+     * task guard claims the lock, not the loop, so there is a real window between
+     * dispatch and the label appearing (SPEC §11).
+     */
+    claimGraceMs: Type.Integer({ default: 300_000, minimum: 0 }),
     reviewCycleCap: Type.Integer({ default: 2, minimum: 1 }),
     cadenceMinutes: Type.Integer({ default: 5, minimum: 1 }),
     /**

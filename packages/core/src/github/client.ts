@@ -7,6 +7,7 @@
 
 import type { CommandRunner } from "../git/exec.ts";
 import { nodeRunner } from "../git/exec.ts";
+import { assertSafeRef } from "../git/worktree.ts";
 
 export type MergeStrategy = "merge" | "squash" | "rebase";
 export type CiState = "success" | "failure" | "pending" | "none";
@@ -64,6 +65,7 @@ export class GitHubClient {
     branch: string,
     options?: { state?: "open" | "all"; base?: string },
   ): Promise<PullRequestInfo | null> {
+    assertSafeRef(branch, "branch");
     const argv = [
       "gh",
       "pr",
@@ -241,6 +243,8 @@ export class GitHubClient {
     strategy: MergeStrategy,
     deleteBranch: boolean,
   ): Promise<string> {
+    assertSafeRef(branch, "branch");
+    assertSafeRef(baseBranch, "baseBranch");
     const status = await this.#runner.run(["git", "status", "--porcelain"], { cwd: repoPath });
     if (status.stdout.trim().length > 0) {
       throw new DirtyWorkingTreeError(repoPath);

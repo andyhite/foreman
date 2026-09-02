@@ -125,7 +125,9 @@ async function rebuildCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<
 /**
  * Upgrades one repo's project install. Probes first because omp reports
  * "not installed" on stdout and still exits 0, so the exit code alone cannot
- * tell an upgrade from a no-op.
+ * tell an upgrade from a no-op. Matches the exact "Failed to upgrade" line
+ * omp prints on failure, rather than any occurrence of "fail" — a
+ * zero-exit success can still mention the word (e.g. "0 failed").
  */
 async function upgradeRepo(deps: UpdateDeps, alias: string, repoPath: string): Promise<boolean> {
   if (!existsSync(repoPath)) {
@@ -145,7 +147,7 @@ async function upgradeRepo(deps: UpdateDeps, alias: string, repoPath: string): P
 
   const upgrade = await deps.runner.capture("omp", ompUpgradeArgv(DEFAULT_OMP_PLUGIN_NAME), { cwd: repoPath });
   const output = `${upgrade.stdout}${upgrade.stderr}`.trim();
-  if (upgrade.code !== 0 || /fail/i.test(output)) {
+  if (upgrade.code !== 0 || /Failed to upgrade/i.test(output)) {
     deps.log(`  ${WARN} ${alias} — upgrade failed: ${output.split("\n")[0] ?? `exit ${upgrade.code}`}`);
     return false;
   }

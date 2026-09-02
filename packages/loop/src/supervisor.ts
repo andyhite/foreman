@@ -185,6 +185,19 @@ export class SupervisorLock {
     const tempPath = `${this.#path}.${token}`;
     writeFileSync(tempPath, JSON.stringify(info, null, 2), "utf8");
     renameSync(tempPath, this.#path);
+    // Two reclaimers can both rename; the last writer owns the lock. Re-read and
+    // compare tokens so the loser fails like any other held lock instead of
+    // believing it owns the board (§17.4). `--once`/`--no-control` have no socket
+    // bind to catch this downstream.
+    let reclaimed: LoopLockInfo | null = null;
+    try {
+      reclaimed = JSON.parse(readFileSync(this.#path, "utf8")) as LoopLockInfo;
+    } catch {
+      reclaimed = null;
+    }
+    if (!reclaimed || reclaimed.token !== token) {
+      throw new LoopLockHeldError(reclaimed ?? info, this.#path);
+    }
     this.#acquired = true;
     this.#token = token;
   }
@@ -386,6 +399,17 @@ export class Supervisor {
     }
   }
 
+  /**
+   * A print handle carries no `herdr` pane. After `#fallbackFromHerdr`, those
+   * handles must be settled and polled through the print dispatcher — the herdr
+   * dispatcher reports every paneless handle as "lost" without throwing, so
+   * `#dispatchWithFallback` cannot recover from it.
+   */
+  #dispatcherFor(handle: DispatchHandle): Dispatcher {
+    if (!handle.herdr && this.#dispatcher.kind === "herdr" && this.#printDispatcher) return this.#printDispatcher;
+    return this.#dispatcher;
+  }
+
   acquireLock(probe?: ProcessProbe): void {
     this.#lock.acquire(process.pid, this.#now(), probe);
     this.#runState = "running";
@@ -426,11 +450,17 @@ export class Supervisor {
     const liveDispatchIds = new Set<string>();
     await Promise.all(
       [...this.#handles.values()].map(async (handle) => {
-        const status = await this.#dispatcher.status(handle);
+        const status = await this.#dispatcherFor(handle).status(handle);
         if (status === "starting" || status === "running") liveDispatchIds.add(handle.dispatchId);
       }),
     );
-    this.#bookkeeping.reconcile(liveIssueIds, liveDispatchIds, this.#now(), lockTtlMs(this.#config()));
+    this.#bookkeeping.reconcile(
+      liveIssueIds,
+      liveDispatchIds,
+      this.#now(),
+      lockTtlMs(this.#config()),
+      this.#config().loop.claimGraceMs,
+    );
     this.#logVerbose(
       `reconcile: ${running.length} issue(s) carrying agent:running, ${liveDispatchIds.size} of ${this.#handles.size} tracked handle(s) still live`,
     );
@@ -600,19 +630,27 @@ export class Supervisor {
     if (!first) return;
     void (async () => {
       try {
-        const outcome = await this.#dispatcher.settle(first);
+        const outcome = await this.#dispatcherFor(first).settle(first);
         this.#logVerbose(
           `settled batch ${first.batchId} (${handles.length} item(s), ${first.agent}): status=${outcome.status} exitCode=${outcome.exitCode ?? "null"}`,
         );
         if (outcome.status !== "settled" || (outcome.exitCode ?? 0) !== 0) {
           for (const handle of handles) {
+            // A batch item (plan) carries no issue; there is nothing to charge a
+            // retry against and no issue to convert into a decision.
+            if (!handle.issueId) continue;
             const pending = this.#bookkeeping.recordAttemptFailure(
               stage,
-              handle.issueId ?? "",
+              handle.issueId,
               this.#config().loop.retryCap,
               this.#now(),
             );
             if (pending) await applyPendingDecisions(this.#context(), [pending]);
+          }
+          this.#bookkeeping.drainPendingDecisions();
+        } else {
+          for (const handle of handles) {
+            if (handle.issueId) this.#bookkeeping.resetAttempts(stage, handle.issueId);
           }
         }
       } catch (error) {
@@ -676,8 +714,8 @@ export class Supervisor {
         }
         return handles;
       },
-      status: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.status(handle)),
-      settle: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.settle(handle)),
+      status: (handle) => this.#dispatcherFor(handle).status(handle),
+      settle: (handle) => this.#dispatcherFor(handle).settle(handle),
       attach: inner.attach ? async (handle) => void (await inner.attach?.(handle)) : undefined,
       available: () => inner.available(),
     };
@@ -788,7 +826,7 @@ export class Supervisor {
       const handle = this.#handles.get(entry.dispatchId);
       if (!handle) continue;
       try {
-        this.#statuses.set(entry.dispatchId, await this.#dispatcher.status(handle));
+        this.#statuses.set(entry.dispatchId, await this.#dispatcherFor(handle).status(handle));
       } catch {
         this.#statuses.set(entry.dispatchId, "lost");
       }
@@ -831,6 +869,11 @@ export class Supervisor {
         return nowMs - last >= worker.cadenceMs;
       });
       if (due.length > 0) {
+        try {
+          await this.reconcile();
+        } catch (error) {
+          this.#log(`reconcile failed: ${String(error)}`);
+        }
         await this.runTick(due, { workerNames: due.map((worker) => worker.name) });
       }
       if (this.#currentRunState() === "draining") break;

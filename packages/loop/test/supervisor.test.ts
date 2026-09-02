@@ -22,6 +22,7 @@ import type {
 } from "@foreman/core";
 import { DENY_CONFIRMER, readReservations, repoLoopId, reservationsPath, YOLO_CONFIRMER } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
+import { HerdrUnavailableError } from "../src/dispatch/index.ts";
 import {
   LoopLockHeldError,
   Supervisor,
@@ -80,6 +81,7 @@ function makeConfig(mode: LoopMode = "confirm"): GlobalConfig {
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
+      claimGraceMs: 300_000,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       mode,
@@ -501,8 +503,10 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
     await supervisor.runTick([worker]);
     await flushBackgroundWork();
     expect(bookkeeping.attemptCount("implement", "ENG-1")).toBe(3);
-    expect(bookkeeping.state.pendingDecisions).toHaveLength(1);
-    expect(bookkeeping.state.pendingDecisions[0]?.kind).toBe("retry-exhausted");
+    // The decision is applied to Linear immediately, then drained from the
+    // durable queue — it would otherwise duplicate the `blocked:needs-decision`
+    // state Linear now records (B12).
+    expect(bookkeeping.state.pendingDecisions).toHaveLength(0);
     expect(linear.updateCalls).toHaveLength(1);
     expect(linear.commentCalls).toHaveLength(1);
   });
@@ -635,5 +639,184 @@ describe("Supervisor — reservations and batch settle (SPEC §17.4, §11)", () 
     for (const issueId of ["ENG-1", "ENG-2", "ENG-3"]) {
       expect(supervisor.handleFor(`foreman-refine-${issueId}-batch`)).toBeNull();
     }
+  });
+});
+
+// ---- herdr fallback routing (B1: paneless print handles must not be polled through herdr) ----
+
+/** Herdr dispatcher whose `dispatch` always fails as "herdr unavailable"; its `settle`/`status` would report "lost" for any handle, proving `#dispatcherFor` must never hand it a print-mode handle. */
+class UnavailableHerdrDispatcher implements Dispatcher {
+  readonly kind = "herdr" as const;
+  async dispatch(): Promise<DispatchHandle[]> {
+    throw new HerdrUnavailableError("herdr server unreachable");
+  }
+  async status(): Promise<DispatchStatus> {
+    return "lost";
+  }
+  async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
+    return { handle, status: "lost", exitCode: null, log: "" };
+  }
+  async available(): Promise<boolean> {
+    return false;
+  }
+}
+
+/** Print dispatcher whose `settle` only resolves once `release()` is called, so the test can observe bookkeeping state before and after the settle resolves. */
+class GatedPrintDispatcher implements Dispatcher {
+  readonly kind = "print" as const;
+  statusCalls = 0;
+  settleCalls = 0;
+  #release: (() => void) | null = null;
+  #gate = new Promise<void>((resolve) => {
+    this.#release = resolve;
+  });
+
+  release(): void {
+    this.#release?.();
+  }
+
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
+      agent: request.agent,
+      issueId: item.issueId,
+      startedAt: new Date().toISOString(),
+      batchId,
+      pid: 4242,
+      herdr: null,
+    }));
+  }
+  async status(): Promise<DispatchStatus> {
+    this.statusCalls += 1;
+    return "running";
+  }
+  async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
+    this.settleCalls += 1;
+    await this.#gate;
+    return { handle, status: "settled", exitCode: 0, log: "" };
+  }
+  async available(): Promise<boolean> {
+    return true;
+  }
+}
+
+describe("Supervisor — herdr-unavailable fallback routes settle/status to the print dispatcher (B1)", () => {
+  it("never consults the herdr dispatcher's settle/status for a print-mode fallback handle, and keeps the in-flight record until the print settle resolves", async () => {
+    const stateDir = tempStateDir();
+    const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
+    const linear = new DecisionLinear();
+    const herdr = new UnavailableHerdrDispatcher();
+    const print = new GatedPrintDispatcher();
+    const supervisor = new Supervisor({
+      config: makeConfig("yolo"),
+      linear: linear as unknown as LinearWriter,
+      dispatcher: herdr,
+      printDispatcher: print,
+      bookkeeping,
+      stateDir,
+      reservationsDir: join(stateDir, "reservations"),
+      entry: makeEntry(),
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: () => {},
+      confirmer: YOLO_CONFIRMER,
+      loopId: repoLoopId("acme"),
+      statusPath: null,
+      version: "0.1.0-test",
+      team: "ENG",
+    });
+
+    await supervisor.runTick([makeDispatchAndWatchWorker()]);
+    await flushBackgroundWork();
+
+    // The dispatch itself fell back to print (herdr.dispatch always throws),
+    // and watchSettle is now blocked on the gated print settle — the herdr
+    // dispatcher's settle/status (which would report "lost") must never have
+    // been consulted, so no attempt failure is charged and the record survives.
+    expect(print.settleCalls).toBe(1);
+    expect(bookkeeping.state.inFlight).toHaveLength(1);
+    expect(bookkeeping.attemptCount("implement", "ENG-1")).toBe(0);
+
+    print.release();
+    await flushBackgroundWork();
+
+    // Once the print dispatcher's settle resolves cleanly, the record clears
+    // and no attempt failure was ever recorded via the herdr path.
+    expect(bookkeeping.state.inFlight).toHaveLength(0);
+    expect(bookkeeping.attemptCount("implement", "ENG-1")).toBe(0);
+    expect(bookkeeping.state.pendingDecisions).toHaveLength(0);
+  });
+});
+
+// ---- plan-batch accounting on failure (B12: issue-less handles must not be charged or produce empty-issue decisions) ----
+
+/** Dispatches a single plan batch item with `issueId: null` (a project-scoped batch, not an issue), and hands the handle to `watchSettle`. */
+function makePlanBatchWorker(): Worker {
+  return {
+    name: "plan",
+    cadenceMs: 0,
+    async run(ctx: WorkerContext): Promise<WorkerReport> {
+      const handles = await ctx.dispatcher.dispatch({
+        agent: "foreman-plan",
+        command: "/foreman:plan",
+        cwd: ctx.entry.repoPath,
+        alias: ctx.entry.alias,
+        items: [{ issueId: null, subject: "initiative-1", dispatchId: "foreman-plan-batch-1", worktree: null }],
+      });
+      for (const handle of handles) {
+        ctx.bookkeeping.recordDispatch({
+          agent: "foreman-plan",
+          issueId: handle.issueId,
+          dispatchId: handle.dispatchId,
+          startedAt: handle.startedAt,
+          stage: "plan",
+        });
+      }
+      ctx.watchSettle(handles, "plan");
+      return {
+        worker: "plan",
+        ranAt: ctx.now().toISOString(),
+        decisions: [],
+        dispatched: [],
+        skipped: [],
+        errors: [],
+      };
+    },
+  };
+}
+
+describe("Supervisor#watchSettle — issue-less plan batch on failure (B12)", () => {
+  it("records no attempt failure and publishes no pending decision for a failed batch item with issueId: null", async () => {
+    const stateDir = tempStateDir();
+    const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
+    const linear = new DecisionLinear();
+    const supervisor = new Supervisor({
+      config: makeConfig("yolo"),
+      linear: linear as unknown as LinearWriter,
+      dispatcher: new SettlingDispatcher(1),
+      bookkeeping,
+      stateDir,
+      reservationsDir: join(stateDir, "reservations"),
+      entry: makeEntry(),
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: () => {},
+      confirmer: YOLO_CONFIRMER,
+      loopId: repoLoopId("acme"),
+      statusPath: null,
+      version: "0.1.0-test",
+      team: "ENG",
+    });
+
+    await supervisor.runTick([makePlanBatchWorker()]);
+    await flushBackgroundWork();
+
+    // No issue to charge a retry against — the attempts map must not gain a
+    // `plan:` (empty-issueId) entry, and no PendingDecision with an empty
+    // issueId must ever be published for the TUI queue to display.
+    expect(bookkeeping.attemptCount("plan", "")).toBe(0);
+    expect(bookkeeping.state.pendingDecisions).toHaveLength(0);
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
+    expect(bookkeeping.state.inFlight).toHaveLength(0);
   });
 });

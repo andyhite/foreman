@@ -4,6 +4,8 @@
  * matching the Markdown conventions of the other renderers.
  */
 
+import { stripControlChars } from "@foreman/core";
+
 export interface BlockedEntry {
   issueId: string;
   type: string;
@@ -79,7 +81,7 @@ export function renderStatusConsole(state: StatusState): string {
   sections.push(
     state.blocked.length > 0
       ? state.blocked
-          .map((entry) => `- ${entry.issueId} [${entry.type}] ${entry.question}`)
+          .map((entry) => `- ${entry.issueId} [${entry.type}] ${stripControlChars(entry.question)}`)
           .join("\n")
       : "_none — nothing waiting on the operator_",
   );

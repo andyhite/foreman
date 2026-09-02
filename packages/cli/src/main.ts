@@ -65,6 +65,7 @@ Options for setup:
   --link                     Dev mode: link the foreman CLI to this checkout's source (no rebuild-to-see-changes).
   --repo-source <owner/repo>  GitHub source for the omp marketplace catalog (default: ${DEFAULT_GITHUB_REPO}).
   --checkout <path>          Path to the foreman checkout (default: auto-detected).
+  --skip-linear               Skip Linear API access.
 
 Options for init:
   --path <dir>               Directory to register (default: the current directory).
@@ -72,6 +73,7 @@ Options for init:
   --alias <name>             Registry alias override (default: derived from the repo directory name).
   --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
   --skip-plugin               Skip installing the omp plugin for this repo.
+  --skip-linear               Skip Linear API access.
 
 Options for update:
   --checkout <path>          Path to the foreman checkout (default: auto-detected).
@@ -81,7 +83,6 @@ Options for update:
 Options for all commands:
   -y, --yes                 Accept defaults for every prompt (non-interactive).
   --home <path>              Home directory for ~/.foreman (default: real home; test hook).
-  --skip-linear               Skip Linear API access.
   --help, -h                  Show this text.
 `;
 

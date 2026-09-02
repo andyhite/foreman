@@ -48,7 +48,6 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
     if (!decision.issueId) continue;
     const issue = todo.find((candidate) => candidate.identifier === decision.issueId);
     if (!issue) continue;
-    const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
     const summary = `dispatch ${decision.agent} for ${decision.issueId}`;
     if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
       skipped.push({ stage: "implement", issueId: decision.issueId, code: "dispatch-declined", message: `Operator declined: ${summary}` });
@@ -83,7 +82,6 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
       });
       ctx.watchSettle(handles, "implement");
       dispatched.push(decision);
-      ctx.bookkeeping.resetAttempts("implement", decision.issueId);
     } catch (error) {
       errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
       const pending = ctx.bookkeeping.recordAttemptFailure(

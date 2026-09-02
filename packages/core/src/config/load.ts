@@ -127,6 +127,17 @@ function assertMergeDetectionReachable(config: GlobalConfig, describeFor: string
   }
 }
 
+/** Rejects an `intake.timezone` that is not a valid IANA time zone name — otherwise the failure surfaces as `RangeError: Invalid time zone` inside every intake tick instead of at load time. */
+function assertIntakeTimezoneValid(config: GlobalConfig, describeFor: string): void {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: config.intake.timezone });
+  } catch {
+    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, [
+      `intake.timezone "${config.intake.timezone}" is not an IANA time zone name`,
+    ]);
+  }
+}
+
 /** `~` expands to `home` (default `os.homedir()`); any other path is returned unchanged. */
 export function expandHome(p: string, home: string = homedir()): string {
   if (p === "~") return home;
@@ -179,6 +190,7 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
   assertRepoAliasesValid(config, describeFor);
   assertInitiativesUnique(config, describeFor);
   assertMergeDetectionReachable(config, describeFor);
+  assertIntakeTimezoneValid(config, describeFor);
   return config;
 }
 

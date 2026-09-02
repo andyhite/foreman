@@ -129,6 +129,7 @@ export class ControlServer {
     try {
       server.listen(this.#socketPath, () => {
         server.removeListener("error", reject);
+        server.on("error", (error) => this.#log(`control server error: ${String(error)}`));
         this.#bound = true;
         resolve();
       });

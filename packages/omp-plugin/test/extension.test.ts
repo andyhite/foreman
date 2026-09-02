@@ -224,7 +224,7 @@ describe("blockedOutcome — human block targets the locked issue", () => {
     if (outcome.kind !== "blocked") throw new Error("unreachable");
     expect(outcome.issueId).toBe("ENG-1");
 
-    await applyBoundResult(deps, "foreman-implement", outcome, "ENG-1", "foreman-implement-ENG-1-20260101T000000Z-abc123", () => {});
+    await applyBoundResult(deps, "foreman-implement", outcome, "ENG-1", "foreman-implement-ENG-1-20260101T000000Z-abc123", null, () => {});
 
     const updatedIssue = await linear.issue("ENG-1");
     expect(updatedIssue?.labels.some((entry) => entry.name === BLOCKED_LABEL.needsInput)).toBe(true);
@@ -232,6 +232,42 @@ describe("blockedOutcome — human block targets the locked issue", () => {
     expect(linear.commentCalls.length).toBe(2);
     // The lock is released as part of the human-block path.
     expect(updatedIssue?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+  });
+});
+
+describe("applyBoundResult — cross-issue rejection restores previousStateId", () => {
+  it("removes agent:running and restores previousStateId in the same updateIssue call", async () => {
+    const lockedIssue = makeIssue({
+      id: "issue-1",
+      identifier: "ENG-1",
+      state: STATE_IN_PROGRESS,
+      labels: [label(AGENT_LABEL.running)],
+    });
+    const otherIssue = makeIssue({ id: "issue-2", identifier: "ENG-9", title: "Someone else's issue", labels: [] });
+    const linear = new FakeLinear([lockedIssue, otherIssue]);
+    const deps = makeDeps(linear);
+
+    const result = makeRefineResult({ issueId: "ENG-9" });
+    const outcome: AgentOutcome = { kind: "result", agent: "foreman-refine", result };
+
+    await applyBoundResult(
+      deps,
+      "foreman-refine",
+      outcome,
+      "ENG-1",
+      "foreman-refine-ENG-1-20260101T000000Z-abc123",
+      STATE_TODO.id,
+      () => {},
+    );
+
+    const lockedUpdateCalls = linear.updateCalls.filter((call) => call.id === lockedIssue.id);
+    expect(lockedUpdateCalls).toHaveLength(1);
+    expect(lockedUpdateCalls[0]?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
+    expect(lockedUpdateCalls[0]?.input.stateId).toBe(STATE_TODO.id);
+
+    const updatedLocked = await linear.issue("ENG-1");
+    expect(updatedLocked?.state.id).toBe(STATE_TODO.id);
+    expect(updatedLocked?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
   });
 });
 
@@ -252,7 +288,8 @@ describe("applyBoundResult — rejects a result naming a different issue than th
       outcome,
       "ENG-1",
       "foreman-refine-ENG-1-20260101T000000Z-abc123",
-      (message, level) => notifications.push({ message, level }),
+      null,
+      (message: string, level: string) => notifications.push({ message, level }),
     );
 
     // Neither issue was mutated by the (rejected) refine result itself:
@@ -287,7 +324,7 @@ describe("applyBoundResult — rejects a result naming a different issue than th
     const result = makeRefineResult({ issueId: "ENG-1", readyForImplementation: false });
     const outcome: AgentOutcome = { kind: "result", agent: "foreman-refine", result };
 
-    await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", "foreman-refine-ENG-1-20260101T000000Z-abc123", () => {});
+    await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", "foreman-refine-ENG-1-20260101T000000Z-abc123", null, () => {});
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.labels.some((entry) => entry.name === "agent:running")).toBe(false);
@@ -558,6 +595,34 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     const payload = toolResultPayload(planEnvelope());
     payload.input.tasks[0]!.task = `Decompose the brief.\n\nFOREMAN-PROJECT: ${PROJECT_ID}\n`;
     expect(extractFromToolResult(payload)).toEqual([]);
+  });
+});
+
+describe("handleCaptured — a blocked triage result with no locked issue notifies instead of mutating Linear", () => {
+  it("calls notify exactly once with the block's whatINeed, and performs no Linear mutation", async () => {
+    const linear = new FakeLinear([]);
+    const deps = makeDeps(linear);
+    const dispatchId = "foreman-triage-batch-20260101T000000Z-abc123";
+    const block = makeBlockRecord({ type: "needs-decision", whatINeed: "Which project owns this batch?" });
+    const payload = { blocked: true, result: null, block };
+
+    const notifications: Array<{ message: string; level: string }> = [];
+    await handleCaptured(
+      dispatchId,
+      "foreman-triage",
+      payload,
+      false,
+      null,
+      null,
+      (message: string, level: string) => notifications.push({ message, level }),
+      deps,
+      { wasApplied: async () => false },
+    );
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.message).toContain("Which project owns this batch?");
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
   });
 });
 

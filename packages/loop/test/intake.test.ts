@@ -38,6 +38,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
+      claimGraceMs: 300_000,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       mode: "yolo",
@@ -239,7 +240,13 @@ class FakeLinear implements LinearWriter {
 }
 
 function proposalComment(item: TriageItem, createdAt: string) {
-  return { id: `comment-proposal-${createdAt}`, body: encodeMarker(MARKER_KIND.proposal, item, "human text"), createdAt, user: null, parentId: null };
+  return {
+    id: `comment-proposal-${createdAt}`,
+    body: encodeMarker(MARKER_KIND.proposal, item, "human text"),
+    createdAt,
+    user: { id: "bot-1", name: "Foreman", displayName: "Foreman" },
+    parentId: null,
+  };
 }
 
 function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
@@ -378,6 +385,31 @@ describe("runIntakeTick — window guard", () => {
 
     expect(second.dispatched).toBe(false);
     expect(second.skipReason).toContain("already dispatched");
+    expect(dispatcher.calls).toHaveLength(0);
+  });
+
+  it("does not re-dispatch when UTC has rolled to a new calendar day but intake.timezone has not (B8)", async () => {
+    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "America/New_York" } });
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const bookkeeping = freshBookkeeping();
+    // Ran at 14:00 UTC on 2026-06-01 (10:00 America/New_York, same calendar day there).
+    bookkeeping.setLastTriageRun(new Date("2026-06-01T14:00:00.000Z"));
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      bookkeeping,
+      // 2026-06-02T00:30:00Z is 2026-06-01T20:30 in America/New_York (EDT):
+      // UTC has already rolled to June 2nd, but the configured zone is still
+      // June 1st, so the daily guard must still consider today's batch run.
+      now: () => new Date("2026-06-02T00:30:00.000Z"),
+    });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(false);
+    expect(report.skipReason).toContain("already dispatched the intake batch today");
     expect(dispatcher.calls).toHaveLength(0);
   });
 

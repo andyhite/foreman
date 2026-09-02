@@ -166,6 +166,7 @@ export async function applyBoundResult(
   outcome: AgentOutcome,
   target: string | null,
   dispatchId: string,
+  previousStateId: string | null,
   notify: (message: string, level: "warn" | "error") => void,
 ): Promise<void> {
   if (
@@ -182,8 +183,18 @@ export async function applyBoundResult(
       body: `Foreman rejected this dispatch result: it reported issue ${reported}, but this dispatch locked ${target}.`,
     });
     const lockedIssue = await deps.linear.issue(target);
-    const running = lockedIssue?.labels.find((label) => label.name === "agent:running");
-    if (running) await deps.linear.updateIssue(lockedIssue!.id, { removedLabelIds: [running.id] });
+    if (lockedIssue) {
+      const running = lockedIssue.labels.find((label) => label.name === "agent:running");
+      const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
+      if (running) mutation.removedLabelIds = [running.id];
+      // The guard already moved this issue Todo → In Progress (implement
+      // only); removing `agent:running` alone would strand it there with no
+      // live agent and no retry, since `routeImplement` only selects Todo.
+      // Restore the dispatch's recorded pre-claim state in the same
+      // mutation, mirroring the invalid-result branch below.
+      if (previousStateId && lockedIssue.state.id !== previousStateId) mutation.stateId = previousStateId;
+      if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(lockedIssue.id, mutation);
+    }
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
     return;
   }
@@ -239,6 +250,8 @@ export async function handleCaptured(
               options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
               costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
             }, target));
+          } else {
+            notify(`Foreman dropped a budget-truncated ${agent} result: no issue was locked for this dispatch, so there is nothing to mark blocked.`, "error");
           }
         } else {
           const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
@@ -260,9 +273,14 @@ export async function handleCaptured(
         appliedDispatchIds.add(dispatchId);
         return;
       }
+      if (parsed.kind === "blocked" && target === null) {
+        notify(`Foreman received a block from ${agent} with no locked issue: ${parsed.block.whatINeed}`, "warn");
+        appliedDispatchIds.add(dispatchId);
+        return;
+      }
       await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
         const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, notify);
+        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, previousStateId, notify);
       });
       // Recorded only after the sink callback (applyOutcome + markApplied)
       // resolves: if either throws, the id must not stay poisoned in the set,

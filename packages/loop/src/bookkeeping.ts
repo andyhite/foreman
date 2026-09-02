@@ -158,20 +158,25 @@ export class Bookkeeping {
    * always true, so the only real signal available across a supervisor
    * restart is age: a batch record older than the lock TTL is treated as
    * dead and dropped, freeing its WIP slot (SPEC §17.4's own staleness
-   * horizon for the lockfile). Called by the supervisor on start; the worst
-   * case of skipping this is one redundant dispatch, never corrupted Linear
-   * state.
+   * horizon for the lockfile). A record younger than `graceMs` is kept
+   * regardless of label state: the dispatched session's own task guard
+   * claims `agent:running`, not the loop, so there is a real window between
+   * dispatch and the label appearing (SPEC §11). Called by the supervisor on
+   * start and before every tick; the worst case of skipping this is one
+   * redundant dispatch, never corrupted Linear state.
    */
   reconcile(
     liveIssueIds: ReadonlySet<string>,
     liveDispatchIds: ReadonlySet<string>,
     now: Date,
     ttlMs: number,
+    graceMs: number,
   ): void {
     this.#state.inFlight = this.#state.inFlight.filter((entry) => {
+      const age = now.getTime() - Date.parse(entry.startedAt);
+      if (Number.isFinite(age) && age < graceMs) return true;
       if (entry.issueId) return liveIssueIds.has(entry.issueId);
       if (liveDispatchIds.has(entry.dispatchId)) return true;
-      const age = now.getTime() - Date.parse(entry.startedAt);
       return Number.isFinite(age) && age < ttlMs;
     });
   }

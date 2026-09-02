@@ -18,6 +18,7 @@ function makeConfig(overrides: { herdrLayout?: "tab" | "pane" } = {}): GlobalCon
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
+      claimGraceMs: 300_000,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       mode: "confirm",
@@ -733,6 +734,9 @@ describe("HerdrDispatcher.dispatch — writing stages get a dedicated worktree w
             stderr: "",
             code: 0,
           });
+        }
+        if (argv.includes("pane") && argv.includes("get")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { agent_status: "idle" } } }), stderr: "", code: 0 });
         }
         if (argv.includes("pane") && argv.includes("split")) {
           return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: "w2:p3" } } }), stderr: "", code: 0 });

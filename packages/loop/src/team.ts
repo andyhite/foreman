@@ -164,8 +164,11 @@ export function pastIntakeWindow(window: string, now: Date, timezone: string): b
   return nowMinutes >= hour * 60 + minute;
 }
 
-function sameCalendarDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+/** `YYYY-MM-DD` in `timezone` — the calendar day `intake.window` is evaluated against, not the host's. */
+export function intakeDayKey(at: Date, timezone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(
+    at,
+  );
 }
 
 /**
@@ -245,7 +248,9 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
     ctx.log(style("yellow", skipReason));
   } else {
     const lastRunAt = ctx.bookkeeping.state.lastTriageRunAt;
-    const alreadyRanToday = lastRunAt !== null && sameCalendarDay(new Date(lastRunAt), now);
+    const alreadyRanToday =
+      lastRunAt !== null &&
+      intakeDayKey(new Date(lastRunAt), ctx.config.intake.timezone) === intakeDayKey(now, ctx.config.intake.timezone);
     if (!pastIntakeWindow(ctx.config.intake.window, now, ctx.config.intake.timezone)) {
       skipReason = `before intake.window (${ctx.config.intake.window})`;
     } else if (alreadyRanToday) {
@@ -328,28 +333,38 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
   let appliedCount = 0;
   let declinedApplyCount = 0;
   try {
-    const candidates = await findApprovedUnapplied(ctx.linear, { filter: INBOX_FILTER });
-    if (candidates.length === 0) {
-      ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+    let viewerId: string | null;
+    try {
+      viewerId = await ctx.linear.viewerId();
+    } catch {
+      viewerId = null;
+    }
+    if (viewerId === null) {
+      ctx.log(style("yellow", "~ apply pass: viewer id unavailable; skipping (marker authorship unverifiable)."));
     } else {
-      const approved = await ctx.confirm({
-        kind: "linear-write",
-        summary: `apply ${candidates.length} approved triage proposal(s)`,
-      });
-      if (!approved) {
-        declinedApplyCount = candidates.length;
-        ctx.log(style("yellow", `~ apply pass: operator declined applying ${candidates.length} approved proposal(s).`));
+      const candidates = await findApprovedUnapplied(ctx.linear, { filter: INBOX_FILTER, authoredBy: viewerId });
+      if (candidates.length === 0) {
+        ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
       } else {
-        const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER });
-        appliedCount = applied.length;
-        if (applied.length === 0) {
-          ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+        const approved = await ctx.confirm({
+          kind: "linear-write",
+          summary: `apply ${candidates.length} approved triage proposal(s)`,
+        });
+        if (!approved) {
+          declinedApplyCount = candidates.length;
+          ctx.log(style("yellow", `~ apply pass: operator declined applying ${candidates.length} approved proposal(s).`));
         } else {
-          const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
-          ctx.log(`${style("green", "✓")} apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
-        }
-        for (const failure of failures) {
-          ctx.log(style("red", `apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`));
+          const { applied, failures } = await runApplyPass(ctx.linear, { filter: INBOX_FILTER, authoredBy: viewerId });
+          appliedCount = applied.length;
+          if (applied.length === 0) {
+            ctx.log(`${style("dim", "○")} apply pass: no approvals pending.`);
+          } else {
+            const identifiers = applied.map((proposal) => proposal.identifier).join(", ");
+            ctx.log(`${style("green", "✓")} apply pass: applied ${applied.length} approved proposal(s) — ${identifiers}.`);
+          }
+          for (const failure of failures) {
+            ctx.log(style("red", `apply pass: failed to apply ${failure.identifier} (${failure.issueId}): ${failure.error}`));
+          }
         }
       }
     }
@@ -576,6 +591,13 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   // process has no registry entry, so `entryTeam` is always null and the
   // fallback is the sole team the credential can reach.
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
+  try {
+    if (new URL(config.linear.endpoint).host !== "api.linear.app") {
+      log(style("yellow", `! linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key is being sent there.`));
+    }
+  } catch {
+    log(style("yellow", `! linear.endpoint "${config.linear.endpoint}" is not a valid URL — the API key is being sent there.`));
+  }
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
 
@@ -648,10 +670,6 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     runtime.stopMode = "graceful";
     runtime.runState = "draining";
     runtime.wake?.();
-    if (args.once) {
-      lock.release();
-      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
-    }
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

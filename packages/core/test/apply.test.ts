@@ -69,8 +69,8 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
   };
 }
 
-function proposalComment(item: TriageItem, createdAt: string): Comment {
-  return { id: `comment-proposal-${createdAt}`, body: encodeMarker(MARKER_KIND.proposal, item, "human text"), createdAt, user: null, parentId: null };
+function proposalComment(item: TriageItem, createdAt: string, user: Comment["user"] = null): Comment {
+  return { id: `comment-proposal-${createdAt}`, body: encodeMarker(MARKER_KIND.proposal, item, "human text"), createdAt, user, parentId: null };
 }
 
 class FakeLinear implements LinearWriter {
@@ -295,7 +295,7 @@ describe("applyProposal — mutation sequence", () => {
 
     const applied = await applyProposal(linear, { issue, item, proposedAt: "2026-01-01T00:00:00.000Z" });
 
-    expect(applied).toEqual({ issueId: "issue-1", identifier: "ENG-1", destination: "Backlog", note: null });
+    expect(applied).toEqual({ issueId: "issue-1", identifier: "ENG-1", destination: "Backlog" });
     const stateMutation = linear.updateCalls.find((call) => call.input.stateId !== undefined);
     expect(stateMutation?.input.stateId).toBe(STATE_BACKLOG.id);
     expect(stateMutation?.input.priority).toBe(item.proposedPriority);
@@ -377,6 +377,28 @@ describe("findApprovedUnapplied — filter passthrough", () => {
   });
 });
 
+describe("findApprovedUnapplied — authorship (A5)", () => {
+  it("excludes a proposal marker authored by a different user id, and includes one authored by the trusted viewer", async () => {
+    const item = makeTriageItem();
+    const attackerIssue = makeIssue({
+      identifier: "ENG-2",
+      comments: [proposalComment(item, "2026-01-01T00:00:00.000Z", { id: "attacker", name: "Attacker", displayName: "Attacker" })],
+    });
+
+    const attackerLinear = new FakeLinear([attackerIssue]);
+    const forgedCandidates = await findApprovedUnapplied(attackerLinear, { authoredBy: "viewer-1" });
+    expect(forgedCandidates.length).toBe(0);
+
+    const viewerIssue = makeIssue({
+      identifier: "ENG-3",
+      comments: [proposalComment(item, "2026-01-01T00:00:00.000Z", { id: "viewer-1", name: "Viewer", displayName: "Viewer" })],
+    });
+    const viewerLinear = new FakeLinear([viewerIssue]);
+    const trustedCandidates = await findApprovedUnapplied(viewerLinear, { authoredBy: "viewer-1" });
+    expect(trustedCandidates.length).toBe(1);
+  });
+});
+
 describe("runApplyPass", () => {
   it("returns applied proposals and no failures when every candidate succeeds", async () => {
     const item = makeTriageItem();
@@ -411,7 +433,7 @@ describe("runApplyPass", () => {
     const result = await runApplyPass(linear);
 
     expect(result.applied).toEqual([
-      { issueId: succeeding.id, identifier: succeeding.identifier, destination: "Backlog", note: null },
+      { issueId: succeeding.id, identifier: succeeding.identifier, destination: "Backlog" },
     ]);
     expect(result.failures).toEqual([
       {

@@ -25,6 +25,7 @@ export * from "./linear/index.ts";
 export * from "./lock.ts";
 export * from "./markers.ts";
 export * from "./repo.ts";
+export * from "./sanitize.ts";
 export * from "./schemas/index.ts";
 export * from "./schemas/parse.ts";
 export * from "./style.ts";

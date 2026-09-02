@@ -45,7 +45,9 @@ export const processRunner: Runner = {
       stderr += String(chunk);
     });
     child.on("error", reject);
-    child.on("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    // `close` (not `exit`) fires once stdio is fully drained, so trailing
+    // output written just before the process exits is not lost.
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
     return promise;
   },
 

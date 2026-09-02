@@ -31,6 +31,13 @@ from every dispatched agent's environment on both dispatch paths (print-mode
 `omp -p` and the herdr terminal pane). The one residual exposure the code
 cannot close: an implement agent still holds `bash`, so it can read
 `linear.apiKeyFile` directly if the operator stores the credential that way.
+A loop-dispatched deployment requires `linear.apiKeyFile` for this reason in
+reverse, too: both dispatch paths (`packages/loop/src/repo.ts`,
+`packages/loop/src/team.ts`) scrub `apiKeyEnv` from every dispatched agent's
+environment, so the dispatched session's own extension — which needs a
+write-capable Linear client to claim locks and apply results — can only
+resolve a key from `linear.apiKeyFile` in that scrubbed environment. An
+env-var-only deployment cannot support loop dispatch.
 An agent returns a validated structured result; the extension performs the
 mutation. That split is the design. (The `bash` boundary above is
 defense-in-depth, not a sandbox — issue content is untrusted input.)
@@ -87,10 +94,14 @@ installs the omp plugin itself — that happens per repo, below, as part of
 `foreman init`. If `$LINEAR_API_KEY` is already set, setup skips the key
 prompt entirely — the loop and extension resolve the key the same way at
 runtime, so setup does not call Linear to validate it. Without a key (or
-without network access to Linear), setup falls back to a manual prompt for
-where to store one. Pass `--link` to symlink the `foreman` CLI to this
-checkout's build output instead of the installed wrapper — dev mode for the
-CLI only, unrelated to the omp plugin. Drop `--yes` to be walked through the
+without network access to Linear), setup skips writing one — set
+`$LINEAR_API_KEY` or `linear.apiKeyFile` yourself before starting the loop.
+When you do paste a key, it always writes to the fixed path
+`<home>/.foreman/linear-api-key` at mode `0600`; there is no prompt for where
+to store it. Pass `--link` to symlink the `foreman` CLI to a wrapper that execs
+this checkout's TypeScript **source** directly via `bun` — not the built
+`dist/main.js` — so a source edit takes effect with no rebuild; dev mode for
+the CLI only, unrelated to the omp plugin. Drop `--yes` to be walked through the
 prompts interactively instead. Run `setup --help` for the full flag list,
 including `--repo-source` to point at a fork. `setup` without `--yes` is
 equivalent to running this by hand:
@@ -225,11 +236,12 @@ want to validate the pipeline one step at a time — `{ "review": "yolo" }`
 lets `review` dispatch unattended while every other worker still asks first.
 `confirm` mode needs a terminal: a loop started with any worker's effective
 mode resolving to `confirm` and no TTY attached refuses to start rather than
-declining everything silently. Every tick logs a per-worker summary plus
-each dispatch intent and every routing skip to stdout, so there is nothing
-for a `--verbose` flag to reveal and `foreman repo` does not take one.
-`foreman team` still does, where it adds the skip reason for each triaged
-issue.
+declining everything silently.
+Every tick logs a per-worker summary plus each dispatch intent and every
+routing skip to stdout by default. `foreman repo` does take `--verbose`: it
+adds per-item skip reasons, timings, and dispatch handles on top of that
+default output. `foreman team` takes `--verbose` too, where it adds the skip
+reason for each triaged issue.
 
 ```
 [foreman-repo:plotroom] confirm: dispatch foreman-plan for project Plotroom
@@ -268,4 +280,28 @@ Slash commands, inside any omp session:
 | Command | Does |
 | --- | --- |
 
-[Showing lines 1-300 of 440. Use :301 to continue]
+|`/foreman:status`|Foreman operator console: blocked queue, locks, proposals, agents, loop state.|
+|`/foreman:apply`|Apply approved triage proposals, or approve/reject one by issue id. Takes `[--yes]`, or `<ISSUE-ID> --approve`, or `<ISSUE-ID> --reject <reason>`.|
+|`/foreman:merge`|Merge one issue's PR (or branch) once the review gate passes. Takes `<ISSUE-ID>`. Operator-invoked only.|
+|`/foreman:unblock`|Record the operator's reply to a blocked issue and clear its `blocked:*` label. Takes `<ISSUE-ID> <reply>`.|
+
+## Development
+
+```bash
+git clone https://github.com/andyhite/foreman
+cd foreman
+bun install && bun run build
+bun run setup          # setup --link, straight from source
+```
+
+```bash
+bun run typecheck      # tsc --build --force across the workspace
+bun test
+bun run contract       # agent/skill/schema wiring check
+bun run schemas        # regenerate output schemas into agent frontmatter
+bun run check          # typecheck + test + contract
+```
+
+`packages/omp-plugin/dist/extension.js` is a committed build artifact that CI
+verifies is current, so a plugin source change needs `bun run build` and the
+rebuilt bundle committed alongside it.

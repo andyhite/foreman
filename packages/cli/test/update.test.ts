@@ -286,4 +286,29 @@ describe("runUpdate", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("treats a zero-exit upgrade printing '3 plugins, 0 failed' as a success", async () => {
+    const home = makeTempHome();
+    const checkoutRoot = join(home, "checkout");
+    const repoA = join(home, "repos", "a");
+    try {
+      mkdirSync(checkoutRoot, { recursive: true });
+      mkdirSync(repoA, { recursive: true });
+      writeConfig(home, { a: { path: repoA } });
+      const runner = new RecordingRunner({
+        responses: {
+          "omp plugin upgrade foreman@foreman": { code: 0, stdout: "3 plugins, 0 failed\n" },
+        },
+      });
+      const log: string[] = [];
+
+      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+
+      expect(ompUpgradeCalls(runner)).toHaveLength(1);
+      expect(log.some((line) => line.includes("upgrade failed"))).toBe(false);
+      expect(log.some((line) => line.includes("✓") && line.includes(" a — "))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

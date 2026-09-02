@@ -12,6 +12,7 @@ function makeConfig(): GlobalConfig {
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
+      claimGraceMs: 300_000,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       mode: "yolo",

@@ -256,6 +256,14 @@ async function cleanupMergedWork(input) {
   }
   return notes;
 }
+// ../core/src/sanitize.ts
+function stripControlChars(text) {
+  return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
+}
+function sanitizeAgentText(text) {
+  return stripControlChars(text).replace(/`{3,}/g, (run) => "&#96;".repeat(run.length));
+}
+
 // ../core/src/markers.ts
 var MARKER_KIND = {
   lock: "lock",
@@ -271,34 +279,32 @@ var MARKER_KIND = {
 };
 var MARKER_FIELD = "foreman";
 var MARKER_VERSION = 1;
-var FENCE = /```json\s*\n([\s\S]*?)\n```/g;
+var TRAILING_FENCE = /```json\s*\n([\s\S]*?)\n```\s*$/;
 function encodeMarker(kind, data, human) {
   const envelope = {
     [MARKER_FIELD]: kind,
     version: MARKER_VERSION,
     data
   };
-  return `${human.trimEnd()}
+  return `${sanitizeAgentText(human).trimEnd()}
 
 \`\`\`json
 ${JSON.stringify(envelope, null, 2)}
 \`\`\``;
 }
 function decodeMarker(kind, body) {
-  FENCE.lastIndex = 0;
-  for (let match = FENCE.exec(body);match !== null; match = FENCE.exec(body)) {
-    const raw = match[1];
-    if (raw === undefined)
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    if (typeof parsed === "object" && parsed !== null && parsed[MARKER_FIELD] === kind && parsed.version === MARKER_VERSION) {
-      return parsed.data;
-    }
+  const match = TRAILING_FENCE.exec(body);
+  const raw = match?.[1];
+  if (raw === undefined)
+    return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed === "object" && parsed !== null && parsed[MARKER_FIELD] === kind && parsed.version === MARKER_VERSION) {
+    return parsed.data;
   }
   return null;
 }
@@ -507,7 +513,6 @@ async function applyProposal(linear, candidate) {
     mutation.description = item.draftDescription;
   if (item.proposedEstimate !== null)
     mutation.estimate = item.proposedEstimate;
-  let projectNote = null;
   if (item.destinationProjectId) {
     mutation.projectId = item.destinationProjectId;
   } else if (item.destinationProject) {
@@ -541,26 +546,9 @@ async function applyProposal(linear, candidate) {
       }
     }
   }
-  const body = encodeMarker(MARKER_KIND.applied, { issueId: issue.identifier, appliedProposalAt: proposedAt }, `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.${projectNote ? ` ${projectNote}` : ""}`);
+  const body = encodeMarker(MARKER_KIND.applied, { issueId: issue.identifier, appliedProposalAt: proposedAt }, `Applied the \`${item.type}\` proposal: moved to ${item.destination}, priority set.`);
   await linear.createComment({ issueId: issue.id, body });
-  return { issueId: issue.id, identifier: issue.identifier, destination: item.destination, note: projectNote };
-}
-async function runApplyPass(linear, options) {
-  const candidates = await findApprovedUnapplied(linear, options);
-  const applied = [];
-  const failures = [];
-  for (const candidate of candidates) {
-    try {
-      applied.push(await applyProposal(linear, candidate));
-    } catch (error) {
-      failures.push({
-        issueId: candidate.issue.id,
-        identifier: candidate.issue.identifier,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-  return { applied, failures };
+  return { issueId: issue.id, identifier: issue.identifier, destination: item.destination };
 }
 // ../../node_modules/.bun/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
 var exports_value = {};
@@ -3298,6 +3286,7 @@ var LoopSettingsSchema = Type.Object({
   readyBufferTarget: Type.Integer({ default: 5, minimum: 1 }),
   backpressureThreshold: Type.Integer({ default: 5, minimum: 0 }),
   retryCap: Type.Integer({ default: 2, minimum: 1 }),
+  claimGraceMs: Type.Integer({ default: 300000, minimum: 0 }),
   reviewCycleCap: Type.Integer({ default: 2, minimum: 1 }),
   cadenceMinutes: Type.Integer({ default: 5, minimum: 1 }),
   mode: LoopModeSchema,
@@ -3325,6 +3314,7 @@ var AgentSettingsSchema = Type.Object({
   ompBin: Type.String({ default: "omp", minLength: 1 }),
   approvalMode: Type.Union([Type.Literal("always-ask"), Type.Literal("write"), Type.Literal("yolo")], { default: "yolo" }),
   herdrBin: Type.String({ default: "herdr", minLength: 1 }),
+  herdrLayout: Type.Union([Type.Literal("tab"), Type.Literal("pane")], { default: "tab" }),
   orchestratorMaxBatches: Type.Integer({ default: 20, minimum: 1 })
 }, { additionalProperties: false, default: {} });
 var InitiativeBindingSchema = Type.Union([
@@ -6742,6 +6732,15 @@ function assertMergeDetectionReachable(config, describeFor) {
     throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
   }
 }
+function assertIntakeTimezoneValid(config, describeFor) {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: config.intake.timezone });
+  } catch {
+    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, [
+      `intake.timezone "${config.intake.timezone}" is not an IANA time zone name`
+    ]);
+  }
+}
 function expandHome(p, home = homedir()) {
   if (p === "~")
     return home;
@@ -6782,6 +6781,7 @@ function defaultAndValidateGlobalConfig(value, describeFor) {
   assertRepoAliasesValid(config, describeFor);
   assertInitiativesUnique(config, describeFor);
   assertMergeDetectionReachable(config, describeFor);
+  assertIntakeTimezoneValid(config, describeFor);
   return config;
 }
 function loadGlobalConfig(options) {
@@ -6899,14 +6899,16 @@ class TtyConfirmer {
       this.#log(`  ${line}`);
     const answer = await new Promise((resolve2) => {
       let settled = false;
+      const rl = this.#interface();
+      const onClose = () => finish(null);
       const finish = (value) => {
         if (settled)
           return;
         settled = true;
+        rl.off("close", onClose);
         resolve2(value);
       };
-      const rl = this.#interface();
-      rl.once("close", () => finish(null));
+      rl.once("close", onClose);
       try {
         rl.question("Proceed? [y/N] ", (line) => finish(line));
       } catch {
@@ -7458,6 +7460,7 @@ class ControlServer {
     try {
       server.listen(this.#socketPath, () => {
         server.removeListener("error", reject);
+        server.on("error", (error) => this.#log(`control server error: ${String(error)}`));
         this.#bound = true;
         resolve2();
       });
@@ -8007,6 +8010,7 @@ class GitHubClient {
     this.#runner = options?.runner ?? nodeRunner;
   }
   async prForBranch(repoPath, branch, options) {
+    assertSafeRef(branch, "branch");
     const argv = [
       "gh",
       "pr",
@@ -8114,6 +8118,8 @@ class GitHubClient {
     return merged;
   }
   async mergeBranchLocally(repoPath, branch, baseBranch, strategy, deleteBranch) {
+    assertSafeRef(branch, "branch");
+    assertSafeRef(baseBranch, "baseBranch");
     const status = await this.#runner.run(["git", "status", "--porcelain"], { cwd: repoPath });
     if (status.stdout.trim().length > 0) {
       throw new DirtyWorkingTreeError(repoPath);
@@ -8428,6 +8434,7 @@ class LinearClient {
   teamScope;
   timeoutMs;
   onRequest;
+  static CACHE_TTL_MS = 10 * 60000;
   labelIdCache = new Map;
   labelGroupIdCache = new Map;
   projectInitiativeCache = new Map;
@@ -8476,6 +8483,13 @@ class LinearClient {
         const message = `Linear API request timed out after ${this.timeoutMs}ms`;
         trace(null, false, message);
         throw new LinearApiError(message, null, null);
+      }
+      if (attempt < 2 && !signal.aborted) {
+        trace(null, false, `retrying transport failure: ${String(error)}`);
+        const { promise, resolve: resolve2 } = Promise.withResolvers();
+        setTimeout(resolve2, 500 * 2 ** attempt);
+        await promise;
+        return this.requestWithRetry(document, variables, attempt + 1, signal);
       }
       trace(null, false, String(error));
       throw error;
@@ -8724,16 +8738,16 @@ class LinearClient {
   }
   async projectInitiatives(projectId) {
     const cached = this.projectInitiativesCache.get(projectId);
-    if (cached)
-      return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS)
+      return cached.value;
     const { initiatives } = await this.fetchProjectInitiatives(projectId);
-    this.projectInitiativesCache.set(projectId, initiatives);
+    this.projectInitiativesCache.set(projectId, { value: initiatives, at: Date.now() });
     return initiatives;
   }
   async projectInitiative(projectId) {
     const cached = this.projectInitiativeCache.get(projectId);
-    if (cached)
-      return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS)
+      return cached.value;
     const { name, initiatives } = await this.fetchProjectInitiatives(projectId);
     const first = initiatives[0];
     if (first === undefined) {
@@ -8744,7 +8758,7 @@ class LinearClient {
       throw new LinearApiError(`Project "${name}" belongs to more than one initiative (${names}); a project must belong to exactly one initiative.`, null, null);
     }
     const ref = { id: first.id, name: first.name };
-    this.projectInitiativeCache.set(projectId, ref);
+    this.projectInitiativeCache.set(projectId, { value: ref, at: Date.now() });
     return ref;
   }
   async projectStatus(projectId) {
@@ -8786,10 +8800,11 @@ class LinearClient {
     return data.initiatives.nodes;
   }
   async viewerId() {
-    if (this.viewerIdCache !== null)
-      return this.viewerIdCache;
+    if (this.viewerIdCache !== null && Date.now() - this.viewerIdCache.at < LinearClient.CACHE_TTL_MS) {
+      return this.viewerIdCache.value;
+    }
     const data = await this.request("query { viewer { id } }", {});
-    this.viewerIdCache = data.viewer.id;
+    this.viewerIdCache = { value: data.viewer.id, at: Date.now() };
     return data.viewer.id;
   }
   async initiative(initiativeId) {
@@ -8907,15 +8922,15 @@ class LinearClient {
   async ensureLabel(name, teamId) {
     const cacheKey = `${teamId}:${name}`;
     const cached = this.labelIdCache.get(cacheKey);
-    if (cached)
-      return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS)
+      return cached.value;
     const matches = (await this.labels(teamId)).filter((label2) => label2.name === name);
     if (matches.length > 1) {
       throw new LinearApiError(`Label "${name}" matches ${matches.length} labels visible to team ${teamId} (team-owned and workspace-level); cannot resolve unambiguously.`, null, null);
     }
     const existing = matches[0];
     if (existing) {
-      this.labelIdCache.set(cacheKey, existing);
+      this.labelIdCache.set(cacheKey, { value: existing, at: Date.now() });
       return existing;
     }
     const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
@@ -8923,7 +8938,7 @@ class LinearClient {
     const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
     const created = await this.createLabel({ name: childName, teamId, parentId });
     const label = { id: created.id, name, parentId: created.parentId };
-    this.labelIdCache.set(cacheKey, label);
+    this.labelIdCache.set(cacheKey, { value: label, at: Date.now() });
     return label;
   }
   async ensureLabelGroup(prefix, teamId) {
@@ -9612,7 +9627,14 @@ function formatSkillGuardProblem(problem) {
 
 // src/enforce/task-guard.ts
 var FOREMAN_PREFIX = "foreman-";
-var ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
+var ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/gm;
+function lastMarkerValue(re, text) {
+  re.lastIndex = 0;
+  let value = null;
+  for (let match = re.exec(text);match !== null; match = re.exec(text))
+    value = match[1] ?? value;
+  return value;
+}
 var inheritedDispatchId = process.env.FOREMAN_DISPATCH_ID ?? null;
 var reservationsPath = process.env[RESERVATIONS_ENV] ?? null;
 function stageFor(agent) {
@@ -9688,9 +9710,13 @@ async function claimLock(linear2, issue2, agent, dispatchId, worktree, now, ttlM
   });
   await linear2.createComment({ issueId: issue2.id, body: comment });
 }
+var MARKER_LINE_RE = /^FOREMAN-[A-Z-]+:.*$/gm;
 function appendMarkers(task, markers2) {
+  const stripped = task.replace(MARKER_LINE_RE, "").replace(/\n{3,}/g, `
+
+`).trimEnd();
   const lines = Object.entries(markers2).filter((entry) => entry[1] !== undefined).map(([key, value]) => `${key}: ${value}`);
-  return `${task}
+  return `${stripped}
 
 ${lines.join(`
 `)}
@@ -9716,17 +9742,16 @@ async function prepareItem(item, deps) {
   if (stage === "triage" || stage === "plan") {
     let projectId = null;
     if (stage === "plan") {
-      projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1] ?? null;
+      projectId = lastMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task);
       if (!projectId) {
         throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
       }
     }
     const dispatchId2 = takeDispatchId(deps, agent, projectId ?? "batch", deps.now());
-    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId2 });
+    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId2, "FOREMAN-PROJECT": projectId ?? undefined });
     return { item: revised, contextDigest: await deps.contextDigest(projectId) };
   }
-  const match = ISSUE_MARKER_RE.exec(item.task);
-  const identifier = match?.[1];
+  const identifier = lastMarkerValue(ISSUE_MARKER_RE, item.task);
   if (!identifier) {
     throw new Error(`Missing "FOREMAN-ISSUE: <IDENTIFIER>" line in the task text for agent "${agent}".`);
   }
@@ -9770,12 +9795,14 @@ async function prepareItem(item, deps) {
     const repoPath = deps.entry.repoPath;
     baseBranch = deps.entry.baseBranch;
     branch = issue2.branchName;
+    assertSafeRef(branch, "issue.branchName");
     const pr = await deps.github.prForBranch(repoPath, branch);
     const diff = deps.entry.pr.required && pr ? await deps.github.prDiff(repoPath, pr.number) : await diffRange(repoPath, baseBranch, branch);
     diffPath = await deps.writeDiffFile(identifier, diff);
   }
   await claimLock(deps.linear, issue2, agent, dispatchId, worktreePath, now, ttlMs);
   revised.task = appendMarkers(item.task, {
+    "FOREMAN-ISSUE": identifier,
     "FOREMAN-DISPATCH": dispatchId,
     "FOREMAN-WORKTREE": worktreePath ?? undefined,
     "FOREMAN-BRANCH": branch ?? undefined,
@@ -9925,25 +9952,76 @@ async function runApplyCommand(linear2, argv, entry) {
   if (argv.length === 1 && argv[0] === "--help") {
     return { ok: true, mutated: false, message: usage };
   }
+  let viewerId;
+  try {
+    viewerId = await linear2.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  if (viewerId === null) {
+    return { ok: false, mutated: false, message: "Cannot verify proposal authorship (Linear viewer id unavailable); refusing to apply." };
+  }
   if (argv.length === 0) {
-    const candidates = await findApprovedUnapplied(linear2);
+    const candidates = await findApprovedUnapplied(linear2, { authoredBy: viewerId });
+    const inScope = [];
+    let outOfScope = 0;
+    for (const candidate of candidates) {
+      if (!entry) {
+        inScope.push(candidate);
+        continue;
+      }
+      try {
+        await assertIssueInScope({ linear: linear2, entry }, candidate.issue);
+        inScope.push(candidate);
+      } catch {
+        outOfScope += 1;
+      }
+    }
+    const message = [
+      inScope.length > 0 ? `${inScope.length} approved proposal(s) pending apply.` : "Nothing to apply.",
+      outOfScope > 0 ? `${outOfScope} skipped: not bound to this repo's initiatives.` : null
+    ].filter((line) => line !== null).join(" ");
     return {
       ok: true,
       mutated: false,
-      message: candidates.length > 0 ? `${candidates.length} approved proposal(s) pending apply.` : "Nothing to apply.",
-      plan: candidates.map((candidate) => ({ issueId: candidate.issue.identifier, item: candidate.item }))
+      message,
+      plan: inScope.map((candidate) => ({ issueId: candidate.issue.identifier, item: candidate.item }))
     };
   }
   if (argv.length === 1 && argv[0] === "--yes") {
-    const { applied, failures } = await runApplyPass(linear2);
-    const lines = [`Applied ${applied.length} approved proposal(s).`];
-    for (const proposal of applied) {
-      if (proposal.note)
-        lines.push(`- ${proposal.identifier}: ${proposal.note}`);
+    const candidates = await findApprovedUnapplied(linear2, { authoredBy: viewerId });
+    const inScope = [];
+    let outOfScope = 0;
+    for (const candidate of candidates) {
+      if (!entry) {
+        inScope.push(candidate);
+        continue;
+      }
+      try {
+        await assertIssueInScope({ linear: linear2, entry }, candidate.issue);
+        inScope.push(candidate);
+      } catch {
+        outOfScope += 1;
+      }
     }
+    const applied = [];
+    const failures = [];
+    for (const candidate of inScope) {
+      try {
+        applied.push(await applyProposal(linear2, candidate));
+      } catch (error) {
+        failures.push({
+          identifier: candidate.issue.identifier,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    const lines = [`Applied ${applied.length} approved proposal(s).`];
     for (const failure of failures) {
       lines.push(`- ${failure.identifier}: failed to apply: ${failure.error}`);
     }
+    if (outOfScope > 0)
+      lines.push(`${outOfScope} skipped: not bound to this repo's initiatives.`);
     return { ok: failures.length === 0, mutated: applied.length > 0, message: lines.join(`
 `) };
   }
@@ -9956,13 +10034,13 @@ async function runApplyCommand(linear2, argv, entry) {
   if (entry)
     await assertIssueInScope({ linear: linear2, entry }, issue2);
   if (flag === "--approve" && rest.length === 0) {
-    const found = latestProposal(issue2);
+    const found = latestProposal(issue2, viewerId);
     if (!found)
       return { ok: false, mutated: false, message: `${issueId} has no proposal marker.` };
-    if (hasLaterApplied(issue2, found.createdAt)) {
+    if (hasLaterApplied(issue2, found.createdAt, viewerId)) {
       return { ok: false, mutated: false, message: `${issueId} was already applied.` };
     }
-    if (hasLaterReject(issue2, found.createdAt)) {
+    if (hasLaterReject(issue2, found.createdAt, viewerId)) {
       return { ok: false, mutated: false, message: `${issueId} has a reject: reply; cannot approve.` };
     }
     const proposedLabel = issue2.labels.find((label) => label.name === AGENT_LABEL.proposed);
@@ -10405,7 +10483,7 @@ function renderStatusConsole(state) {
   const pastTtlCount = state.locks.filter((lock2) => lock2.pastTtl).length;
   sections.push(`**${state.blocked.length} blocked · ${state.proposalsAwaiting.count} proposals awaiting · ` + `${state.locks.length} locks (${pastTtlCount} past TTL) · mode ${state.loop.mode}**`);
   sections.push("## Blocked (human)");
-  sections.push(state.blocked.length > 0 ? state.blocked.map((entry) => `- ${entry.issueId} [${entry.type}] ${entry.question}`).join(`
+  sections.push(state.blocked.length > 0 ? state.blocked.map((entry) => `- ${entry.issueId} [${entry.type}] ${stripControlChars(entry.question)}`).join(`
 `) : "_none — nothing waiting on the operator_");
   sections.push("## Locks");
   sections.push(state.locks.length > 0 ? state.locks.map((lock2) => `- ${lock2.pastTtl ? "⚠ " : ""}${lock2.issueId} held by ${lock2.agent} (dispatch ${lock2.dispatchId}, ` + `age ${formatAge(lock2.ageMs)}${lock2.pastTtl ? ", **PAST TTL**" : ""})`).join(`
@@ -10741,7 +10819,10 @@ async function applyRefine(deps, result) {
   await deps.linear.updateIssue(issue2.id, mutation);
   const needsBacklog = result.subIssues.length > 0 || result.spikeCreated !== null;
   const backlog = needsBacklog ? await backlogStateId(deps, issue2.team.id) : null;
+  const existingChildTitles = new Set(issue2.children.map((child) => child.title));
   for (const subIssue of result.subIssues) {
+    if (existingChildTitles.has(subIssue.title))
+      continue;
     const subDescription = renderIssueDescription({
       context: subIssue.description,
       acceptanceCriteria: subIssue.acceptanceCriteria,
@@ -10761,21 +10842,24 @@ async function applyRefine(deps, result) {
     });
   }
   if (result.spikeCreated) {
-    const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue2.identifier });
-    const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue2.team.id);
-    const spike = await deps.linear.createIssue({
-      teamId: issue2.team.id,
-      title: result.spikeCreated.title,
-      description: spikeBody,
-      projectId: issue2.project?.id,
-      labelIds: [spikeTypeLabel.id],
-      stateId: backlog ?? undefined
-    });
-    await deps.linear.createRelation({
-      issueId: spike.id,
-      relatedIssueId: issue2.id,
-      type: "blocks"
-    });
+    const existingSpike = issue2.relations.some((relation) => relation.type === "blocks" && relation.other.title === result.spikeCreated?.title);
+    if (!existingSpike) {
+      const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue2.identifier });
+      const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue2.team.id);
+      const spike = await deps.linear.createIssue({
+        teamId: issue2.team.id,
+        title: result.spikeCreated.title,
+        description: spikeBody,
+        projectId: issue2.project?.id,
+        labelIds: [spikeTypeLabel.id],
+        stateId: backlog ?? undefined
+      });
+      await deps.linear.createRelation({
+        issueId: spike.id,
+        relatedIssueId: issue2.id,
+        type: "blocks"
+      });
+    }
   }
   if (result.readyForImplementation)
     await moveToState(deps, issue2, "todo");
@@ -10874,7 +10958,7 @@ async function applyDependencyBlock(deps, issue2, block) {
       });
     }
   }
-  const body = renderBlockComment(block);
+  const body = sanitizeAgentText(renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue2.id, body });
   await releaseLock(deps, issue2);
   await moveToState(deps, issue2, "todo");
@@ -10946,16 +11030,11 @@ function isStructuredOutput(value) {
 
 // src/results/sink.ts
 function extractDispatchInfo(taskText) {
-  const agentMatch = /^FOREMAN-AGENT:\s*(\S+)\s*$/m.exec(taskText);
-  const dispatchMatch = /^FOREMAN-DISPATCH:\s*(\S+)\s*$/m.exec(taskText);
-  const issueMatch = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m.exec(taskText);
-  const prevStateMatch = /^FOREMAN-PREV-STATE:\s*(\S+)\s*$/m.exec(taskText);
-  return {
-    agent: agentMatch?.[1] ?? null,
-    dispatchId: dispatchMatch?.[1] ?? null,
-    issueId: issueMatch?.[1] ?? null,
-    previousStateId: prevStateMatch?.[1] ?? null
-  };
+  const agent = lastMarkerValue(/^FOREMAN-AGENT:\s*(\S+)\s*$/gm, taskText);
+  const dispatchId = lastMarkerValue(/^FOREMAN-DISPATCH:\s*(\S+)\s*$/gm, taskText);
+  const issueId = lastMarkerValue(/^FOREMAN-ISSUE:\s*(\S+)\s*$/gm, taskText);
+  const previousStateId = lastMarkerValue(/^FOREMAN-PREV-STATE:\s*(\S+)\s*$/gm, taskText);
+  return { agent, dispatchId, issueId, previousStateId };
 }
 function taskTextOf(entry) {
   if (!isRecord(entry))
@@ -11085,7 +11164,7 @@ function issueIdOf(outcome) {
 function isForemanAgentName(agent) {
   return agent in AGENT_OUTPUT_SCHEMAS;
 }
-async function applyBoundResult(deps, agent, outcome, target, dispatchId, notify) {
+async function applyBoundResult(deps, agent, outcome, target, dispatchId, previousStateId, notify) {
   if (outcome.kind === "result" && target && agent !== "foreman-plan" && agent !== "foreman-triage" && "issueId" in outcome.result && outcome.result.issueId !== target) {
     const reported = outcome.result.issueId;
     await deps.linear.createComment({
@@ -11093,9 +11172,16 @@ async function applyBoundResult(deps, agent, outcome, target, dispatchId, notify
       body: `Foreman rejected this dispatch result: it reported issue ${reported}, but this dispatch locked ${target}.`
     });
     const lockedIssue = await deps.linear.issue(target);
-    const running = lockedIssue?.labels.find((label) => label.name === "agent:running");
-    if (running)
-      await deps.linear.updateIssue(lockedIssue.id, { removedLabelIds: [running.id] });
+    if (lockedIssue) {
+      const running = lockedIssue.labels.find((label) => label.name === "agent:running");
+      const mutation = {};
+      if (running)
+        mutation.removedLabelIds = [running.id];
+      if (previousStateId && lockedIssue.state.id !== previousStateId)
+        mutation.stateId = previousStateId;
+      if (Object.keys(mutation).length > 0)
+        await deps.linear.updateIssue(lockedIssue.id, mutation);
+    }
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
     return;
   }
@@ -11134,6 +11220,8 @@ async function handleCaptured(dispatchId, agent, data, aborted, lockedIssueId, p
               costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.",
               blockedByIssues: [target]
             }, target));
+          } else {
+            notify(`Foreman dropped a budget-truncated ${agent} result: no issue was locked for this dispatch, so there is nothing to mark blocked.`, "error");
           }
         } else {
           const issue2 = target ? await deps.linear.issue(target, { includeComments: true }) : null;
@@ -11155,9 +11243,14 @@ ${parsed.problems.map((problem) => `- ${problem}`).join(`
         appliedDispatchIds.add(dispatchId);
         return;
       }
+      if (parsed.kind === "blocked" && target === null) {
+        notify(`Foreman received a block from ${agent} with no locked issue: ${parsed.block.whatINeed}`, "warn");
+        appliedDispatchIds.add(dispatchId);
+        return;
+      }
       await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
         const outcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result };
-        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, notify);
+        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, previousStateId, notify);
       });
       appliedDispatchIds.add(dispatchId);
     } catch (error) {

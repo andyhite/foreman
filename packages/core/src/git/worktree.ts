@@ -60,7 +60,7 @@ function assertSafeIdentifier(identifier: string): void {
 }
 
 /** Rejects a ref that git would parse as an option rather than a ref name. */
-function assertSafeRef(ref: string, label: string): void {
+export function assertSafeRef(ref: string, label: string): void {
   if (ref.startsWith("-")) {
     throw new Error(`refusing to pass "${label}" starting with "-" to git: ${ref}`);
   }

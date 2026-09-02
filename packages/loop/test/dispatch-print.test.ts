@@ -39,6 +39,7 @@ function makeConfig(ompBin: string): GlobalConfig {
       readyBufferTarget: 5,
       backpressureThreshold: 5,
       retryCap: 2,
+      claimGraceMs: 300_000,
       reviewCycleCap: 2,
       cadenceMinutes: 5,
       mode: "yolo",
@@ -60,8 +61,8 @@ function makeConfig(ompBin: string): GlobalConfig {
   };
 }
 
-describe("PrintDispatcher.settle (SPEC §17.8: retained logs must be pruned on settle)", () => {
-  it("prunes the internal running entry once every handle in the batch has settled", async () => {
+describe("PrintDispatcher.settle (SPEC §17.8: retained logs must be pruned once the outcome resolves)", () => {
+  it("prunes the internal running entry after the first settle; a sibling settle returns the untracked default", async () => {
     const ompBin = fakeOmpBin(1);
     const dispatcher = new PrintDispatcher(makeConfig(ompBin));
     const handles = await dispatcher.dispatch({
@@ -80,16 +81,11 @@ describe("PrintDispatcher.settle (SPEC §17.8: retained logs must be pruned on s
     expect(outcome.status).toBe("settled");
     expect(outcome.exitCode).toBe(1);
 
-    // Settling one handle leaves the batch retained for its sibling: this
-    // second settle for the same handle proves the entry is still there.
-    const repeat = await dispatcher.settle(handles[0] as never);
-    expect(repeat.exitCode).toBe(1);
-
-    // Settling the last handle in the batch prunes it: a third settle for
-    // an already-settled handle falls back to the "never tracked" default.
-    await dispatcher.settle(handles[1] as never);
-    const third = await dispatcher.settle(handles[0] as never);
-    expect(third.exitCode).toBeNull();
+    // The batch resolved once; the entry is pruned immediately, not held
+    // for every handle to consume. A sibling's settle falls back to the
+    // untracked-handle default rather than replaying the outcome.
+    const sibling = await dispatcher.settle(handles[1] as never);
+    expect(sibling).toEqual({ status: "settled", exitCode: null, log: "", handle: handles[1] as never });
   });
 });
 
