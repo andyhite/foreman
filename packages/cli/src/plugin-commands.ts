@@ -32,8 +32,16 @@ export function ompMarketplaceAddArgv(githubRepo: string): string[] {
   return ["plugin", "marketplace", "add", githubRepo];
 }
 
+/**
+ * `--json`, never the human table. The table renders the scope
+ * parenthesized and colorized — `foreman@foreman (0.1.0) (project)` — so
+ * any parse of it is a guess about omp's presentation layer, and a wrong
+ * guess reads as "not installed" rather than as a failure to read. `--json`
+ * is the same data omp's own list command consumes (verified against omp
+ * 18.1.4).
+ */
 export function ompPluginListArgv(): string[] {
-  return ["plugin", "list"];
+  return ["plugin", "list", "--json"];
 }
 
 /** Always project scope — see the module comment for why user/machine scope is unreachable from here. */
@@ -66,18 +74,48 @@ export function ompUpgradeArgv(pluginName: string): string[] {
   return ["plugin", "upgrade", `${pluginName}@${FOREMAN_MARKETPLACE_NAME}`];
 }
 
-/** Scans `omp plugin list` output for a plugin@marketplace entry's scope(s). */
-export function findPluginScopes(stdout: string, pluginName: string, marketplace: string): { project: boolean; user: boolean } {
-  const needle = `${pluginName}@${marketplace}`;
-  let project = false;
-  let user = false;
-  for (const line of stdout.split("\n")) {
-    if (!line.includes(needle)) continue;
-    // Scope is its own whitespace-delimited column; substring-testing the
-    // whole line makes any path containing "project" or "user" read as a scope.
-    const fields = line.trim().split(/\s+/);
-    if (fields.includes("project")) project = true;
-    if (fields.includes("user")) user = true;
+export interface PluginScopes {
+  project: boolean;
+  user: boolean;
+}
+
+/**
+ * One element of `omp plugin list --json`'s `marketplace` array. omp emits
+ * one per (plugin id, registry) pair — the project registry and the user
+ * registry are read separately and each contributes its own element, so a
+ * plugin installed at both scopes appears twice under one id, and `scope`
+ * is that element's registry rather than a summary of the plugin.
+ */
+interface MarketplacePluginEntry {
+  id?: unknown;
+  scope?: unknown;
+}
+
+/**
+ * Reads a plugin@marketplace entry's scope(s) out of `omp plugin list --json`.
+ *
+ * Returns null when the payload is not omp's plugin list at all, which is a
+ * different answer from "installed nowhere" and must not be reported as
+ * one: an unreadable probe means the caller learned nothing, while an empty
+ * `marketplace` array means omp positively reports no install.
+ */
+export function findPluginScopes(stdout: string, pluginName: string, marketplace: string): PluginScopes | null {
+  const id = `${pluginName}@${marketplace}`;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(stdout);
+  } catch {
+    return null;
   }
-  return { project, user };
+
+  const listed = (payload as { marketplace?: unknown } | null)?.marketplace;
+  if (!Array.isArray(listed)) return null;
+
+  const scopes: PluginScopes = { project: false, user: false };
+  for (const entry of listed as MarketplacePluginEntry[]) {
+    if (entry?.id !== id) continue;
+    if (entry.scope === "project") scopes.project = true;
+    if (entry.scope === "user") scopes.user = true;
+  }
+  return scopes;
 }

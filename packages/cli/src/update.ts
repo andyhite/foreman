@@ -139,7 +139,15 @@ async function upgradeRepo(deps: UpdateDeps, alias: string, repoPath: string): P
   const scopes =
     listed.code === 0
       ? findPluginScopes(listed.stdout, DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME)
-      : { project: false, user: false };
+      : null;
+  // An unreadable probe is reported as itself. Folding it into "not
+  // installed" sends the operator to `foreman init` in a repo that is
+  // already initialized, which is the one instruction that cannot help.
+  if (scopes === null) {
+    const detail = `${listed.stderr}${listed.stdout}`.trim().split("\n")[0] ?? `exit ${listed.code}`;
+    deps.log(`  ${WARN} ${alias} — could not read \`omp ${ompPluginListArgv().join(" ")}\`: ${detail}`);
+    return false;
+  }
   if (!scopes.project) {
     deps.log(`  ${SKIP} ${alias} — no project install; run \`foreman init\` there.`);
     return false;

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
 import { runUpdate, type UpdateOptions } from "../src/update.ts";
+import { OMP_PLUGIN_LIST_TABLE, ompPluginListJson } from "./omp-fixtures.ts";
 
 /**
  * Records every command issued, in order, and lets each test script a
@@ -47,7 +48,7 @@ class RecordingRunner implements Runner {
     }
     if (bin === "git" && argv.join(" ") === "rev-parse HEAD") return { code: 0, stdout: "deadbeef\n", stderr: "" };
     if (bin === "omp" && argv[0] === "plugin" && argv[1] === "list") {
-      return { code: 0, stdout: "foreman@foreman  project\n", stderr: "" };
+      return { code: 0, stdout: ompPluginListJson(["project"]), stderr: "" };
     }
     return { code: 0, stdout: "", stderr: "" };
   }
@@ -249,7 +250,7 @@ describe("runUpdate", () => {
       mkdirSync(repoA, { recursive: true });
       writeConfig(home, { a: { path: repoA } });
       const runner = new RecordingRunner({
-        responses: { "omp plugin list": { stdout: "foreman@foreman  user\n" } },
+        responses: { "omp plugin list": { stdout: ompPluginListJson(["user"]) } },
       });
       const log: string[] = [];
 
@@ -257,6 +258,32 @@ describe("runUpdate", () => {
 
       expect(ompUpgradeCalls(runner)).toHaveLength(0);
       expect(log.some((line) => line.includes("no project install"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unreadable plugin list as itself, not as a missing install", async () => {
+    const home = makeTempHome();
+    const checkoutRoot = join(home, "checkout");
+    const repoA = join(home, "repos", "a");
+    try {
+      mkdirSync(checkoutRoot, { recursive: true });
+      mkdirSync(repoA, { recursive: true });
+      writeConfig(home, { a: { path: repoA } });
+      // The human table: exactly what a probe that lost `--json` returns,
+      // and it reports a plugin that *is* installed. Sending the operator
+      // to `foreman init` here is the failure mode being guarded.
+      const runner = new RecordingRunner({
+        responses: { "omp plugin list": { stdout: OMP_PLUGIN_LIST_TABLE } },
+      });
+      const log: string[] = [];
+
+      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+
+      expect(ompUpgradeCalls(runner)).toHaveLength(0);
+      expect(log.some((line) => line.includes("could not read"))).toBe(true);
+      expect(log.some((line) => line.includes("no project install"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runInit, type InitDeps, type InitOptions } from "../src/init.ts";
+import { OMP_PLUGIN_LIST_TABLE, ompPluginListJson } from "./omp-fixtures.ts";
 
 class ScriptedPrompter implements Prompter {
   multiSelectResult: string[] | null = null;
@@ -574,7 +575,7 @@ describe("runInit — omp plugin (project scope)", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], listStdout: "foreman@foreman  project\n" });
+      const runner = new FakeRunner({ missing: [], listStdout: ompPluginListJson(["project"]) });
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
       const logs: string[] = [];
@@ -592,7 +593,7 @@ describe("runInit — omp plugin (project scope)", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], listStdout: "foreman@foreman  user  [shadowed]\n" });
+      const runner = new FakeRunner({ missing: [], listStdout: ompPluginListJson(["user"]) });
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
       const logs: string[] = [];
@@ -602,6 +603,24 @@ describe("runInit — omp plugin (project scope)", () => {
       expect(runner.calls.some((call) => call.argv[1] === "install")).toBe(true);
       expect(logs.some((line) => line.includes("machine-wide (user-scope) install"))).toBe(true);
       expect(logs.some((line) => line.includes("plugin uninstall --scope user foreman@foreman"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("still attempts the install, and says why, when the plugin list cannot be read", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const runner = new FakeRunner({ missing: [], listStdout: OMP_PLUGIN_LIST_TABLE });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
+
+      expect(runner.calls.some((call) => call.argv[1] === "install")).toBe(true);
+      expect(logs.some((line) => line.includes("could not read"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

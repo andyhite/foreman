@@ -264,8 +264,19 @@ async function installProjectPlugin(deps: InitDeps, options: InitOptions, repoRo
   }
 
   const listResult = await deps.runner.capture("omp", ompPluginListArgv(), { cwd: repoRoot });
-  const scopes = listResult.code === 0 ? findPluginScopes(listResult.stdout, DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME) : { project: false, user: false };
-  if (scopes.project) {
+  const scopes =
+    listResult.code === 0 ? findPluginScopes(listResult.stdout, DEFAULT_OMP_PLUGIN_NAME, FOREMAN_MARKETPLACE_NAME) : null;
+  // Install is still attempted on an unreadable probe: init's job is to
+  // leave the plugin installed, and omp refuses a redundant install loudly
+  // rather than duplicating one. Said out loud so the "already installed"
+  // error that follows on an initialized repo is legible.
+  if (scopes === null) {
+    deps.log(
+      `  ${style("yellow", "!")} could not read \`omp ${ompPluginListArgv().join(" ")}\` in this repo — ` +
+        "installing anyway; omp will say so if it is already installed.",
+    );
+  }
+  if (scopes?.project === true) {
     deps.log(`  ${style("cyan", "i")} "${needle}" is already installed at project scope.`);
   } else {
     const installArgv = ompInstallArgv(DEFAULT_OMP_PLUGIN_NAME);
@@ -283,7 +294,7 @@ async function installProjectPlugin(deps: InitDeps, options: InitOptions, repoRo
   // Warned on every run, not just a fresh install: a lingering machine-wide
   // install is exactly as harmful on the tenth `foreman init` as the first,
   // and re-running init is how an operator would expect to be told.
-  if (scopes.user) {
+  if (scopes?.user === true) {
     const uninstallArgv = ompUninstallUserArgv(DEFAULT_OMP_PLUGIN_NAME);
     deps.log(
       `  ${style("yellow", "!")} a machine-wide (user-scope) install of "${needle}" is still active and will keep firing ` +

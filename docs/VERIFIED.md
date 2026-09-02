@@ -105,6 +105,23 @@ no `foreman_linear_read` in any form, and the same repo loaded and called it
 top-level once given a copied tree that carried `dist/extension.js`.
 So the bundle is committed, and CI plus `check-contract.ts` guard it.
 
+**`omp plugin list` prints the scope parenthesized, so only `--json` can be
+parsed.** The table renders one line per install as
+`  foreman@foreman (0.1.0) (project)` — id, then version in parentheses, then
+the scope in parentheses, dim-styled, with an optional ` [shadowed]`. A parse
+that looked for a bare `project` column therefore matched nothing and reported
+every healthy install as absent, which `foreman update` surfaced as "no project
+install; run `foreman init` there" against a repo that had just been
+initialized. `--json` returns `{ npm, marketplace }`, where `marketplace` holds
+one element per (plugin id, registry) pair — `{ id, scope, entries }`, the user
+element carrying `shadowedBy: "project"` when both exist — so a plugin
+installed at both scopes appears twice under one id and each element states its
+own scope. Verified against omp 18.1.4 by A/B on live output from a
+project-installed repo: the column parse returned
+`{ project: false, user: false }` and the JSON parse `{ project: true }`.
+An unreadable probe is now reported as itself rather than as an absent install,
+because those two demand opposite actions from the operator.
+
 **omp replaces an extension's bare `@sinclair/typebox` with its own shim, and
 the shim rejects `default: {}`.** Bisected with one-file probe extensions: a
 trivial `.ts` extension loads, and one registering a tool with `.default(50)`
