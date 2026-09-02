@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { AGENT_LABEL, BLOCKED_LABEL, PRIORITY, TYPE_LABEL } from "@foreman/core";
+import { AGENT_LABEL, BLOCKED_LABEL, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions } from "@foreman/core";
 import type {
   BlockRecord,
   CreateIssueInput,
@@ -15,6 +15,7 @@ import type {
 import { GitHubClient } from "@foreman/core";
 import { applyBoundResult, blockedOutcome, handleCaptured, __resetAppliedDispatchIdsForTest, __resetInFlightCapturesForTest } from "../src/extension.ts";
 import type { ApplyDeps, AgentOutcome } from "../src/results/apply.ts";
+import { extractFromToolResult } from "../src/results/sink.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Progress", type: "started", position: 3 };
@@ -61,6 +62,9 @@ class FakeLinear implements LinearWriter {
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
   commentCalls: Array<{ issueId: string; body: string }> = [];
   relationCalls: Array<{ issueId: string; relatedIssueId: string; type: IssueRelationType }> = [];
+  createIssueCalls: CreateIssueInput[] = [];
+  projectStatusCalls: Array<{ projectId: string; type: string }> = [];
+  projectRecord: { id: string; name: string; description: string | null; content: string | null; documents: [] } | null = null;
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -85,7 +89,7 @@ class FakeLinear implements LinearWriter {
     return "bot-1";
   }
   async project() {
-    return null;
+    return this.projectRecord;
   }
   async projectStatus() {
     return null;
@@ -135,7 +139,9 @@ class FakeLinear implements LinearWriter {
     return issue;
   }
   async createIssue(input: CreateIssueInput): Promise<Issue> {
-    const created = makeIssue({ id: `created-1`, identifier: `ENG-created-1`, title: input.title });
+    this.createIssueCalls.push(input);
+    const ordinal = this.createIssueCalls.length;
+    const created = makeIssue({ id: `created-${ordinal}`, identifier: `ENG-created-${ordinal}`, title: input.title });
     this.issuesById.set(created.identifier, created);
     return created;
   }
@@ -143,7 +149,9 @@ class FakeLinear implements LinearWriter {
     return { id: `project-created-${input.name}`, name: input.name };
   }
   async addProjectToInitiative() {}
-  async updateProjectStatus() {}
+  async updateProjectStatus(input: { projectId: string; type: string }) {
+    this.projectStatusCalls.push(input);
+  }
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.commentCalls.push(input);
     return { id: `comment-${this.commentCalls.length}`, body: input.body, createdAt: new Date().toISOString(), user: null, parentId: input.parentId ?? null };
@@ -164,8 +172,8 @@ class FakeLinear implements LinearWriter {
   }
 }
 
-function makeDeps(linear: FakeLinear): ApplyDeps {
-  return { linear, github: new GitHubClient(), now: () => new Date("2026-01-01T00:00:00.000Z") };
+function makeDeps(linear: FakeLinear, overrides: Partial<ApplyDeps> = {}): ApplyDeps {
+  return { linear, github: new GitHubClient(), now: () => new Date("2026-01-01T00:00:00.000Z"), ...overrides };
 }
 
 function makeBlockRecord(overrides: Partial<BlockRecord> = {}): BlockRecord {
@@ -413,6 +421,139 @@ describe("handleCaptured — concurrent deliveries dedupe in-process", () => {
 
     const descriptionUpdates = linear.updateCalls.filter((call) => call.input.description !== undefined);
     expect(descriptionUpdates).toHaveLength(1);
+  });
+});
+
+/**
+ * The regression this file exists to pin: a `foreman-plan` yield used to be
+ * dropped between the agent and Linear, silently. Three separate defects had
+ * to line up for it to be applied at all — the real `structuredOutput` shape
+ * (`status`, not `valid`), a `FOREMAN-DISPATCH` marker on a stage that claims
+ * no lock, and a `blocking` agent so the `SingleResult` rides the
+ * `tool_result` at all — so this drives the whole chain, from a payload
+ * shaped exactly like omp's, through `extractFromToolResult` and
+ * `handleCaptured`, to the `createIssue` calls.
+ */
+describe("handleCaptured — a plan tool_result reaches Linear", () => {
+  const PROJECT_ID = "project-1";
+  const DISPATCH_ID = `foreman-plan-${PROJECT_ID}-20260101T000000Z-abc123`;
+  const TITLES = [
+    "Agent defaults: model and thinking-level defaults",
+    "Agent defaults: safety ceilings",
+    "Terminal preferences pane",
+    "Appearance pane: named theme picker",
+  ];
+
+  function toolResultPayload(data: unknown) {
+    return {
+      toolName: "task",
+      input: {
+        tasks: [
+          {
+            agent: "foreman-plan",
+            task: `Decompose the brief.\n\nFOREMAN-PROJECT: ${PROJECT_ID}\n\nFOREMAN-DISPATCH: ${DISPATCH_ID}\n`,
+          },
+        ],
+      },
+      result: {
+        content: [],
+        details: {
+          results: [
+            {
+              index: 0,
+              id: "PlanAppSettings",
+              agent: "foreman-plan",
+              exitCode: 0,
+              aborted: false,
+              structuredOutput: { source: "agent", mode: "strict", status: "valid", data },
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  function planEnvelope() {
+    return {
+      blocked: false,
+      block: null,
+      result: {
+        projectId: PROJECT_ID,
+        fullyPlanned: true,
+        rationale: "Four slices, one per pane plus the ceilings, which have a different consumer story.",
+        outOfScope: ["Enforcement of the ceilings in the fleet mesh"],
+        proposedIssues: TITLES.map((title, index) => ({
+          title,
+          type: TYPE_LABEL.feature,
+          description: `## Context\n${title} is a thin surface over existing machinery.`,
+          acceptanceCriteria: [`${title} persists its setting`, `${title} rejects out-of-range input`],
+          proposedPriority: PRIORITY.Medium,
+          proposedEstimate: index === 3 ? 2 : 3,
+        })),
+      },
+    };
+  }
+
+  it("creates one Backlog issue per proposedIssue and marks the project planned", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", documents: [] };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+
+    const captured = extractFromToolResult(toolResultPayload(planEnvelope()));
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.dispatchId).toBe(DISPATCH_ID);
+
+    const notices: string[] = [];
+    await handleCaptured(
+      captured[0]!.dispatchId,
+      captured[0]!.agent,
+      captured[0]!.data,
+      captured[0]!.aborted,
+      captured[0]!.issueId,
+      captured[0]!.previousStateId,
+      (message, level) => notices.push(`${level}: ${message}`),
+      makeDeps(linear, { entry: { team: "ENG" } }),
+      { wasApplied: async () => false },
+    );
+
+    expect(notices).toEqual([]);
+    expect(linear.createIssueCalls.map((call) => call.title)).toEqual(TITLES);
+    expect(linear.createIssueCalls.every((call) => call.projectId === PROJECT_ID)).toBe(true);
+    expect(linear.projectStatusCalls).toEqual([{ projectId: PROJECT_ID, type: "planned" }]);
+  });
+
+  it("stores a description the parser can read back — one template, not one nested in another", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", documents: [] };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+
+    const captured = extractFromToolResult(toolResultPayload(planEnvelope()));
+    await handleCaptured(
+      captured[0]!.dispatchId,
+      captured[0]!.agent,
+      captured[0]!.data,
+      captured[0]!.aborted,
+      captured[0]!.issueId,
+      captured[0]!.previousStateId,
+      () => {},
+      makeDeps(linear, { entry: { team: "ENG" } }),
+      { wasApplied: async () => false },
+    );
+
+    const description = linear.createIssueCalls[0]?.description ?? "";
+    expect(description.match(/^## Context$/gm)).toHaveLength(1);
+    expect(description.match(/^## Acceptance Criteria$/gm)).toHaveLength(1);
+    expect(acceptanceCriteria(description)).toEqual([
+      `${TITLES[0]} persists its setting`,
+      `${TITLES[0]} rejects out-of-range input`,
+    ]);
+    expect(openQuestions(description)).toEqual([]);
+  });
+
+  it("drops nothing on the floor: the same payload with no FOREMAN-DISPATCH marker is never captured", () => {
+    const payload = toolResultPayload(planEnvelope());
+    payload.input.tasks[0]!.task = `Decompose the brief.\n\nFOREMAN-PROJECT: ${PROJECT_ID}\n`;
+    expect(extractFromToolResult(payload)).toEqual([]);
   });
 });
 

@@ -25,6 +25,39 @@ was written against documentation, and some of it was wrong.
 These are corrections, not preferences. Each one would have produced a silently
 broken plugin.
 
+**`structuredOutput` is `{ source, mode, status, data }` — there is no `valid`
+boolean.** `status` is `"valid" | "invalid" | "unavailable"`. The extension's
+shape guard originally required `typeof value.valid === "boolean"`, so it
+rejected every genuine payload and `extractFromToolResult` skipped each result
+as "not structured output": agents yielded, validated fine, and nothing was
+ever written to Linear for any stage. Measured twice — off a recorded
+`SingleResult` in a session transcript, and live from a probe agent spawned
+during the fix:
+
+```json
+{ "source": "agent", "mode": "strict", "status": "valid", "data": { "verdict": "GREEN" } }
+```
+
+**Only a synchronous spawn's result reaches the extension.** `structuredOutput`
+exists on the `SingleResult` alone, and a `SingleResult` reaches the parent
+only inside the `task` tool's `tool_result` (`result.details.results[]`). With
+`task.async.enabled` on, a non-`blocking` agent spawns as a background job:
+the immediate `tool_result` carries only the spawn acknowledgement, and the
+settled result is delivered later as an `async-result` custom message whose
+`details` is `{ jobs: [{ jobId, type, label, durationMs }] }` — prose content,
+no structured data, nothing to apply. Every workflow agent therefore declares
+`blocking: true` (SPEC §3.5 item 5), which contradicts the `blocking: false`
+§7 frontmatter blocks as originally written.
+
+**The `task:subagent:*` channels are not a capture fallback.** All three
+payloads are status only — `{ id, agent, parentToolCallId, detached,
+agentSource, description, status, sessionFile, index }` — with no task text and
+no `structuredOutput`, so an extractor probing them structurally can never
+fire. The extension listened on them as a second channel, which made the
+capture path look redundant while it was in fact broken end to end; the
+listeners are gone and SPEC §3.5 item 7 now scopes those events to status and
+abort detection.
+
 **`schemaMode: strict` is not an agent frontmatter key.** §5 and §7 put it in
 every agent's frontmatter. It is a *per-spawn* field on the `task` tool item and
 defaults to `permissive`; in frontmatter it is inert, so every Foreman agent

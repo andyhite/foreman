@@ -1,6 +1,6 @@
 # Description template
 
-Verbatim, per SPEC §13.1:
+The extension renders the stored body, per SPEC §13.1:
 
 ```markdown
 ## Context
@@ -19,47 +19,64 @@ Verbatim, per SPEC §13.1:
 <empty at Todo; anything here means it isn't refined>
 ```
 
-Do not restate the Definition of Done in `## Context` or anywhere else in the
-description — it is per-product and lives in the product `Context` doc.
+You do not write that markdown. You return its parts, and the extension
+assembles them in exactly this order:
 
-`## Open Questions` must be **empty** for a refined issue. Anything written
-there is a signal that refinement isn't finished — resolve it (read more,
-check the product `Context` doc or project brief, or spin off a spike) before
-yielding, don't ship an issue with an open question attached.
+| Section | Field |
+|---|---|
+| `## Context` | `refinedDescription` — prose only, no headings |
+| `## Acceptance Criteria` | `acceptanceCriteria[]` |
+| `## Affected Areas` | `affectedAreas[]` |
+| `## Out of Scope` | `outOfScope[]` |
+| `## Open Questions` | nothing — always rendered empty |
+
+Putting the headings in `refinedDescription` nests a second copy of the
+template inside the `## Context` section, and leaves the real acceptance
+criteria orphaned where the parser cannot read them back.
+
+Do not restate the Definition of Done in `refinedDescription` or anywhere else
+in the description — it is per-product and lives in the product `Context` doc.
+
+There is no open-questions field: a refined issue has none. An unresolved
+unknown is not something to park in the body — resolve it (read more, check
+the product `Context` doc or project brief, or spin off a spike) before
+yielding.
 
 ## Worked example
 
+`refinedDescription`:
+
 ```markdown
-## Context
 The triage dedupe pass currently does an exact title match, so near-duplicate
 bug reports (e.g. "search times out" vs "search request times out on long
 queries") both land in Backlog separately. See Context doc §"Triage quality
 signals".
+```
 
-## Acceptance Criteria
-- [ ] Two Triage items whose descriptions describe the same defect are
-      proposed as `duplicateOf` in the same `TriageProposal` run.
-- [ ] A near-duplicate with materially different reproduction scope (e.g. a
-      narrower query-length trigger) is proposed as `blocked by`, not
-      `duplicateOf`.
-- [ ] `severityReasoning` for a proposed duplicate names the specific matched
-      issue ID, not a general description.
+`acceptanceCriteria`:
 
-## Affected Areas
+- Two Triage items whose descriptions describe the same defect are proposed as
+  `duplicateOf` in the same `TriageProposal` run.
+- A near-duplicate with materially different reproduction scope (e.g. a
+  narrower query-length trigger) is proposed as `blocked by`, not
+  `duplicateOf`.
+- `severityReasoning` for a proposed duplicate names the specific matched
+  issue ID, not a general description.
+
+`affectedAreas`:
+
 - `packages/omp-plugin/skills/foreman-triage-inbox/dedupe.md`
 - `packages/omp-plugin/agents/foreman-triage.md`
 
-## Out of Scope
+`outOfScope`:
+
 - Changing the dedupe threshold or introducing embedding-based similarity —
   this issue only fixes the exact-match limitation, not the whole matching
   strategy.
 - Retroactively re-triaging already-proposed items.
 
-## Open Questions
-```
-
-Note the empty `## Open Questions` — that emptiness is what marks the issue
-refined.
+Note that no field carries a `##` heading: every heading in the stored issue
+comes from the renderer.
 
 ## Writing an `## Out of Scope` that actually prevents scope creep
 

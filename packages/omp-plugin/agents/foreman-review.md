@@ -6,7 +6,7 @@ model: "@slow"
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, grep, glob, lsp, foreman_linear_read]
-blocking: false
+blocking: true
 prewalk: false
 autoloadSkills: [foreman-review-diff, foreman-block-protocol]
 # BEGIN generated output schema

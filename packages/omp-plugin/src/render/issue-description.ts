@@ -4,6 +4,8 @@
  * parses back out, so the two must stay in lockstep: this renders, that reads.
  */
 
+import { contextBody } from "@foreman/core";
+
 export interface IssueDescriptionInput {
   context: string;
   acceptanceCriteria: string[];
@@ -27,12 +29,20 @@ function renderCriteria(items: string[]): string {
  * SPEC §13.1. Deliberately omits the Definition of Done — that lives in the
  * product `Context` doc on the initiative, never restated per-issue (SPEC
  * §13.1 closing line).
+ *
+ * `context` is the `## Context` body, never the whole template: this function
+ * owns every heading, and `acceptanceCriteria`/`affectedAreas`/`outOfScope`
+ * are separate fields on each agent's result. A model that returns the full
+ * template anyway is unwrapped rather than nested, so the stored description
+ * always has exactly one of each section and `acceptanceCriteria()` reads
+ * back the criteria the agent actually reported.
  */
 export function renderIssueDescription(input: IssueDescriptionInput): string {
   const openQuestions = input.openQuestions ?? [];
+  const context = (contextBody(input.context) ?? input.context).trim();
   return [
     "## Context",
-    input.context.trim().length > 0 ? input.context.trim() : "_none_",
+    context.length > 0 ? context : "_none_",
     "",
     "## Acceptance Criteria",
     renderCriteria(input.acceptanceCriteria),

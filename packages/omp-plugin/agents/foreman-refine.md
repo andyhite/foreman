@@ -55,7 +55,7 @@ output: |
               },
               "refinedDescription": {
                 "minLength": 1,
-                "description": "The issue body in the SPEC §13.1 template. Do not restate the Definition of Done. `## Open Questions` must be empty for a refined issue.",
+                "description": "The `## Context` body only — why this issue exists, in prose. The extension renders the SPEC §13.1 template around it from this plus `acceptanceCriteria`, `affectedAreas`, and `outOfScope`; emitting the headings yourself nests one template inside another. Do not restate the Definition of Done. A refined issue leaves no open questions behind.",
                 "type": "string"
               },
               "estimate": {
@@ -151,7 +151,7 @@ output: |
                     },
                     "description": {
                       "minLength": 1,
-                      "description": "Full body in the SPEC §13.1 template, same as `refinedDescription`.",
+                      "description": "The `## Context` body only, same as `refinedDescription` — the extension renders the SPEC §13.1 template around it.",
                       "type": "string"
                     },
                     "estimate": {

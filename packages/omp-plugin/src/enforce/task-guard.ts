@@ -199,6 +199,18 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
   return `${task}\n\n${lines.join("\n")}\n`;
 }
 
+/**
+ * Resolves the dispatch id for one prepared item: the inherited one when the
+ * caller (loop or operator dispatcher) already minted it, otherwise a fresh
+ * one. Consumes the inherited id so a call preparing several items never
+ * reuses it, and registers the result as live in this process.
+ */
+function takeDispatchId(deps: TaskGuardDeps, agent: string, subject: string, now: Date): string {
+  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
+  inheritedDispatchId = null;
+  deps.registerLiveDispatch(dispatchId);
+  return dispatchId;
+}
 
 interface PreparedCleanup {
   issue: Issue;
@@ -243,12 +255,26 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     throw new Error(`Unknown Foreman agent "${agent}".`);
   }
 
-  if (stage === "triage") {
-    return { item: revised, contextDigest: await deps.contextDigest(null) };
-  }
-  if (stage === "plan") {
-    const projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1];
-    if (!projectId) throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
+  // Plan and triage claim no lock — plan operates on a project, triage on a
+  // batch — but the result sink keys every capture on the `FOREMAN-DISPATCH`
+  // marker it recovers from the task text (`results/sink.ts`), so both
+  // stages need one anyway. Without it their `PlanResult`/`TriageProposal`
+  // is dropped on the floor: the agent yields, the extension sees a
+  // structured output it cannot attribute to a dispatch, and nothing is ever
+  // written to Linear.
+  if (stage === "triage" || stage === "plan") {
+    let projectId: string | null = null;
+    if (stage === "plan") {
+      projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1] ?? null;
+      if (!projectId) {
+        throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
+      }
+    }
+    // "batch" matches the subject the loop's own intake dispatch mints for
+    // triage (`packages/loop/src/team.ts`), so an inherited and a minted id
+    // read the same way in the log.
+    const dispatchId = takeDispatchId(deps, agent, projectId ?? "batch", deps.now());
+    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId });
     return { item: revised, contextDigest: await deps.contextDigest(projectId) };
   }
 
@@ -280,9 +306,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   }
 
   const now = deps.now();
-  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, identifier, now);
-  inheritedDispatchId = null;
-  deps.registerLiveDispatch(dispatchId);
+  const dispatchId = takeDispatchId(deps, agent, identifier, now);
   const ttlMs = lockTtlMs(deps.config);
 
   let worktreePath: string | null = null;

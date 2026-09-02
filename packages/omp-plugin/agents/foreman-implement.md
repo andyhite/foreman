@@ -6,7 +6,7 @@ description: Move one refined issue from In Progress to In Review. Implements ag
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, edit, write, grep, glob, lsp, debug, bash, eval, foreman_linear_read, foreman_github_pr]
 model: "@default"
-blocking: false
+blocking: true
 # prewalk: false is load-bearing here, not a default. The edits are the hard
 # part of this agent's job; handing off to a cheaper model exactly when
 # writing begins is backwards (SPEC §5, §7.3).

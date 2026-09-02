@@ -38,7 +38,7 @@ import { COMMAND_NAMES } from "./commands/names.ts";
 import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
 import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome } from "./results/apply.ts";
-import { extractFromLifecycle, extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
+import { extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
 import {
   getConfig,
   getEntry,
@@ -221,7 +221,13 @@ export async function handleCaptured(
 
   const work = (async () => {
     if (appliedDispatchIds.has(dispatchId)) return;
-    const target = lockedIssueId ?? issueIdFromDispatchId(dispatchId);
+    // Plan and triage dispatch ids carry a project id or the literal
+    // "batch" where the issue-stage ids carry an identifier, so decoding one
+    // back into a "locked issue" would hand every downstream branch a target
+    // that is not an issue at all. Neither stage locks anything: no target.
+    const target =
+      lockedIssueId ??
+      (agent === "foreman-plan" || agent === "foreman-triage" ? null : issueIdFromDispatchId(dispatchId));
     try {
       const parsed = parseAgentOutput(agent, data);
       if (parsed.kind === "invalid") {
@@ -486,6 +492,12 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     pi.logger.error(message);
     ctx.ui.notify(message, "error");
   };
+  // Only `tool_result` carries structured output. The three
+  // `task:subagent:*` channels report status alone — no task text and no
+  // `structuredOutput` — so listening on them can never capture a result
+  // (`results/sink.ts`, docs/VERIFIED.md). Every Foreman agent therefore
+  // declares `blocking: true`, which keeps its `SingleResult` in the `task`
+  // tool result rather than in a background job's `async-result` delivery.
   pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (event.toolName !== "task") return;
     for (const item of extractFromToolResult(event)) {
@@ -493,15 +505,6 @@ export default function createForemanExtension(pi: ExtensionAPI) {
       catch (error) { reportFailure(ctx)(error); }
     }
   });
-  const lifecycleHandler = async (payload: unknown, ctx: ExtensionContext) => {
-    const captured = extractFromLifecycle(payload);
-    if (!captured) return;
-    try { await handleCaptured(captured.dispatchId, captured.agent, captured.data, captured.aborted, captured.issueId, captured.previousStateId, ctx.ui.notify); }
-    catch (error) { reportFailure(ctx)(error); }
-  };
-  pi.on("task:subagent:lifecycle", lifecycleHandler);
-  pi.on("task:subagent:progress", lifecycleHandler);
-  pi.on("task:subagent:event", lifecycleHandler);
 
   return {};
 }

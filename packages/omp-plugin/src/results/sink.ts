@@ -1,18 +1,26 @@
 /**
- * Multi-channel structured-output capture (SPEC contract item 3).
+ * Structured-output capture (SPEC contract item 3, §3.5 item 5).
  *
- * A `foreman-*` agent's final `ParsedOutput` can arrive by three routes, and
- * only the first is documented: `tool_result` for `toolName === "task"`
- * carries `result.details.results[]`, each an optional `SingleResult` with a
- * `structuredOutput` field; `task:subagent:lifecycle` fires on the parent bus
- * with an undocumented payload; and a subagent's own `yield` tool call may
- * surface in the parent's `tool_call` interception. This module probes each
- * payload structurally rather than trusting a fabricated type, and funnels
- * every hit into one idempotent `apply`.
+ * A `foreman-*` agent's final `ParsedOutput` reaches the parent on exactly
+ * one channel: the `tool_result` for `toolName === "task"`, whose
+ * `result.details.results[]` entries are `SingleResult`s carrying a
+ * `structuredOutput` field. That is the only payload omp ever populates with
+ * structured data — measured, not assumed (docs/VERIFIED.md):
  *
- * Idempotency (a `foreman:applied` marker keyed on dispatch id) is what makes
- * listening on the unverified channels safe: a duplicate delivery from two
- * channels firing for the same yield is a no-op, not a double mutation.
+ * - `task:subagent:lifecycle`/`:progress`/`:event` payloads are status only
+ *   (`{ id, agent, parentToolCallId, detached, agentSource, description,
+ *   status, sessionFile, index }`) — no task text, no `structuredOutput`.
+ * - A background (non-`blocking`) spawn's settled result is delivered as an
+ *   `async-result` custom message whose `details` is `{ jobs: [{ jobId,
+ *   type, label, durationMs }] }` — prose content, no structured data.
+ *
+ * Both consequences are load-bearing: every Foreman agent declares
+ * `blocking: true` so its `SingleResult` lands in the `tool_result` this
+ * module reads, and no second channel can be listened on to compensate.
+ *
+ * Idempotency (a `foreman:applied` marker keyed on dispatch id) still guards
+ * the one channel: a redelivery of the same yield is a no-op, not a double
+ * mutation.
  */
 
 import { isRecord, isStructuredOutput } from "../util/guards.ts";
@@ -22,7 +30,7 @@ export interface CapturedOutput {
   dispatchId: string;
   agent: string;
   data: unknown;
-  /** The lifecycle-reported abort flag (SPEC §17.8) — set when the dispatch hit its budget mid-run rather than yielding cleanly. */
+  /** The `SingleResult`-reported abort flag (SPEC §17.8) — set when the dispatch hit its budget mid-run rather than yielding cleanly. */
   aborted: boolean;
   /** The `FOREMAN-ISSUE` identifier embedded in the dispatched task text, or null when it could not be recovered — the issue the dispatch's lock was taken against (SPEC §3.5 item 5). */
   issueId: string | null;
@@ -56,7 +64,7 @@ function agentOf(entry: unknown): string | null {
   return typeof entry.agent === "string" ? entry.agent : null;
 }
 
-/** Reads the lifecycle-reported `aborted` flag off a raw entry, defaulting to false when absent. */
+/** Reads the `aborted` flag off a `SingleResult` (or its enclosing tool result), defaulting to false when absent. */
 function abortedOf(entry: unknown): boolean {
   if (!isRecord(entry)) return false;
   return entry.aborted === true;
@@ -82,7 +90,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
     const single = results[index];
     if (!isRecord(single)) continue;
     const structuredOutput = single.structuredOutput;
-    // Runtime `valid: false` is not dropped here: a budget-truncated yield
+    // A `status` of `invalid` is not dropped here: a budget-truncated yield
     // is both aborted and schema-invalid, and only `parseAgentOutput`
     // (downstream, in the extension) can tell that apart from a genuine
     // malformed result. `isStructuredOutput` remains the shape gate.
@@ -104,37 +112,6 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
   return captured;
 }
 
-/**
- * Extracts a `CapturedOutput` from an undocumented `task:subagent:lifecycle`
- * payload. Probed structurally: any object carrying `structuredOutput` (in
- * the same `{ data, valid }` shape) alongside a task-text field the
- * `FOREMAN-*` markers can be pulled from, or an explicit `dispatchId` field.
- */
-export function extractFromLifecycle(payload: unknown): CapturedOutput | null {
-  if (!isRecord(payload)) return null;
-  const structuredOutput = payload.structuredOutput;
-  // See the comment in `extractFromToolResult` — `valid: false` must still
-  // reach the caller so a budget-truncated yield can be classified.
-  if (!isStructuredOutput(structuredOutput)) return null;
-
-  const agent = typeof payload.agent === "string" ? payload.agent : null;
-  const taskText =
-    typeof payload.task === "string" ? payload.task : taskTextOf(payload.input);
-  const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskText);
-  const explicitDispatchId = typeof payload.dispatchId === "string" ? payload.dispatchId : null;
-  const finalDispatchId = explicitDispatchId ?? dispatchId;
-  if (!agent || !finalDispatchId) return null;
-
-  return {
-    dispatchId: finalDispatchId,
-    agent,
-    data: structuredOutput.data,
-    aborted: abortedOf(payload),
-    issueId,
-    previousStateId,
-  };
-}
-
 /** Marks a dispatch as applied, and checks whether it already was. Backed by Linear markers (`results/apply.ts` writes them). */
 export interface AppliedTracker {
   wasApplied(dispatchId: string): Promise<boolean>;
@@ -142,7 +119,8 @@ export interface AppliedTracker {
 
 /**
  * Routes a captured output through `apply`, but only once per dispatch id.
- * Consumers call this from every channel; a duplicate is silently dropped.
+ * The extension calls this for each captured `SingleResult`; a redelivery of
+ * an already-applied dispatch id is silently dropped.
  */
 export async function sink(
   captured: CapturedOutput,

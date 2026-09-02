@@ -41,6 +41,42 @@ describe("renderIssueDescription", () => {
     expect(acceptanceCriteria(output)).toEqual(criteria);
   });
 
+  // An agent whose `description`/`refinedDescription` carries the whole §13.1
+  // template — the shape every schema description used to ask for — must not
+  // produce one template nested inside another's Context section. The
+  // structured fields stay authoritative; only the context prose is taken.
+  it("unwraps a context that arrives as a full §13.1 template", () => {
+    const output = renderIssueDescription({
+      context: [
+        "## Context",
+        "The dedupe pass matches titles exactly, so near-duplicates both land in Backlog.",
+        "",
+        "## Acceptance Criteria",
+        "- [ ] A stale criterion the agent drafted before reading the code",
+        "",
+        "## Affected Areas",
+        "- guessed/path.ts",
+        "",
+        "## Out of Scope",
+        "- Something else",
+        "",
+        "## Open Questions",
+        "- Is this even right?",
+      ].join("\n"),
+      acceptanceCriteria: ["Near-duplicates are proposed as duplicateOf"],
+      affectedAreas: ["packages/core/src/linear/issue.ts"],
+      outOfScope: ["Embedding-based similarity"],
+    });
+
+    for (const heading of ["## Context", "## Acceptance Criteria", "## Affected Areas", "## Out of Scope", "## Open Questions"]) {
+      expect(output.split("\n").filter((line) => line === heading)).toHaveLength(1);
+    }
+    expect(output).toContain("The dedupe pass matches titles exactly");
+    expect(acceptanceCriteria(output)).toEqual(["Near-duplicates are proposed as duplicateOf"]);
+    expect(output).not.toContain("A stale criterion");
+    expect(openQuestions(output)).toEqual([]);
+  });
+
   it("renders _none_ for empty sections", () => {
     const output = renderIssueDescription({
       context: "",

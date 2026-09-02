@@ -32,10 +32,13 @@ it is created and approved, unless the operator later empties it back out.
 3. For each slice, draft a `ProposedIssue`:
    - `title`: short, specific, not a restatement of the brief.
    - `type`: the `type:` label it should carry.
-   - `description`: the SPEC §13.1 template. This is a draft, not a
-     finished refinement — `foreman-refine` verifies and revises it against
-     the actual code before the issue reaches Todo, exactly as it already
-     does for intake-drafted issues (SPEC §3.12). Do not restate the
+   - `description`: the `## Context` body only — prose, no headings. The
+     extension renders the SPEC §13.1 template around it from this plus
+     `acceptanceCriteria` and the pass's `outOfScope`, so writing the
+     headings yourself nests one template inside another. This is a draft,
+     not a finished refinement — `foreman-refine` verifies and revises it
+     against the actual code before the issue reaches Todo, exactly as it
+     already does for intake-drafted issues (SPEC §3.12). Do not restate the
      Definition of Done.
    - `acceptanceCriteria`: draft observable behaviors. `foreman-refine` may
      sharpen these once it reads the code — a rough but honest first pass

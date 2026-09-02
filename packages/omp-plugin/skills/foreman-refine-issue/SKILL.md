@@ -24,8 +24,9 @@ The extension strips `legacy` when it applies this agent's result.
 1. Verify Priority ≠ `None`. Refuse if unprioritized.
 2. Read the product `Context` doc and the project brief, Definition of Done
    included.
-3. Draft the description in the `description-template.md` template. Return it
-   as `refinedDescription` — never write it to Linear directly.
+3. Draft the `## Context` prose per `description-template.md` and return it as
+   `refinedDescription` — the section bodies are separate fields, the
+   extension renders the template, and you never write to Linear directly.
 4. Write acceptance criteria as observable behaviors, verifiable by someone
    who did not write the code. Do not restate the Definition of Done — it is
    per-product, lives in the product `Context` doc, and applies to every

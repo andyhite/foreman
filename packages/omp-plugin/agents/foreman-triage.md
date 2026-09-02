@@ -6,7 +6,7 @@ description: Move issues one state right out of Triage. Classifies, dedupes, att
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, grep, glob, lsp, foreman_linear_read]
 model: "@default"
-blocking: false
+blocking: true
 prewalk: false
 autoloadSkills: [foreman-triage-inbox, foreman-block-protocol]
 # BEGIN generated output schema

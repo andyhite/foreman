@@ -19,6 +19,7 @@ import type {
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { prepareTaskCall, __setInheritedDispatchIdForTest, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
+import { extractDispatchInfo } from "../src/results/sink.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = {
@@ -307,6 +308,66 @@ describe("prepareTaskCall — marker requirement", () => {
     const decision = await prepareTaskCall(input, makeDeps(linear));
     expect(decision.block).toBe(true);
     expect(decision.reason).toContain("FOREMAN-ISSUE");
+  });
+});
+
+describe("prepareTaskCall — project and batch stages", () => {
+  const PLAN_PROJECT = "project-1";
+
+  function planTask(): TaskCallInput {
+    return {
+      context: "shared context",
+      tasks: [{ agent: "foreman-plan", task: `Decompose the brief.\n\nFOREMAN-PROJECT: ${PLAN_PROJECT}\n` }],
+    };
+  }
+
+  it("appends FOREMAN-DISPATCH to a plan item so the sink can attribute its PlanResult", async () => {
+    __setInheritedDispatchIdForTest(null);
+    const linear = new FakeLinear([]);
+    const decision = await prepareTaskCall(planTask(), makeDeps(linear));
+    expect(decision.block).toBeUndefined();
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(task).toContain(`FOREMAN-DISPATCH: foreman-plan-${PLAN_PROJECT}-dispatch-1`);
+    expect(task).toContain(`FOREMAN-PROJECT: ${PLAN_PROJECT}`);
+    expect(extractDispatchInfo(task).dispatchId).toBe(`foreman-plan-${PLAN_PROJECT}-dispatch-1`);
+  });
+
+  it("claims no lock for a plan item — plan operates on a project, not an issue", async () => {
+    __setInheritedDispatchIdForTest(null);
+    const linear = new FakeLinear([]);
+    await prepareTaskCall(planTask(), makeDeps(linear));
+    expect(linear.updateCalls).toEqual([]);
+    expect(linear.createCommentCalls).toEqual([]);
+  });
+
+  it("appends FOREMAN-DISPATCH to a triage item under the batch subject", async () => {
+    __setInheritedDispatchIdForTest(null);
+    const linear = new FakeLinear([]);
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [{ agent: "foreman-triage", task: "Triage the inbox." }],
+    };
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    expect(decision.block).toBeUndefined();
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(extractDispatchInfo(task).dispatchId).toBe("foreman-triage-batch-dispatch-1");
+  });
+
+  it("prefers the inherited dispatch id so the loop's bookkeeping and the marker agree", async () => {
+    __setInheritedDispatchIdForTest("foreman-plan-project-1-20260902T053606Z-abc123");
+    const linear = new FakeLinear([]);
+    const decision = await prepareTaskCall(planTask(), makeDeps(linear));
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(extractDispatchInfo(task).dispatchId).toBe("foreman-plan-project-1-20260902T053606Z-abc123");
+  });
+
+  it("still blocks a plan item with no FOREMAN-PROJECT marker", async () => {
+    __setInheritedDispatchIdForTest(null);
+    const linear = new FakeLinear([]);
+    const input: TaskCallInput = { context: "c", tasks: [{ agent: "foreman-plan", task: "Decompose something." }] };
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    expect(decision.block).toBe(true);
+    expect(decision.reason).toContain("FOREMAN-PROJECT");
   });
 });
 

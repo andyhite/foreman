@@ -353,6 +353,12 @@ that must be real code:
    `SingleResult` and drive every Linear mutation from validated objects —
    descriptions, labels, state moves, sub-issue and spike creation, discovered
    work, comments, review renderings. This is where principle 9 lives.
+   The `SingleResult` arrives on exactly one channel — the `task` tool's
+   `tool_result`, whose `structuredOutput` is `{ source, mode, status, data }`
+   (docs/VERIFIED.md) — and only for a synchronous spawn. Every workflow
+   agent therefore declares `blocking: true`: a background spawn's result is
+   delivered as an `async-result` message carrying no structured data at all,
+   so there is nothing to apply and the yield is lost.
 6. **Config loader.** Reads and validates the global `~/.foreman/config.json`
    (§3.10) — including the `repos` registry: each entry's path, `team`, and
    bound `initiatives` (**IDs**, not names — grouping prefixes rename), per
@@ -368,7 +374,10 @@ that must be real code:
    when something does.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
-   Use them to keep `/foreman:status` live and to detect aborts.
+   Use them to keep `/foreman:status` live and to detect aborts — and only
+   for that: their payloads carry status alone (no task text, no
+   `structuredOutput`), so they are not a second capture channel for item 5
+   (docs/VERIFIED.md).
 8. **GitHub read client.** Extension-internal, like the Linear write client:
    fetches PR diffs and head SHAs for review dispatch (§7.4) and checks CI
    status for the review gate (§10). Never exposed as an agent tool.
@@ -948,7 +957,7 @@ structured data written into Linear, not as the agent's return channel.
 ```yaml
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
-blocking: false
+blocking: true
 model: "@default"
 advisor: off
 prewalk: false
@@ -1034,9 +1043,11 @@ a reasoning task, not a lookup.
 1. Verify Priority ≠ `None`. Refuse if unprioritized.
 2. Read the product `Context` doc and the project brief (§4.7), Definition of
    Done included.
-3. Draft the description in the §13.1 template — or, for intake-drafted
-   issues (§3.12), verify and revise the draft against the code. Returned as
-   `refinedDescription`, never written directly.
+3. Draft the `## Context` prose for the §13.1 description — or, for
+   intake-drafted issues (§3.12), verify and revise the draft against the
+   code. Returned as `refinedDescription`, never written directly: the
+   extension renders the template around it from `acceptanceCriteria`,
+   `affectedAreas`, and `outOfScope`, so the agent never emits the headings.
 4. Acceptance criteria as observable behaviors, verifiable by someone who didn't
    write the code. Do not restate the Definition of Done.
 5. Identify affected files/modules via LSP, not guesswork.
@@ -1056,7 +1067,7 @@ Step 1 is the enforcement mechanism for "never bulk-refine the backlog."
 tools: [read, edit, write, search, lsp, dap, exec,
         foreman_linear_read, foreman_github_pr]
 spawns: false
-blocking: false
+blocking: true
 model: "@default"
 advisor: off
 prewalk: false
@@ -1094,7 +1105,7 @@ guards against downgrading mid-edit, not a stronger role.
 ```yaml
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
-blocking: false
+blocking: true
 model: "@slow"
 advisor: off
 prewalk: false
@@ -1153,7 +1164,7 @@ from the repo or Linear. Operator, weekly, ~1 hour.
 ```yaml
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
-blocking: false
+blocking: true
 model: "@plan"
 advisor: on
 prewalk: false
@@ -1181,17 +1192,20 @@ different grain, than classifying one inbox item.
 **Per bare project:** read the project brief and the product `Context` doc,
 split the brief into agent-sized slices (the same scale `foreman-refine`
 estimates against, §4.6), and draft each as a `ProposedIssue` — title,
-`type:`, a §13.1-shape description, draft acceptance criteria, a rough
-priority, and a rough estimate. Record explicit non-goals in `outOfScope`.
+`type:`, the `## Context` prose for a §13.1 description (the extension
+renders the template; the agent never writes the headings), draft acceptance
+criteria, a rough priority, and a rough estimate. Record explicit non-goals
+in `outOfScope`.
 
 **Output:** a `PlanResult`. The extension creates each `proposedIssues[]`
-entry as a new Backlog issue under the project — nothing else. None of them
-carry `agent:ready`; every one enters the normal refine funnel the moment
-the operator sets a priority, exactly the path any other Backlog issue
-takes. `foreman-refine` verifies and revises each draft against the code
-before it reaches Todo, the same way it already handles intake-drafted
-issues (§3.12) — `foreman-plan` is deliberately not expected to get every
-draft right; it only has to get the decomposition right.
+entry as a new Backlog issue under the project, and marks the project
+`planned` (§17.5) — nothing else. None of them carry `agent:ready`; every
+one enters the normal refine funnel the moment the operator sets a priority,
+exactly the path any other Backlog issue takes. `foreman-refine` verifies
+and revises each draft against the code before it reaches Todo, the same way
+it already handles intake-drafted issues (§3.12) — `foreman-plan` is
+deliberately not expected to get every draft right; it only has to get the
+decomposition right.
 
 **One-shot, not a buffer.** Unlike refine's Ready-buffer top-up (§17.6),
 plan does not maintain an ongoing backlog depth per project. A project is a
@@ -1458,6 +1472,14 @@ excepted — §13.2).
 ```
 
 Do not restate the Definition of Done here.
+
+The extension owns every heading above. Each agent returns the parts — the
+`## Context` prose in `description`/`refinedDescription`, and
+`acceptanceCriteria`, `affectedAreas`, `outOfScope` as their own fields —
+and one renderer assembles them, so the sections the parser reads back
+(`acceptanceCriteria()`, `openQuestions()`) are always exactly the sections
+that were written. `TriageItem.draftDescription` is the one exception: it is
+stored verbatim, so it carries the full template.
 
 ### 13.2 PR body
 

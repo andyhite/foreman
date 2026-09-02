@@ -42,6 +42,7 @@ export function duplicateOf(issue: Issue): IssueRef | null {
   return relation ? relation.other : null;
 }
 
+const CONTEXT_HEADING = /^##\s+Context\s*$/m;
 const ACCEPTANCE_CRITERIA_HEADING = /^##\s+Acceptance Criteria\s*$/m;
 const OPEN_QUESTIONS_HEADING = /^##\s+Open Questions\s*$/m;
 const NEXT_HEADING = /^##\s+/m;
@@ -80,6 +81,20 @@ export function acceptanceCriteria(description: string | null): string[] {
 /** SPEC §4.10 refinement gate: `## Acceptance Criteria` present with ≥1 checkbox line. */
 export function hasAcceptanceCriteria(description: string | null): boolean {
   return acceptanceCriteria(description).length > 0;
+}
+
+/**
+ * The `## Context` body of a SPEC §13.1 description, or null when the text
+ * carries no such heading — in which case it already *is* a context body.
+ *
+ * Every agent contract asks for the context prose alone and leaves the
+ * template to the renderer, but a model that hands back the whole template
+ * anyway must not end up with one template nested inside another's Context
+ * section, so `renderIssueDescription` unwraps through here first.
+ */
+export function contextBody(description: string | null): string | null {
+  if (!description) return null;
+  return sectionBody(description, CONTEXT_HEADING);
 }
 
 /**

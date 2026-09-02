@@ -26,9 +26,11 @@ export const ProposedIssue = Type.Object(
     description: Type.String({
       minLength: 1,
       description:
-        "Draft in the SPEC §13.1 template. This is a starting point, not a finished refinement — " +
-        "`foreman-refine` verifies and revises it against the code, exactly as it already does for " +
-        "intake-drafted issues (SPEC §3.12).",
+        "The `## Context` body only — why this issue exists, in prose. The extension renders the " +
+        "SPEC §13.1 template around it from this plus `acceptanceCriteria` and `outOfScope`, so " +
+        "emitting the headings yourself nests one template inside another. This is a starting " +
+        "point, not a finished refinement — `foreman-refine` verifies and revises it against the " +
+        "code, exactly as it already does for intake-drafted issues (SPEC §3.12).",
     }),
     acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), {
       description: "Draft observable behaviors. `foreman-refine` may revise these once it reads the code.",

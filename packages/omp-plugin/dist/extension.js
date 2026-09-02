@@ -7761,6 +7761,7 @@ function blockedByRelations(issue) {
 function incompleteBlockers(issue) {
   return blockedByRelations(issue).filter((relation) => !blockerIsResolved(relation.other.state));
 }
+var CONTEXT_HEADING = /^##\s+Context\s*$/m;
 var ACCEPTANCE_CRITERIA_HEADING = /^##\s+Acceptance Criteria\s*$/m;
 var NEXT_HEADING = /^##\s+/m;
 var CHECKBOX_LINE = /^-\s*\[[ xX]\]\s*(.+)$/;
@@ -7791,6 +7792,11 @@ function acceptanceCriteria(description) {
 }
 function hasAcceptanceCriteria(description) {
   return acceptanceCriteria(description).length > 0;
+}
+function contextBody(description) {
+  if (!description)
+    return null;
+  return sectionBody(description, CONTEXT_HEADING);
 }
 
 // ../core/src/gates/refinement.ts
@@ -9224,7 +9230,7 @@ var SubIssue = Type.Object({
   type: TypeLabelSchema2,
   description: Type.String({
     minLength: 1,
-    description: "Full body in the SPEC §13.1 template, same as `refinedDescription`."
+    description: "The `## Context` body only, same as `refinedDescription` — the extension renders the " + "SPEC §13.1 template around it."
   }),
   estimate: EstimateSchema,
   acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })
@@ -9248,7 +9254,7 @@ var RefineResult = Type.Object({
   issueId: Type.String({ minLength: 1 }),
   refinedDescription: Type.String({
     minLength: 1,
-    description: "The issue body in the SPEC §13.1 template. Do not restate the Definition " + "of Done. `## Open Questions` must be empty for a refined issue."
+    description: "The `## Context` body only — why this issue exists, in prose. The extension renders the " + "SPEC §13.1 template around it from this plus `acceptanceCriteria`, `affectedAreas`, and " + "`outOfScope`; emitting the headings yourself nests one template inside another. Do not " + "restate the Definition of Done. A refined issue leaves no open questions behind."
   }),
   estimate: EstimateSchema,
   acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), {
@@ -9401,7 +9407,7 @@ var ProposedIssue = Type.Object({
   type: TypeLabelSchema3,
   description: Type.String({
     minLength: 1,
-    description: "Draft in the SPEC §13.1 template. This is a starting point, not a finished refinement — " + "`foreman-refine` verifies and revises it against the code, exactly as it already does for " + "intake-drafted issues (SPEC §3.12)."
+    description: "The `## Context` body only — why this issue exists, in prose. The extension renders the " + "SPEC §13.1 template around it from this plus `acceptanceCriteria` and `outOfScope`, so " + "emitting the headings yourself nests one template inside another. This is a starting " + "point, not a finished refinement — `foreman-refine` verifies and revises it against the " + "code, exactly as it already does for intake-drafted issues (SPEC §3.12)."
   }),
   acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), {
     description: "Draft observable behaviors. `foreman-refine` may revise these once it reads the code."
@@ -9692,6 +9698,12 @@ ${lines.join(`
 `)}
 `;
 }
+function takeDispatchId(deps, agent, subject, now) {
+  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
+  inheritedDispatchId = null;
+  deps.registerLiveDispatch(dispatchId);
+  return dispatchId;
+}
 async function prepareItem(item, deps) {
   const agent = item.agent;
   if (!agent || !agent.startsWith(FOREMAN_PREFIX))
@@ -9702,13 +9714,16 @@ async function prepareItem(item, deps) {
   if (stage === null || !(agent in AGENT_OUTPUT_SCHEMAS)) {
     throw new Error(`Unknown Foreman agent "${agent}".`);
   }
-  if (stage === "triage") {
-    return { item: revised, contextDigest: await deps.contextDigest(null) };
-  }
-  if (stage === "plan") {
-    const projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1];
-    if (!projectId)
-      throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
+  if (stage === "triage" || stage === "plan") {
+    let projectId = null;
+    if (stage === "plan") {
+      projectId = /^FOREMAN-PROJECT:\s*(\S+)\s*$/m.exec(item.task)?.[1] ?? null;
+      if (!projectId) {
+        throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
+      }
+    }
+    const dispatchId2 = takeDispatchId(deps, agent, projectId ?? "batch", deps.now());
+    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId2 });
     return { item: revised, contextDigest: await deps.contextDigest(projectId) };
   }
   const match = ISSUE_MARKER_RE.exec(item.task);
@@ -9734,9 +9749,7 @@ async function prepareItem(item, deps) {
     throw new Error(`${identifier}: ${gateSummary(gateName, gate)}`);
   }
   const now = deps.now();
-  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, identifier, now);
-  inheritedDispatchId = null;
-  deps.registerLiveDispatch(dispatchId);
+  const dispatchId = takeDispatchId(deps, agent, identifier, now);
   const ttlMs = lockTtlMs(deps.config);
   let worktreePath = null;
   let branch = null;
@@ -10248,9 +10261,10 @@ function renderCriteria(items) {
 }
 function renderIssueDescription(input) {
   const openQuestions = input.openQuestions ?? [];
+  const context = (contextBody(input.context) ?? input.context).trim();
   return [
     "## Context",
-    input.context.trim().length > 0 ? input.context.trim() : "_none_",
+    context.length > 0 ? context : "_none_",
     "",
     "## Acceptance Criteria",
     renderCriteria(input.acceptanceCriteria),
@@ -10908,12 +10922,13 @@ async function applyOutcome(deps, outcome) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+var STRUCTURED_OUTPUT_STATUSES = { valid: true, invalid: true, unavailable: true };
 function isStructuredOutput(value) {
   if (!isRecord(value))
     return false;
-  if (!("valid" in value) || !("data" in value))
+  if (!("data" in value))
     return false;
-  return typeof value.valid === "boolean";
+  return typeof value.status === "string" && STRUCTURED_OUTPUT_STATUSES[value.status] === true;
 }
 
 // src/results/sink.ts
@@ -10974,28 +10989,6 @@ function extractFromToolResult(payload) {
     });
   }
   return captured;
-}
-function extractFromLifecycle(payload) {
-  if (!isRecord(payload))
-    return null;
-  const structuredOutput = payload.structuredOutput;
-  if (!isStructuredOutput(structuredOutput))
-    return null;
-  const agent = typeof payload.agent === "string" ? payload.agent : null;
-  const taskText = typeof payload.task === "string" ? payload.task : taskTextOf(payload.input);
-  const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskText);
-  const explicitDispatchId = typeof payload.dispatchId === "string" ? payload.dispatchId : null;
-  const finalDispatchId = explicitDispatchId ?? dispatchId;
-  if (!agent || !finalDispatchId)
-    return null;
-  return {
-    dispatchId: finalDispatchId,
-    agent,
-    data: structuredOutput.data,
-    aborted: abortedOf(payload),
-    issueId,
-    previousStateId
-  };
 }
 async function sink(captured, tracker, apply2) {
   if (await tracker.wasApplied(captured.dispatchId))
@@ -11112,7 +11105,7 @@ async function handleCaptured(dispatchId, agent, data, aborted, lockedIssueId, p
   const work = (async () => {
     if (appliedDispatchIds.has(dispatchId))
       return;
-    const target = lockedIssueId ?? issueIdFromDispatchId(dispatchId);
+    const target = lockedIssueId ?? (agent === "foreman-plan" || agent === "foreman-triage" ? null : issueIdFromDispatchId(dispatchId));
     try {
       const parsed = parseAgentOutput(agent, data);
       if (parsed.kind === "invalid") {
@@ -11333,19 +11326,6 @@ function createForemanExtension(pi) {
       }
     }
   });
-  const lifecycleHandler = async (payload, ctx) => {
-    const captured = extractFromLifecycle(payload);
-    if (!captured)
-      return;
-    try {
-      await handleCaptured(captured.dispatchId, captured.agent, captured.data, captured.aborted, captured.issueId, captured.previousStateId, ctx.ui.notify);
-    } catch (error) {
-      reportFailure(ctx)(error);
-    }
-  };
-  pi.on("task:subagent:lifecycle", lifecycleHandler);
-  pi.on("task:subagent:progress", lifecycleHandler);
-  pi.on("task:subagent:event", lifecycleHandler);
   return {};
 }
 export {

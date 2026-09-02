@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { isBudgetTruncation } from "@foreman/core";
 import {
-  extractFromLifecycle,
   extractFromToolResult,
   sink,
   type AppliedTracker,
@@ -9,6 +8,10 @@ import {
 } from "../src/results/sink.ts";
 
 describe("extractFromToolResult", () => {
+  // Every `structuredOutput` literal below is omp's real shape, copied off a
+  // recorded `SingleResult`: `{ source, mode, status, data }`. There is no
+  // `valid` boolean — an earlier guard demanded one and silently dropped
+  // every genuine result (docs/VERIFIED.md).
   it("extracts structuredOutput from a tool_result-shaped payload", () => {
     const payload = {
       toolName: "task",
@@ -21,7 +24,7 @@ describe("extractFromToolResult", () => {
         details: {
           results: [
             {
-              structuredOutput: { data: { issueId: "ENG-1" }, valid: true, mode: "strict", source: "yield", error: null },
+              structuredOutput: { source: "agent", mode: "strict", status: "valid", data: { issueId: "ENG-1" } },
             },
           ],
         },
@@ -40,11 +43,18 @@ describe("extractFromToolResult", () => {
     ]);
   });
 
-  it("still captures a runtime-invalid (valid: false) structuredOutput — a budget-truncated yield must reach the classifier downstream", () => {
+  it("still captures a status: invalid structuredOutput — a budget-truncated yield must reach the classifier downstream", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
-      result: { content: [], details: { results: [{ structuredOutput: { data: {}, valid: false } }] } },
+      result: {
+        content: [],
+        details: {
+          results: [
+            { structuredOutput: { source: "agent", mode: "strict", status: "invalid", data: {}, error: "schema_violation" } },
+          ],
+        },
+      },
     };
     const captured = extractFromToolResult(payload);
     expect(captured).toEqual([
@@ -52,7 +62,19 @@ describe("extractFromToolResult", () => {
     ]);
   });
 
-  it("ignores results whose structuredOutput is malformed (missing the valid/data shape)", () => {
+  it("captures a status: unavailable structuredOutput so a broken schema surfaces as an invalid result rather than silence", () => {
+    const payload = {
+      toolName: "task",
+      input: { tasks: [{ agent: "foreman-plan", task: "FOREMAN-DISPATCH: d-2\n" }] },
+      result: {
+        content: [],
+        details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "unavailable", data: null } }] },
+      },
+    };
+    expect(extractFromToolResult(payload).map((item) => item.dispatchId)).toEqual(["d-2"]);
+  });
+
+  it("ignores results whose structuredOutput carries no recognizable status", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
@@ -61,39 +83,20 @@ describe("extractFromToolResult", () => {
     expect(extractFromToolResult(payload)).toEqual([]);
   });
 
+  it("ignores a task result whose text carries no FOREMAN-DISPATCH marker", () => {
+    const payload = {
+      toolName: "task",
+      input: { tasks: [{ agent: "foreman-plan", task: "FOREMAN-PROJECT: project-1\n" }] },
+      result: {
+        content: [],
+        details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "valid", data: {} } }] },
+      },
+    };
+    expect(extractFromToolResult(payload)).toEqual([]);
+  });
+
   it("ignores a non-task tool_result", () => {
     expect(extractFromToolResult({ toolName: "read", result: {} })).toEqual([]);
-  });
-});
-
-describe("extractFromLifecycle", () => {
-  it("extracts structuredOutput from a bare lifecycle-shaped payload", () => {
-    const payload = {
-      agent: "foreman-refine",
-      dispatchId: "foreman-refine-ENG-2-9",
-      structuredOutput: { data: { issueId: "ENG-2" }, valid: true },
-    };
-    expect(extractFromLifecycle(payload)).toEqual({
-      dispatchId: "foreman-refine-ENG-2-9",
-      agent: "foreman-refine",
-      data: { issueId: "ENG-2" },
-      aborted: false,
-      issueId: null,
-      previousStateId: null,
-    });
-  });
-
-  it("recovers the dispatch id from FOREMAN-DISPATCH markers when no explicit field is present", () => {
-    const payload = {
-      agent: "foreman-review",
-      task: "Review it.\n\nFOREMAN-DISPATCH: foreman-review-ENG-3-1\n",
-      structuredOutput: { data: { issueId: "ENG-3" }, valid: true },
-    };
-    expect(extractFromLifecycle(payload)?.dispatchId).toBe("foreman-review-ENG-3-1");
-  });
-
-  it("returns null for a payload with no recognizable structuredOutput", () => {
-    expect(extractFromLifecycle({ agent: "foreman-review", note: "just progress" })).toBeNull();
   });
 });
 
