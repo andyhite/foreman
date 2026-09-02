@@ -307,6 +307,29 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
    * later `foreman repo` in that repo failed with `LoopLockHeldError`.
    */
   let controlServer: ControlServer | null = null;
+  /*
+   * Registered before the first `await` past `acquireLock()`. The lock file
+   * is what callers poll to know this process is up, so a SIGTERM can arrive
+   * the instant it appears — and until these handlers exist, the default
+   * disposition kills the process outright and orphans the lock. The
+   * `controlServer.listen()` below is the await that widens that window.
+   */
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
+    supervisor.requestStop("graceful");
+    // When polling, `runForever` reaches its own cleanup immediately after
+    // the active tick. `--once` has no poll loop to observe the request.
+    if (args.once) {
+      supervisor.stop();
+      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    }
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
   try {
     // The control server has nothing to supervise once `--once` exits right
     // after its single tick, and an operator can opt out entirely with
@@ -336,22 +359,6 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
       await server.listen();
       log(`${style("cyan", "i")} control socket listening at ${controlPaths.socket}`);
     }
-
-    let shuttingDown = false;
-    const shutdown = (signal: string): void => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
-      supervisor.requestStop("graceful");
-      // When polling, `runForever` reaches its own cleanup immediately after
-      // the active tick. `--once` has no poll loop to observe the request.
-      if (args.once) {
-        supervisor.stop();
-        void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
-      }
-    };
-    process.on("SIGINT", () => shutdown("SIGINT"));
-    process.on("SIGTERM", () => shutdown("SIGTERM"));
 
     const cadenceMs = config.loop.cadenceMinutes * 60_000;
     const allWorkers: Worker[] = [

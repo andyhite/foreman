@@ -590,6 +590,38 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
    * a lock whose owner never started. Same reasoning as `repo.ts`.
    */
   let controlServer: ControlServer | null = null;
+  /*
+   * Registered before the first `await` past `lock.acquire()`. The lock file
+   * is what callers poll to know this process is up, so a SIGTERM can arrive
+   * the instant it appears — and until these handlers exist, the default
+   * disposition kills the process outright and orphans the lock. The
+   * `controlServer.listen()` below is the await that made that window wide
+   * enough to lose on a loaded CI runner.
+   *
+   * A tick already in flight (`runIntakeTick` awaiting a Linear call) must
+   * finish and save its bookkeeping before the lock is released — an
+   * abrupt exit mid-dispatch would spawn `/foreman-triage` without ever
+   * recording it, leaking a WIP slot the same way the leak this file's
+   * reconcile fix closes on the supervisor side. `draining` makes the
+   * poll loop exit after its current iteration instead of waiting a full
+   * `intakeInterruptibleWait`.
+   */
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
+    runtime.stopMode = "graceful";
+    runtime.runState = "draining";
+    runtime.wake?.();
+    if (args.once) {
+      lock.release();
+      void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    }
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
   try {
     const home = args.homePath ?? homedir();
     controlServer = args.once || args.noControl
@@ -618,29 +650,6 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
       log(`${style("cyan", "i")} control socket listening at ${controlPaths.socket}`);
     }
 
-    // A tick already in flight (`runIntakeTick` awaiting a Linear call) must
-    // finish and save its bookkeeping before the lock is released — an
-    // abrupt exit mid-dispatch would spawn `/foreman-triage` without ever
-    // recording it, leaking a WIP slot the same way the leak this file's
-    // reconcile fix closes on the supervisor side. `draining` makes the
-    // poll loop exit after its current iteration instead of waiting a full
-    // `intakeInterruptibleWait`.
-    let shuttingDown = false;
-    const shutdown = (signal: string): void => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      log(style("yellow", `received ${signal}, finishing any in-flight tick before releasing the lock.`));
-      runtime.stopMode = "graceful";
-      runtime.runState = "draining";
-      runtime.wake?.();
-      if (args.once) {
-        lock.release();
-        void (controlServer?.close() ?? Promise.resolve()).finally(() => process.exit(0));
-      }
-    };
-    process.on("SIGINT", () => shutdown("SIGINT"));
-    process.on("SIGTERM", () => shutdown("SIGTERM"));
-
     log(style("bold", `starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`));
 
     if (config.loop.mode === "confirm") {
@@ -651,7 +660,11 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
       log(rule);
     }
 
-    runtime.runState = "running";
+    // Mirrors `Supervisor#runForever`: a SIGTERM (or an operator `pause`)
+    // that landed during startup has already moved the state off "starting",
+    // and promoting to "running" unconditionally would discard it — leaving
+    // the process polling forever instead of draining.
+    if (runtime.currentRunState() === "starting") runtime.runState = "running";
     if (args.once) {
       const report = await runIntakeTick(ctx);
       if (args.verbose && report.skipReason) {
