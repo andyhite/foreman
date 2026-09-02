@@ -257,7 +257,7 @@ export interface SupervisorOptions {
   statusPath: string | null;
   version: string;
   team: string | null;
-  /** `--verbose`: emits per-tick timing, dispatch handle detail, reconcile counts, and full error stacks that the default output omits (diagnostics, not routing decisions — those already log unconditionally). */
+  /** `--verbose`: emits per-tick timing, dispatch handle detail, reconcile counts, full error stacks, and per-item skip reasons that the default output omits — only actual dispatches and would-dispatch decisions log unconditionally. */
   verbose?: boolean;
 }
 
@@ -677,10 +677,12 @@ export class Supervisor {
             `  ${marker} ${action} ${worker.name} [mode: ${mode}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
           );
         }
-        for (const skip of report.skipped) {
-          this.#log(
-            `  ${style("dim", "○")} skip ${worker.name} [mode: ${mode}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
-          );
+        if (this.#verbose) {
+          for (const skip of report.skipped) {
+            this.#log(
+              `  ${style("dim", "○")} skip ${worker.name} [mode: ${mode}] ${skip.issueId ?? skip.projectId ?? "(batch)"}: ${skip.code} — ${skip.message}`,
+            );
+          }
         }
       } catch (error) {
         this.#log(`${style("red", "✗")} ${worker.name} failed: ${String(error)}`);

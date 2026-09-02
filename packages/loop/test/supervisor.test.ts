@@ -266,7 +266,7 @@ function makeStubWorker(): Worker {
   };
 }
 
-function makeSupervisor(logs: string[], confirmer: Confirmer = YOLO_CONFIRMER): Supervisor {
+function makeSupervisor(logs: string[], confirmer: Confirmer = YOLO_CONFIRMER, verbose = false): Supervisor {
   const stateDir = tempStateDir();
   return new Supervisor({
     config: makeConfig("yolo"),
@@ -282,21 +282,29 @@ function makeSupervisor(logs: string[], confirmer: Confirmer = YOLO_CONFIRMER): 
     statusPath: join(stateDir, "status.json"),
     version: "0.1.0-test",
     team: "ENG",
+    verbose,
   });
 }
 
 describe("Supervisor.runTick — decision observability", () => {
-  it("logs actual dispatches and every skip", async () => {
+  it("logs actual dispatches without per-item skip detail by default", async () => {
     const logs: string[] = [];
     const supervisor = makeSupervisor(logs);
     await supervisor.runTick([makeStubWorker()]);
     expect(logs.some((line) => line.includes("mode: yolo") && line.includes("1 dispatched"))).toBe(true);
     expect(logs.some((line) => line.includes("dispatched refine [mode: yolo] ENG-1"))).toBe(true);
+    expect(logs.some((line) => line.includes("skip refine [mode: yolo] ENG-2: unprioritized"))).toBe(false);
+  });
+
+  it("logs every skip under --verbose", async () => {
+    const logs: string[] = [];
+    const supervisor = makeSupervisor(logs, YOLO_CONFIRMER, true);
+    await supervisor.runTick([makeStubWorker()]);
     expect(logs.some((line) => line.includes("skip refine [mode: yolo] ENG-2: unprioritized"))).toBe(true);
   });
 
-  it("publishes decision logs to control subscribers", async () => {
-    const supervisor = makeSupervisor([]);
+  it("publishes decision logs to control subscribers, including skip detail under verbose", async () => {
+    const supervisor = makeSupervisor([], YOLO_CONFIRMER, true);
     const events: ControlEvent[] = [];
     supervisor.onEvent((event) => events.push(event));
     await supervisor.runTick([makeStubWorker()]);

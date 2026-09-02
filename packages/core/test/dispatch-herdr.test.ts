@@ -144,3 +144,110 @@ describe("HerdrDispatcher.cleanup", () => {
     ]);
   });
 });
+
+describe("HerdrDispatcher.dispatch", () => {
+  it("starts omp interactively, without -p, then submits the command via agent prompt", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { workspaces: [] } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("workspace") && argv.includes("create")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { workspace_id: "w1" } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("tab") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("tab") && argv.includes("create")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("split")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: "w1:p2" } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("start")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("prompt")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("report-metadata")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    const handle = await dispatcher.dispatch({
+      agent: "foreman-plan",
+      issueId: null,
+      command: "/foreman:plan project-1",
+      dispatchId: "dispatch-1",
+      cwd: "/repos/product",
+    });
+
+    expect(handle.herdr).toEqual({ paneId: "w1:p2", agentName: expect.any(String) });
+    const startCall = calls.find((call) => call.includes("start"));
+    const promptCall = calls.find((call) => call.includes("prompt"));
+    expect(startCall).toBeDefined();
+    expect(startCall).not.toContain("-p");
+    expect(startCall?.slice(-1)).not.toEqual(["/foreman:plan project-1"]);
+    expect(promptCall).toEqual([
+      "herdr",
+      "agent",
+      "prompt",
+      expect.any(String),
+      "/foreman:plan project-1",
+      "--wait",
+      "--until",
+      "working",
+      "--until",
+      "done",
+      "--timeout",
+      "30000",
+    ]);
+  });
+
+  it("closes the pane and rethrows when omp never reaches interactive readiness", async () => {
+    const runner = {
+      run(argv: string[]) {
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { workspaces: [{ label: "/repos/product", workspace_id: "w1" }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("tab") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("tab") && argv.includes("create")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("split")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: "w1:p2" } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("start")) {
+          return Promise.resolve({ stdout: "", stderr: "agent_not_ready", code: 1 });
+        }
+        if (argv.includes("pane") && argv.includes("close")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await expect(
+      dispatcher.dispatch({
+        agent: "foreman-plan",
+        issueId: null,
+        command: "/foreman:plan project-1",
+        dispatchId: "dispatch-1",
+        cwd: "/repos/product",
+      }),
+    ).rejects.toThrow(/agent_not_ready/);
+  });
+});

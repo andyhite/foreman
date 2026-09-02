@@ -250,6 +250,12 @@ export class HerdrDispatcher implements Dispatcher {
 
     const agentName = herdrAgentName(request.issueId ?? request.dispatchId);
     try {
+      // `agent start` only recognizes an agent that reaches Herdr's own
+      // interactive-readiness state; omp's `-p`/`--print` mode processes a
+      // prompt and exits immediately, which Herdr never observes as
+      // "ready for input" (SPEC §17.2). Start omp interactively — no
+      // prompt, no `-p` — then hand it the actual command through
+      // `agent prompt` once Herdr confirms it is idle.
       await this.#runChecked([
         this.#config.agent.herdrBin,
         "agent",
@@ -262,12 +268,24 @@ export class HerdrDispatcher implements Dispatcher {
         "--timeout",
         "30000",
         "--",
-        "-p",
         "--approval-mode",
         this.#config.agent.approvalMode,
         "--cwd",
         request.cwd,
+      ]);
+      await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "agent",
+        "prompt",
+        agentName,
         request.command,
+        "--wait",
+        "--until",
+        "working",
+        "--until",
+        "done",
+        "--timeout",
+        "30000",
       ]);
     } catch (error) {
       await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
