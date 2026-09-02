@@ -195,6 +195,75 @@ describe("startup cleanup (zombie-loop regression)", () => {
     expect(existsSync(paths.socket)).toBe(false);
   });
 
+  it("foreman repo in continuous mode cleans up on SIGINT without waiting for a full poll cycle", async () => {
+    // Mirrors the `foreman team` SIGTERM case above, but for `repo.ts`'s own
+    // `shutdown()`/`requestStop("graceful")` wiring, which nothing else here
+    // exercises: every other `repo` test fails during the ensure pass and
+    // never reaches `runForever`'s continuous poll loop at all. `--worker
+    // none` selects zero workers (no worker in `allWorkers` is named
+    // "none"), so once inside the loop the process only ever sleeps between
+    // cadence checks — the SIGINT has to interrupt that sleep, not a tick.
+    const teamsOp = "query Teams";
+    const initiativeDocsOp = "query InitiativeDocuments";
+    const initiativeProjectsOp = "query InitiativeProjects";
+    const issuesOp = "query Issues";
+    const okServer = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { query } = (await request.json()) as { query: string };
+        const data = query.includes(teamsOp)
+          ? { teams: { nodes: [{ id: "team-1", key: "ENG", name: "ENG" }] } }
+          : query.includes(initiativeDocsOp)
+            ? { initiative: { id: "init-1", name: "Init One", documents: { nodes: [] } } }
+            : query.includes(initiativeProjectsOp)
+              ? { initiative: { projects: { nodes: [{ id: "proj-1", name: "Maintenance" }] } } }
+              : query.includes(issuesOp)
+                ? { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }
+                : null;
+        if (data === null) {
+          return new Response(JSON.stringify({ errors: [{ message: `unhandled query: ${query}` }] }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ data }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    try {
+      const config = {
+        repos: { demo: { path: home, initiatives: ["init-1"], team: "ENG" } },
+        loop: { stateDir: join(home, "state"), mode: "yolo" },
+        linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: `http://127.0.0.1:${okServer.port}/graphql` },
+      };
+      writeFileSync(join(home, ".foreman", "config.json"), JSON.stringify(config), "utf8");
+
+      const proc = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG", "--worker", "none"]);
+      const paths = loopPaths(configForPaths(), repoLoopId("demo"), home);
+      const deadline = Date.now() + SPAWN_TIMEOUT_MS;
+      // Real wall-clock polling, not a fake timer: this is a genuine
+      // spawned OS process (see the file header) whose lock-file write
+      // happens on its own schedule outside this test's control.
+      while (!existsSync(paths.lock)) {
+        if (Date.now() > deadline) {
+          proc.kill();
+          throw new Error("foreman repo never acquired its lock");
+        }
+        await Bun.sleep(20);
+      }
+      proc.kill("SIGINT");
+      const [, out, err] = await Promise.all([
+        waitForExit(proc, "foreman repo (SIGINT)"),
+        readAll(proc.stdout),
+        readAll(proc.stderr),
+      ]);
+      expect(out + err).not.toContain("LoopLockHeldError");
+      expect(existsSync(paths.lock)).toBe(false);
+      expect(existsSync(paths.socket)).toBe(false);
+    } finally {
+      okServer.stop(true);
+    }
+  });
+
   it("--no-control still cleans up the lock (and never created a socket)", async () => {
     const proc = spawnForeman(["repo", "demo", "--home", home, "--team", "ENG", "--no-control"]);
     const exitCode = await waitForExit(proc, "foreman repo --no-control");
