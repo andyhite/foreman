@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   Comment,
   CreateIssueInput,
@@ -28,9 +32,11 @@ import {
   DENY_CONFIRMER,
   DISPATCH_COMMAND,
   encodeMarker,
+  ensureWorktree,
   MAINTENANCE_PROJECT_NAME,
   MARKER_KIND,
   TYPE_LABEL,
+  worktreePathFor,
   YOLO_CONFIRMER,
 } from "@foreman/core";
 import type { ConfirmRequest } from "@foreman/core";
@@ -58,6 +64,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       mode: "yolo",
       workerModes: {},
       mergeDetection: true,
+      cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
@@ -139,6 +146,8 @@ function freshBookkeeping(): Bookkeeping {
 class FakeDispatcher implements Dispatcher {
   readonly kind = "print" as const;
   calls: DispatchRequest[] = [];
+  /** Overridable per-test; `Dispatcher.cleanup` is optional and print mode leaves it unset by default. */
+  cleanup?: (issueId: string, repoPath: string) => Promise<void>;
 
   async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
     this.calls.push(request);
@@ -735,5 +744,100 @@ describe("mergeDetectWorker — confirmation gate (SPEC §17.9)", () => {
     await mergeDetectWorker.run(ctx);
 
     expect(linear.updateIssueCalls).toEqual([{ id: issue.id, stateId: "state-done" }]);
+  });
+});
+
+describe("mergeDetectWorker — worktree/herdr cleanup (SPEC §12)", () => {
+  let repoRoot: string;
+  let repoPath: string;
+
+  beforeEach(() => {
+    repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-merge-detect-")));
+    repoPath = join(repoRoot, "repo");
+    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath, encoding: "utf8" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, encoding: "utf8" });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: repoPath, encoding: "utf8" });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** Like `MergeDetectFakeLinear`, but `updateIssue` actually succeeds — needed here since the code under test keeps going after the Done transition. */
+  class SucceedingFakeLinear extends MergeDetectFakeLinear {
+    override async updateIssue(id: string, input: { stateId?: string }): Promise<Issue> {
+      this.updateIssueCalls.push({ id, stateId: input.stateId ?? "" });
+      return { ...makeIssue(), id, state: { id: input.stateId ?? "", name: "Done", type: "completed", position: 1 } };
+    }
+  }
+
+  function contextWithLog(linear: LinearWriter, config: GlobalConfig, dispatcher: Dispatcher, entry: ResolvedRepoEntry): { ctx: WorkerContext; logs: string[] } {
+    const logs: string[] = [];
+    const ctx: WorkerContext = {
+      config,
+      bookkeeping: freshBookkeeping(),
+      dispatcher,
+      linear,
+      entry,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: (message) => logs.push(message),
+      mode: "yolo",
+      confirm: (request) => YOLO_CONFIRMER.confirm(request),
+      watchSettle: () => {},
+    };
+    return { ctx, logs };
+  }
+
+  it("removes the merged issue's clean worktree and closes its dispatcher tab", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath, pr: { required: false, draft: false, ciRequired: true } });
+    const issue = makeIssue({ state: { id: "state-review", name: "In Review", type: "started", position: 3 } });
+    issue.comments = [mergedMarkerComment(issue, entry)];
+    const worktreePath = worktreePathFor(entry.worktreePattern, repoPath, issue);
+    await ensureWorktree({ repoPath, worktreePath, branch: "wt-branch", baseBranch: "main" });
+    const linear = new SucceedingFakeLinear([issue]);
+    const dispatcher = new FakeDispatcher();
+    const cleanupCalls: Array<{ issueId: string; repoPath: string }> = [];
+    dispatcher.cleanup = async (issueId, dispatchRepoPath) => {
+      cleanupCalls.push({ issueId, repoPath: dispatchRepoPath });
+    };
+    const { ctx } = contextWithLog(linear, makeConfig(), dispatcher, entry);
+
+    await mergeDetectWorker.run(ctx);
+
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(cleanupCalls).toEqual([{ issueId: issue.identifier, repoPath }]);
+  });
+
+  it("leaves a dirty worktree in place and logs why", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath, pr: { required: false, draft: false, ciRequired: true } });
+    const issue = makeIssue({ state: { id: "state-review", name: "In Review", type: "started", position: 3 } });
+    issue.comments = [mergedMarkerComment(issue, entry)];
+    const worktreePath = worktreePathFor(entry.worktreePattern, repoPath, issue);
+    await ensureWorktree({ repoPath, worktreePath, branch: "wt-branch", baseBranch: "main" });
+    writeFileSync(join(worktreePath, "scratch.txt"), "wip");
+    const linear = new SucceedingFakeLinear([issue]);
+    const { ctx, logs } = contextWithLog(linear, makeConfig(), new FakeDispatcher(), entry);
+
+    await mergeDetectWorker.run(ctx);
+
+    expect(existsSync(worktreePath)).toBe(true);
+    expect(logs.some((line) => line.includes("uncommitted changes"))).toBe(true);
+  });
+
+  it("skips cleanup entirely when loop.cleanupMergedWorktrees is false", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath, pr: { required: false, draft: false, ciRequired: true } });
+    const issue = makeIssue({ state: { id: "state-review", name: "In Review", type: "started", position: 3 } });
+    issue.comments = [mergedMarkerComment(issue, entry)];
+    const worktreePath = worktreePathFor(entry.worktreePattern, repoPath, issue);
+    await ensureWorktree({ repoPath, worktreePath, branch: "wt-branch", baseBranch: "main" });
+    const linear = new SucceedingFakeLinear([issue]);
+    const config = makeConfig({ loop: { ...makeConfig().loop, cleanupMergedWorktrees: false } });
+    const { ctx, logs } = contextWithLog(linear, config, new FakeDispatcher(), entry);
+
+    await mergeDetectWorker.run(ctx);
+
+    expect(existsSync(worktreePath)).toBe(true);
+    expect(logs).toEqual([]);
   });
 });

@@ -9,6 +9,7 @@
  */
 
 import {
+  cleanupMergedWork,
   GitHubClient,
   branchNameFor,
   inState,
@@ -96,6 +97,16 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
       const done = resolveState("done", states);
       await ctx.linear.updateIssue(issue.id, { stateId: done.id });
       ctx.bookkeeping.resetReviewCycles(issue.identifier);
+      if (ctx.config.loop.cleanupMergedWorktrees) {
+        const notes = await cleanupMergedWork({
+          repoPath,
+          worktreePattern: ctx.entry.worktreePattern,
+          baseBranch: ctx.entry.baseBranch,
+          issue,
+          dispatcher: ctx.dispatcher,
+        });
+        for (const note of notes) ctx.log(`merge-detect: ${note}`);
+      }
     } catch (error) {
       errors.push(`merge check/transition failed for ${issue.identifier}: ${String(error)}`);
     }

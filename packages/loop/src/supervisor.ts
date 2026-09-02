@@ -257,6 +257,8 @@ export interface SupervisorOptions {
   statusPath: string | null;
   version: string;
   team: string | null;
+  /** `--verbose`: emits per-tick timing, dispatch handle detail, reconcile counts, and full error stacks that the default output omits (diagnostics, not routing decisions — those already log unconditionally). */
+  verbose?: boolean;
 }
 
 export interface RunTickOptions {
@@ -283,6 +285,7 @@ export class Supervisor {
   readonly #team: string | null;
   readonly #startedAt: string;
   readonly #confirmer: Confirmer;
+  readonly #verbose: boolean;
 
   #runState: RunState = "starting";
   #pausedAt: string | null = null;
@@ -330,6 +333,13 @@ export class Supervisor {
     this.#team = options.team;
     this.#startedAt = this.#now().toISOString();
     this.#confirmer = options.confirmer;
+    this.#verbose = options.verbose ?? false;
+  }
+
+  /** `--verbose` only: under-the-hood detail (timings, request tracing, dispatch handles, full stacks) the default output omits. */
+  #logVerbose(message: string): void {
+    if (!this.#verbose) return;
+    this.#log(style("dim", `  · ${message}`));
   }
 
   get bookkeeping(): Bookkeeping {
@@ -407,6 +417,9 @@ export class Supervisor {
       }),
     );
     this.#bookkeeping.reconcile(liveIssueIds, liveDispatchIds, this.#now(), lockTtlMs(this.#config()));
+    this.#logVerbose(
+      `reconcile: ${running.length} issue(s) carrying agent:running, ${liveDispatchIds.size} of ${this.#handles.size} tracked handle(s) still live`,
+    );
     const dropped = before - this.#bookkeeping.state.inFlight.length;
     if (dropped > 0) {
       this.#log(`reconciled: dropped ${dropped} stale in-flight record(s)`);
@@ -572,6 +585,9 @@ export class Supervisor {
     void (async () => {
       try {
         const outcome = await this.#dispatcher.settle(handle);
+        this.#logVerbose(
+          `settled ${handle.dispatchId} (${handle.agent}${handle.issueId ? ` ${handle.issueId}` : ""}): status=${outcome.status} exitCode=${outcome.exitCode ?? "null"}`,
+        );
         if (outcome.status !== "settled" || (outcome.exitCode ?? 0) !== 0) {
           const pending = this.#bookkeeping.recordAttemptFailure(
             stage,
@@ -583,6 +599,7 @@ export class Supervisor {
         }
       } catch (error) {
         this.#log(`watchSettle failed for ${handle.dispatchId}: ${String(error)}`);
+        if (this.#verbose && error instanceof Error && error.stack) this.#logVerbose(error.stack);
       } finally {
         this.#bookkeeping.clearDispatch(handle.dispatchId);
         try {
@@ -609,6 +626,11 @@ export class Supervisor {
         const handle = await this.#dispatchWithFallback((dispatcher) => dispatcher.dispatch(request));
         this.#handles.set(handle.dispatchId, handle);
         this.#statuses.set(handle.dispatchId, "starting");
+        this.#logVerbose(
+          `dispatch ${handle.dispatchId} (${handle.agent}): cwd=${request.cwd} ` +
+            (handle.herdr ? `pane=${handle.herdr.paneId}` : `pid=${handle.pid ?? "unknown"}`) +
+            ` command="${request.command}"`,
+        );
         return handle;
       },
       status: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.status(handle)),
@@ -635,6 +657,7 @@ export class Supervisor {
       const beforeIds = new Set(this.#bookkeeping.state.inFlight.map((entry) => entry.dispatchId));
       this.#runningWorkers.add(worker.name);
       let report: WorkerReport;
+      const workerStartedAt = performance.now();
       try {
         report = await worker.run(this.#context(worker.name));
         const stage = isStageName(worker.name) ? worker.name : null;
@@ -645,6 +668,7 @@ export class Supervisor {
             `${style("yellow", `${report.decisions.length - report.dispatched.length} would dispatch`)}, ${report.skipped.length} skipped` +
             (report.errors.length > 0 ? `, ${style("red", `${report.errors.length} error(s)`)}` : ""),
         );
+        this.#logVerbose(`${worker.name}: ran in ${Math.round(performance.now() - workerStartedAt)}ms`);
         for (const decision of report.decisions) {
           const dispatched = launched.has(decision);
           const action = dispatched ? "dispatched" : "would dispatch";
@@ -660,6 +684,7 @@ export class Supervisor {
         }
       } catch (error) {
         this.#log(`${style("red", "✗")} ${worker.name} failed: ${String(error)}`);
+        if (this.#verbose && error instanceof Error && error.stack) this.#logVerbose(error.stack);
         report = {
           worker: worker.name as WorkerReport["worker"],
           ranAt: this.#now().toISOString(),

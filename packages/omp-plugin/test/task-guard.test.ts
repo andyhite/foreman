@@ -184,6 +184,7 @@ function makeConfig(): GlobalConfig {
       dispatcher: "print",
       workerModes: {},
       mergeDetection: true,
+      cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },

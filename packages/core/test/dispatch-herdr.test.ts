@@ -20,6 +20,7 @@ function makeConfig(): GlobalConfig {
       mode: "confirm",
       workerModes: {},
       mergeDetection: true,
+      cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
@@ -63,5 +64,83 @@ describe("HerdrDispatcher timeouts", () => {
   it("classifies HerdrUnavailableError with isHerdrUnavailable", () => {
     expect(isHerdrUnavailable(new HerdrUnavailableError("timed out"))).toBe(true);
     expect(isHerdrUnavailable(new Error("other"))).toBe(false);
+  });
+});
+
+describe("HerdrDispatcher.cleanup", () => {
+  it("closes the issue's tab when both the workspace and tab exist", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { workspaces: [{ label: "/repos/product", workspace_id: "w1" }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("tab") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { tabs: [{ label: "ENG-142", tab_id: "w1:t1" }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("tab") && argv.includes("close")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.cleanup("ENG-142", "/repos/product");
+
+    expect(calls).toEqual([
+      ["herdr", "workspace", "list"],
+      ["herdr", "tab", "list", "--workspace", "w1"],
+      ["herdr", "tab", "close", "w1:t1"],
+    ]);
+  });
+
+  it("is a no-op when the repo has no workspace yet", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        return Promise.resolve({ stdout: JSON.stringify({ result: { workspaces: [] } }), stderr: "", code: 0 });
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.cleanup("ENG-142", "/repos/product");
+
+    expect(calls).toEqual([["herdr", "workspace", "list"]]);
+  });
+
+  it("is a no-op when the workspace exists but the issue never got a tab", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { workspaces: [{ label: "/repos/product", workspace_id: "w1" }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.cleanup("ENG-142", "/repos/product");
+
+    expect(calls).toEqual([
+      ["herdr", "workspace", "list"],
+      ["herdr", "tab", "list", "--workspace", "w1"],
+    ]);
   });
 });

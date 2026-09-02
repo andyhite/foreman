@@ -6,7 +6,7 @@
  */
 
 import type { GitHubClient, LinearWriter, MergedRecord, ResolvedRepoEntry } from "@foreman/core";
-import { assertIssueInScope, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
+import { assertIssueInScope, cleanupMergedWork, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
 import { getEntry } from "../runtime.ts";
 
@@ -144,11 +144,19 @@ export async function runMerge(
     };
   }
 
+  const cleanupNotes = await cleanupMergedWork({
+    repoPath,
+    worktreePattern: repoSettings.worktreePattern,
+    baseBranch: repoSettings.baseBranch,
+    issue,
+  });
+  const cleanupSuffix = cleanupNotes.length > 0 ? ` (${cleanupNotes.join("; ")})` : "";
+
   if (gitMergeComplete) {
     const via = mergedPrNumber !== null ? `PR #${mergedPrNumber}` : `local ${repoSettings.merge.strategy}`;
-    return { merged: true, message: `Moved ${issueId} to Done (git merge via ${via} was already complete).` };
+    return { merged: true, message: `Moved ${issueId} to Done (git merge via ${via} was already complete).${cleanupSuffix}` };
   }
 
   const via = mergedPrNumber !== null ? `PR #${mergedPrNumber}` : repoSettings.merge.strategy;
-  return { merged: true, message: `Merged ${issueId} (${branch}) via ${via}; moved to Done.` };
+  return { merged: true, message: `Merged ${issueId} (${branch}) via ${via}; moved to Done.${cleanupSuffix}` };
 }

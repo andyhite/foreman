@@ -37,6 +37,7 @@ import {
   runApplyPass,
   writeStatusFile,
   TtyConfirmer,
+  verboseConfirmer,
   YOLO_CONFIRMER,
   type ConfirmRequest,
   type Confirmer,
@@ -44,6 +45,7 @@ import {
   type ControlHandlers,
   type Dispatcher,
   type EmittableEvent,
+  type LinearRequestEvent,
   type GlobalConfig,
   type Issue,
   type LinearWriter,
@@ -78,7 +80,7 @@ Usage: foreman team [key] [options]
 
   [key]                   Linear team key. Defaults to the sole team the credential can reach.
   --once                  Run one tick, then exit.
-  --verbose               Log every skip, not just dispatch counts.
+  --verbose               Log skip reasons, Linear request tracing, auto-approved actions, and full error stacks.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
   --no-control            Skip the control-plane socket/status.json; --once already implies this.
   --help                  Show this text.
@@ -190,6 +192,8 @@ export interface IntakeContext {
   now: () => Date;
   log: (message: string) => void;
   confirm(request: ConfirmRequest): Promise<boolean>;
+  /** `--verbose`: full error stacks alongside the one-line failures already logged unconditionally. */
+  verbose?: boolean;
 }
 
 export interface IntakeTickReport {
@@ -264,6 +268,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
             dispatched = true;
           } catch (error) {
             skipReason = `dispatch ${DISPATCH_COMMAND.triage} failed: ${String(error)}`;
+            if (ctx.verbose && error instanceof Error && error.stack) ctx.log(style("dim", `  · ${error.stack}`));
           }
         }
       }
@@ -324,6 +329,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
     }
   } catch (error) {
     ctx.log(`apply pass failed: ${String(error)}`);
+    if (ctx.verbose && error instanceof Error && error.stack) ctx.log(style("dim", `  · ${error.stack}`));
   }
 
   ctx.bookkeeping.save();
@@ -500,6 +506,21 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     console.log(`${style("cyan", "[foreman-team]")} ${message}`);
   };
 
+  /** `--verbose`: every GraphQL round-trip this process makes, success or failure. */
+  const traceLinearRequest = (event: LinearRequestEvent): void => {
+    if (!args.verbose) return;
+    const outcome = event.ok ? style("green", "✓") : style("red", "✗");
+    const retried = event.attempt > 0 ? ` (attempt ${event.attempt + 1})` : "";
+    log(
+      style(
+        "dim",
+        `  · linear ${outcome} ${event.operation}${retried}: ${Math.round(event.durationMs)}ms` +
+          (event.status !== null ? ` status=${event.status}` : "") +
+          (event.error ? ` — ${event.error}` : ""),
+      ),
+    );
+  };
+
   // A confirm-mode loop with no operator on the other end of stdin would
   // block on the first dispatch or Linear write forever — nobody is there
   // to answer. Fail loudly at startup instead of hanging silently. `foreman
@@ -521,9 +542,9 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   // (SPEC §3.11): the positional team key first, then `null` — the team
   // process has no registry entry, so `entryTeam` is always null and the
   // fallback is the sole team the credential can reach.
-  const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
+  const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
-  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
+  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
 
   const controlPaths = loopPaths(config, INTAKE_LOOP_ID, args.homePath ?? undefined);
   const intakeStateDir = controlPaths.dir;
@@ -537,7 +558,11 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     log,
   );
 
-  const confirmer: Confirmer = config.loop.mode === "confirm" ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
+  const baseConfirmer: Confirmer = config.loop.mode === "confirm" ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
+  // `TtyConfirmer` already logs every request it asks; only the silent
+  // yolo path needs wrapping so `--verbose` still shows what was auto-approved.
+  const confirmer: Confirmer =
+    args.verbose && config.loop.mode !== "confirm" ? verboseConfirmer(baseConfirmer, log) : baseConfirmer;
 
   const lock = new SupervisorLock(lockPathFor(intakeStateDir));
   lock.acquire(process.pid, new Date());
@@ -553,6 +578,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     now: () => new Date(),
     log,
     confirm: (request) => confirmer.confirm(request),
+    verbose: args.verbose,
   };
   const runtime = new IntakeRuntime();
 

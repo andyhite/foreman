@@ -147,7 +147,8 @@ export class HerdrDispatcher implements Dispatcher {
       return false;
     }
   }
-  async #ensureWorkspace(repoPath: string): Promise<string> {
+  /** Herdr's own workspace list, matched by repo-path label — `null` when no workspace exists yet. */
+  async #findWorkspaceId(repoPath: string): Promise<string | null> {
     // Maps save a little parsing within one process, but are insufficient for
     // a loop restarted around existing Herdr state. Re-read Herdr's own list
     // first so "one workspace per repo" holds across process lifetimes.
@@ -157,9 +158,13 @@ export class HerdrDispatcher implements Dispatcher {
       "list",
     ]);
     const listed = JSON.parse(stdout) as HerdrWorkspaceListResult;
-    const existing = listed.result.workspaces.find((workspace) => workspace.label === repoPath);
+    return listed.result.workspaces.find((workspace) => workspace.label === repoPath)?.workspace_id ?? null;
+  }
+
+  async #ensureWorkspace(repoPath: string): Promise<string> {
+    const existing = await this.#findWorkspaceId(repoPath);
     if (existing) {
-      return existing.workspace_id;
+      return existing;
     }
 
     const created = await this.#runChecked([
@@ -175,10 +180,8 @@ export class HerdrDispatcher implements Dispatcher {
     return workspaceId;
   }
 
-  async #ensureTab(workspaceId: string, label: string, cwd: string): Promise<string> {
-    // Like workspaces, tabs outlive this dispatcher instance. A process restart
-    // must locate the prior tab by its stable issue label rather than create a
-    // duplicate for every resumed dispatch.
+  /** Herdr's own tab list within `workspaceId`, matched by label — `null` when no tab exists yet. */
+  async #findTabId(workspaceId: string, label: string): Promise<string | null> {
     const { stdout } = await this.#runChecked([
       this.#config.agent.herdrBin,
       "tab",
@@ -187,9 +190,16 @@ export class HerdrDispatcher implements Dispatcher {
       workspaceId,
     ]);
     const listed = JSON.parse(stdout) as HerdrTabListResult;
-    const existing = listed.result.tabs.find((tab) => tab.label === label);
+    return listed.result.tabs.find((tab) => tab.label === label)?.tab_id ?? null;
+  }
+
+  async #ensureTab(workspaceId: string, label: string, cwd: string): Promise<string> {
+    // Like workspaces, tabs outlive this dispatcher instance. A process restart
+    // must locate the prior tab by its stable issue label rather than create a
+    // duplicate for every resumed dispatch.
+    const existing = await this.#findTabId(workspaceId, label);
     if (existing) {
-      return existing.tab_id;
+      return existing;
     }
 
     const created = await this.#runChecked([
@@ -357,6 +367,20 @@ export class HerdrDispatcher implements Dispatcher {
   async attach(handle: DispatchHandle): Promise<void> {
     if (!handle.herdr) return;
     await this.#runner.run([this.#config.agent.herdrBin, "agent", "focus", handle.herdr.agentName]);
+  }
+
+  /**
+   * Post-merge housekeeping (SPEC §12): closes the issue's tab, which takes
+   * its pane with it. A no-op when the repo has no workspace yet or the
+   * issue never got a tab (e.g. it was dispatched in print mode earlier) —
+   * cleanup finding nothing to close is success, not an error.
+   */
+  async cleanup(issueId: string, repoPath: string): Promise<void> {
+    const workspaceId = await this.#findWorkspaceId(repoPath);
+    if (!workspaceId) return;
+    const tabId = await this.#findTabId(workspaceId, issueId);
+    if (!tabId) return;
+    await this.#runChecked([this.#config.agent.herdrBin, "tab", "close", tabId]);
   }
 
   /**

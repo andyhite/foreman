@@ -19,6 +19,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
     mode: "yolo",
     workerModes: {},
     mergeDetection: true,
+    cleanupMergedWorktrees: true,
     stateDir: "~/.foreman/state",
   };
   return {

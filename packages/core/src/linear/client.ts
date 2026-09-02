@@ -132,6 +132,20 @@ interface GraphQlResponse<T> {
   errors?: GraphQlErrorEntry[];
 }
 
+/** One GraphQL round-trip's outcome — the verbose loop output's Linear tracing hook subscribes to this. */
+export interface LinearRequestEvent {
+  /** The document's own `query`/`mutation` name (e.g. `Issues`, `IssueUpdate`), not the field it selects. */
+  operation: string;
+  /** 0 on the first try, incremented on each retryable-status retry. */
+  attempt: number;
+  durationMs: number;
+  /** `null` when the request never reached a response (e.g. it timed out). */
+  status: number | null;
+  ok: boolean;
+  /** Present only when `ok` is false. */
+  error?: string;
+}
+
 /** Options accepted by the constructor; `fetch` is the test seam. */
 export interface LinearClientOptions {
   apiKey: string;
@@ -152,6 +166,14 @@ export interface LinearClientOptions {
    * freeze the whole singleton loop.
    */
   timeoutMs?: number;
+  /** Fired after every attempt (success, retry, or terminal failure) — the loop commands' `--verbose` tracing hook. Never called for cache hits. */
+  onRequest?: (event: LinearRequestEvent) => void;
+}
+
+/** The document's `query Name(...)`/`mutation Name(...)` identifier, or `"anonymous"` for the one inline viewer-id query that has none. */
+function operationName(document: string): string {
+  const match = /\b(?:query|mutation)\s+(\w+)/.exec(document);
+  return match?.[1] ?? "anonymous";
 }
 
 /** Hard ceiling on pagination loops — exhausting it with more pages remaining is a hard error, never a silent partial result. */
@@ -164,6 +186,7 @@ export class LinearClient implements LinearWriter {
   private readonly fetchImpl: FetchLike;
   private readonly teamScope: IssueFilter | null;
   private readonly timeoutMs: number;
+  private readonly onRequest: ((event: LinearRequestEvent) => void) | null;
   private readonly labelIdCache = new Map<string, IssueLabel>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
   private readonly projectInitiativeCache = new Map<string, InitiativeRef>();
@@ -183,6 +206,7 @@ export class LinearClient implements LinearWriter {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.teamScope = options.team ? { team: { key: { eq: options.team } } } : null;
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.onRequest = options.onRequest ?? null;
   }
 
   /**
@@ -204,6 +228,19 @@ export class LinearClient implements LinearWriter {
     attempt: number,
     signal: AbortSignal,
   ): Promise<T> {
+    const startedAt = performance.now();
+    const trace = (status: number | null, ok: boolean, error?: string): void => {
+      if (!this.onRequest) return;
+      this.onRequest({
+        operation: operationName(document),
+        attempt,
+        durationMs: performance.now() - startedAt,
+        status,
+        ok,
+        ...(error !== undefined ? { error } : {}),
+      });
+    };
+
     let response: Response;
     try {
       response = await this.fetchImpl(this.endpoint, {
@@ -217,12 +254,11 @@ export class LinearClient implements LinearWriter {
       });
     } catch (error) {
       if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
-        throw new LinearApiError(
-          `Linear API request timed out after ${this.timeoutMs}ms`,
-          null,
-          null,
-        );
+        const message = `Linear API request timed out after ${this.timeoutMs}ms`;
+        trace(null, false, message);
+        throw new LinearApiError(message, null, null);
       }
+      trace(null, false, String(error));
       throw error;
     }
 
@@ -232,11 +268,13 @@ export class LinearClient implements LinearWriter {
         // underlying socket pinned to the pool until the body is consumed
         // or GC'd, and every retryable status here is precisely the
         // rate-limit condition that can least afford a leaked connection.
-        await response.text();
+        const body = await response.text();
+        trace(response.status, false, `retrying: ${body}`);
         await this.backoff(response, signal);
         return this.requestWithRetry<T>(document, variables, attempt + 1, signal);
       }
       const body = await response.text();
+      trace(response.status, false, body);
       throw new LinearApiError(
         `Linear API request failed with status ${response.status}: ${body}`,
         response.status,
@@ -249,15 +287,15 @@ export class LinearClient implements LinearWriter {
       // A 200 with a GraphQL errors array is still a rate-limit/transient
       // failure in Linear's implementation for some resolvers; only the HTTP
       // status is documented as retryable, so errors here are terminal.
-      throw new LinearApiError(
-        payload.errors.map((entry) => entry.message).join("; "),
-        response.status,
-        payload.errors,
-      );
+      const message = payload.errors.map((entry) => entry.message).join("; ");
+      trace(response.status, false, message);
+      throw new LinearApiError(message, response.status, payload.errors);
     }
     if (payload.data === null || payload.data === undefined) {
+      trace(response.status, false, "Linear API returned no data");
       throw new LinearApiError("Linear API returned no data", response.status, payload.errors);
     }
+    trace(response.status, true);
     return payload.data;
   }
 

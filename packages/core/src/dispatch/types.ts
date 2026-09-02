@@ -54,6 +54,12 @@ export interface Dispatcher {
   settle(handle: DispatchHandle): Promise<DispatchOutcome>;
   /** herdr only: bring the operator to the pane. */
   attach?(handle: DispatchHandle): Promise<void>;
+  /**
+   * Post-merge housekeeping (SPEC §12): release whatever terminal state this
+   * dispatcher holds for the issue — herdr closes its tab; print mode has
+   * nothing to release and leaves this unimplemented.
+   */
+  cleanup?(issueId: string, repoPath: string): Promise<void>;
   /** True when this dispatcher's substrate is reachable right now. */
   available(): Promise<boolean>;
 }

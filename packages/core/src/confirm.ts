@@ -55,6 +55,23 @@ export const YOLO_CONFIRMER: Confirmer = {
   close: () => {},
 };
 
+/**
+ * Wraps any `Confirmer` so every request's summary/detail is logged before
+ * delegating — `TtyConfirmer` already logs what it asks, so this exists for
+ * `YOLO_CONFIRMER`: `--verbose` in yolo mode still wants to see what the
+ * loop is doing under the hood, just without blocking for an answer.
+ */
+export function verboseConfirmer(inner: Confirmer, log: (message: string) => void): Confirmer {
+  return {
+    confirm: async (request) => {
+      log(`confirm (auto): ${request.summary}`);
+      for (const line of request.detail ?? []) log(`  ${line}`);
+      return inner.confirm(request);
+    },
+    close: () => inner.close(),
+  };
+}
+
 /** Denies every action without prompting. The `--once`/non-TTY guard rejects before this is reachable; it exists so tests can pin "declined" behavior without a terminal. */
 export const DENY_CONFIRMER: Confirmer = {
   confirm: () => Promise.resolve(false),

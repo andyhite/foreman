@@ -1312,7 +1312,13 @@ from racing the first before its issues land, not this mechanism.
   default, per-repo `branchPattern`; base branch from `baseBranch` (§3.10).
 - Worktrees are disposable but must survive a block. No state outside the
   worktree, Linear, and the PR.
-- Cleanup of merged worktrees is a scheduled chore, not an agent responsibility.
+- Cleanup of merged worktrees and their herdr tabs happens automatically once
+  a merge is confirmed — `merge-detect` (§17.5) and the operator-invoked
+  `/foreman:merge` both call it right after moving the issue to Done. Gated
+  by `loop.cleanupMergedWorktrees` (default `true`), and skipped — with a
+  logged note, never an error — when the worktree still has uncommitted
+  changes. Never runs for a crashed or orphaned lock; that stays the
+  reaper's report-only territory (§11).
 
 ---
 

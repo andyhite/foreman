@@ -271,9 +271,11 @@ export async function ensureWorktree(
 
 
 /**
- * Merged-worktree cleanup only (SPEC §12: "Cleanup of merged worktrees is a
- * scheduled chore, not an agent responsibility"). Never called by an agent,
- * and never by the reaper — the reaper reports, the operator decides (§11).
+ * Merged-worktree cleanup only (SPEC §12), called from `cleanupMergedWork`
+ * once a merge is confirmed and the issue moves to Done. Never called by an
+ * agent, and never by the reaper — the reaper reports crashed/orphaned
+ * locks, the operator decides (§11); this only removes worktrees for work
+ * that has already landed.
  */
 export async function removeWorktree(
   repoPath: string,

@@ -35,7 +35,9 @@ import {
   resolveTeamKey,
   style,
   TtyConfirmer,
+  verboseConfirmer,
   YOLO_CONFIRMER,
+  type LinearRequestEvent,
   type LoopMode,
 } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping.ts";
@@ -60,6 +62,7 @@ interface ParsedArgs {
   team: string | null;
   homePath: string | null;
   noControl: boolean;
+  verbose: boolean;
   help: boolean;
 }
 
@@ -74,6 +77,7 @@ Usage: foreman repo [alias] [options]
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
   --home <path>            Home directory containing .foreman/config.json (default: real home).
   --no-control             Skip the control-plane socket/status.json; --once already implies this.
+  --verbose               Log Linear request tracing, dispatch handles, tick timing, and full error stacks.
   --help                   Show this text.
 
 Modes (loop.mode in ~/.foreman/config.json; --mode overrides):
@@ -93,6 +97,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     team: null,
     homePath: null,
     noControl: false,
+    verbose: false,
     help: false,
   };
 
@@ -134,6 +139,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       case "--no-control":
         parsed.noControl = true;
+        break;
+      case "--verbose":
+        parsed.verbose = true;
         break;
       case "--help":
       case "-h":
@@ -192,6 +200,25 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     throw error;
   }
 
+  const log = (message: string): void => {
+    console.log(`${style("cyan", `[foreman-repo:${entry.alias}]`)} ${message}`);
+  };
+
+  /** `--verbose`: every GraphQL round-trip this process makes, success or failure. */
+  const traceLinearRequest = (event: LinearRequestEvent): void => {
+    if (!args.verbose) return;
+    const outcome = event.ok ? style("green", "✓") : style("red", "✗");
+    const retried = event.attempt > 0 ? ` (attempt ${event.attempt + 1})` : "";
+    log(
+      style(
+        "dim",
+        `  · linear ${outcome} ${event.operation}${retried}: ${Math.round(event.durationMs)}ms` +
+          (event.status !== null ? ` status=${event.status}` : "") +
+          (event.error ? ` — ${event.error}` : ""),
+      ),
+    );
+  };
+
   const apiKey = resolveLinearApiKey(config);
   // `resolveTeamKey` needs a client only to call `teams()`, which happens
   // only when neither `--team` nor the entry's `team` supply a key. `team`
@@ -199,7 +226,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   // an unscoped client resolves the team first; every other call in this
   // process then goes through a second, team-scoped client (SPEC §3.11) —
   // simpler than threading an optional team through every query site.
-  const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
+  const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
 
   let team: string;
   try {
@@ -213,15 +240,11 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     }
     throw error;
   }
-  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team });
+  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
 
   const controlPaths = loopPaths(config, repoLoopId(entry.alias), args.homePath ?? undefined);
   const stateDir = controlPaths.dir;
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(stateDir));
-
-  const log = (message: string): void => {
-    console.log(`${style("cyan", `[foreman-repo:${entry.alias}]`)} ${message}`);
-  };
 
   // A confirm-mode loop with no operator on the other end of stdin would
   // block on the first dispatch or Linear write forever — nobody is there
@@ -249,7 +272,10 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     log,
   );
 
-  const confirmer = confirmationRequired(config.loop) ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
+  const baseConfirmer = confirmationRequired(config.loop) ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
+  // `TtyConfirmer` already logs every request it asks; only the silent
+  // yolo path needs wrapping so `--verbose` still shows what was auto-approved.
+  const confirmer = args.verbose && !confirmationRequired(config.loop) ? verboseConfirmer(baseConfirmer, log) : baseConfirmer;
 
   const supervisor = new Supervisor({
     config,
@@ -265,6 +291,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     statusPath: args.once || args.noControl ? null : controlPaths.status,
     version: LOOP_VERSION,
     team,
+    verbose: args.verbose,
   });
 
   supervisor.acquireLock();

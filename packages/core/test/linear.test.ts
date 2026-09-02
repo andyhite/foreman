@@ -249,6 +249,57 @@ describe("LinearClient retry", () => {
   });
 });
 
+describe("LinearClient onRequest tracing", () => {
+  it("fires with the operation name, attempt, and ok=true on success", async () => {
+    const events: Array<{ operation: string; attempt: number; ok: boolean; status: number | null }> = [];
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issue: baseWireIssue() } });
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: fetchStub,
+      onRequest: (event) => events.push(event),
+    });
+    await client.issue("ENG-1");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ operation: "IssueByIdentifier", attempt: 0, ok: true, status: 200 });
+  });
+
+  it("fires once per attempt, including retries, with the retryable status and an error message", async () => {
+    const events: Array<{ operation: string; attempt: number; ok: boolean; status: number | null; error?: string }> = [];
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return jsonResponse(429, { errors: [{ message: "rate limited" }] }, { "Retry-After": "0" });
+      }
+      return jsonResponse(200, { data: { issue: baseWireIssue() } });
+    };
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: fetchStub,
+      onRequest: (event) => events.push(event),
+    });
+    await client.issue("ENG-1");
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ operation: "IssueByIdentifier", attempt: 0, ok: false, status: 429 });
+    expect(events[0]?.error).toBeDefined();
+    expect(events[1]).toMatchObject({ operation: "IssueByIdentifier", attempt: 1, ok: true, status: 200 });
+  });
+
+  it("fires with ok=false and the GraphQL error message on a terminal failure", async () => {
+    const events: Array<{ ok: boolean; error?: string }> = [];
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: null, errors: [{ message: "Entity not found" }] });
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: fetchStub,
+      onRequest: (event) => events.push(event),
+    });
+    await expect(client.issue("ENG-1")).rejects.toThrow(LinearApiError);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.ok).toBe(false);
+    expect(events[0]?.error).toBe("Entity not found");
+  });
+});
+
 describe("LinearClient timeout", () => {
   it("rejects with LinearApiError when the request deadline elapses", async () => {
     const fetchStub: FetchLike = async (_url, init) => {

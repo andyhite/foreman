@@ -1,6 +1,10 @@
-import { describe, expect, it } from "bun:test";
-import { AGENT_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker } from "@foreman/core";
-import type { Comment, CommandRunner, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AGENT_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker, ensureWorktree, worktreePathFor } from "@foreman/core";
+import type { Comment, CommandRunner, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { runMerge } from "../src/commands/merge.ts";
 
@@ -273,5 +277,73 @@ describe("runMerge — partial failure recovery", () => {
     expect(second.message).toContain("already complete");
     expect(mergeCalls).toBe(1);
     expect((await flakyLinear.issue("ENG-1"))?.state.id).toBe(STATE_DONE.id);
+  });
+});
+
+describe("runMerge — worktree cleanup (SPEC §12)", () => {
+  let repoRoot: string;
+  let directBranchRepoPath: string;
+
+  beforeEach(() => {
+    repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-merge-cleanup-")));
+    directBranchRepoPath = join(repoRoot, "repo");
+    execFileSync("git", ["init", "--initial-branch=main", directBranchRepoPath], { encoding: "utf8" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: directBranchRepoPath, encoding: "utf8" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: directBranchRepoPath, encoding: "utf8" });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: directBranchRepoPath, encoding: "utf8" });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  function mergedMarkerComment(issue: Issue, entry: ResolvedRepoEntry) {
+    const record: MergedRecord = {
+      issueId: issue.identifier,
+      branch: issue.branchName,
+      baseBranch: entry.baseBranch,
+      mergeCommit: "deadbeef",
+      strategy: "squash",
+      mergedAt: "2026-06-01T00:00:00.000Z",
+    };
+    return {
+      id: "comment-merged",
+      body: encodeMarker(MARKER_KIND.merged, record, "Merged."),
+      createdAt: "2026-06-01T00:00:00.000Z",
+      user: { id: "bot-1", name: "bot", displayName: "bot" },
+      parentId: null,
+    };
+  }
+
+  it("removes the issue's clean worktree and reports it in the result message", async () => {
+    const directEntry: ResolvedRepoEntry = { ...entry, repoPath: directBranchRepoPath, pr: { required: false, draft: false, ciRequired: false } };
+    const issue = makeIssue({ comments: [] });
+    issue.comments = [mergedMarkerComment(issue, directEntry)];
+    const worktreePath = worktreePathFor(directEntry.worktreePattern, directBranchRepoPath, issue);
+    await ensureWorktree({ repoPath: directBranchRepoPath, worktreePath, branch: "wt-branch", baseBranch: "main" });
+    const linear = new FakeLinear([issue]);
+    const github = new GitHubClient({ runner: stubRunner(() => ({ stdout: "[]" })) });
+
+    const result = await runMerge(linear, github, "ENG-1", directEntry);
+
+    expect(result.merged).toBe(true);
+    expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("leaves a dirty worktree in place and notes it in the result message", async () => {
+    const directEntry: ResolvedRepoEntry = { ...entry, repoPath: directBranchRepoPath, pr: { required: false, draft: false, ciRequired: false } };
+    const issue = makeIssue({ comments: [] });
+    issue.comments = [mergedMarkerComment(issue, directEntry)];
+    const worktreePath = worktreePathFor(directEntry.worktreePattern, directBranchRepoPath, issue);
+    await ensureWorktree({ repoPath: directBranchRepoPath, worktreePath, branch: "wt-branch", baseBranch: "main" });
+    writeFileSync(join(worktreePath, "scratch.txt"), "wip");
+    const linear = new FakeLinear([issue]);
+    const github = new GitHubClient({ runner: stubRunner(() => ({ stdout: "[]" })) });
+
+    const result = await runMerge(linear, github, "ENG-1", directEntry);
+
+    expect(result.merged).toBe(true);
+    expect(result.message).toContain("uncommitted changes");
+    expect(existsSync(worktreePath)).toBe(true);
   });
 });

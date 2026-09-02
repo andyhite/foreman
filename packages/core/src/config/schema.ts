@@ -144,6 +144,12 @@ export const LoopSettingsSchema = Type.Object(
      * auto-transitions when a team workflow automation has been configured for it.
      */
     mergeDetection: Type.Boolean({ default: true }),
+    /**
+     * Remove a merged issue's worktree and close its herdr tab once
+     * merge-detect moves it to Done (SPEC §12). Skipped when the worktree
+     * still has uncommitted changes, so this never discards work.
+     */
+    cleanupMergedWorktrees: Type.Boolean({ default: true }),
     /** Loop lockfile and bookkeeping. `~` expands. */
     stateDir: Type.String({ default: "~/.foreman/state", minLength: 1 }),
   },
