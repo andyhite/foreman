@@ -37,6 +37,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      herdrLayout: "tab",
       orchestratorMaxBatches: 20,
     },
     repoDefaults: {

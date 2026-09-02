@@ -330,6 +330,36 @@ exactly what §17 describes.
   buys N concurrent agents and N `SingleResult`s in one `tool_result`, which is
   the mechanism §17.4 rests on.
 
+## Verified building the `agent.herdrLayout: "pane"` strategy
+
+- **A pane split only ever divides the one pane it names — it can never
+  re-parent a sibling that already exists beside it.** Measured live against
+  `herdr` 0.8.2 with `pane layout`'s `splits`/`panes` trees. Splitting an
+  existing tab's root pane *right first*, then splitting its *left* child
+  *down*, leaves the right pane at `height: 100` throughout — a later split
+  inside one child's subtree never touches its sibling's rect. But splitting
+  a pane *right* that already has a same-width sibling stacked *below* it
+  (i.e. two panes already share one `down` root split) only opens the new
+  pane beside the one it was called on, at that pane's own height; the
+  existing sibling keeps spanning the full tab width underneath it — two
+  panes now sit to the right of one, not a single column spanning both.
+  `agent.herdrLayout: "pane"`'s full-tab-height column is therefore only
+  guaranteed when its first split runs before anything else in the tab has
+  been split — in practice, when the loop's own pane is still the tab's sole
+  occupant at that moment.
+- **`pane move <id> --tab <same-tab> --split right` with no `--target-pane`
+  is a no-op against its own tab**, returning `"changed": false, "reason":
+  "same_tab"`. There is no CLI operation that takes an already-multi-pane
+  tab and wraps its whole existing tree as one child of a fresh top-level
+  split — confirming the limitation above is a real gap in the exposed API,
+  not a workaround Foreman failed to find.
+- **`pane rename <id> <label>` sets a `label` field that `pane list`,
+  `pane get`, and `pane split`'s own response all echo back**, and it
+  survives independently of any herdr *tab* label. `agent.herdrLayout:
+  "pane"` uses it to find a stage's row pane (`foreman-<stage>`) within one
+  shared tab across process restarts, the pane-scoped equivalent of how
+  `agent.herdrLayout: "tab"` finds a stage's tab by its own label.
+
 ## Verified capturing a `tool_result`
 
 - **`tool_result` carries `details` flat on the event. There is no enclosing

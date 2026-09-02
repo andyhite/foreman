@@ -110,7 +110,7 @@ interface HerdrWorktreeResult {
   result: { workspace: { workspace_id: string }; tab: { tab_id: string }; root_pane: { pane_id: string } };
 }
 interface HerdrPaneListResult {
-  result: { panes: { pane_id: string; tab_id: string }[] };
+  result: { panes: { pane_id: string; tab_id: string; label?: string }[] };
 }
 interface HerdrPaneResult {
   result: { root_pane?: { pane_id: string }; pane?: { pane_id: string } };
@@ -169,6 +169,14 @@ export class HerdrDispatcher implements Dispatcher {
   readonly #runner: HerdrRunner;
   readonly #scrubEnv: readonly string[];
   readonly #reservationsDir: string | undefined;
+  /**
+   * `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID`/`HERDR_PANE_ID` — injected by herdr
+   * into every pane it manages — locate *this process's own* pane when it
+   * is itself running inside herdr. `agent.herdrLayout: "pane"` anchors its
+   * column there; defaults to `process.env` and is overridable so tests
+   * don't depend on the real process environment.
+   */
+  readonly #env: NodeJS.ProcessEnv;
   /** One pending `agent wait` per batch, so sibling handles share it rather than waiting N times. */
   readonly #pendingSettles = new Map<string, Promise<DispatchOutcome>>();
   /** Settled batches served by each shared orchestrator, since its last (re)start — SPEC §17.4 recycling. */
@@ -176,12 +184,13 @@ export class HerdrDispatcher implements Dispatcher {
 
   constructor(
     config: GlobalConfig,
-    options?: { runner?: HerdrRunner; scrubEnv?: string[]; reservationsDir?: string },
+    options?: { runner?: HerdrRunner; scrubEnv?: string[]; reservationsDir?: string; env?: NodeJS.ProcessEnv },
   ) {
     this.#config = config;
     this.#runner = options?.runner ?? nodeHerdrRunner;
     this.#scrubEnv = options?.scrubEnv ?? [];
     this.#reservationsDir = options?.reservationsDir;
+    this.#env = options?.env ?? process.env;
   }
 
   /** Runs an herdr command and throws with its stderr when it exits non-zero. */
@@ -304,11 +313,7 @@ export class HerdrDispatcher implements Dispatcher {
         cwd,
         ...envArgs,
       ]);
-      const parsedPane = JSON.parse(split.stdout) as HerdrPaneResult;
-      const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
-      if (!paneId) {
-        throw new Error(`herdr pane split returned no pane id: ${split.stdout}`);
-      }
+      const paneId = this.#splitPaneId(split.stdout);
       return { tabId: existing, paneId };
     }
 
@@ -334,6 +339,116 @@ export class HerdrDispatcher implements Dispatcher {
   }
 
   /**
+   * The herdr pane/tab/workspace hosting *this* process, when it is itself
+   * running inside a managed pane — `null` when it isn't (e.g. a
+   * cron/launchd-run loop, SPEC §3.12), which is the signal
+   * `#ensureStagePane` uses to fall back to the tab strategy.
+   */
+  #callerPaneContext(): { workspaceId: string; tabId: string; paneId: string } | null {
+    const workspaceId = this.#env.HERDR_WORKSPACE_ID;
+    const tabId = this.#env.HERDR_TAB_ID;
+    const paneId = this.#env.HERDR_PANE_ID;
+    if (!workspaceId || !tabId || !paneId) return null;
+    return { workspaceId, tabId, paneId };
+  }
+
+  /** Shared by `#ensureTab`'s split call and `#ensurePaneColumn`'s — both hand back either `result.pane` or `result.root_pane`. */
+  #splitPaneId(stdout: string): string {
+    const parsed = JSON.parse(stdout) as HerdrPaneResult;
+    const paneId = parsed.result.pane?.pane_id ?? parsed.result.root_pane?.pane_id;
+    if (!paneId) {
+      throw new Error(`herdr pane split returned no pane id: ${stdout}`);
+    }
+    return paneId;
+  }
+
+  /**
+   * `agent.herdrLayout: "pane"`'s pane for a stage's shared orchestrator: a
+   * right-hand column split off the caller's own pane in its current tab,
+   * further split downward into one row per stage — instead of `#ensureTab`'s
+   * one tab per stage. Rows are found across process restarts by a
+   * `foreman-<stage>` pane label, the pane-scoped equivalent of `#ensureTab`'s
+   * tab label.
+   *
+   * The column only spans the whole tab's height when the caller's pane was
+   * the tab's sole occupant at the moment the first row split off it — herdr's
+   * pane tree has no operation to retroactively wrap panes that already sit
+   * beside it (`docs/VERIFIED.md`). Once created, later splits on either side
+   * (the operator's own panes, or more stage rows) never shrink the column,
+   * because each split only ever divides its own pane.
+   */
+  async #ensurePaneColumn(
+    caller: { workspaceId: string; tabId: string; paneId: string },
+    label: string,
+    cwd: string,
+    envArgs: string[],
+  ): Promise<{ tabId: string; paneId: string }> {
+    const paneLabel = `foreman-${label}`;
+    const { stdout } = await this.#runChecked([this.#config.agent.herdrBin, "pane", "list", "--workspace", caller.workspaceId]);
+    const listed = JSON.parse(stdout) as HerdrPaneListResult;
+    const tabPanes = listed.result.panes.filter((pane) => pane.tab_id === caller.tabId);
+
+    const existingRow = tabPanes.find((pane) => pane.label === paneLabel);
+    if (existingRow) {
+      // Same story as a reused tab in `#ensureTab`: the row already hosts a
+      // prior agent at its own idle prompt, not a plain shell.
+      const split = await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "pane",
+        "split",
+        "--pane",
+        existingRow.pane_id,
+        "--direction",
+        "down",
+        "--cwd",
+        cwd,
+        ...envArgs,
+      ]);
+      const paneId = this.#splitPaneId(split.stdout);
+      await this.#runChecked([this.#config.agent.herdrBin, "pane", "rename", paneId, paneLabel]);
+      return { tabId: caller.tabId, paneId };
+    }
+
+    // Another stage's row already anchors the column — stack this stage
+    // below it rather than opening a second column. Otherwise this is the
+    // column's first row: split the caller's own pane to the right.
+    const anyColumnPane = tabPanes.find((pane) => (pane.label ?? "").startsWith("foreman-"));
+    const splitFrom = anyColumnPane?.pane_id ?? caller.paneId;
+    const direction = anyColumnPane ? "down" : "right";
+    const split = await this.#runChecked([
+      this.#config.agent.herdrBin,
+      "pane",
+      "split",
+      "--pane",
+      splitFrom,
+      "--direction",
+      direction,
+      "--cwd",
+      cwd,
+      ...envArgs,
+    ]);
+    const paneId = this.#splitPaneId(split.stdout);
+    await this.#runChecked([this.#config.agent.herdrBin, "pane", "rename", paneId, paneLabel]);
+    return { tabId: caller.tabId, paneId };
+  }
+
+  /** Routes a stage's shared orchestrator to `#ensureTab` or `#ensurePaneColumn` per `agent.herdrLayout`. */
+  async #ensureStagePane(
+    workspaceId: string,
+    label: string,
+    cwd: string,
+    envArgs: string[],
+  ): Promise<{ tabId: string; paneId: string }> {
+    if (this.#config.agent.herdrLayout === "pane") {
+      const caller = this.#callerPaneContext();
+      if (caller) {
+        return this.#ensurePaneColumn(caller, label, cwd, envArgs);
+      }
+    }
+    return this.#ensureTab(workspaceId, label, cwd, envArgs);
+  }
+
+  /**
    * `worktree create`/`open` hand back a plain root pane with no way to
    * attach `--env` (verified live: neither subcommand accepts it), so it
    * never carries the scrubbed credentials or `FOREMAN_DISPATCH_ID` every
@@ -353,11 +468,7 @@ export class HerdrDispatcher implements Dispatcher {
       cwd,
       ...envArgs,
     ]);
-    const parsedPane = JSON.parse(split.stdout) as HerdrPaneResult;
-    const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
-    if (!paneId) {
-      throw new Error(`herdr pane split returned no pane id: ${split.stdout}`);
-    }
+    const paneId = this.#splitPaneId(split.stdout);
     await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", anchorPaneId]);
     return paneId;
   }
@@ -484,7 +595,7 @@ export class HerdrDispatcher implements Dispatcher {
       await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", existingPaneId]);
     }
     const stageLabel = request.agent.replace(/^foreman-/, "");
-    const { paneId } = await this.#ensureTab(workspaceId, stageLabel, request.cwd, envArgs);
+    const { paneId } = await this.#ensureStagePane(workspaceId, stageLabel, request.cwd, envArgs);
     return { paneId, startedFresh: true };
   }
 

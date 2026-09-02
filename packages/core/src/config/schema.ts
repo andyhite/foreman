@@ -215,6 +215,22 @@ export const AgentSettingsSchema = Type.Object(
     ),
     herdrBin: Type.String({ default: "herdr", minLength: 1 }),
     /**
+     * How a stage's shared orchestrator (SPEC §17.4) gets its herdr pane.
+     * `"tab"` (default) opens one tab per stage, growing sideways as more
+     * stages dispatch (SPEC §17.3's layout table). `"pane"` instead anchors
+     * everything to the tab hosting *this* process (`HERDR_TAB_ID`/
+     * `HERDR_PANE_ID`, only set when the loop itself runs inside a herdr
+     * pane): the first stage orchestrator splits that pane into a
+     * right-hand column, and every later stage splits an existing column
+     * pane downward into another row, instead of opening a new tab. The
+     * column spans the whole tab's height only when the loop's own pane is
+     * still the tab's sole occupant at that first split — herdr's pane tree
+     * has no operation to retroactively wrap panes that already exist
+     * beside it (verified in `docs/VERIFIED.md`). With no current herdr
+     * pane (e.g. a cron/launchd-run loop), `"pane"` falls back to `"tab"`.
+     */
+    herdrLayout: Type.Union([Type.Literal("tab"), Type.Literal("pane")], { default: "tab" }),
+    /**
      * Batches a stage's shared orchestrator serves before the loop recycles
      * its session (SPEC §17.4). The orchestrator carries no state between
      * batches, so this only bounds context growth — and even at 20 it still

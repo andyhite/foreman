@@ -77,7 +77,7 @@ function makeConfig(): GlobalConfig {
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql" },
-    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", orchestratorMaxBatches: 20 },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", herdrLayout: "tab", orchestratorMaxBatches: 20 },
     repoDefaults: {
       baseBranch: "main",
       pr: { required: true, draft: false, ciRequired: true },

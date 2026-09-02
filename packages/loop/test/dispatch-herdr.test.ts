@@ -9,7 +9,7 @@ import {
   sharedAgentName,
 } from "../src/dispatch/herdr.ts";
 
-function makeConfig(): GlobalConfig {
+function makeConfig(overrides: { herdrLayout?: "tab" | "pane" } = {}): GlobalConfig {
   return {
     repos: {},
     loop: {
@@ -34,6 +34,7 @@ function makeConfig(): GlobalConfig {
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      herdrLayout: overrides.herdrLayout ?? "tab",
       orchestratorMaxBatches: 20,
     },
     repoDefaults: {
@@ -470,6 +471,124 @@ describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
       }),
     ).rejects.toThrow(/agent_prompt_failed/);
     expect(calls.some((call) => call.includes("pane") && call.includes("close"))).toBe(false);
+  });
+});
+
+describe("HerdrDispatcher.dispatch — agent.herdrLayout: \"pane\"", () => {
+  const CALLER_ENV = { HERDR_WORKSPACE_ID: "w1", HERDR_TAB_ID: "w1:t1", HERDR_PANE_ID: "w1:p1" };
+
+  function paneLayoutRunner(tabPanes: { pane_id: string; tab_id: string; label?: string }[]) {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        if (argv.includes("agent") && argv.includes("get")) {
+          return Promise.resolve({ stdout: "", stderr: "", code: 1 });
+        }
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { workspaces: [{ workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("pane") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { panes: tabPanes } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("split")) {
+          const newPaneId = `w1:p${calls.length}`;
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: newPaneId } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("rename")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("start")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("prompt")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("report-metadata")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("tab") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("tab") && argv.includes("create")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    return { calls, runner };
+  }
+
+  it("splits the caller's own pane right to open the column's first row", async () => {
+    const { calls, runner } = paneLayoutRunner([{ pane_id: "w1:p1", tab_id: "w1:t1" }]);
+    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: CALLER_ENV });
+
+    const handles = await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall).toEqual([
+      "herdr", "pane", "split", "--pane", "w1:p1", "--direction", "right", "--cwd", "/repos/product",
+      "--env", "FOREMAN_DISPATCH_ID=dispatch-1",
+    ]);
+    const renameCall = calls.find((call) => call.includes("rename"));
+    expect(renameCall?.slice(-1)[0]).toBe("foreman-refine");
+    expect(calls.some((call) => call.includes("tab") && call.includes("create"))).toBe(false);
+    expect(handles[0]!.herdr?.paneId).toBe(renameCall?.[3]);
+  });
+
+  it("stacks a new stage's row below an existing column row instead of opening a second column", async () => {
+    const { calls, runner } = paneLayoutRunner([
+      { pane_id: "w1:p1", tab_id: "w1:t1" },
+      { pane_id: "w1:p5", tab_id: "w1:t1", label: "foreman-plan" },
+    ]);
+    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: CALLER_ENV });
+
+    await dispatcher.dispatch({
+      agent: "foreman-review",
+      command: "/foreman:review",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall).toEqual([
+      "herdr", "pane", "split", "--pane", "w1:p5", "--direction", "down", "--cwd", "/repos/product",
+      "--env", "FOREMAN_DISPATCH_ID=dispatch-1",
+    ]);
+    const renameCall = calls.find((call) => call.includes("rename"));
+    expect(renameCall?.slice(-1)[0]).toBe("foreman-review");
+  });
+
+  it("falls back to the tab strategy when the loop is not running inside a herdr pane", async () => {
+    const { calls, runner } = paneLayoutRunner([]);
+    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: {} });
+
+    const handles = await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    expect(calls.some((call) => call.includes("tab") && call.includes("create"))).toBe(true);
+    expect(calls.some((call) => call.includes("pane") && call.includes("split"))).toBe(false);
+    expect(handles[0]!.herdr).toEqual({ paneId: "w1:p2", agentName: "foreman-product-refine" });
   });
 });
 

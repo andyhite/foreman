@@ -62,6 +62,7 @@ interface ParsedArgs {
   homePath: string | null;
   noControl: boolean;
   verbose: boolean;
+  herdrLayout: "tab" | "pane" | null;
   help: boolean;
 }
 
@@ -76,6 +77,7 @@ Usage: foreman repo [alias] [options]
   --team <KEY>             Linear team key (default: the entry's team, or the sole reachable team).
   --home <path>            Home directory containing .foreman/config.json (default: real home).
   --no-control             Skip the control-plane socket/status.json; --once already implies this.
+  --herdr-layout <l>       Override agent.herdrLayout: tab | pane.
   --verbose               Log Linear request tracing, dispatch handles, tick timing, and full error stacks.
   --help                   Show this text.
 
@@ -97,6 +99,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     homePath: null,
     noControl: false,
     verbose: false,
+    herdrLayout: null,
     help: false,
   };
 
@@ -142,6 +145,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--verbose":
         parsed.verbose = true;
         break;
+      case "--herdr-layout": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --herdr-layout");
+        const value = argv[++i];
+        if (value !== "tab" && value !== "pane") {
+          throw new Error(`--herdr-layout must be one of tab|pane, got "${value ?? ""}"`);
+        }
+        parsed.herdrLayout = value;
+        break;
+      }
       case "--help":
       case "-h":
         parsed.help = true;
@@ -170,12 +182,17 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   for (const warning of warnings) console.error(style("yellow", `[foreman-repo] ${warning}`));
 
   // `--mode` is the operator's explicit override of the autonomy mode
-  // (SPEC §17.9); it wins over the config file for this run.
+  // (SPEC §17.9); it wins over the config file for this run. `--herdr-layout`
+  // is the same kind of override for `agent.herdrLayout`.
   const config = {
     ...loadedConfig,
     loop: {
       ...loadedConfig.loop,
       mode: args.mode ?? loadedConfig.loop.mode,
+    },
+    agent: {
+      ...loadedConfig.agent,
+      herdrLayout: args.herdrLayout ?? loadedConfig.agent.herdrLayout,
     },
   };
 

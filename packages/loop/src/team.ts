@@ -74,6 +74,7 @@ interface ParsedArgs {
   verbose: boolean;
   homePath: string | null;
   noControl: boolean;
+  herdrLayout: "tab" | "pane" | null;
   help: boolean;
 }
 
@@ -86,6 +87,7 @@ Usage: foreman team [key] [options]
   --verbose               Log skip reasons, Linear request tracing, auto-approved actions, and full error stacks.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
   --no-control            Skip the control-plane socket/status.json; --once already implies this.
+  --herdr-layout <l>      Override agent.herdrLayout: tab | pane.
   --help                  Show this text.
 
 Team-level: one process per team, not per repo. Per-repo work is
@@ -99,6 +101,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     verbose: false,
     homePath: null,
     noControl: false,
+    herdrLayout: null,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -113,6 +116,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--no-control":
         parsed.noControl = true;
         break;
+      case "--herdr-layout": {
+        if (i + 1 >= argv.length) throw new Error("missing value for --herdr-layout");
+        const value = argv[++i];
+        if (value !== "tab" && value !== "pane") {
+          throw new Error(`--herdr-layout must be one of tab|pane, got "${value ?? ""}"`);
+        }
+        parsed.herdrLayout = value;
+        break;
+      }
       case "--home": {
         if (i + 1 >= argv.length) throw new Error("missing value for --home");
         const value = argv[++i];
@@ -512,7 +524,14 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   );
   for (const warning of warnings) console.error(style("yellow", `[foreman-team] ${warning}`));
 
-  const config = loadedConfig;
+  // `--herdr-layout` is the operator's explicit override of `agent.herdrLayout` for this run.
+  const config = {
+    ...loadedConfig,
+    agent: {
+      ...loadedConfig.agent,
+      herdrLayout: args.herdrLayout ?? loadedConfig.agent.herdrLayout,
+    },
+  };
 
   const apiKey = resolveLinearApiKey(config);
 

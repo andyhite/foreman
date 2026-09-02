@@ -504,7 +504,8 @@ default defined here, not a constant):
     "lockTtlMarginMs": 1800000,                           // lock TTL is 2 × maxRuntimeMs + this (~4.5h by default)
     "ompBin": "omp",
     "approvalMode": "yolo",                               // §17.2, §17.3 — always-ask | write | yolo, passed to every dispatched parent session
-    "herdrBin": "herdr"
+    "herdrBin": "herdr",
+    "herdrLayout": "tab"                                  // §17.3 — tab (default) or pane
   },
 
   "repoDefaults": {                                       // inherited by every repos.* entry
@@ -1729,6 +1730,21 @@ entirely if left at defaults.
 
 Tabs are bounded by the WIP limit (§17.6), so at WIP 3 the layout stays legible
 rather than becoming a wall of panes.
+
+**`agent.herdrLayout` (`"tab"` default, or `"pane"`).** The table above is
+`"tab"`. Setting `agent.herdrLayout: "pane"` (or `--herdr-layout pane` on
+`foreman repo`/`foreman team`) replaces the stage-orchestrator row only: no
+new tab per stage, just one right-hand column split off the tab hosting the
+process itself (`HERDR_TAB_ID`/`HERDR_PANE_ID`, set only when that process is
+itself running inside a herdr pane), and one row per stage stacked downward
+inside that column. It falls back to `"tab"` when there is no such pane — a
+cron/launchd-run loop has no "current tab" to anchor on. The column spans the
+whole tab's height only if the process's own pane was the tab's sole occupant
+at the moment the first stage split off it; herdr's pane tree has no
+operation to retroactively wrap panes that already sit beside it, so panes
+the operator opened before that first split keep their own height
+(`docs/VERIFIED.md`). Implement agents are unaffected — they still get their
+own worktree-backed workspace either way.
 
 **Naming.** Agent names must match `[a-z][a-z0-9_-]{0,31}`, must be unique among
 live agents, and the alias is cleared when the agent exits — but herdr keeps a
