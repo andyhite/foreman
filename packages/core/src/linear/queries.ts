@@ -204,12 +204,16 @@ export const INITIATIVES_QUERY = `
   }
 `;
 
-/** An initiative's projects — used to check for the standing Maintenance project (SPEC §3.11). */
+/**
+ * An initiative's projects — used to check for the standing Maintenance
+ * project (SPEC §3.11) and, via the embedded `status`, to let the
+ * project-status worker skip a separate per-project status round trip.
+ */
 export const INITIATIVE_PROJECTS_QUERY = `
   query InitiativeProjects($initiativeId: String!) {
     initiative(id: $initiativeId) {
       projects(first: 250) {
-        nodes { id name }
+        nodes { id name status { id name type } }
       }
     }
   }

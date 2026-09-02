@@ -60,6 +60,8 @@ export interface TeamRef {
 export interface ProjectRef {
   id: LinearId;
   name: string;
+  /** Present when fetched via `initiativeProjects`, folding a per-project status read into that one query. */
+  status?: ProjectStatus | null;
 }
 
 /** Enough of a related issue to evaluate a gate against it without a second fetch. */

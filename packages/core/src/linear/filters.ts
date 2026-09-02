@@ -67,6 +67,17 @@ export function inProject(id: string): IssueFilter {
   return { project: { id: { eq: id } } };
 }
 
+/**
+ * Every issue under any of these initiatives, filtered through the project
+ * edge in a single hop (verified live: `IssueFilter` has no direct
+ * initiative field, but `NullableProjectFilter.initiatives` does — see
+ * docs/VERIFIED.md). Lets a worker that needs "every issue across an
+ * initiative's projects" ask once instead of once per project.
+ */
+export function inInitiatives(ids: readonly string[]): IssueFilter {
+  return { project: { initiatives: { some: { id: { in: ids } } } } };
+}
+
 export function hasBlockedByRelations(present: boolean): IssueFilter {
   return { hasBlockedByRelations: { eq: present } };
 }

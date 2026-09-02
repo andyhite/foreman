@@ -5,30 +5,43 @@
  * class of housekeeping pass as the reaper (§11), not a `nextActions` stage.
  */
 
-import { MAINTENANCE_PROJECT_NAME, inProject } from "@foreman/core";
+import { MAINTENANCE_PROJECT_NAME, inInitiatives } from "@foreman/core";
+import type { WorkflowStateType } from "@foreman/core";
 import { nextProjectStatus } from "../project-status.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 
 async function runProjectStatus(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
+  const initiativeIds = ctx.entry.initiativeIds;
 
-  for (const initiativeId of ctx.entry.initiativeIds) {
-    const projects = await ctx.linear.initiativeProjects(initiativeId);
+  const [projectLists, issuesInScope] = await Promise.all([
+    Promise.all(initiativeIds.map((initiativeId) => ctx.linear.initiativeProjects(initiativeId))),
+    initiativeIds.length === 0 ? Promise.resolve([]) : ctx.linear.issues({ filter: inInitiatives(initiativeIds), limit: 500 }),
+  ]);
+  if (issuesInScope.length >= 500) {
+    ctx.log(`project-status: query returned a full page of 500 issues; some projects' status may be stale this pass.`);
+  }
+  const issuesByProject = new Map<string, WorkflowStateType[]>();
+  for (const issue of issuesInScope) {
+    if (!issue.project) continue;
+    const states = issuesByProject.get(issue.project.id) ?? [];
+    states.push(issue.state.type);
+    issuesByProject.set(issue.project.id, states);
+  }
+
+  const seen = new Set<string>();
+  for (const projects of projectLists) {
     for (const project of projects) {
+      if (seen.has(project.id)) continue;
+      seen.add(project.id);
       if (project.name.trim().toLowerCase() === MAINTENANCE_PROJECT_NAME.toLowerCase()) continue;
 
       try {
-        const [status, issues] = await Promise.all([
-          ctx.linear.projectStatus(project.id),
-          ctx.linear.issues({ filter: inProject(project.id), limit: 500 }),
-        ]);
+        const status = project.status;
         if (!status) continue;
 
-        const next = nextProjectStatus(
-          status.type,
-          issues.map((issue) => issue.state.type),
-        );
+        const next = nextProjectStatus(status.type, issuesByProject.get(project.id) ?? []);
         // Native project-status transitions are Linear writes, gated the
         // same as any other action outside this process (SPEC §17.9).
         if (next && (await ctx.confirm({ kind: "linear-write", summary: `set project ${project.name} status to ${next}` }))) {

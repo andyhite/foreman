@@ -407,9 +407,10 @@ describe("refineWorker — scope resolution (SPEC §3.11)", () => {
 
 /**
  * Query-aware stub: `initiativeProjects` returns configured projects per
- * initiative, and `issues` inspects `query.filter` to answer either "does
- * this project have any issues" or the blocked-human count — the two shapes
- * `workers/plan.ts` actually issues.
+ * initiative (with each project's status folded in, mirroring the live
+ * query), and `issues` answers either "every issue under these initiatives"
+ * or the blocked-human count — the two shapes `workers/plan.ts` and
+ * `workers/project-status.ts` actually issue.
  */
 class PlanFakeLinear implements LinearWriter {
   updateProjectStatusCalls: Array<{ projectId: string; type: string }> = [];
@@ -424,9 +425,8 @@ class PlanFakeLinear implements LinearWriter {
     return null;
   }
   async issues(query: IssueQuery): Promise<Issue[]> {
-    const filter = query.filter as { project?: { id?: { eq?: string } } } | undefined;
-    const projectId = filter?.project?.id?.eq;
-    if (projectId) return this.issuesByProject[projectId] ?? [];
+    const filter = query.filter as { project?: { initiatives?: { some?: { id?: { in?: string[] } } } } } | undefined;
+    if (filter?.project?.initiatives?.some?.id?.in) return Object.values(this.issuesByProject).flat();
     return []; // BLOCKED_HUMAN_FILTER — no blocked-human issues in these tests.
   }
   async comments(): Promise<Comment[]> {
@@ -454,7 +454,8 @@ class PlanFakeLinear implements LinearWriter {
     return [];
   }
   async initiativeProjects(initiativeId: string): Promise<ProjectRef[]> {
-    return this.projectsByInitiative[initiativeId] ?? [];
+    const projects = this.projectsByInitiative[initiativeId] ?? [];
+    return projects.map((project) => ({ ...project, status: this.statusByProject[project.id] ?? null }));
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return [];
@@ -564,7 +565,7 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
     const project: ProjectRef = { id: "project-1", name: "Search revamp" };
     const linear = new PlanFakeLinear(
       { "initiative-1": [project] },
-      { "project-1": [makeIssue({ state: { id: "s", name: "In Progress", type: "started", position: 3 } })] },
+      { "project-1": [makeIssue({ project, state: { id: "s", name: "In Progress", type: "started", position: 3 } })] },
       { "project-1": { id: "status-planned", name: "Planned", type: "planned" } },
     );
     const entry = makeEntry({ initiativeIds: ["initiative-1"] });
@@ -580,7 +581,7 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
     const project: ProjectRef = { id: "project-1", name: "Search revamp" };
     const linear = new PlanFakeLinear(
       { "initiative-1": [project] },
-      { "project-1": [makeIssue({ state: { id: "s", name: "Todo", type: "unstarted", position: 2 } })] },
+      { "project-1": [makeIssue({ project, state: { id: "s", name: "Todo", type: "unstarted", position: 2 } })] },
       { "project-1": { id: "status-planned", name: "Planned", type: "planned" } },
     );
     const entry = makeEntry({ initiativeIds: ["initiative-1"] });
@@ -595,7 +596,7 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
     const maintenance: ProjectRef = { id: "project-maintenance", name: MAINTENANCE_PROJECT_NAME };
     const linear = new PlanFakeLinear(
       { "initiative-1": [maintenance] },
-      { "project-maintenance": [makeIssue({ state: { id: "s", name: "Done", type: "completed", position: 5 } })] },
+      { "project-maintenance": [makeIssue({ project: maintenance, state: { id: "s", name: "Done", type: "completed", position: 5 } })] },
       { "project-maintenance": { id: "status-started", name: "Started", type: "started" } },
     );
     const entry = makeEntry({ initiativeIds: ["initiative-1"] });
@@ -610,7 +611,7 @@ describe("projectStatusWorker — Linear status sync (SPEC §7.6a)", () => {
     const project: ProjectRef = { id: "project-1", name: "Search revamp" };
     const linear = new PlanFakeLinear(
       { "initiative-1": [project] },
-      { "project-1": [makeIssue({ state: { id: "s", name: "Done", type: "completed", position: 5 } })] },
+      { "project-1": [makeIssue({ project, state: { id: "s", name: "Done", type: "completed", position: 5 } })] },
       { "project-1": { id: "status-started", name: "Started", type: "started" } },
     );
     const entry = makeEntry({ initiativeIds: ["initiative-1"] });

@@ -6,19 +6,42 @@
  * "fully planned" flag to maintain (see `routing.ts`'s `routePlan`).
  */
 
-import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inProject, newDispatchId } from "@foreman/core";
+import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inInitiatives, newDispatchId } from "@foreman/core";
 import type { BoardSnapshot, DispatchDecision, PlanCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 
+/**
+ * A project is bare when it has zero issues in any state. Rather than ask
+ * Linear once per project (SPEC §17.5 already scopes this loop to a handful
+ * of initiatives, but a busy initiative can carry dozens of projects — that
+ * many round trips per tick was the actual cost here), this fetches every
+ * issue under the instance's initiatives in one query and checks project
+ * membership in memory.
+ */
 async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> {
+  const initiativeIds = ctx.entry.initiativeIds;
+  if (initiativeIds.length === 0) return [];
+
+  const [projectLists, issuesInScope] = await Promise.all([
+    Promise.all(initiativeIds.map((initiativeId) => ctx.linear.initiativeProjects(initiativeId))),
+    ctx.linear.issues({ filter: inInitiatives(initiativeIds), limit: 500 }),
+  ]);
+  if (issuesInScope.length >= 500) {
+    ctx.log(`plan: query returned a full page of 500 issues; some projects may look bare when they are not.`);
+  }
+  const projectsWithIssues = new Set(
+    issuesInScope.map((issue) => issue.project?.id).filter((id): id is string => id != null),
+  );
+
   const candidates: PlanCandidate[] = [];
-  for (const initiativeId of ctx.entry.initiativeIds) {
-    const projects = await ctx.linear.initiativeProjects(initiativeId);
+  const seen = new Set<string>();
+  for (const projects of projectLists) {
     for (const project of projects) {
+      if (seen.has(project.id)) continue;
+      seen.add(project.id);
       if (project.name.trim().toLowerCase() === MAINTENANCE_PROJECT_NAME.toLowerCase()) continue;
-      const issues = await ctx.linear.issues({ filter: inProject(project.id), limit: 1 });
-      if (issues.length === 0) candidates.push({ project });
+      if (!projectsWithIssues.has(project.id)) candidates.push({ project });
     }
   }
   return candidates;
