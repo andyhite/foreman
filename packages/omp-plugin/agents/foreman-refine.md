@@ -5,7 +5,7 @@ description: Move one prioritized issue from Backlog to Todo. Drafts the descrip
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, grep, glob, lsp, foreman_linear_read]
-thinking-level: high
+model: "@plan"
 blocking: true
 advisor: true
 prewalk: false

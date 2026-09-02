@@ -5,7 +5,7 @@ description: Move one refined issue from In Progress to In Review. Implements ag
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, edit, write, grep, glob, lsp, debug, bash, eval, foreman_linear_read, foreman_github_pr]
-thinking-level: medium
+model: "@default"
 blocking: false
 # prewalk: false is load-bearing here, not a default. The edits are the hard
 # part of this agent's job; handing off to a cheaper model exactly when

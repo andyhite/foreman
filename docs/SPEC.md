@@ -949,7 +949,7 @@ structured data written into Linear, not as the agent's return channel.
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
 blocking: false
-thinking-level: medium
+model: "@default"
 advisor: off
 prewalk: false
 autoload-skills: [foreman-triage-inbox, foreman-block-protocol]
@@ -1016,7 +1016,7 @@ first week before touching the threshold.
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
 blocking: true
-thinking-level: high
+model: "@plan"
 advisor: on
 prewalk: false
 autoload-skills: [foreman-refine-issue, foreman-spike, foreman-block-protocol]
@@ -1027,7 +1027,9 @@ schemaMode: strict
 Blocking because it's short-lived — inline is right both when the operator
 invokes it deliberately and in the loop's print-mode parent. Advisor on because
 refinement quality is where reasoning actually pays, and a second opinion
-catching a bad split before implementation is cheap.
+catching a bad split before implementation is cheap. Model role `plan` for the
+same reason — drafting a description and split that survives implementation is
+a reasoning task, not a lookup.
 
 1. Verify Priority ≠ `None`. Refuse if unprioritized.
 2. Read the product `Context` doc and the project brief (§4.7), Definition of
@@ -1055,7 +1057,7 @@ tools: [read, edit, write, search, lsp, dap, exec,
         foreman_linear_read, foreman_github_pr]
 spawns: false
 blocking: false
-thinking-level: medium
+model: "@default"
 advisor: off
 prewalk: false
 autoload-skills: [foreman-implement-issue, foreman-block-protocol]
@@ -1066,7 +1068,9 @@ schemaMode: strict
 Runs **non-isolated** in a Foreman-created worktree (§3.7). `prewalk: false` is
 load-bearing here, not a default — see §5. `foreman_github_pr` is the one
 mutation tool any agent holds — the PR must exist before yield so the block
-protocol can reference it.
+protocol can reference it. Model role `default` — editing against a concrete
+contract is not where the reasoning budget goes; `prewalk: false` is what
+guards against downgrading mid-edit, not a stronger role.
 
 1. Verify the lock. The dispatcher claimed `agent:running` with this dispatch's
    ID before the spawn (§11, §17.5); if the ID doesn't match, abort. The agent
@@ -1091,7 +1095,7 @@ protocol can reference it.
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
 blocking: false
-thinking-level: high
+model: "@slow"
 advisor: off
 prewalk: false
 autoload-skills: [foreman-review-diff, foreman-block-protocol]
@@ -1150,7 +1154,7 @@ from the repo or Linear. Operator, weekly, ~1 hour.
 tools: [read, search, lsp, foreman_linear_read]
 spawns: false
 blocking: false
-thinking-level: high
+model: "@plan"
 advisor: on
 prewalk: false
 autoload-skills: [foreman-plan-project, foreman-block-protocol]
@@ -1162,7 +1166,7 @@ schemaMode: strict
 |---|---|
 | **Transition** | none — creates new Backlog issues under a project; touches no existing issue's state |
 | **Trigger** | The loop's `plan` worker (§17.5), at any in-scope, non-Maintenance project with zero issues in any state. Never called mid-flow by another agent. |
-| **Model role** | high — decomposing a brief into a coherent issue set is a drafting task, not a lookup |
+| **Model role** | `plan` — decomposing a brief into a coherent issue set is a drafting task, not a lookup |
 
 This is the gap §3.12's `newProject { ..., seedIssues[] }` sketch always
 implied but nothing ever filled: intake can *propose* a milestone project,

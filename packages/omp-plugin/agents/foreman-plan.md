@@ -5,7 +5,7 @@ description: Decompose a bare project's brief into its first slate of Backlog is
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, grep, glob, lsp, foreman_linear_read]
-thinking-level: high
+model: "@plan"
 blocking: false
 advisor: true
 prewalk: false

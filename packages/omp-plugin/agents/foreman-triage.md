@@ -5,7 +5,7 @@ description: Move issues one state right out of Triage. Classifies, dedupes, att
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
 tools: [read, grep, glob, lsp, foreman_linear_read]
-thinking-level: low
+model: "@default"
 blocking: false
 prewalk: false
 autoloadSkills: [foreman-triage-inbox, foreman-block-protocol]
