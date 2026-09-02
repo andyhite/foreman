@@ -54,6 +54,7 @@ describe("PrintDispatcher.settle (SPEC §17.8: retained logs must be pruned on s
       command: "/foreman:implement ENG-1",
       dispatchId: "foreman-implement-ENG-1-20260601T120000Z-abc123",
       cwd: tmpdir(),
+      worktree: null,
     });
 
     const outcome = await dispatcher.settle(handle);

@@ -118,6 +118,7 @@ function makeDispatchingWorker(name = "refine"): Worker {
         command: `/foreman-refine ${issueId}`,
         dispatchId,
         cwd: ctx.entry.repoPath,
+        worktree: null,
       });
       ctx.bookkeeping.recordDispatch({
         agent: "foreman-refine",

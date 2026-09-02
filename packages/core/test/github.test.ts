@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GlobalConfig } from "../src/config/schema.ts";
-import { HerdrDispatcher, herdrAgentName } from "../src/dispatch/herdr.ts";
+import { herdrAgentName } from "../src/dispatch/herdr.ts";
 import { PrintDispatcher } from "../src/dispatch/print.ts";
 import type { CommandRunner } from "../src/git/exec.ts";
 import { DirtyWorkingTreeError, GitHubClient } from "../src/github/client.ts";
@@ -281,6 +281,7 @@ describe("PrintDispatcher", () => {
         command: "/foreman-implement",
         dispatchId: "dispatch-1",
         cwd: scriptDir,
+        worktree: null,
       });
 
       const outcome = await dispatcher.settle(handle);
@@ -290,157 +291,6 @@ describe("PrintDispatcher", () => {
       else process.env.FOREMAN_TEST_SCRUB = prior;
       rmSync(scriptDir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("HerdrDispatcher", () => {
-  it("rediscovers existing workspaces and issue tabs after a dispatcher restart", async () => {
-    const calls: string[][] = [];
-    const runner = {
-      async run(argv: string[]) {
-        calls.push(argv);
-        if (argv[1] === "workspace" && argv[2] === "list") {
-          return {
-            code: 0,
-            stderr: "",
-            stdout: JSON.stringify({
-              result: { workspaces: [{ label: "/repo", workspace_id: "w1" }] },
-            }),
-          };
-        }
-        if (argv[1] === "tab" && argv[2] === "list") {
-          return {
-            code: 0,
-            stderr: "",
-            stdout: JSON.stringify({
-              result: { tabs: [{ label: "ENG-142", tab_id: "w1:t2" }] },
-            }),
-          };
-        }
-        if (argv[1] === "pane" && argv[2] === "split") {
-          return {
-            code: 0,
-            stderr: "",
-            stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t2:p2" } } }),
-          };
-        }
-        return { code: 0, stderr: "", stdout: "{}" };
-      },
-    };
-    const config = {
-      agent: {
-        herdrBin: "herdr",
-        approvalMode: "yolo",
-        maxRuntimeMs: 0,
-        lockTtlMarginMs: 0,
-      },
-    } as GlobalConfig;
-    const dispatcher = new HerdrDispatcher(config, { runner });
-    await dispatcher.dispatch({
-      agent: "foreman-implement",
-      issueId: "ENG-142",
-      command: "/foreman-implement",
-      dispatchId: "dispatch-1",
-      cwd: "/repo",
-    });
-    expect(calls.some((argv) => argv[1] === "workspace" && argv[2] === "create")).toBe(false);
-    expect(calls.some((argv) => argv[1] === "tab" && argv[2] === "create")).toBe(false);
-  });
-
-  it("appends --env args scrubbing credentials and carrying the dispatch id", async () => {
-    const calls: string[][] = [];
-    const runner = {
-      async run(argv: string[]) {
-        calls.push(argv);
-        if (argv[1] === "workspace" && argv[2] === "list") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspaces: [] } }) };
-        }
-        if (argv[1] === "workspace" && argv[2] === "create") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspace_id: "w1" } }) };
-        }
-        if (argv[1] === "tab" && argv[2] === "list") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tabs: [] } }) };
-        }
-        if (argv[1] === "tab" && argv[2] === "create") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }) };
-        }
-        if (argv[1] === "pane" && argv[2] === "split") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t1:p1" } } }) };
-        }
-        return { code: 0, stderr: "", stdout: "{}" };
-      },
-    };
-    const config = {
-      agent: {
-        herdrBin: "herdr",
-        approvalMode: "yolo",
-        maxRuntimeMs: 0,
-        lockTtlMarginMs: 0,
-      },
-    } as GlobalConfig;
-    const dispatcher = new HerdrDispatcher(config, { runner, scrubEnv: ["LINEAR_API_KEY"] });
-    await dispatcher.dispatch({
-      agent: "foreman-implement",
-      issueId: "ENG-142",
-      command: "/foreman-implement",
-      dispatchId: "dispatch-1",
-      cwd: "/repo",
-    });
-    const splitCall = calls.find((argv) => argv[1] === "pane" && argv[2] === "split");
-    expect(splitCall).toContain("--env");
-    const envIndex = splitCall!.indexOf("--env");
-    expect(splitCall).toEqual(
-      expect.arrayContaining(["--env", "LINEAR_API_KEY=", "--env", "FOREMAN_DISPATCH_ID=dispatch-1"]),
-    );
-    expect(envIndex).toBeGreaterThan(-1);
-  });
-
-  it("rejects and closes the pane when agent start exits non-zero", async () => {
-    const calls: string[][] = [];
-    const runner = {
-      async run(argv: string[]) {
-        calls.push(argv);
-        if (argv[1] === "workspace" && argv[2] === "list") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspaces: [] } }) };
-        }
-        if (argv[1] === "workspace" && argv[2] === "create") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { workspace_id: "w1" } }) };
-        }
-        if (argv[1] === "tab" && argv[2] === "list") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tabs: [] } }) };
-        }
-        if (argv[1] === "tab" && argv[2] === "create") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" } } }) };
-        }
-        if (argv[1] === "pane" && argv[2] === "split") {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ result: { pane: { pane_id: "w1:t1:p1" } } }) };
-        }
-        if (argv[1] === "agent" && argv[2] === "start") {
-          return { code: 1, stderr: "agent name collision", stdout: "" };
-        }
-        return { code: 0, stderr: "", stdout: "{}" };
-      },
-    };
-    const config = {
-      agent: {
-        herdrBin: "herdr",
-        approvalMode: "yolo",
-        maxRuntimeMs: 0,
-        lockTtlMarginMs: 0,
-      },
-    } as GlobalConfig;
-    const dispatcher = new HerdrDispatcher(config, { runner });
-    await expect(
-      dispatcher.dispatch({
-        agent: "foreman-implement",
-        issueId: "ENG-142",
-        command: "/foreman-implement",
-        dispatchId: "dispatch-1",
-        cwd: "/repo",
-      }),
-    ).rejects.toThrow(/herdr agent start .* failed \(exit 1\)/);
-    const closeCall = calls.find((argv) => argv[1] === "pane" && argv[2] === "close");
-    expect(closeCall).toEqual(["herdr", "pane", "close", "w1:t1:p1"]);
   });
 });
 

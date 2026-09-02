@@ -43,7 +43,7 @@ export async function cleanupMergedWork(input: CleanupMergedWorkInput): Promise<
 
   if (input.dispatcher?.cleanup) {
     try {
-      await input.dispatcher.cleanup(input.issue.identifier, input.repoPath);
+      await input.dispatcher.cleanup(input.issue.identifier, input.repoPath, worktreePath);
     } catch (error) {
       notes.push(`failed to close ${input.issue.identifier}'s dispatcher tab: ${String(error)}`);
     }

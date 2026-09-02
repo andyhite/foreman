@@ -261,6 +261,7 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
               command,
               dispatchId,
               cwd: scratchCwd,
+              worktree: null,
             });
             void handle;
             ctx.bookkeeping.setLastTriageRun(now);

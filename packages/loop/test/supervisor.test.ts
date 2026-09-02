@@ -353,6 +353,7 @@ function makeDispatchAndWatchWorker(): Worker {
         command: "/foreman:implement ENG-1",
         dispatchId,
         cwd: ctx.entry.repoPath,
+        worktree: null,
       });
       ctx.bookkeeping.recordDispatch({
         agent: "foreman-implement",

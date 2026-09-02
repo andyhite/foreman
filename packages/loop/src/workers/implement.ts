@@ -7,8 +7,10 @@
 
 import {
   BLOCKED_HUMAN_FILTER,
+  branchNameFor,
   inState,
   newDispatchId,
+  worktreePathFor,
 } from "@foreman/core";
 import { nextActions } from "../routing.ts";
 import type { BoardSnapshot, DispatchDecision } from "../routing.ts";
@@ -52,12 +54,15 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
       continue;
     }
     try {
+      const worktreePath = worktreePathFor(ctx.entry.worktreePattern, ctx.entry.repoPath, issue);
+      const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
       const handle = await ctx.dispatcher.dispatch({
         agent: decision.agent,
         issueId: decision.issueId,
         command: decision.command,
         dispatchId,
         cwd: ctx.entry.repoPath,
+        worktree: { path: worktreePath, branch, baseBranch: ctx.entry.baseBranch },
       });
       ctx.bookkeeping.recordDispatch({
         agent: decision.agent,

@@ -87,7 +87,7 @@ const nodeHerdrRunner: HerdrRunner = {
 
 interface HerdrWorkspaceListResult {
   result: {
-    workspaces: { label: string; workspace_id: string }[];
+    workspaces: { workspace_id: string; active_tab_id: string; worktree?: { checkout_path: string } }[];
   };
 }
 interface HerdrTabListResult {
@@ -96,7 +96,14 @@ interface HerdrTabListResult {
   };
 }
 interface HerdrTabResult {
-  result: { tab: { tab_id: string } };
+  result: { tab: { tab_id: string }; root_pane: { pane_id: string } };
+}
+/** Shared by `worktree create` and `worktree open` — both hand back a fresh workspace/tab/pane. */
+interface HerdrWorktreeResult {
+  result: { workspace: { workspace_id: string }; tab: { tab_id: string }; root_pane: { pane_id: string } };
+}
+interface HerdrPaneListResult {
+  result: { panes: { pane_id: string; tab_id: string }[] };
 }
 interface HerdrPaneResult {
   result: { root_pane?: { pane_id: string }; pane?: { pane_id: string } };
@@ -104,14 +111,24 @@ interface HerdrPaneResult {
 interface HerdrMoveResult {
   result: { move_result: { pane: { pane_id: string }; previous_pane_id: string } };
 }
+/** Every failed herdr call's stderr is this shape (verified live across `workspace`/`tab`/`pane`/`worktree`). */
+interface HerdrErrorResponse {
+  error?: { code?: string; message?: string };
+}
 
 /**
- * Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents.
- * Keep the tail when truncating: batch dispatch ids carry their random suffix
- * there, while their common timestamp-heavy prefix is not distinguishing.
+ * Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live
+ * agents — and herdr keeps a `done` agent's name reserved until its pane is
+ * closed (verified live: `agent_name_taken`, even against a finished agent),
+ * which for an issue-scoped dispatch doesn't happen until post-merge
+ * `cleanup()`. Keying this off `issueId` would collide on every redispatch to
+ * the same issue before merge, so it always takes the dispatch id instead —
+ * `newDispatchId()` mints a fresh one per attempt. Keep the tail when
+ * truncating: the trailing random suffix is what's actually distinguishing,
+ * while the common timestamp-heavy prefix is not.
  */
-export function herdrAgentName(issueId: string): string {
-  const suffix = issueId.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+export function herdrAgentName(dispatchId: string): string {
+  const suffix = dispatchId.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
   return `foreman-${suffix.slice(-(32 - "foreman-".length))}`;
 }
 
@@ -147,7 +164,7 @@ export class HerdrDispatcher implements Dispatcher {
       return false;
     }
   }
-  /** Herdr's own workspace list, matched by repo-path label — `null` when no workspace exists yet. */
+  /** Herdr's own workspace list, matched by the worktree it was opened on — `null` when no workspace exists yet. */
   async #findWorkspaceId(repoPath: string): Promise<string | null> {
     // Maps save a little parsing within one process, but are insufficient for
     // a loop restarted around existing Herdr state. Re-read Herdr's own list
@@ -158,7 +175,10 @@ export class HerdrDispatcher implements Dispatcher {
       "list",
     ]);
     const listed = JSON.parse(stdout) as HerdrWorkspaceListResult;
-    return listed.result.workspaces.find((workspace) => workspace.label === repoPath)?.workspace_id ?? null;
+    return (
+      listed.result.workspaces.find((workspace) => workspace.worktree?.checkout_path === repoPath)
+        ?.workspace_id ?? null
+    );
   }
 
   async #ensureWorkspace(repoPath: string): Promise<string> {
@@ -167,11 +187,15 @@ export class HerdrDispatcher implements Dispatcher {
       return existing;
     }
 
+    // `--cwd` (not `--label`) is what makes Herdr adopt the repo as this
+    // workspace's worktree — the thing `#findWorkspaceId` matches on above.
+    // A `--label` alone is a free-form display string Herdr never compares
+    // against a path.
     const created = await this.#runChecked([
       this.#config.agent.herdrBin,
       "workspace",
       "create",
-      "--label",
+      "--cwd",
       repoPath,
       "--no-focus",
     ]);
@@ -193,15 +217,68 @@ export class HerdrDispatcher implements Dispatcher {
     return listed.result.tabs.find((tab) => tab.label === label)?.tab_id ?? null;
   }
 
-  async #ensureTab(workspaceId: string, label: string, cwd: string): Promise<string> {
+  /**
+   * `pane split --pane` takes a pane id, never a tab id (SPEC §17.3 — verified
+   * live against `herdr` 0.8.2, which returns `pane_not_found` for a tab id).
+   * A tab's anchor is its oldest surviving pane; `pane list` doesn't flag
+   * "root", so the first match in workspace order is that anchor.
+   */
+  async #findAnchorPaneId(workspaceId: string, tabId: string): Promise<string> {
+    const { stdout } = await this.#runChecked([
+      this.#config.agent.herdrBin,
+      "pane",
+      "list",
+      "--workspace",
+      workspaceId,
+    ]);
+    const listed = JSON.parse(stdout) as HerdrPaneListResult;
+    const anchor = listed.result.panes.find((pane) => pane.tab_id === tabId);
+    if (!anchor) {
+      throw new Error(`herdr tab ${tabId} has no panes`);
+    }
+    return anchor.pane_id;
+  }
+
+  async #ensureTab(
+    workspaceId: string,
+    label: string,
+    cwd: string,
+    envArgs: string[],
+  ): Promise<{ tabId: string; paneId: string }> {
     // Like workspaces, tabs outlive this dispatcher instance. A process restart
     // must locate the prior tab by its stable issue label rather than create a
     // duplicate for every resumed dispatch.
     const existing = await this.#findTabId(workspaceId, label);
     if (existing) {
-      return existing;
+      // A reused tab's anchor pane already hosts a prior agent at its own
+      // idle prompt, not a plain shell — herdr refuses `agent start` there
+      // (`agent_pane_busy`, verified live). Split off a fresh shell instead
+      // of touching it.
+      const anchor = await this.#findAnchorPaneId(workspaceId, existing);
+      const split = await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "pane",
+        "split",
+        "--pane",
+        anchor,
+        "--direction",
+        "down",
+        "--cwd",
+        cwd,
+        ...envArgs,
+      ]);
+      const parsedPane = JSON.parse(split.stdout) as HerdrPaneResult;
+      const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
+      if (!paneId) {
+        throw new Error(`herdr pane split returned no pane id: ${split.stdout}`);
+      }
+      return { tabId: existing, paneId };
     }
 
+    // A freshly created tab's root pane is already a plain shell at `cwd` —
+    // splitting it would only abandon that pane forever, doubling every
+    // single-shot issue's pane count for nothing (verified live: the root
+    // pane accepts `agent start` directly, no split needed).
     const created = await this.#runChecked([
       this.#config.agent.herdrBin,
       "tab",
@@ -213,16 +290,118 @@ export class HerdrDispatcher implements Dispatcher {
       "--label",
       label,
       "--no-focus",
+      ...envArgs,
     ]);
     const parsed = JSON.parse(created.stdout) as HerdrTabResult;
-    const tabId = parsed.result.tab.tab_id;
-    return tabId;
+    return { tabId: parsed.result.tab.tab_id, paneId: parsed.result.root_pane.pane_id };
+  }
+
+  /**
+   * `worktree create`/`open` hand back a plain root pane with no way to
+   * attach `--env` (verified live: neither subcommand accepts it), so it
+   * never carries the scrubbed credentials or `FOREMAN_DISPATCH_ID` every
+   * dispatch needs. Split a properly-enved pane off it and close the
+   * original, leaving exactly one pane behind rather than two.
+   */
+  async #replacePane(anchorPaneId: string, cwd: string, envArgs: string[]): Promise<string> {
+    const split = await this.#runChecked([
+      this.#config.agent.herdrBin,
+      "pane",
+      "split",
+      "--pane",
+      anchorPaneId,
+      "--direction",
+      "down",
+      "--cwd",
+      cwd,
+      ...envArgs,
+    ]);
+    const parsedPane = JSON.parse(split.stdout) as HerdrPaneResult;
+    const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
+    if (!paneId) {
+      throw new Error(`herdr pane split returned no pane id: ${split.stdout}`);
+    }
+    await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", anchorPaneId]);
+    return paneId;
+  }
+
+  /**
+   * A dispatch that writes code gets its own workspace bound to a real git
+   * worktree (SPEC §12) — Herdr's own `worktree` family shells `git worktree
+   * add`/`remove` for us, so this is the only place a writing dispatch
+   * touches git, mirroring how `#ensureWorkspace` owns the repo workspace.
+   */
+  async #ensureWorktreeWorkspace(
+    mainWorkspaceId: string,
+    worktree: { path: string; branch: string; baseBranch: string },
+    label: string,
+    envArgs: string[],
+  ): Promise<string> {
+    const { stdout } = await this.#runChecked([this.#config.agent.herdrBin, "workspace", "list"]);
+    const listed = JSON.parse(stdout) as HerdrWorkspaceListResult;
+    const existing = listed.result.workspaces.find(
+      (workspace) => workspace.worktree?.checkout_path === worktree.path,
+    );
+    if (existing) {
+      // Same story as a reused tab: the workspace's own pane already hosts a
+      // prior agent at its idle prompt, not a plain shell.
+      const anchor = await this.#findAnchorPaneId(existing.workspace_id, existing.active_tab_id);
+      return this.#replacePane(anchor, worktree.path, envArgs);
+    }
+
+    const created = await this.#runner.run([
+      this.#config.agent.herdrBin,
+      "worktree",
+      "create",
+      "--workspace",
+      mainWorkspaceId,
+      "--branch",
+      worktree.branch,
+      "--base",
+      worktree.baseBranch,
+      "--path",
+      worktree.path,
+      "--label",
+      label,
+      "--no-focus",
+    ]);
+    if (created.code === 0) {
+      const parsed = JSON.parse(created.stdout) as HerdrWorktreeResult;
+      return this.#replacePane(parsed.result.root_pane.pane_id, worktree.path, envArgs);
+    }
+
+    // The git worktree already exists on disk with no live workspace open on
+    // it (e.g. a prior process's workspace was closed without removing it,
+    // verified live: `worktree create` fails `worktree_create_failed` there)
+    // — adopt it with `worktree open` instead of failing the dispatch.
+    let errorCode: string | undefined;
+    try {
+      const parsedError = JSON.parse(created.stderr) as HerdrErrorResponse;
+      errorCode = parsedError.error?.code;
+    } catch {
+      // Unparsable stderr — fall through and surface the original failure.
+    }
+    if (errorCode !== "worktree_create_failed") {
+      throw new Error(`herdr worktree create failed (exit ${created.code}): ${created.stderr.trim()}`);
+    }
+    const opened = await this.#runChecked([
+      this.#config.agent.herdrBin,
+      "worktree",
+      "open",
+      "--workspace",
+      mainWorkspaceId,
+      "--path",
+      worktree.path,
+      "--label",
+      label,
+      "--no-focus",
+    ]);
+    const parsedOpen = JSON.parse(opened.stdout) as HerdrWorktreeResult;
+    return this.#replacePane(parsedOpen.result.root_pane.pane_id, worktree.path, envArgs);
   }
 
   async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
-    const label = request.issueId ?? "scratch";
     const workspaceId = await this.#ensureWorkspace(request.cwd);
-    const tabId = await this.#ensureTab(workspaceId, label, request.cwd);
 
     const envArgs: string[] = [];
     for (const name of this.#scrubEnv) {
@@ -230,25 +409,21 @@ export class HerdrDispatcher implements Dispatcher {
     }
     envArgs.push("--env", `FOREMAN_DISPATCH_ID=${request.dispatchId}`);
 
-    const paneResult = await this.#runChecked([
-      this.#config.agent.herdrBin,
-      "pane",
-      "split",
-      "--pane",
-      tabId,
-      "--direction",
-      "down",
-      "--cwd",
-      request.cwd,
-      ...envArgs,
-    ]);
-    const parsedPane = JSON.parse(paneResult.stdout) as HerdrPaneResult;
-    const paneId = parsedPane.result.pane?.pane_id ?? parsedPane.result.root_pane?.pane_id;
-    if (!paneId) {
-      throw new Error(`herdr pane split returned no pane id: ${paneResult.stdout}`);
-    }
-
-    const agentName = herdrAgentName(request.issueId ?? request.dispatchId);
+    // A dispatch that writes code gets its own worktree-backed workspace
+    // (SPEC §12); every readonly stage (triage/plan/refine/review) shares
+    // one tab per stage in the repo's main workspace instead, so N plan
+    // agents running at once split panes within a single "plan" tab rather
+    // than scattering across N per-issue tabs.
+    const paneId = request.worktree
+      ? await this.#ensureWorktreeWorkspace(
+          workspaceId,
+          request.worktree,
+          request.issueId ?? request.dispatchId,
+          envArgs,
+        )
+      : (await this.#ensureTab(workspaceId, request.agent.replace(/^foreman-/, ""), request.cwd, envArgs))
+          .paneId;
+    const agentName = herdrAgentName(request.dispatchId);
     try {
       // `agent start` only recognizes an agent that reaches Herdr's own
       // interactive-readiness state; omp's `-p`/`--print` mode processes a
@@ -371,6 +546,14 @@ export class HerdrDispatcher implements Dispatcher {
         "--timeout",
         String(timeoutMs),
       ]);
+      // Readonly stages share a per-stage tab; closing a finished pane keeps
+      // it from accumulating dead panes over the loop's whole lifetime. A
+      // writing dispatch's worktree pane stays open until post-merge
+      // `cleanup()` — the operator may still need to attach and inspect the
+      // code it wrote.
+      if (handle.agent !== "foreman-implement") {
+        await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", handle.herdr.paneId]);
+      }
       return {
         handle,
         status: code === 0 ? "settled" : "lost",
@@ -388,17 +571,17 @@ export class HerdrDispatcher implements Dispatcher {
   }
 
   /**
-   * Post-merge housekeeping (SPEC §12): closes the issue's tab, which takes
-   * its pane with it. A no-op when the repo has no workspace yet or the
-   * issue never got a tab (e.g. it was dispatched in print mode earlier) —
-   * cleanup finding nothing to close is success, not an error.
+   * Post-merge housekeeping (SPEC §12): closes the issue's worktree
+   * workspace, if it had one. Readonly dispatches never get a per-issue tab
+   * — they share a per-stage tab that `settle()` already prunes pane by pane
+   * as each attempt finishes — so there is nothing else to close here. A
+   * no-op when the issue had no worktree or its workspace is already gone.
    */
-  async cleanup(issueId: string, repoPath: string): Promise<void> {
-    const workspaceId = await this.#findWorkspaceId(repoPath);
+  async cleanup(issueId: string, repoPath: string, worktreePath: string | null): Promise<void> {
+    if (!worktreePath) return;
+    const workspaceId = await this.#findWorkspaceId(worktreePath);
     if (!workspaceId) return;
-    const tabId = await this.#findTabId(workspaceId, issueId);
-    if (!tabId) return;
-    await this.#runChecked([this.#config.agent.herdrBin, "tab", "close", tabId]);
+    await this.#runChecked([this.#config.agent.herdrBin, "workspace", "close", workspaceId]);
   }
 
   /**

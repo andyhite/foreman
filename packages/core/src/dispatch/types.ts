@@ -23,8 +23,15 @@ export interface DispatchRequest {
   command: string;
   /** Claimed by the extension before the spawn; the agent verifies it (SPEC §11). */
   dispatchId: string;
-  /** Working directory for the launched session. The issue's worktree, when it has one. */
+  /** Working directory for the launched session — always the repo checkout, never a worktree; see `worktree` for that. */
   cwd: string;
+  /**
+   * Set only for dispatches that write code: the isolated git worktree this
+   * run belongs in. `HerdrDispatcher` opens a dedicated worktree-backed
+   * workspace for it instead of grouping into a shared per-stage tab; other
+   * dispatchers ignore it and just use `cwd`.
+   */
+  worktree: { path: string; branch: string; baseBranch: string } | null;
 }
 
 export interface DispatchHandle {
@@ -56,10 +63,11 @@ export interface Dispatcher {
   attach?(handle: DispatchHandle): Promise<void>;
   /**
    * Post-merge housekeeping (SPEC §12): release whatever terminal state this
-   * dispatcher holds for the issue — herdr closes its tab; print mode has
-   * nothing to release and leaves this unimplemented.
+   * dispatcher holds for the issue — herdr closes the issue's worktree
+   * workspace when it had one; print mode has nothing to release and leaves
+   * this unimplemented.
    */
-  cleanup?(issueId: string, repoPath: string): Promise<void>;
+  cleanup?(issueId: string, repoPath: string, worktreePath: string | null): Promise<void>;
   /** True when this dispatcher's substrate is reachable right now. */
   available(): Promise<boolean>;
 }

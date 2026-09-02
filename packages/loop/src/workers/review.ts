@@ -138,6 +138,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
         command: decision.command,
         dispatchId,
         cwd: ctx.entry.repoPath,
+        worktree: null,
       });
       ctx.bookkeeping.recordDispatch({
         agent: decision.agent,
