@@ -86,41 +86,119 @@ do, with a YAML comment saying so.
 
 **The manifest lives at `.omp-plugin/plugin.json`.** §3.1 said
 `.claude-plugin/plugin.json`; that is the Claude Code fallback. The omp-native
-location is `.omp-plugin/`. (§3.1 has since been corrected.)
+location is `.omp-plugin/`. (§3.1 has since been corrected.) That manifest is
+now gone entirely: a hand-written project plugin root needs no manifest at
+all. Discovery unions the dependency map with the lock file's own entries, so
+a lock-only entry — `<repo>/.omp/plugins/omp-plugins.lock.json` naming
+`@foreman/omp-plugin`, with no `package.json` alongside it required in the
+plugin root itself — is sufficient. Verified against omp 18.1.4 by driving
+`omp acp` (`initialize` + `session/new`) in a scratch repo and reading the
+`available_commands_update` notification: `foreman:apply`, `foreman:merge`,
+`foreman:status`, `foreman:unblock`, the markdown commands `plan`, `refine`,
+`implement`, `triage`, and all seven `skill:foreman-*` entries appeared, and
+the process debug log showed all three foreman TTSR rules registered
+(`foreman-no-gate-bypass`, `foreman-no-interactive-questions`,
+`foreman-no-scope-expansion`). So the extension module, `skills/`,
+`commands/`, and `rules/` all load from a project-scope link with nothing
+more than the two files above.
 
-**A gitignored `dist/` ships a plugin whose extension never loads.** `omp
-plugin install <name>@<marketplace>` copies the plugin directory out of a git
-clone of the marketplace repo and symlinks it into the scope's `node_modules`;
-it never runs a package manager and never builds. `package.json` pointed
-`omp.extensions` at `./dist/extension.js` while `.gitignore` excluded `dist/`,
-so every repo that installed Foreman the normal way got a plugin with no
-extension entrypoint at all — and omp includes a declared entry only if the
-file exists, dropping a missing one without a warning. The failure is
+**Project plugin-root resolution walks up from the process cwd, unlike omp
+settings discovery.** The same probe run from `<repo>/sub/deep` loaded
+everything identically to running it at the repo root. This differs from omp
+*settings* discovery, which is cwd-only and does not walk ancestors — a
+distinction worth keeping straight, because it means a plugin stays active
+from any subdirectory while a settings override does not.
+
+**Symlink chains resolve, which is what lets one global indirection serve
+every repo.** `<repo>/.omp/plugins/node_modules/@foreman/omp-plugin ->
+~/.foreman/plugin -> <checkout>/packages/omp-plugin` loaded identically to a
+direct link in the same ACP probe. `foreman setup` writes the middle link
+once; every repo's `foreman init` writes only the first hop.
+
+**A broken symlink target degrades gracefully.** Pointing the repo-side link
+at a nonexistent target and starting a session did not crash it: the session
+still started and Foreman was simply absent, no error surfaced. `foreman
+doctor` is what turns that silence into a diagnosis.
+
+**`omp plugin link <dir> --scope project` silently ignores `--scope` and
+installs user-wide — the footgun this design exists to avoid.** Verified
+against omp 18.1.4: the command reports `✔ Linked @foreman/omp-plugin from
+<dir>`, writes nothing into the project, and adds an entry to
+`~/.omp/plugins/omp-plugins.lock.json` instead — the exact machine-wide leak
+that would make Foreman's rules, skills, and agents fire in every repo on the
+machine, not just the ones registered in `config.repos`. `--scope` is honored
+for a marketplace install (`name@marketplace`) alone. This is why activation
+writes the project plugin root directly instead of calling `omp plugin` at
+all — there is no `omp` invocation that reaches project scope from a local
+directory.
+
+**A gitignored `dist/` shipped a plugin whose extension never loaded — this
+is the failure the old marketplace-based install carried, now retired.** `omp
+plugin install <name>@<marketplace>` copied the plugin directory out of a git
+clone of the marketplace repo and symlinked it into the scope's
+`node_modules`; it never ran a package manager and never built. `package.json`
+pointed `omp.extensions` at `./dist/extension.js` while `.gitignore` excluded
+`dist/`, so every repo that installed Foreman the normal way got a plugin
+with no extension entrypoint at all — and omp includes a declared entry only
+if the file exists, dropping a missing one without a warning. The failure was
 especially convincing because `agents/`, `commands/`, `skills/`, and `rules/`
-are auto-discovered straight from the copied tree: `/foreman:plan` expanded its
-prompt exactly as designed while both tools, the task guard, the lock manager,
-the result appliers, and all four `pi.registerCommand` commands were absent.
-Confirmed by A/B: in a repo whose install lacked the bundle the agent reported
-no `foreman_linear_read` in any form, and the same repo loaded and called it
-top-level once given a copied tree that carried `dist/extension.js`.
-So the bundle is committed, and CI plus `check-contract.ts` guard it.
+are auto-discovered straight from the copied tree: `/foreman:plan` expanded
+its prompt exactly as designed while both tools, the task guard, the lock
+manager, and the result appliers were absent. Confirmed by A/B: in a repo
+whose install lacked the bundle the agent reported no `foreman_linear_read`
+in any form, and the same repo loaded and called it top-level once given a
+copied tree that carried `dist/extension.js`. The fix at the time was to
+commit the bundle; that fix has since been superseded (below) rather than
+kept, because committing it only patched this one symptom of the marketplace
+distribution path, not the path itself.
+
+**The version-keyed marketplace plugin cache served stale code indefinitely —
+the concrete reliability failure that motivated dropping the marketplace path
+altogether.** `~/.omp/plugins/cache/plugins/foreman___foreman___0.1.0/` was
+observed holding an older build than the working tree: `dist/extension.js`
+and five `src/` files differed, and `src/lock/manager.ts` existed only in the
+cache, not in the checkout. Because the plugin version was pinned at `0.1.0`
+and the catalog declared no `version`, `omp plugin upgrade` compared versions,
+found no change, and no-opped — so the cache served whatever it first cached
+forever, with no way to force a refresh short of deleting the cache
+directory by hand. `foreman update`'s new design has no cache to strand:
+every repo's plugin symlink resolves through the single global
+`~/.foreman/plugin` link straight to the checkout, so rebuilding the checkout
+is the only "upgrade" step there is.
+
+**`omp plugin list --json` reports nothing at all for a project-scope
+link — it only reads the user plugin root and the marketplace registries.**
+Probing it to decide whether a repo is activated therefore reports a healthy,
+fully-activated repo as uninstalled, which is exactly what the old
+`findPluginScopes` code did and exactly why it was wrong: `foreman update`
+used to surface "no project install; run `foreman init` there" against a
+repo that had just been initialized. (The table-vs-`--json` parsing footgun
+below was a second, independent bug in that same dead code path — worth
+keeping as a cautionary note about parsing `omp plugin list` output at all,
+not just about the column it targeted.) Activation state is no longer read
+from `omp`; `inspectRepoActivation` in `plugin-activation.ts` reads the
+repo's own lock file and resolves its own symlink instead.
 
 **`omp plugin list` prints the scope parenthesized, so only `--json` can be
-parsed.** The table renders one line per install as
-`  foreman@foreman (0.1.0) (project)` — id, then version in parentheses, then
-the scope in parentheses, dim-styled, with an optional ` [shadowed]`. A parse
-that looked for a bare `project` column therefore matched nothing and reported
-every healthy install as absent, which `foreman update` surfaced as "no project
-install; run `foreman init` there" against a repo that had just been
-initialized. `--json` returns `{ npm, marketplace }`, where `marketplace` holds
-one element per (plugin id, registry) pair — `{ id, scope, entries }`, the user
-element carrying `shadowedBy: "project"` when both exist — so a plugin
-installed at both scopes appears twice under one id and each element states its
-own scope. Verified against omp 18.1.4 by A/B on live output from a
-project-installed repo: the column parse returned
-`{ project: false, user: false }` and the JSON parse `{ project: true }`.
-An unreadable probe is now reported as itself rather than as an absent install,
-because those two demand opposite actions from the operator.
+parsed**, and even `--json` misses project-scope installs (above): the table
+renders one line per install as `  foreman@foreman (0.1.0) (project)` — id,
+then version in parentheses, then the scope in parentheses, dim-styled, with
+an optional ` [shadowed]`. A parse that looked for a bare `project` column
+matched nothing and reported every healthy install as absent. `--json`
+returns `{ npm, marketplace }`, where `marketplace` holds one element per
+(plugin id, registry) pair — `{ id, scope, entries }`, the user element
+carrying `shadowedBy: "project"` when both exist — so a plugin installed at
+both scopes appears twice under one id and each element states its own
+scope, when the plugin was marketplace-installed at all. Verified against
+omp 18.1.4 by A/B on live output from a project-installed repo: the column
+parse returned `{ project: false, user: false }` and the JSON parse
+`{ project: true }`.
+
+**`omp plugin uninstall <pkg>` removes the lock entry but leaves the
+`node_modules/<pkg>` symlink behind.** Verified against omp 18.1.4: a full
+cleanup has to delete that symlink itself, which is why `deactivateRepoPlugin`
+removes both the lock entry and the `node_modules/@foreman/omp-plugin`
+symlink rather than leaning on any `omp plugin` command to do it.
 
 **omp replaces an extension's bare `@sinclair/typebox` with its own shim, and
 the shim rejects `default: {}`.** Bisected with one-file probe extensions: a
@@ -149,15 +227,45 @@ accepted, JSON-serializable, `Value.Check` true, `Value.Default` populating.
 So the shim is escapable, and the earlier claim that vendoring could not help
 was wrong.
 
-**None of that is why the bundle exists.** The bundle exists because a
-marketplace install runs no package manager — the installed copy has no
-`node_modules` at all — and the plugin's only dependency, `@foreman/core`, is
-`private: true` and `workspace:*`. Bundling resolves the root TypeBox specifier
-at build time as a side effect, which is why the shim never fires in
-production. Adopting omptype in core instead is not an option: `packages/cli`
-ships the standalone `foreman` binary, depends on core, and has no omp
-dependency, and `foreman init` is what installs the omp plugin — so core would
-need omp's internals to read `~/.foreman/config.json` before omp is present.
+**That was not why the bundle existed, and the finding is now superseded —
+the plugin has no build step at all.** The bundle used to exist because a
+marketplace install ran no package manager — the installed copy had no
+`node_modules` at all. That premise is gone: every repo's plugin symlink now
+resolves through `~/.foreman/plugin` straight to the checkout, a normal
+workspace with `node_modules` at its root. Rather than keep bundling to
+route around the TypeBox shim, `omp.extensions` now names
+`./src/extension.ts` directly and omp loads it as TypeScript with no build
+step and no artifact.
+
+**A `./src/extension.ts` entry loads and registers everything, with no
+measurable startup cost.** Loaded over ACP against omp 18.1.4 from a repo
+with `dist/` deleted: all four extension commands
+(`foreman:status|apply|merge|unblock`) and all seven skills registered.
+End-to-end session startup was indistinguishable from the old bundled
+entrypoint — medians 6.53s source vs 6.75s bundled, both within the
+5.0–7.0s run-to-run variance observed across repeated runs.
+
+**omp's remap only ever touches the bare specifier — it never reaches into
+`node_modules`.** A probe extension with a deliberately broken
+`node_modules/@sinclair/typebox` symlink still loaded successfully, proving
+the bare `@sinclair/typebox` import is served entirely by omp's shim and
+never resolves through the filesystem. The `@sinclair/typebox/type` subpath
+import in the same probe reached real TypeBox and returned a plain JSON
+Schema object with a working `.properties`, an accepted `default: {}`, and a
+`JSON.stringify` that succeeds.
+
+**omp's facade returns a validator function, not a schema object.** The bare
+`@sinclair/typebox` import's result has its own enumerable keys — `ir,
+hasSteps, hasDefault, defaultValue, defaultOutput, hasDefaultOutput,
+errorConfig, clone, run, $` — plus a `safeParse` method, with no
+`.properties` anywhere on it, and `JSON.stringify` throws.
+
+**`pi.zod`, `pi.arktype`, and `pi.typebox` are injected members of `pi`, not
+importable modules.** omp exposes native omptype as `pi.arktype`, a
+zod-compatible omptype-backed wrapper as `pi.zod`, and the legacy TypeBox
+shim as `pi.typebox`, all attached to the `pi` object handed to a live
+extension rather than published as packages. Foreman's two tools already
+build their parameters with `pi.zod`.
 
 **A malformed frontmatter scalar silently strips a command's whole
 frontmatter.** `commands/triage.md` shipped

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "../typebox.ts";
 import {
   type GlobalConfig,
   GlobalConfigSchema,

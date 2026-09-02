@@ -10,15 +10,19 @@ const entrypoint = (): string => join(import.meta.dir, "..", "src", "main.ts");
 const checkoutRoot = (): string => join(import.meta.dir, "..", "..", "..");
 
 describe("parseArgs", () => {
-  it("treats setup and init as distinct commands, not aliases", () => {
+  it("treats every installer command as distinct, not as aliases", () => {
     expect(parseArgs(["setup"]).command).toBe("setup");
     expect(parseArgs(["init"]).command).toBe("init");
+    expect(parseArgs(["deinit"]).command).toBe("deinit");
+    expect(parseArgs(["doctor"]).command).toBe("doctor");
+    expect(parseArgs(["update"]).command).toBe("update");
     expect(parseArgs([]).command).toBeNull();
   });
 
-  it("parses --path for init and defaults it to unset", () => {
+  it("parses --path for init and deinit and defaults it to unset", () => {
     expect(parseArgs(["init"]).path).toBeNull();
     expect(parseArgs(["init", "--path", "/tmp/some-repo"]).path).toBe("/tmp/some-repo");
+    expect(parseArgs(["deinit", "--path", "/tmp/some-repo"]).path).toBe("/tmp/some-repo");
     expect(() => parseArgs(["init", "--path"])).toThrow(/missing value for --path/);
   });
 
@@ -38,11 +42,9 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["bogus"])).toThrow(/Unknown command "bogus"/);
   });
 
-  it("rejects setup-only flags on init", () => {
+  it("rejects setup-only flags on other commands", () => {
     expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
-    expect(() => parseArgs(["init", "--path", "/tmp", "--checkout", "/tmp/checkout"])).toThrow(
-      /--checkout applies to `foreman setup`/,
-    );
+    expect(() => parseArgs(["doctor", "--link"])).toThrow(/--link applies to `foreman setup`/);
   });
 
   it("rejects init-only flags on setup", () => {
@@ -50,7 +52,45 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["setup", "--initiative", "i1"])).toThrow(/--initiative applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--alias", "mine"])).toThrow(/--alias applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--team", "ENG"])).toThrow(/--team applies to `foreman init`/);
-    expect(() => parseArgs(["setup", "--skip-plugin"])).toThrow(/--skip-plugin applies to `foreman init`/);
+  });
+
+  /*
+   * The flags several commands share are the ones most likely to be misaimed,
+   * so the error has to name every owner rather than just the first.
+   */
+  it("accepts --checkout on setup, doctor, and update, and rejects it elsewhere", () => {
+    expect(parseArgs(["setup", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
+    expect(parseArgs(["doctor", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
+    expect(parseArgs(["update", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
+    expect(() => parseArgs(["init", "--checkout", "/tmp/c"])).toThrow(
+      /--checkout applies to `foreman setup` or `foreman doctor` or `foreman update`/,
+    );
+  });
+
+  it("accepts --skip-plugin on init and update, and rejects it elsewhere", () => {
+    expect(parseArgs(["init"]).skipPlugin).toBe(false);
+    expect(parseArgs(["init", "--skip-plugin"]).skipPlugin).toBe(true);
+    expect(parseArgs(["update", "--skip-plugin"]).skipPlugin).toBe(true);
+    expect(() => parseArgs(["deinit", "--skip-plugin"])).toThrow(
+      /--skip-plugin applies to `foreman init` or `foreman update`/,
+    );
+  });
+
+  it("parses --keep-registry for deinit only", () => {
+    expect(parseArgs(["deinit"]).keepRegistry).toBe(false);
+    expect(parseArgs(["deinit", "--keep-registry"]).keepRegistry).toBe(true);
+    expect(() => parseArgs(["init", "--keep-registry"])).toThrow(/--keep-registry applies to `foreman deinit`/);
+  });
+
+  it("parses --fix for doctor only", () => {
+    expect(parseArgs(["doctor"]).fix).toBe(false);
+    expect(parseArgs(["doctor", "--fix"]).fix).toBe(true);
+    expect(() => parseArgs(["update", "--fix"])).toThrow(/--fix applies to `foreman doctor`/);
+  });
+
+  it("parses --skip-pull for update only", () => {
+    expect(parseArgs(["update", "--skip-pull"]).skipPull).toBe(true);
+    expect(() => parseArgs(["setup", "--skip-pull"])).toThrow(/--skip-pull applies to `foreman update`/);
   });
 
   it("parses repeatable --initiative, --alias, and --team for init", () => {
@@ -70,40 +110,26 @@ describe("parseArgs", () => {
     expect(args.team).toBe("ENG");
   });
 
-  it("parses --skip-plugin for init", () => {
-    expect(parseArgs(["init"]).skipPlugin).toBe(false);
-    expect(parseArgs(["init", "--skip-plugin"]).skipPlugin).toBe(true);
+  it("parses --link as a standalone flag meaning 'run the foreman CLI from source'", () => {
+    expect(parseArgs(["setup"]).link).toBe(false);
+    expect(parseArgs(["setup", "--link"]).link).toBe(true);
   });
 
-  it("defaults githubRepo and link to unset", () => {
-    const args = parseArgs(["setup"]);
-    expect(args.githubRepo).toBe("andyhite/foreman");
-    expect(args.link).toBe(false);
-  });
-
-  it("parses --link as a standalone flag meaning 'link the foreman CLI to source'", () => {
-    const args = parseArgs(["setup", "--link"]);
-    expect(args.link).toBe(true);
-  });
-
-  it("parses --yes, --repo-source, --checkout, --home", () => {
-    const args = parseArgs([
-      "setup",
-      "--yes",
-      "--repo-source",
-      "someone/fork",
-      "--checkout",
-      "/tmp/checkout",
-      "--home",
-      "/tmp/home",
-    ]);
+  it("parses --yes, --checkout, and --home", () => {
+    const args = parseArgs(["setup", "--yes", "--checkout", "/tmp/checkout", "--home", "/tmp/home"]);
     expect(args.yes).toBe(true);
-    expect(args.githubRepo).toBe("someone/fork");
     expect(args.checkoutPath).toBe("/tmp/checkout");
     expect(args.home).toBe("/tmp/home");
   });
 
-  it("rejects --scope, --omp, and --skip-build now that the plugin install lives in init", () => {
+  /*
+   * `--repo-source` named the GitHub repo the omp marketplace catalog was
+   * fetched from. There is no marketplace any more — the plugin is linked from
+   * the local checkout — so accepting the flag would quietly imply Foreman
+   * still installs from somewhere else.
+   */
+  it("rejects flags from the retired marketplace install path", () => {
+    expect(() => parseArgs(["setup", "--repo-source", "someone/fork"])).toThrow(/Unrecognized argument/);
     expect(() => parseArgs(["setup", "--scope", "project"])).toThrow(/Unrecognized argument/);
     expect(() => parseArgs(["setup", "--omp", "install"])).toThrow(/Unrecognized argument/);
     expect(() => parseArgs(["setup", "--skip-build"])).toThrow(/Unrecognized argument/);
@@ -153,6 +179,7 @@ describe("foreman repo delegation", () => {
     const stdout = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     expect(stdout).toContain("Usage: foreman <command>");
-    expect(stdout).toContain("repo  ");
+    expect(stdout).toContain("deinit");
+    expect(stdout).toContain("doctor");
   });
 });

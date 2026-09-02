@@ -68,53 +68,86 @@ foreman/
     loop/                       # `foreman repo` + `foreman team` CLIs (§3.11, §3.12)
 ```
 
-The omp plugin is a Claude/OMP-compatible plugin directory. It is **always
-installed project-scoped**, into the specific repo `foreman init` registers —
-never user-scoped. A user-scoped install would put Foreman's agents, skills,
-TTSR rules, and slash commands into every omp session on the machine,
-including repos that never use Foreman; Foreman is per-repo by construction —
-the `repos` registry (§3.10) binds specific repos — so machine-wide is never
-the right scope. It is also the only scope omp's CLI can reach: `--scope` is
+The omp plugin is a Claude/OMP-compatible plugin directory. It is **activated
+project-scoped**, into the specific repo `foreman init` registers — never
+user-scoped. A user-scoped install would put Foreman's agents, skills, TTSR
+rules, and slash commands into every omp session on the machine, including
+repos that never use Foreman; Foreman is per-repo by construction — the
+`repos` registry (§3.10) binds specific repos — so machine-wide is never the
+right scope. It is also the only scope omp's own CLI can reach: `--scope` is
 honored for a marketplace install (`name@marketplace`) alone, while `omp
 plugin link <dir>` and installs from a local path are unconditionally
-user-wide regardless of any flag passed.
+user-wide regardless of any flag passed — verified against omp 18.1.4: `omp
+plugin link <dir> --scope project` reports success, writes nothing to the
+project, and adds a *user*-scope entry to `~/.omp/plugins/omp-plugins.lock.json`,
+the exact machine-wide leak this design exists to avoid.
 
-Every managed repo therefore runs the *published* plugin. Foreman's own
-checkout is the one exception: `foreman init` detects that it is registering
-the tree that owns `packages/omp-plugin` and repoints the installed symlink
-at the working copy, so plugin development does not need a publish
-round-trip per edit. That is a direct rewrite of omp's install layout rather
-than an omp command, for the reason above — see `packages/cli/src/plugin-link.ts`.
-`/reload-plugins` applies Markdown changes (agents, skills, commands, rules)
-without a restart either way; a changed extension needs `bun run build`.
+That is why activation is a direct filesystem write rather than an `omp
+plugin` call. A project plugin root is just two things, and omp discovers a
+plugin from them with no marketplace, cache, or network involved — verified
+against omp 18.1.4 by probing a scratch repo over ACP:
+
+```
+<repo>/.omp/plugins/omp-plugins.lock.json
+<repo>/.omp/plugins/node_modules/@foreman/omp-plugin -> <plugin dir>
+```
+
+`foreman init` writes exactly those two things, plus a `/.omp/plugins/` line
+in `.git/info/exclude` so the machine-local root never shows up in `git
+status`. `foreman deinit` is the exact inverse. Neither runs an `omp`
+subprocess, touches the network, or clones anything.
+
+The per-repo symlink does not target the checkout directly; it targets one
+stable indirection, `~/.foreman/plugin`, written once by `foreman setup`.
+omp resolves symlink chains, so repo → `~/.foreman/plugin` → checkout loads
+identically to a direct link, and re-pointing that one global link — at a
+fresh clone, a relocated checkout, or (for Foreman's own development) the
+working tree itself — updates every registered repo at once with no
+per-repo re-install and no separate "dev mode" install shape to drift from
+the real one. `packages/cli/src/plugin-activation.ts` owns both the global
+link and the per-repo activation; its header comment carries the full
+rationale above. `/reload-plugins` applies Markdown changes (agents, skills,
+commands, rules) without a restart either way; a changed extension needs
+`bun run build`.
 
 **`foreman update` — the machine-refresh contract.** After Foreman changes
 land on GitHub, `foreman update` is the only supported way to bring a
-machine current; a hand-rolled `omp plugin marketplace update` or `git pull`
-is not equivalent and MUST NOT be recommended in its place. It runs, in this
-fixed order: (1) pull the Foreman checkout (`git pull --ff-only`, skippable
-with `--skip-pull`); (2) rebuild it (`bun install && bun run build`); (3)
-refresh the omp marketplace catalog (`omp plugin marketplace update
-foreman`); (4) upgrade the omp plugin (`omp plugin upgrade foreman@foreman`)
-in every repo listed in the `repos` registry (§3.10) that has it installed,
-skippable entirely with `--skip-plugin`. Steps 3 and 4 MUST run in that
-order and MUST NOT be reordered or split across separate invocations,
-because `omp plugin upgrade` never fetches from GitHub — it only re-copies
-the marketplace clone already on disk, so upgrading before the marketplace
-refresh silently reinstalls stale content. Step 2 MUST precede any use of
-the `foreman` binary the pull produced, because the installed `foreman`
-command is a symlink to `packages/cli/dist/main.js`; a pull without a
-rebuild leaves the operator running the previous build under the new
-source. Step 4 MUST run against every registered repo in the same pass, not
-just the repo the operator happens to be standing in: the plugin cache is
-version-keyed (`~/.omp/plugins/cache/plugins/foreman___foreman___<version>`),
-every repo's project-scoped install is a symlink into that one shared
-directory, and upgrading a single repo past a version bump deletes the
-superseded cache directory — stranding every other registered repo's
-symlink. `foreman update` treats a marketplace-refresh failure as fatal to
-the whole run (it stops before touching any repo, per the invariant above)
-and treats each repo's plugin upgrade as independently best-effort, so one
-repo missing project scope or failing to upgrade does not block the rest.
+machine current; a hand-rolled `git pull` alone is not equivalent and MUST
+NOT be recommended in its place, because the installed `foreman` command is
+a symlink to `packages/cli/dist/main.js` and a pull without a rebuild leaves
+the operator running the previous build under the new source. It runs, in
+order: (1) pull the Foreman checkout (`git pull --ff-only`, skippable with
+`--skip-pull`); (2) rebuild it (`bun install && bun run build`); (3)
+re-assert the global plugin link at `~/.foreman/plugin`, self-healing it if
+it was moved or clobbered since `foreman setup` ran; (4) walk every repo in
+the `repos` registry (§3.10) and repair activation drift — a repo whose
+link or lock entry has gone stale is re-activated, a healthy repo is left
+untouched and reported as such — skippable entirely with `--skip-plugin`.
+There is **no per-repo install step**: every repo's plugin symlink resolves
+through `~/.foreman/plugin` to this checkout, so step 2 alone updates every
+registered repo at once. The version-keyed shared-cache hazard the previous
+marketplace-based install carried — upgrading one repo past a version bump
+silently deleting the cache directory every other repo's symlink pointed
+at, stranding them — does not exist in this design; there is no shared,
+version-keyed cache left to strand anything in.
+
+**The full command surface** is five installer commands with disjoint
+scope, because the machine, a repo, and the source checkout are three
+independently mutable things:
+
+| Command | Scope | Flags |
+| --- | --- | --- |
+| `foreman setup` | per-machine: tool preflight, the Linear credential, the one global plugin link at `~/.foreman/plugin` | `--link` (dev mode: run from this checkout's source, no rebuild to see changes), `--checkout <path>`, `--skip-linear` |
+| `foreman init` | per-repo: one `repos` entry, plus the two files that activate the plugin in that repo | `--path <dir>`, `--initiative <id>` (repeatable), `--alias <name>`, `--team <KEY>`, `--skip-plugin`, `--skip-linear` |
+| `foreman deinit` | per-repo: the exact inverse of `init` | `--path <dir>`, `--keep-registry` (deactivate the plugin but leave the `repos` entry in place) |
+| `foreman doctor` | verification and repair for both layers | `--fix`, `--checkout <path>` |
+| `foreman update` | pull, rebuild, then repair drift | `--checkout <path>`, `--skip-pull`, `--skip-plugin` |
+
+All five also accept `-y`/`--yes` (accept defaults for every prompt,
+non-interactive), `--home <path>` (home directory for `~/.foreman`; a test
+hook), and `--help`/`-h`. There is no `--repo-source` flag; the plugin has
+exactly one distribution path, the global link, so there is nothing left to
+choose a source for.
 
 Everything below `packages/omp-plugin/` except `package.json` and `src/` is
 *auto-discovered by convention*: omp scans an installed plugin tree for
@@ -124,7 +157,6 @@ module has to be declared.
 
 ```
 packages/omp-plugin/
-  .omp-plugin/plugin.json       # omp-native manifest (Claude's is .claude-plugin/)
   package.json                  # omp.extensions declaration — the ONLY declared path
   agents/                       # auto-discovered (§3.2)
     foreman-triage.md  foreman-refine.md  foreman-plan.md
@@ -148,7 +180,7 @@ packages/omp-plugin/
     render/                     # Linear comment and issue-body rendering (§3.1.1)
     enforce/  lock/  results/  commands/
   dist/
-    extension.js                # COMMITTED build artifact — see below
+    extension.js                # UNTRACKED — built by `bun run build`, see below
 ```
 
 `@foreman/core` carries the matching guard for the other fabricable surface:
@@ -173,36 +205,33 @@ array), not `omp.hooks`. Resolution is `pkg.omp` first with fallback to
 `pkg.pi`; declaring the wrong key means the extension silently never loads and
 nothing warns you. There is a public bug trail on exactly this.
 
-**The bundle is committed, and that is load-bearing.** `omp plugin install`
-copies this package out of a git clone of the marketplace repo and never runs a
-package manager, so a gitignored `dist/` means the declared entrypoint is simply
-absent — omp includes a declared entry only if the file exists, and drops a
-missing one silently. The auto-discovered markdown above still loads from the
-copied tree, so `/foreman:plan` expands normally while both tools, the task
-guard, the lock manager, and the result appliers are all missing. CI rebuilds
-and fails on drift; `check-contract.ts` fails when the entrypoint is missing.
+**The plugin has no build step and no artifact.** `omp.extensions` names
+`./src/extension.ts` directly, and omp loads TypeScript straight from the
+checkout rather than a built `dist/`. Verified against omp 18.1.4: loading
+the plugin over ACP from a repo with `dist/` deleted, all four extension
+commands (`foreman:status|apply|merge|unblock`) and all seven skills loaded,
+and end-to-end session startup was indistinguishable from the old bundled
+entrypoint (medians 6.53s source vs 6.75s bundled, run-to-run variance
+5.0–7.0s). This retires the whole failure class rather than guarding it:
+there is no artifact to go stale, to be forgotten to build, or to ship
+missing.
 
-**Bundling is not an omp requirement — it is a requirement of *this* package.**
-omp runs TypeScript directly, a `.ts` entrypoint loads fine, and an extension
-may import genuine runtime dependencies from its own `node_modules`. Exactly
-one reason is load-bearing:
+The one condition that would bring a build back is shipping the plugin to a
+machine with no checkout — a copied-directory install runs no package
+manager, so a source entrypoint would have no `node_modules`. SPEC's
+non-goals already exclude any such distribution channel.
 
-**The installed copy has no dependencies and cannot get any.** A marketplace
-install copies `packages/omp-plugin/` out of a git clone, symlinks it into the
-scope's `node_modules`, and runs no package manager — the installed tree has no
-`node_modules` at all. The plugin's sole dependency is `@foreman/core`, which
-is `private: true` and specified `workspace:*`: unpublishable to a registry and
-unresolvable by any package manager outside this monorepo. Bundling inlines it,
-so the shipped extension resolves nothing at runtime.
-
-Everything else about TypeBox is downstream of that and changes no decision.
-omp remaps an extension's bare `@sinclair/typebox` import to its
-`@oh-my-pi/omptype` facade, which rejects `default: {}` — `config/schema.ts`
-carries eleven of them. This never fires in the shipped plugin, because
-bundling resolves the specifier at build time. It is also escapable if it ever
-matters: the filter is `/^(?:@sinclair\/typebox|typebox)$/`, so the subpath
-`@sinclair/typebox/type` exports the same `Type` builder and reaches real
-TypeBox untouched.
+**TypeBox still has to go through a chokepoint, and that chokepoint is now
+the whole mechanism.** omp rewrites the *bare* `@sinclair/typebox` specifier
+to its `@oh-my-pi/omptype` facade, which rejects `default: {}` (throwing "A
+mutable default value must be specified as a factory") and returns opaque
+validators with no `.properties` that `JSON.stringify` throws on —
+`config/schema.ts` carries eleven `default: {}` uses that would break under
+it. The filter only matches the bare specifier and `typebox`, so the
+subpaths `@sinclair/typebox/type` and `/value` reach real TypeBox untouched.
+Core imports exclusively through `packages/core/src/typebox.ts`, which uses
+those un-remapped subpaths; `packages/core/test/typebox-import.test.ts`
+enforces that nothing in core reaches the bare specifier instead.
 
 **Core must not adopt omp's TypeBox**, which is otherwise the obvious
 simplification. `packages/cli` ships the standalone `foreman` binary, depends
@@ -210,17 +239,20 @@ on core, and has no omp dependency — `foreman init` is what installs the omp
 plugin in the first place, so it necessarily runs before omp's runtime exists
 in a repo. Routing core's schemas through `@oh-my-pi/omptype` would make the
 tool that bootstraps omp depend on omp's internals to read
-`~/.foreman/config.json`. The two libraries also disagree on semantics that
-§3.10's sparse-override design rests on: omptype validates a default as an
-instance of its schema, while TypeBox treats `default` as inert annotation that
-`Value.Default` later applies.
+`~/.foreman/config.json`. `pi.zod`, `pi.arktype`, and `pi.typebox` are also
+injected members of the `pi` object, not importable modules — they exist
+only inside a live extension, while core also runs in the standalone CLI and
+the loop, neither of which has a `pi` to inject from. The two libraries
+additionally disagree on semantics that §3.10's sparse-override design rests
+on: omptype validates a default as an instance of its schema, while TypeBox
+treats `default` as inert annotation that `Value.Default` later applies.
 
 ```json
 {
   "omp": {
     "name": "foreman",
     "description": "Agile SDLC workflow over Linear",
-    "extensions": ["./dist/extension.js"]
+    "extensions": ["./src/extension.ts"]
   }
 }
 ```
@@ -461,8 +493,9 @@ can live in the dotfiles repo like any other machine config. `foreman init`,
 run once per repo inside that repo, is the command that produces one `repos`
 entry **and** installs the omp plugin project-scoped into that repo (§3.1);
 `foreman setup` never runs global setup and never touches this table — it
-installs no plugin at all, only the marketplace catalog the later `init`
-installs from.
+writes the single global plugin link at `~/.foreman/plugin` and nothing
+repo-specific; `foreman init` is what writes the per-repo `repos` entry and
+the per-repo plugin activation.
 
 The registry key is named `repos`, not `projects` — in this document
 "project" means a Linear milestone (§4.1), and overloading it for repo
@@ -1571,10 +1604,11 @@ to have built it that way.
 
 ## 16. Verified vs. assumed
 
-**Verified against omp documentation:** plugin layout and marketplace catalog
-format; user vs. project install scopes; the `omp.extensions` manifest key and
-its silent-failure mode; agent discovery precedence, case sensitivity, and
-`.omp`-roots-only scanning; skill provider priorities; `tools` allowlist
+**Verified against omp documentation:** project-plugin-root layout (lock file
+plus a `node_modules` symlink, no manifest required) and the `omp.extensions`
+manifest key and its silent-failure mode; user vs. project install scopes;
+agent discovery precedence, case sensitivity, and `.omp`-roots-only scanning;
+skill provider priorities; `tools` allowlist
 semantics including forced `hub` and `exec` expansion; `spawns` granting the
 `task` tool; `blocking` inline-vs-background execution and that no bundled agent
 sets it; `output` / `schemaMode` precedence and strict validation; `advisor`
@@ -2042,8 +2076,8 @@ sessions, and a `yolo`-mode loop can dispatch agents pinned to a stricter
 
 ## 18. Build order
 
-1. **Plugin skeleton + Linear config.** Correct `omp.extensions` key, local
-   marketplace install, `/reload-plugins` loop working. The `core` config
+1. **Plugin skeleton + Linear config.** Correct `omp.extensions` key, the
+   two-file per-repo activation, `/reload-plugins` loop working. The `core` config
    loader with schema validation, layering, and defaults (§3.10). Workspace
    topology per §4.0: single team, default issue template → Triage,
    initiatives enabled, one initiative per product (grouping prefixes where
@@ -2124,7 +2158,8 @@ that dispatches confidently into a routing bug.
 - A central daemon watching all of Linear — the instance model (§3.11) is
   per-repo by design
 - An `area:` ontology beyond what `foreman-implement` reads
-- Publishing to a public marketplace before it works locally
+- A public plugin marketplace; the design has no marketplace or distribution
+  channel beyond the single global symlink `foreman setup` writes
 - Config keys that can disable gates, WIP limits, backpressure, the lock
   protocol, or propose-before-apply — config tunes parameters, never removes
   invariants (§3.10)

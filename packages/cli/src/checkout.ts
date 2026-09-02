@@ -1,7 +1,6 @@
 /**
  * Locates the Foreman checkout that a `foreman setup` invocation is running
- * from — the source of the omp-plugin directory that dev mode links and that
- * `bun run build` builds.
+ * from — the source of the omp-plugin directory that dev mode links.
  *
  * Named for the checkout, not the repo: "repo" already means two other things
  * in this CLI — the `foreman repo` supervisor command, and a `repos` registry

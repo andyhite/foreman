@@ -34,23 +34,6 @@ jobs:
       - name: Build every package
         run: bun run build
 
-      # The plugin's `omp.extensions` entrypoint is a tracked build artifact.
-      # `omp plugin install` copies this package out of a git clone and never
-      # runs a package manager, so a stale or missing bundle ships an extension
-      # that silently never loads (docs/VERIFIED.md). `bun build` is
-      # byte-deterministic, so a rebuild on a clean tree must be a no-op.
-      - name: The plugin bundle is committed and current
-        run: |
-          if [ ! -f packages/omp-plugin/dist/extension.js ]; then
-            echo "::error::packages/omp-plugin/dist/extension.js is missing. It is the plugin's omp.extensions entrypoint and must be committed."
-            exit 1
-          fi
-          if ! git diff --quiet -- packages/omp-plugin/dist/extension.js; then
-            echo "::error::The committed plugin bundle is stale. Run 'bun run build' and commit packages/omp-plugin/dist/extension.js."
-            git --no-pager diff --stat -- packages/omp-plugin/dist/extension.js
-            exit 1
-          fi
-
       - name: Exercise the built CLI
         run: bun packages/cli/dist/main.js --help
 

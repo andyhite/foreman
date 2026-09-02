@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { expandHome } from "../config/load.ts";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "../typebox.ts";
 import type { GlobalConfig } from "../config/schema.ts";
 import { INTAKE_LOOP_ID, type LoopId, type LoopKind, type LoopPaths, loopPaths, repoLoopId } from "./paths.ts";
 import { probeSocket } from "./client.ts";

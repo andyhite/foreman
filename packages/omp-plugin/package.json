@@ -7,10 +7,7 @@
   "omp": {
     "name": "foreman",
     "description": "Agile SDLC workflow over Linear",
-    "extensions": ["./dist/extension.js"]
-  },
-  "scripts": {
-    "build": "bun build ./src/extension.ts --outdir ./dist --target node --format esm --external '@oh-my-pi/*'"
+    "extensions": ["./src/extension.ts"]
   },
   "dependencies": {
     "@foreman/core": "workspace:*"

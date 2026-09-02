@@ -1,4 +1,4 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, Type } from "../typebox.ts";
 import { TYPE_LABELS } from "../domain/labels.ts";
 import { envelope } from "./envelope.ts";
 

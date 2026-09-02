@@ -2,13 +2,22 @@
 /**
  * `foreman` CLI entrypoint.
  *
- * Two installer commands with disjoint scope: `setup` is per-machine (tool
- * preflight, Linear credential, omp marketplace catalog) and `init` is
- * per-repo (writes one `config.repos` entry and installs the omp plugin
- * scoped to that repo). They were one command with `init` as an alias,
- * which meant installing the machine-level pieces and registering a repo
- * could not be done independently — re-running to add a repo re-ran the
- * whole installer.
+ * Five installer commands with disjoint scope, because the machine, a repo,
+ * and the source checkout are three independently mutable things and folding
+ * them together is what made the previous installer unreliable:
+ *
+ *   setup   per-machine — tool preflight, the Linear credential, and the one
+ *           global plugin link at `~/.foreman/plugin`.
+ *   init    per-repo — one `config.repos` entry, plus the two files that make
+ *           the omp plugin active in that repo and nowhere else.
+ *   deinit  per-repo — the exact inverse, so a repo can stop using Foreman
+ *           without leaving a dangling plugin root behind.
+ *   doctor  verification and repair for both layers. The activation surface
+ *           is two files and a symlink, so drift is silent; this is what
+ *           turns "it should be installed" into an answer.
+ *   update  pull, rebuild, then repair drift. There is no per-repo install
+ *           step: every repo links to `~/.foreman/plugin`, so rebuilding the
+ *           checkout updates all of them at once.
  *
  * Hand-rolled argument parsing, same rationale as `foreman repo`: the
  * workspace's sole runtime dependency is `@sinclair/typebox`.
@@ -19,28 +28,34 @@ import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { nodeRunner } from "@foreman/core";
 import { runRepo, runTeam } from "@foreman/loop";
+import { resolveCheckoutRoot } from "./checkout.ts";
+import { runDeinit } from "./deinit.ts";
+import { runDoctor } from "./doctor.ts";
 import { processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
-import { DEFAULT_GITHUB_REPO } from "./plugin-commands.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
-import { resolveCheckoutRoot } from "./checkout.ts";
-import { runWizard } from "./wizard.ts";
 import { runUpdate } from "./update.ts";
+import { runWizard } from "./wizard.ts";
+
+type Command = "setup" | "init" | "deinit" | "doctor" | "update";
 
 interface ParsedArgs {
-  command: "setup" | "init" | "update" | null;
+  command: Command | null;
   yes: boolean;
   /** Link the foreman CLI itself to this checkout's source; setup-only. */
   link: boolean;
-  githubRepo: string;
   checkoutPath: string | null;
   path: string | null;
   home: string | null;
   skipLinear: boolean;
-  /** Skip the omp plugin; init installs none, update refreshes none. */
+  /** Skip the omp plugin; init activates none, update re-asserts none. */
   skipPlugin: boolean;
   /** Refresh without touching git; update-only. */
   skipPull: boolean;
+  /** Leave the `config.repos` entry in place; deinit-only. */
+  keepRegistry: boolean;
+  /** Repair what it can instead of only reporting; doctor-only. */
+  fix: boolean;
   help: boolean;
   initiatives: string[];
   alias: string | null;
@@ -52,63 +67,72 @@ const HELP_TEXT = `foreman — Foreman CLI
 Usage: foreman <command> [options]
 
 Commands:
-  setup                    Per-machine install: tool preflight, Linear credential, omp marketplace catalog.
-  init                     Per-repo: register this directory in the repos registry and install the omp plugin for it.
-  update                   Pull Foreman's source, rebuild the CLI, and re-sync the omp plugin in every registered repo.
+  setup                    Per-machine install: tool preflight, Linear credential, the global plugin link.
+  init                     Per-repo: register this directory and activate the omp plugin for it.
+  deinit                   Per-repo: deactivate the omp plugin here and drop the registry entry.
+  doctor                   Verify the install — machine, plugin link, and every registered repo.
+  update                   Pull Foreman's source, rebuild, and repair any drift.
   repo                     Run the per-repo supervisor; \`foreman repo --help\` for its flags.
   team                     Run the team-level triage process; \`foreman team --help\` for its flags.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`repo\` per repo.
-Run \`update\` after pulling or pushing changes to bring the machine current.
+The plugin is active only in repos that ran \`init\`; \`doctor\` proves it.
 
 Options for setup:
-  --link                     Dev mode: link the foreman CLI to this checkout's source (no rebuild-to-see-changes).
-  --repo-source <owner/repo>  GitHub source for the omp marketplace catalog (default: ${DEFAULT_GITHUB_REPO}).
+  --link                     Dev mode: run the foreman CLI from this checkout's source (no rebuild to see changes).
   --checkout <path>          Path to the foreman checkout (default: auto-detected).
-  --skip-linear               Skip Linear API access.
+  --skip-linear              Skip Linear API access.
 
 Options for init:
   --path <dir>               Directory to register (default: the current directory).
   --initiative <id>          Initiative to bind; repeat for multiple. Accepts <uuid> or <uuid>:<subdir>.
   --alias <name>             Registry alias override (default: derived from the repo directory name).
   --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
-  --skip-plugin               Skip installing the omp plugin for this repo.
-  --skip-linear               Skip Linear API access.
+  --skip-plugin              Register the repo without activating the omp plugin in it.
+  --skip-linear              Skip Linear API access.
+
+Options for deinit:
+  --path <dir>               Directory to deactivate (default: the current directory).
+  --keep-registry            Deactivate the plugin but leave the \`repos\` entry in place.
+
+Options for doctor:
+  --fix                      Repair what can be repaired instead of only reporting it.
+  --checkout <path>          Path to the foreman checkout, for repairing the global link.
 
 Options for update:
   --checkout <path>          Path to the foreman checkout (default: auto-detected).
-  --skip-pull                Rebuild and refresh plugins without touching git.
-  --skip-plugin               Update the checkout only; leave omp alone.
+  --skip-pull                Rebuild and repair without touching git.
+  --skip-plugin              Update the checkout only; leave the plugin link and repos alone.
 
 Options for all commands:
-  -y, --yes                 Accept defaults for every prompt (non-interactive).
+  -y, --yes                  Accept defaults for every prompt (non-interactive).
   --home <path>              Home directory for ~/.foreman (default: real home; test hook).
-  --help, -h                  Show this text.
+  --help, -h                 Show this text.
 `;
 
 /**
- * Rejects a flag aimed at the wrong command. Table-driven rather than the
- * previous pair of "setup-only"/"init-only" lists: with a third command and
- * flags deliberately shared by two of them — `--checkout` by setup and
- * update, `--skip-plugin` by init and update — a pairwise scheme no longer
- * describes the surface, and silently accepting a misaimed flag is how an
- * operator ends up believing they skipped a step they didn't.
+ * Rejects a flag aimed at the wrong command. Table-driven rather than a list
+ * per command: several flags are deliberately shared by two or three of them —
+ * `--checkout` by setup, doctor, and update; `--skip-plugin` by init and
+ * update; `--path` by init and deinit — and silently accepting a misaimed flag
+ * is how an operator ends up believing they skipped a step they didn't.
  */
 function validateCommandFlags(parsed: ParsedArgs): void {
   const command = parsed.command;
   if (!command) return;
 
-  const flags: { flag: string; supplied: boolean; commands: readonly string[] }[] = [
+  const flags: { flag: string; supplied: boolean; commands: readonly Command[] }[] = [
     { flag: "--link", supplied: parsed.link, commands: ["setup"] },
-    { flag: "--repo-source", supplied: parsed.githubRepo !== DEFAULT_GITHUB_REPO, commands: ["setup"] },
-    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "update"] },
-    { flag: "--path", supplied: parsed.path !== null, commands: ["init"] },
+    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "doctor", "update"] },
+    { flag: "--path", supplied: parsed.path !== null, commands: ["init", "deinit"] },
     { flag: "--initiative", supplied: parsed.initiatives.length > 0, commands: ["init"] },
     { flag: "--alias", supplied: parsed.alias !== null, commands: ["init"] },
     { flag: "--team", supplied: parsed.team !== null, commands: ["init"] },
     { flag: "--skip-linear", supplied: parsed.skipLinear, commands: ["setup", "init"] },
     { flag: "--skip-plugin", supplied: parsed.skipPlugin, commands: ["init", "update"] },
     { flag: "--skip-pull", supplied: parsed.skipPull, commands: ["update"] },
+    { flag: "--keep-registry", supplied: parsed.keepRegistry, commands: ["deinit"] },
+    { flag: "--fix", supplied: parsed.fix, commands: ["doctor"] },
   ];
 
   for (const entry of flags) {
@@ -125,20 +149,21 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     command: null,
     yes: false,
     link: false,
-    githubRepo: DEFAULT_GITHUB_REPO,
     checkoutPath: null,
     path: null,
     home: null,
     skipLinear: false,
     skipPlugin: false,
     skipPull: false,
+    keepRegistry: false,
+    fix: false,
     help: false,
     initiatives: [],
     alias: null,
     team: null,
   };
 
-  const setCommand = (command: "setup" | "init" | "update"): void => {
+  const setCommand = (command: Command): void => {
     if (parsed.command) {
       throw new Error(`Multiple commands supplied: "${parsed.command}" and "${command}".`);
     }
@@ -151,6 +176,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     switch (arg) {
       case "setup":
       case "init":
+      case "deinit":
+      case "doctor":
       case "update":
         setCommand(arg);
         break;
@@ -161,14 +188,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--skip-pull":
         parsed.skipPull = true;
         break;
+      case "--keep-registry":
+        parsed.keepRegistry = true;
+        break;
+      case "--fix":
+        parsed.fix = true;
+        break;
       case "--link":
         parsed.link = true;
         break;
-      case "--repo-source": {
-        if (argv[i + 1] === undefined) throw new Error("missing value for --repo-source");
-        parsed.githubRepo = argv[++i] as string;
-        break;
-      }
       case "--checkout": {
         if (argv[i + 1] === undefined) throw new Error("missing value for --checkout");
         parsed.checkoutPath = argv[++i] as string;
@@ -225,20 +253,14 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
   /*
-   * `repo` owns every argument after it. Delegating before this CLI's own
-   * parser runs is what lets the supervisor keep its flags (`--mode`,
-   * `--once`) without this parser having to know any of them.
+   * `repo` and `team` each own every argument after them. Delegating before
+   * this CLI's own parser runs is what lets those processes keep their own
+   * flags (`--mode`, `--once`, `--verbose`) without this parser knowing any.
    */
   if (argv[0] === "repo") {
     await runRepo(argv.slice(1));
     return;
   }
-
-  /*
-   * `team` owns every argument after it, same rationale as `repo`: the
-   * team-level process keeps its own flags (`--once`, `--verbose`) without
-   * this parser having to know any of them.
-   */
   if (argv[0] === "team") {
     await runTeam(argv.slice(1));
     return;
@@ -254,25 +276,49 @@ async function main(): Promise<void> {
   const nonInteractive = args.yes || !process.stdin.isTTY;
   const prompter: Prompter = nonInteractive ? new NonInteractivePrompter() : new InteractivePrompter();
   const log = (message: string): void => console.log(message);
+  const home = args.home ?? homedir();
 
   try {
     /*
-     * `init` deliberately skips `resolveCheckoutRoot`: that resolves the
-     * *foreman checkout* (it looks for `packages/omp-plugin`) and would reject
-     * the arbitrary product repo `init` is meant to register.
+     * `init` and `deinit` deliberately skip `resolveCheckoutRoot`: that
+     * resolves the *foreman checkout* (it looks for `packages/omp-plugin`) and
+     * would reject the arbitrary product repo they operate on. Both reach the
+     * plugin through `~/.foreman/plugin` instead, which is exactly why that
+     * indirection exists.
      */
     if (args.command === "init") {
       await runInit(
         {
           cwd: args.path ?? process.cwd(),
-          home: args.home ?? homedir(),
+          home,
           skipLinear: args.skipLinear,
           skipPlugin: args.skipPlugin,
           initiatives: args.initiatives.length > 0 ? args.initiatives : undefined,
           alias: args.alias ?? undefined,
           team: args.team ?? undefined,
         },
-        { prompter, log, git: nodeRunner, runner: processRunner },
+        { prompter, log, git: nodeRunner },
+      );
+      return;
+    }
+
+    if (args.command === "deinit") {
+      await runDeinit(
+        { cwd: args.path ?? process.cwd(), home, keepRegistry: args.keepRegistry },
+        { prompter, log, git: nodeRunner },
+      );
+      return;
+    }
+
+    /*
+     * `doctor` takes the checkout path unresolved: a machine whose checkout
+     * has moved is precisely the drift it exists to diagnose, so failing to
+     * resolve it here would turn the diagnosis into a crash.
+     */
+    if (args.command === "doctor") {
+      process.exitCode = await runDoctor(
+        { home, checkoutRoot: args.checkoutPath, fix: args.fix },
+        { runner: processRunner, log },
       );
       return;
     }
@@ -286,7 +332,7 @@ async function main(): Promise<void> {
       await runUpdate(
         {
           checkoutRoot: resolveCheckoutRoot(args.checkoutPath),
-          home: args.home ?? homedir(),
+          home,
           skipPull: args.skipPull,
           skipPlugin: args.skipPlugin,
         },
@@ -295,12 +341,10 @@ async function main(): Promise<void> {
       return;
     }
 
-    const checkoutRoot = resolveCheckoutRoot(args.checkoutPath);
     await runWizard(
       {
-        home: args.home ?? homedir(),
-        checkoutRoot,
-        githubRepo: args.githubRepo,
+        home,
+        checkoutRoot: resolveCheckoutRoot(args.checkoutPath),
         linkCli: args.link,
         skipLinear: args.skipLinear,
       },
@@ -318,7 +362,7 @@ async function main(): Promise<void> {
  * carries, and a naive template-string prefix never does. Node also does not
  * resolve symlinks when populating argv[1] (Bun does), so invoking this file
  * through a symlinked `foreman` binary — the normal install shape — left
- * argv[1] pointing at the symlink while `import.meta.url` already reflects
+ * argv[1] pointing at the symlink while `import.meta.url` already reflected
  * the real path underneath; `realpathSync` closes that gap too.
  */
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;

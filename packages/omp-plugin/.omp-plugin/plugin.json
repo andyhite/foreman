@@ -1,7 +1,0 @@
-{
-  "name": "foreman",
-  "version": "0.1.0",
-  "description": "Agile SDLC workflow over Linear",
-  "author": { "name": "Andy Hite" },
-  "homepage": "https://github.com/andyhite/foreman"
-}

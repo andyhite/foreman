@@ -1,12 +1,11 @@
 import { loadGlobalConfig } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Runner } from "../src/exec.ts";
-import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
+import { dirname, join } from "node:path";
 import { runInit, type InitDeps, type InitOptions } from "../src/init.ts";
-import { OMP_PLUGIN_LIST_TABLE, ompPluginListJson } from "./omp-fixtures.ts";
+import { repoPluginLinkPath, repoPluginLockPath } from "../src/plugin-activation.ts";
+import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 
 class ScriptedPrompter implements Prompter {
   multiSelectResult: string[] | null = null;
@@ -59,38 +58,6 @@ class FakeGit {
   }
 }
 
-/**
- * Fakes the omp probes `installProjectPlugin` issues. `omp` is missing by
- * default so plugin tests unrelated to the install itself see it skip
- * quietly, the same way a machine without omp does.
- */
-class FakeRunner implements Runner {
-  calls: Array<{ bin: string; argv: string[]; cwd?: string }> = [];
-  private readonly missing: Set<string>;
-  private readonly failing: Set<string>;
-  private readonly listStdout: string;
-
-  constructor(options: { missing?: string[]; failing?: string[]; listStdout?: string } = {}) {
-    this.missing = new Set(options.missing ?? ["omp"]);
-    this.failing = new Set(options.failing ?? []);
-    this.listStdout = options.listStdout ?? "";
-  }
-
-  run(bin: string, argv: string[], options?: { cwd?: string }): Promise<number> {
-    this.calls.push({ bin, argv, cwd: options?.cwd });
-    return Promise.resolve(this.failing.has(bin) ? 1 : 0);
-  }
-
-  capture(bin: string, argv: string[], options?: { cwd?: string }): Promise<{ code: number; stdout: string; stderr: string }> {
-    this.calls.push({ bin, argv, cwd: options?.cwd });
-    return Promise.resolve({ code: this.failing.has(bin) ? 1 : 0, stdout: this.listStdout, stderr: "" });
-  }
-
-  exists(bin: string): Promise<boolean> {
-    return Promise.resolve(!this.missing.has(bin));
-  }
-}
-
 function defaultGitResponses(repoRoot: string): Record<string, string> {
   return {
     "git rev-parse --show-toplevel": `${repoRoot}\n`,
@@ -110,17 +77,30 @@ function readConfig(home: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
 }
 
+/** A fixture plugin package: `package.json` with a version. */
+function makePluginFixture(version = "1.2.3"): string {
+  const dir = mkdtempSync(join(tmpdir(), "foreman-plugin-fixture-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@foreman/omp-plugin", version }));
+  return dir;
+}
+
+/** Seeds `<home>/.foreman/plugin` the way `foreman setup` would, pointing at `pluginDir`. */
+function seedGlobalLink(home: string, pluginDir: string): void {
+  const linkPath = join(home, ".foreman", "plugin");
+  mkdirSync(dirname(linkPath), { recursive: true });
+  symlinkSync(pluginDir, linkPath);
+}
+
 describe("runInit", () => {
   it("registers a fresh repo with one manually-entered initiative", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
       const logs: string[] = [];
-      const deps: InitDeps = { prompter, git, runner, log: (message) => logs.push(message) };
+      const deps: InitDeps = { prompter, git, log: (message) => logs.push(message) };
       await runInit(baseOptions({}, home, "/repos/plotroom"), deps);
 
       const config = readConfig(home);
@@ -140,12 +120,11 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/mono"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i2";
       prompter.textAnswers['Subdirectory for initiative "i2" (blank = repo root)'] = "apps/zero";
 
-      const deps: InitDeps = { prompter, git, runner, log: () => {} };
+      const deps: InitDeps = { prompter, git, log: () => {} };
       await runInit(baseOptions({}, home, "/repos/mono"), deps);
 
       const config = readConfig(home);
@@ -161,10 +140,9 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const first = new ScriptedPrompter();
       first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter: first, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter: first, git, log: () => {} });
 
       const second = new ScriptedPrompter();
       // Default for the manual-ids prompt should now be pre-filled with "i1" — confirm by adding i2.
@@ -173,7 +151,6 @@ describe("runInit", () => {
       await runInit(baseOptions({}, home, "/repos/plotroom"), {
         prompter: second,
         git,
-        runner,
         log: (m) => logs.push(m),
       });
 
@@ -199,11 +176,10 @@ describe("runInit", () => {
         JSON.stringify({ repos: { old: { path: "~/repos/plotroom", initiatives: ["i1"] } } }),
       );
       const git = new FakeGit(defaultGitResponses(repoRoot));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Registry alias for this repo"] = "new";
 
-      await runInit(baseOptions({}, home, repoRoot), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: () => {} });
 
       expect(readConfig(home).repos).toEqual({
         new: { path: repoRoot, initiatives: ["i1"] },
@@ -217,12 +193,11 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i1";
 
       await expect(
-        runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} }),
+        runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
       ).rejects.toThrow(/both "plotroom" and "plotroom"/);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -233,12 +208,11 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
       // Team prompt defaults to "" and ScriptedPrompter returns the default when unanswered.
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
       const config = readConfig(home);
       const entry = (config.repos as Record<string, Record<string, unknown>>).plotroom;
@@ -258,7 +232,6 @@ describe("runInit", () => {
       await runInit(baseOptions({}, homeMain, "/repos/plotroom"), {
         prompter: promptMain,
         git: gitMain,
-        runner: new FakeRunner(),
         log: () => {},
       });
       const configMain = readConfig(homeMain);
@@ -273,7 +246,6 @@ describe("runInit", () => {
       await runInit(baseOptions({}, homeOther, "/repos/plotroom"), {
         prompter: promptOther,
         git: gitOther,
-        runner: new FakeRunner(),
         log: () => {},
       });
       const configOther = readConfig(homeOther);
@@ -294,11 +266,10 @@ describe("runInit", () => {
       );
 
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
       const config = readConfig(home);
       expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBe("main");
@@ -320,11 +291,10 @@ describe("runInit", () => {
         "git rev-parse --show-toplevel": "/repos/plotroom\n",
         "git symbolic-ref --short refs/remotes/origin/HEAD": "origin/trunk\n",
       });
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
       const config = readConfig(home);
       expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBeUndefined();
@@ -343,11 +313,10 @@ describe("runInit", () => {
         },
         ["git symbolic-ref --short refs/remotes/origin/HEAD"],
       );
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
       const config = readConfig(home);
       expect((config.repos as Record<string, Record<string, unknown>>).plotroom?.baseBranch).toBe("develop");
@@ -369,11 +338,10 @@ describe("runInit", () => {
         { "git rev-parse --show-toplevel": "/repos/plotroom\n" },
         ["git symbolic-ref --short refs/remotes/origin/HEAD", "git rev-parse --abbrev-ref HEAD"],
       );
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
       const config = readConfig(home);
       // Falls back to "trunk" (repoDefaults.baseBranch), which equals the
@@ -411,18 +379,20 @@ describe("runInit", () => {
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as typeof fetch;
 
+    // Restored, not deleted: `bun test` shares one process across files, so
+    // unconditionally dropping the variable leaks this test's setup into every
+    // later file that reads it (`foreman doctor` reports it as the credential).
+    const ambientApiKey = process.env.LINEAR_API_KEY;
     try {
       process.env.LINEAR_API_KEY = "lin_api_test";
 
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.multiSelectResult = ["i1", "i2"];
 
       await runInit(baseOptions({ skipLinear: false }, home, "/repos/plotroom"), {
         prompter,
         git,
-        runner,
         log: () => {},
       });
 
@@ -431,7 +401,8 @@ describe("runInit", () => {
         plotroom: { path: "/repos/plotroom", team: "ENG", initiatives: ["i1", "i2"] },
       });
     } finally {
-      delete process.env.LINEAR_API_KEY;
+      if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = ambientApiKey;
       globalThis.fetch = originalFetch;
       rmSync(home, { recursive: true, force: true });
     }
@@ -439,16 +410,22 @@ describe("runInit", () => {
 
   it("falls back to manual initiative ids when no API key resolves", async () => {
     const home = makeTempHome();
+    /*
+     * The premise is "no key resolves", so the ambient variable has to go for
+     * the duration: with `$LINEAR_API_KEY` exported, `init` would reach the
+     * real Linear API instead of the manual prompt and this test would assert
+     * nothing about the fallback.
+     */
+    const ambientApiKey = process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_KEY;
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
       await runInit(baseOptions({ skipLinear: false }, home, "/repos/plotroom"), {
         prompter,
         git,
-        runner,
         log: () => {},
       });
 
@@ -457,6 +434,8 @@ describe("runInit", () => {
         plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
       });
     } finally {
+      if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = ambientApiKey;
       rmSync(home, { recursive: true, force: true });
     }
   });
@@ -465,11 +444,10 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit({}, ["git rev-parse --show-toplevel"]);
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
 
       await expect(
-        runInit(baseOptions({}, home, "/tmp/not-a-repo"), { prompter, git, runner, log: () => {} }),
+        runInit(baseOptions({}, home, "/tmp/not-a-repo"), { prompter, git, log: () => {} }),
       ).rejects.toThrow(/must be run inside a git repository/);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -480,11 +458,10 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
       await runInit(
         baseOptions({ initiatives: ["i1", "i2:apps/zero"], alias: "plotroom", team: "ENG" }, home, "/repos/plotroom"),
-        { prompter, git, runner, log: () => {} },
+        { prompter, git, log: () => {} },
       );
 
       expect(readConfig(home).repos).toEqual({
@@ -503,11 +480,10 @@ describe("runInit", () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner();
       const prompter = new ScriptedPrompter();
 
       await expect(
-        runInit(baseOptions({ initiatives: [":subdir"] }, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} }),
+        runInit(baseOptions({ initiatives: [":subdir"] }, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
       ).rejects.toThrow(/Invalid --initiative/);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -515,134 +491,128 @@ describe("runInit", () => {
   });
 });
 
-describe("runInit — omp plugin (project scope)", () => {
-  it("installs the plugin at project scope with cwd set to the repo root", async () => {
+describe("runInit — omp plugin activation (project scope)", () => {
+  it("activates the plugin: symlink points at the global link, lock entry is enabled", async () => {
     const home = makeTempHome();
+    const pluginDir = makePluginFixture();
+    const repoRoot = mkdtempSync(join(tmpdir(), "foreman-init-repo-"));
     try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [] });
+      seedGlobalLink(home, pluginDir);
+      const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: () => {} });
 
-      const installCall = runner.calls.find((call) => call.bin === "omp" && call.argv[1] === "install");
-      expect(installCall?.argv).toEqual(["plugin", "install", "foreman@foreman", "--scope", "project"]);
-      expect(installCall?.cwd).toBe("/repos/plotroom");
+      const linkPath = repoPluginLinkPath(repoRoot);
+      expect(readlinkSync(linkPath)).toBe(join(home, ".foreman", "plugin"));
+
+      const lock = JSON.parse(readFileSync(repoPluginLockPath(repoRoot), "utf8"));
+      expect(lock.plugins["@foreman/omp-plugin"]).toEqual({ version: "1.2.3", enabledFeatures: null, enabled: true });
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(pluginDir, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 
-  it("--skip-plugin installs nothing", async () => {
+  it("is idempotent across two runs", async () => {
     const home = makeTempHome();
+    const pluginDir = makePluginFixture();
+    const repoRoot = mkdtempSync(join(tmpdir(), "foreman-init-repo-"));
     try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [] });
+      seedGlobalLink(home, pluginDir);
+      const git = new FakeGit(defaultGitResponses(repoRoot));
+
+      const first = new ScriptedPrompter();
+      first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      await runInit(baseOptions({}, home, repoRoot), { prompter: first, git, log: () => {} });
+
+      const second = new ScriptedPrompter();
+      second.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+      await runInit(baseOptions({}, home, repoRoot), { prompter: second, git, log: (m) => logs.push(m) });
+
+      expect(logs.some((line) => line.includes("already linked"))).toBe(true);
+      expect(logs.some((line) => line.includes("already up to date"))).toBe(true);
+      const lock = JSON.parse(readFileSync(repoPluginLockPath(repoRoot), "utf8"));
+      expect(lock.plugins["@foreman/omp-plugin"]).toEqual({ version: "1.2.3", enabledFeatures: null, enabled: true });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(pluginDir, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("--skip-plugin writes no .omp/", async () => {
+    const home = makeTempHome();
+    const pluginDir = makePluginFixture();
+    const repoRoot = mkdtempSync(join(tmpdir(), "foreman-init-repo-"));
+    try {
+      seedGlobalLink(home, pluginDir);
+      const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
 
-      await runInit(baseOptions({ skipPlugin: true }, home, "/repos/plotroom"), { prompter, git, runner, log: () => {} });
+      await runInit(baseOptions({ skipPlugin: true }, home, repoRoot), { prompter, git, log: () => {} });
 
-      expect(runner.calls).toEqual([]);
+      expect(existsSync(join(repoRoot, ".omp"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(pluginDir, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 
-  it("skips without throwing and still writes the registry entry when omp is missing", async () => {
+  it("warns but still registers the repo when the global link is missing", async () => {
     const home = makeTempHome();
+    const repoRoot = mkdtempSync(join(tmpdir(), "foreman-init-repo-"));
     try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: ["omp"] });
+      // No seedGlobalLink() call: `~/.foreman/plugin` does not exist.
+      const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
       prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
       const logs: string[] = [];
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
+      await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: (m) => logs.push(m) });
 
-      expect(runner.calls.some((call) => call.bin === "omp")).toBe(false);
-      expect(logs.some((line) => line.includes("omp not found on PATH"))).toBe(true);
-      expect(readConfig(home).repos).toEqual({
-        plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
-      });
+      expect(logs.some((line) => line.includes("foreman setup"))).toBe(true);
+      expect(existsSync(join(repoRoot, ".omp"))).toBe(false);
+      const config = readConfig(home);
+      const repos = config.repos as Record<string, { path: string; initiatives: string[] }>;
+      const [alias, entry] = Object.entries(repos)[0] ?? [];
+      expect(alias).toBeDefined();
+      expect(entry).toEqual({ path: repoRoot, initiatives: ["i1"] });
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 
-  it("skips the install and says so when the plugin is already installed at project scope", async () => {
+  it("adds the .git/info/exclude line exactly once across two runs", async () => {
     const home = makeTempHome();
+    const pluginDir = makePluginFixture();
+    const repoRoot = mkdtempSync(join(tmpdir(), "foreman-init-repo-"));
+    mkdirSync(join(repoRoot, ".git", "info"), { recursive: true });
     try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], listStdout: ompPluginListJson(["project"]) });
-      const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      const logs: string[] = [];
+      seedGlobalLink(home, pluginDir);
+      const git = new FakeGit(defaultGitResponses(repoRoot));
 
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
+      const first = new ScriptedPrompter();
+      first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      await runInit(baseOptions({}, home, repoRoot), { prompter: first, git, log: () => {} });
 
-      expect(runner.calls.some((call) => call.argv[1] === "install")).toBe(false);
-      expect(logs.some((line) => line.includes("already installed at project scope"))).toBe(true);
+      const second = new ScriptedPrompter();
+      second.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      await runInit(baseOptions({}, home, repoRoot), { prompter: second, git, log: () => {} });
+
+      const excludeContents = readFileSync(join(repoRoot, ".git", "info", "exclude"), "utf8");
+      const occurrences = excludeContents.split("\n").filter((line) => line.trim() === "/.omp/plugins/").length;
+      expect(occurrences).toBe(1);
     } finally {
       rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("warns about a lingering user-scoped install after a successful project install", async () => {
-    const home = makeTempHome();
-    try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], listStdout: ompPluginListJson(["user"]) });
-      const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      const logs: string[] = [];
-
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
-
-      expect(runner.calls.some((call) => call.argv[1] === "install")).toBe(true);
-      expect(logs.some((line) => line.includes("machine-wide (user-scope) install"))).toBe(true);
-      expect(logs.some((line) => line.includes("plugin uninstall --scope user foreman@foreman"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("still attempts the install, and says why, when the plugin list cannot be read", async () => {
-    const home = makeTempHome();
-    try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], listStdout: OMP_PLUGIN_LIST_TABLE });
-      const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      const logs: string[] = [];
-
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
-
-      expect(runner.calls.some((call) => call.argv[1] === "install")).toBe(true);
-      expect(logs.some((line) => line.includes("could not read"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("logs a warning and continues when the install command fails", async () => {
-    const home = makeTempHome();
-    try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const runner = new FakeRunner({ missing: [], failing: ["omp"] });
-      const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      const logs: string[] = [];
-
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, runner, log: (m) => logs.push(m) });
-
-      expect(logs.some((line) => line.includes("omp plugin install failed"))).toBe(true);
-      expect(readConfig(home).repos).toEqual({
-        plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(pluginDir, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 });

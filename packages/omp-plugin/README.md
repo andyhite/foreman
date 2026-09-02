@@ -5,32 +5,29 @@ inbox, refine prioritized issues, implement them in worktrees, and review the
 diff, with every mutation applied by the extension from validated structured
 output.
 
-The plugin ships four agents, six skills, eight commands, three TTSR rules,
-and one extension module (`src/extension.ts`) that owns the Linear write
-client, gate validators, lock manager, and config loader.
+The plugin ships five agents, seven skills, nine commands (five Markdown,
+four registered by the extension), three TTSR rules, and one extension
+module (`src/extension.ts`) that owns the Linear write client, gate
+validators, lock manager, and config loader.
 
-This plugin is always installed **project-scoped** — into one specific repo,
-never user-wide. Installing it here does not touch, shadow, or conflict with
-any install in another repo; each repo gets its own copy, installed by that
-repo's `foreman init`.
+This plugin is only ever active **per repo**, never user-wide, so it cannot
+fire in a repo that does not use Foreman. Every registered repo symlinks the
+single global copy at `~/.foreman/plugin`; nothing is copied, so every repo
+moves together with the checkout that copy points at.
 
 ## Install
 
-There is no dev-mode plugin linking: omp only honors `--scope` for a
-marketplace install (`name@marketplace`) — `omp plugin link <dir>` and
-installs from a local path are unconditionally user-wide regardless of any
-flag passed. So there is no local-development install path that stays
-project-scoped either; the plugin is always installed the same way
-production repos get it, project-scoped via `foreman init` (see the repo
-root README), which resolves to:
+`foreman init`, run inside the target repo — see the repo root README. No
+`omp plugin` subcommand is involved, because none of them can do this: omp
+honors `--scope` for a marketplace install (`name@marketplace`) alone, so
+`omp plugin link <dir>` and installs from a local path are unconditionally
+user-wide regardless of the flag passed. `foreman init` writes omp's project
+plugin root directly instead — a `node_modules` symlink to
+`~/.foreman/plugin`, plus this machine's enable lock.
 
-```
-omp plugin marketplace add andyhite/foreman
-omp plugin install foreman@foreman --scope project
-```
-
-run inside the target repo, after `bun install && bun run build` — the
-extension bundle at `dist/extension.js` is build output and is not committed.
+There is no build step. `omp.extensions` names `./src/extension.ts` and omp
+loads the TypeScript directly, so there is no artifact to rebuild, to go
+stale, or to ship missing.
 
 `/reload-plugins` picks up changes to Markdown (agents, skills, commands,
 rules) without a restart. It does **not** pick up changes to

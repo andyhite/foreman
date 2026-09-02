@@ -58,9 +58,9 @@ label and an entry in the drain you resolve with one keypress.
 
 Requires [Bun](https://bun.sh) 1.3+, `git`, `gh` authenticated for the repos
 Foreman will open PRs against, and [omp](https://github.com/andyhite/oh-my-pi).
-Foreman isn't published as a standalone package, so getting the CLI still means
-a one-time clone-and-build — after that, `foreman setup` registers the plugin
-straight from GitHub and none of your other repos need this checkout again.
+Foreman isn't published as a standalone package, so getting the CLI means a
+one-time clone-and-build — after that, `foreman setup` points one global
+symlink at this checkout, and every repo you `foreman init` follows it.
 
 The one-line installer clones the checkout to `~/.foreman/src`, builds it,
 drops a `foreman` wrapper on `$PATH` (`~/.local/bin` by default), and launches
@@ -70,14 +70,13 @@ drops a `foreman` wrapper on `$PATH` (`~/.local/bin` by default), and launches
 curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/install.sh | bash
 ```
 
-It's re-runnable — running it again pulls the latest checkout and re-runs
-setup on top of your existing `~/.foreman/config.json`. An already-registered
-marketplace is reported as a skip instead of failing. Extra arguments pass
-straight through to `foreman setup`, e.g. `... | bash -s -- --yes`. To bring an
-already-installed machine current after Foreman changes land on GitHub, don't
-re-run the installer — use `foreman update` (below); it pulls, rebuilds, and
-upgrades every registered repo's plugin in the one order that's actually safe.
-Prefer to do it by hand:
+It's re-runnable — running it again pulls the latest checkout, rebuilds, and
+re-runs setup on top of your existing `~/.foreman/config.json`. Extra
+arguments pass straight through to `foreman setup`, e.g.
+`... | bash -s -- --yes`. To bring an already-installed machine current after
+Foreman changes land on GitHub, don't re-run the installer — use
+`foreman update` (below); it pulls, rebuilds, and every registered repo picks
+up the change automatically, with no per-repo work. Prefer to do it by hand:
 
 ```bash
 git clone https://github.com/andyhite/foreman
@@ -88,31 +87,27 @@ bun run packages/cli/dist/main.js setup --yes
 
 `foreman setup` is the one-time-per-machine installer: it checks for
 `bun`/`git`/`gh`/`omp`/`herdr`, walks you through the Linear API key, and
-registers the `andyhite/foreman` marketplace so later plugin installs can
-resolve it. It never touches repos, initiatives, or teams, and it never
-installs the omp plugin itself — that happens per repo, below, as part of
-`foreman init`. If `$LINEAR_API_KEY` is already set, setup skips the key
-prompt entirely — the loop and extension resolve the key the same way at
-runtime, so setup does not call Linear to validate it. Without a key (or
-without network access to Linear), setup skips writing one — set
-`$LINEAR_API_KEY` or `linear.apiKeyFile` yourself before starting the loop.
-When you do paste a key, it always writes to the fixed path
-`<home>/.foreman/linear-api-key` at mode `0600`; there is no prompt for where
-to store it. Pass `--link` to symlink the `foreman` CLI to a wrapper that execs
-this checkout's TypeScript **source** directly via `bun` — not the built
-`dist/main.js` — so a source edit takes effect with no rebuild; dev mode for
-the CLI only, unrelated to the omp plugin. Drop `--yes` to be walked through the
-prompts interactively instead. Run `setup --help` for the full flag list,
-including `--repo-source` to point at a fork. `setup` without `--yes` is
-equivalent to running this by hand:
+writes a single symlink, `~/.foreman/plugin -> <checkout>/packages/omp-plugin`
+— the one indirection every repo's plugin link points through. It never
+touches repos, initiatives, or teams, and it never activates the plugin in
+any repo itself — that happens per repo, below, as part of `foreman init`. If
+`$LINEAR_API_KEY` is already set, setup skips the key prompt entirely — the
+loop and extension resolve the key the same way at runtime, so setup does not
+call Linear to validate it. Without a key (or without network access to
+Linear), setup skips writing one — set `$LINEAR_API_KEY` or
+`linear.apiKeyFile` yourself before starting the loop. When you do paste a
+key, it always writes to the fixed path `<home>/.foreman/linear-api-key` at
+mode `0600`; there is no prompt for where to store it. Pass `--link` to
+symlink the `foreman` CLI to a wrapper that execs this checkout's TypeScript
+**source** directly via `bun` — not the built `dist/main.js` — so a source
+edit takes effect with no rebuild; dev mode for the CLI only, unrelated to the
+omp plugin link. Drop `--yes` to be walked through the prompts interactively
+instead. Flags: `--link`, `--checkout <path>` (defaults to auto-detecting this
+checkout), `--skip-linear`, `--home <path>`, `-y`/`--yes`.
 
-```bash
-omp plugin marketplace add andyhite/foreman
-```
-
-Once setup has run, register each repo Foreman will manage — and install the
-omp plugin **project-scoped, into that repo** — by running `foreman init`
-**inside that repo**:
+Once setup has run, register each repo Foreman will manage — and activate its
+plugin **in that repo only** — by running `foreman init` **inside that
+repo**:
 
 ```bash
 cd ~/Code/my-app
@@ -120,43 +115,55 @@ foreman init
 ```
 
 `foreman init` resolves the repo root with `git rev-parse --show-toplevel`,
-installs `foreman@foreman` as a project-scoped omp plugin in that repo (skip
-with `--skip-plugin`), then lists every product (initiative) in your Linear
-workspace as a checkbox
-picker (`↑`/`↓` to move, `space` to toggle, `a` to toggle all, `enter` to
-confirm) — pre-checking any already mapped to this repo — and scrolls with
-`↑ N more` / `↓ N more` when the list is taller than the terminal. It then
-asks for the team and alias. You confirm or edit every choice before it's
-written to `~/.foreman/config.json`. `--initiative <uuid>[:subdir]` binds
-one or more initiatives (repeat the flag; the optional `:subdir` is the
-per-initiative subdirectory binding); `--alias <name>` and `--team <KEY>`
-override the registry alias and Linear team key. `--skip-linear` takes manual
-initiative ids instead of querying the API; `--path <dir>` registers a
-directory other than the current one; `-y`/`--yes` accepts every default and
-pre-checked value non-interactively — on a repo with no prior registration
-that means nothing is selected and init fails unless you also pass
-`--initiative`; `--home <path>` overrides `~/.foreman` for testing;
-`--skip-plugin` registers the repo without installing the omp plugin.
-`foreman init` never prompts for or writes the Linear API key — that's
-`foreman setup`'s job.
+then writes `<repo>/.omp/plugins/omp-plugins.lock.json` and
+`<repo>/.omp/plugins/node_modules/@foreman/omp-plugin`, a symlink to
+`~/.foreman/plugin` (skip both with `--skip-plugin`), plus a
+`.git/info/exclude` line so that machine-local state never shows up in `git
+status`. It then lists every product (initiative) in your Linear workspace as
+a checkbox picker (`↑`/`↓` to move, `space` to toggle, `a` to toggle all,
+`enter` to confirm) — pre-checking any already mapped to this repo — and
+scrolls with `↑ N more` / `↓ N more` when the list is taller than the
+terminal. It then asks for the team and alias. You confirm or edit every
+choice before it's written to `~/.foreman/config.json`. `--initiative
+<uuid>[:subdir]` binds one or more initiatives (repeat the flag; the optional
+`:subdir` is the per-initiative subdirectory binding); `--alias <name>` and
+`--team <KEY>` override the registry alias and Linear team key.
+`--skip-linear` takes manual initiative ids instead of querying the API;
+`--path <dir>` registers a directory other than the current one; `-y`/`--yes`
+accepts every default and pre-checked value non-interactively — on a repo
+with no prior registration that means nothing is selected and init fails
+unless you also pass `--initiative`. `foreman init` never prompts for or
+writes the Linear API key — that's `foreman setup`'s job.
+
+Run `foreman deinit` inside a repo to undo `foreman init`: it removes the
+plugin lock and symlink under `.omp/plugins/` and, unless you pass
+`--keep-registry`, drops the repo's entry from `~/.foreman/config.json`.
+`--path <dir>` targets a directory other than the current one.
+
+Run `foreman doctor` any time to check whether the global plugin link and
+every registered repo's activation are healthy — a broken symlink or a stale
+lock entry are each reported as a problem. Pass `--fix`
+to repair what it can (re-running the equivalent of `activateRepoPlugin` for
+each affected repo); `--checkout <path>` overrides which checkout it expects
+the global link to point at. It exits `0` when healthy, `1` when it found
+problems `--fix` didn't (or wasn't asked to) resolve.
 
 **Already have the old machine-wide install?** `foreman setup` used to
-install the omp plugin user-scoped, so it loaded in every omp session,
-including repos that never use Foreman. Fix it once:
-
-```bash
-omp plugin uninstall --scope user foreman@foreman
-```
-
-Then run `foreman init` in each repo that should actually have Foreman — it
-installs the plugin project-scoped, into just that repo.
+register an omp marketplace and let `omp plugin install` land the plugin
+user-scoped, so it loaded in every omp session, including repos that never
+use Foreman. `foreman doctor` detects that leftover automatically and
+`foreman doctor --fix` removes it — no manual `omp plugin uninstall` step is
+needed. Then run `foreman init` in each repo that should actually have
+Foreman.
 
 ## Updating
 
 After pushing plugin or CLI changes to GitHub, `foreman update` is the single
-command that brings a machine current — it pulls the checkout, rebuilds the
-CLI, refreshes the marketplace catalog, and upgrades the omp plugin in every
-repo registered in `~/.foreman/config.json`:
+command that brings a machine current — it pulls the checkout and rebuilds
+the CLI; the plugin loads straight from source, so pulling the checkout is
+all it needs. Because every registered repo's plugin link resolves through
+`~/.foreman/plugin` into this one checkout, that pull-and-rebuild is the
+entire update: no per-repo work happens.
 
 ```bash
 foreman update
@@ -167,15 +174,14 @@ Flags:
 | Flag | Does |
 | --- | --- |
 | `--checkout <path>` | Path to the foreman checkout (default: auto-detected). |
-| `--skip-pull` | Refresh plugins and rebuild without touching git. |
-| `--skip-plugin` | Update the checkout only; leave omp alone. |
+| `--skip-pull` | Rebuild without touching git. |
+| `--skip-plugin` | Update the checkout only; leave the global plugin link alone. |
 | `--home <path>` | Home directory for `~/.foreman` (default: real home; test hook). |
 
 `--checkout` is shared with `setup`; `--skip-plugin` is shared with `init`;
-`--home` is shared by all three. Don't reach for a bare `omp plugin
-marketplace update foreman` or a manual `git pull` — `foreman update` runs
-those steps in the order the plugin cache actually requires (see `docs/SPEC.md`
-§3.1) and upgrades every registered repo together, not just the one you're
+`--home` is shared by every command above. Don't reach for a bare `git pull`
+by hand — `foreman update` rebuilds and revalidates the global plugin link in
+the order that keeps every registered repo working, not just the one you're
 standing in.
 
 `foreman init` writes an entry like this to `~/.foreman/config.json`'s
@@ -302,6 +308,5 @@ bun run schemas        # regenerate output schemas into agent frontmatter
 bun run check          # typecheck + test + contract
 ```
 
-`packages/omp-plugin/dist/extension.js` is a committed build artifact that CI
-verifies is current, so a plugin source change needs `bun run build` and the
-rebuilt bundle committed alongside it.
+`omp.extensions` names `./src/extension.ts` directly, so the plugin has no
+build step and no artifact — a plugin source change just needs a commit.

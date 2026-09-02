@@ -5,13 +5,16 @@
 #   curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/install.sh | bash
 #
 # Clones (or updates) the foreman checkout, builds it, drops a `foreman`
-# wrapper on PATH, then launches `foreman setup`. Safe to re-run — it just
-# pulls the latest checkout and re-runs setup on top of your existing
+# wrapper on PATH, then launches `foreman setup`. Setup writes exactly one
+# global symlink, `~/.foreman/plugin -> <checkout>/packages/omp-plugin`; it
+# does not touch any repo. Per-repo activation is `foreman init`, run inside
+# each repo you want Foreman in. Safe to re-run — it just pulls the latest
+# checkout, rebuilds, and re-runs setup on top of your existing
 # ~/.foreman/config.json.
 #
 # Extra arguments are forwarded to `foreman setup`, e.g.:
 #
-#   curl -fsSL .../install.sh | bash -s -- --yes --repo-source myfork/foreman
+#   curl -fsSL .../install.sh | bash -s -- --yes
 #
 # Env overrides: FOREMAN_REPO_URL, FOREMAN_INSTALL_DIR, FOREMAN_BIN_DIR.
 
@@ -103,3 +106,7 @@ elif [ -t 1 ] && [ -r /dev/tty ]; then
 else
   "$FOREMAN_BIN_DIR/foreman" setup --yes "$@"
 fi
+
+printf '\n\033[1mNext steps\033[0m\n\n'
+echo "  cd <repo> && foreman init   # activate Foreman in a repo"
+echo "  foreman doctor              # verify the install is healthy"

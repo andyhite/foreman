@@ -2,27 +2,16 @@ node_modules/
 dist/
 dist-types/
 
-# ...except the omp plugin's bundled entrypoint, which MUST be tracked.
-# `omp plugin install <name>@<marketplace>` copies this package out of a git
-# clone of the marketplace repo and never runs a package manager, so whatever
-# the clone does not carry is simply absent at load time. `package.json` points
-# `omp.extensions` at ./dist/extension.js, and omp includes a declared entry
-# only if the file exists — so an untracked bundle makes the entire extension
-# (both tools, the task guard, the lock manager, the result appliers, and every
-# extension-registered command) fail to load in silence, while the markdown
-# agents/commands/skills/rules still discover normally and make it look fine.
-# The bundle inlines @foreman/core, which a bare specifier could never resolve
-# from the installed copy; that is why a build step exists at all. `bun build`
-# is byte-deterministic here, so CI rebuilds and fails on drift — the same
-# no-drift contract the generated agent schemas already use.
-!packages/omp-plugin/dist/
-!packages/omp-plugin/dist/extension.js
+# `dist/` above is the CLI's bundle alone. The omp plugin has no build step:
+# its `omp.extensions` entry names `src/extension.ts` and omp loads the
+# TypeScript directly, so there is no artifact to track, stale, or forget to
+# rebuild.
 *.tsbuildinfo
 .DS_Store
 
-# Project-scoped omp plugin runtime state, written by `foreman init`
-# (`omp plugin install --scope project`): a node_modules symlink into the
-# marketplace cache plus this machine's enable/version lock. Machine-local,
+# Per-repo omp plugin activation state, written by `foreman init`: a
+# node_modules symlink to `~/.foreman/plugin` (itself a symlink into this
+# machine's foreman checkout) plus omp's enable/version lock. Machine-local,
 # like node_modules/ above — the repo's binding to Foreman lives in
 # ~/.foreman/config.json's `repos` table, not here.
 .omp/plugins/

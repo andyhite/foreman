@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBinDir } from "../src/cli-link.ts";
 import type { Runner } from "../src/exec.ts";
+import { globalPluginLinkPath, PLUGIN_PACKAGE_NAME } from "../src/plugin-activation.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
 
@@ -48,7 +49,6 @@ class ScriptedPrompter implements Prompter {
 
 class RecordingRunner implements Runner {
   calls: Array<{ bin: string; argv: string[] }> = [];
-  marketplaceRegistered = false;
   private readonly missing: Set<string>;
   private readonly failing: Set<string>;
 
@@ -64,14 +64,7 @@ class RecordingRunner implements Runner {
 
   capture(bin: string, argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
     this.calls.push({ bin, argv });
-    const stdout =
-      (this.marketplaceRegistered &&
-        argv[0] === "plugin" &&
-        argv[1] === "marketplace" &&
-        argv[2] === "list" &&
-        "foreman\n") ||
-      "";
-    return Promise.resolve({ code: this.failing.has(bin) ? 1 : 0, stdout, stderr: "" });
+    return Promise.resolve({ code: this.failing.has(bin) ? 1 : 0, stdout: "", stderr: "" });
   }
 
   exists(bin: string): Promise<boolean> {
@@ -83,110 +76,124 @@ function baseOptions(overrides: Partial<WizardOptions>, home: string, checkoutRo
   return {
     home,
     checkoutRoot,
-    githubRepo: "andyhite/foreman",
     linkCli: false,
     skipLinear: true,
     ...overrides,
   };
 }
 
+/** A minimal checkout: just enough for `writeGlobalPluginLink` to accept it. */
+function makeCheckout(): string {
+  const checkoutRoot = mkdtempSync(join(tmpdir(), "foreman-checkout-"));
+  const pluginDir = join(checkoutRoot, "packages", "omp-plugin");
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: PLUGIN_PACKAGE_NAME, version: "1.2.3" }));
+  return checkoutRoot;
+}
+
 describe("runWizard", () => {
-  it("registers the omp marketplace catalog", async () => {
+  it("writes the global plugin link pointed at the checkout's plugin package", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
-      const runner = new RecordingRunner();
-      await runWizard(baseOptions({}, home, "/repo"), {
+      await runWizard(baseOptions({}, home, checkoutRoot), {
         prompter: new ScriptedPrompter(),
-        runner,
+        runner: new RecordingRunner(),
         log: () => {},
       });
 
-      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
-      expect(binSeq).toContain("omp plugin marketplace add andyhite/foreman");
-
-      const configPath = join(home, ".foreman", "config.json");
-      expect(JSON.parse(readFileSync(configPath, "utf8"))).toBeTruthy();
+      const linkPath = globalPluginLinkPath(home);
+      expect(readlinkSync(linkPath)).toBe(join(checkoutRoot, "packages", "omp-plugin"));
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
-  it("never installs or links the omp plugin — that's foreman init's job", async () => {
+  it("is idempotent — re-running reports the link as already correct without rewriting it", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
-      const runner = new RecordingRunner();
-      await runWizard(baseOptions({ linkCli: true }, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner,
-        log: () => {},
-      });
+      const run = () =>
+        runWizard(baseOptions({}, home, checkoutRoot), {
+          prompter: new ScriptedPrompter(),
+          runner: new RecordingRunner(),
+          log: () => {},
+        });
+      await run();
+      const linkPath = globalPluginLinkPath(home);
+      const targetBefore = readlinkSync(linkPath);
 
-      for (const call of runner.calls) {
-        expect(call.argv.slice(0, 2)).not.toEqual(["plugin", "install"]);
-        expect(call.argv.slice(0, 2)).not.toEqual(["plugin", "link"]);
-      }
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("skips marketplace add when the foreman marketplace is already registered", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner();
-      runner.marketplaceRegistered = true;
-      await runWizard(baseOptions({}, home, "/repo"), {
-        prompter: new ScriptedPrompter(),
-        runner,
-        log: () => {},
-      });
-
-      const binSeq = runner.calls.map((call) => `${call.bin} ${call.argv.join(" ")}`);
-      expect(binSeq).toContain("omp plugin marketplace list");
-      expect(binSeq).not.toContain("omp plugin marketplace add andyhite/foreman");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("skips marketplace registration and explains why when omp is absent", async () => {
-    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
-    try {
-      const runner = new RecordingRunner({ missing: ["omp"] });
       const logs: string[] = [];
-      await runWizard(baseOptions({}, home, "/repo"), {
+      await runWizard(baseOptions({}, home, checkoutRoot), {
         prompter: new ScriptedPrompter(),
-        runner,
+        runner: new RecordingRunner(),
         log: (message) => logs.push(message),
       });
 
-      expect(runner.calls.map((call) => call.bin)).not.toContain("omp");
-      expect(logs.some((line) => line.includes("omp not found on PATH"))).toBe(true);
+      expect(readlinkSync(linkPath)).toBe(targetBefore);
+      expect(logs.some((line) => line.includes("already points at"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
-  it("throws when the omp marketplace add command fails", async () => {
+  it("detects and removes a seeded machine-wide (user-scope) install", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
-      const runner = new RecordingRunner({ failing: ["omp"] });
-      await expect(
-        runWizard(baseOptions({}, home, "/repo"), {
-          prompter: new ScriptedPrompter(),
-          runner,
-          log: () => {},
+      const userPluginRoot = join(home, ".omp", "plugins");
+      mkdirSync(userPluginRoot, { recursive: true });
+      writeFileSync(
+        join(userPluginRoot, "omp-plugins.lock.json"),
+        JSON.stringify({
+          plugins: { [PLUGIN_PACKAGE_NAME]: { version: "1.0.0", enabledFeatures: null, enabled: true } },
+          settings: {},
         }),
-      ).rejects.toThrow(/omp plugin marketplace add failed/);
+      );
+      const userLinkDir = join(userPluginRoot, "node_modules", "@foreman");
+      mkdirSync(userLinkDir, { recursive: true });
+      symlinkSync(checkoutRoot, join(userLinkDir, "omp-plugin"));
+
+      await runWizard(baseOptions({}, home, checkoutRoot), {
+        prompter: new ScriptedPrompter([true]),
+        runner: new RecordingRunner(),
+        log: () => {},
+      });
+
+      const lock = JSON.parse(readFileSync(join(userPluginRoot, "omp-plugins.lock.json"), "utf8"));
+      expect(lock.plugins[PLUGIN_PACKAGE_NAME]).toBeUndefined();
+      expect(existsSync(join(userLinkDir, "omp-plugin"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("never calls omp", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    try {
+      const runner = new RecordingRunner();
+      await runWizard(baseOptions({ linkCli: true }, home, checkoutRoot), {
+        prompter: new ScriptedPrompter(),
+        runner,
+        log: () => {},
+      });
+
+      expect(runner.calls.map((call) => call.bin)).not.toContain("omp");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("links the foreman CLI to source when --link is passed", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
-      await runWizard(baseOptions({ linkCli: true }, home, "/repo"), {
+      await runWizard(baseOptions({ linkCli: true }, home, checkoutRoot), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
         log: () => {},
@@ -195,16 +202,18 @@ describe("runWizard", () => {
       const binPath = join(cliBinDir(home), "foreman");
       const contents = readFileSync(binPath, "utf8");
       expect(contents).toContain("exec bun");
-      expect(contents).toContain("/repo/packages/cli/src/main.ts");
+      expect(contents).toContain(`${checkoutRoot}/packages/cli/src/main.ts`);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("does not link the foreman CLI without --link", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
-      await runWizard(baseOptions({ linkCli: false }, home, "/repo"), {
+      await runWizard(baseOptions({ linkCli: false }, home, checkoutRoot), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
         log: () => {},
@@ -213,17 +222,19 @@ describe("runWizard", () => {
       expect(existsSync(join(cliBinDir(home), "foreman"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("resolves the Linear API key from the environment without prompting, and writes no repos key", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     const originalEnvKey = process.env.LINEAR_API_KEY;
     process.env.LINEAR_API_KEY = "lin_api_test";
 
     try {
       const prompter = new ScriptedPrompter();
-      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
         prompter,
         runner: new RecordingRunner(),
         log: () => {},
@@ -237,17 +248,19 @@ describe("runWizard", () => {
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("prompts for and writes the Linear API key when not skipped and no env var is set", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     const originalEnvKey = process.env.LINEAR_API_KEY;
     delete process.env.LINEAR_API_KEY;
 
     try {
       const prompter = new ScriptedPrompter([false]);
-      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
         prompter,
         runner: new RecordingRunner(),
         log: () => {},
@@ -260,18 +273,20 @@ describe("runWizard", () => {
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("rejects a whitespace-only Linear API key without writing a key file", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     const originalEnvKey = process.env.LINEAR_API_KEY;
     delete process.env.LINEAR_API_KEY;
     try {
       const prompter = new ScriptedPrompter([true]);
       prompter.secretAnswer = "   ";
       const logs: string[] = [];
-      await runWizard(baseOptions({ skipLinear: false }, home, "/repo"), {
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
         prompter,
         runner: new RecordingRunner(),
         log: (message) => logs.push(message),
@@ -283,14 +298,16 @@ describe("runWizard", () => {
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 
   it("closing message names `foreman init` as the next step, not `foreman repo`", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
     try {
       const logs: string[] = [];
-      await runWizard(baseOptions({}, home, "/repo"), {
+      await runWizard(baseOptions({}, home, checkoutRoot), {
         prompter: new ScriptedPrompter(),
         runner: new RecordingRunner(),
         log: (message) => logs.push(message),
@@ -300,6 +317,7 @@ describe("runWizard", () => {
       expect(logs.some((line) => line.includes("foreman repo"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
     }
   });
 });

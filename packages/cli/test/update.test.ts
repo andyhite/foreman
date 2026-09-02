@@ -1,18 +1,22 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  activateRepoPlugin,
+  checkoutPluginDir,
+  inspectRepoActivation,
+  repoPluginLinkPath,
+  writeGlobalPluginLink,
+} from "../src/plugin-activation.ts";
 import type { Runner } from "../src/exec.ts";
 import { runUpdate, type UpdateOptions } from "../src/update.ts";
-import { OMP_PLUGIN_LIST_TABLE, ompPluginListJson } from "./omp-fixtures.ts";
 
 /**
  * Records every command issued, in order, and lets each test script a
  * response per command keyed on `bin` plus the argv joined with spaces
- * (matched by prefix so e.g. "omp plugin upgrade" can be scripted without
- * repeating the trailing "foreman@foreman"). Defaults represent the healthy
- * path: git checkout is clean and up to date, bun/omp are present and
- * succeed, and `omp plugin list` reports the plugin project-installed.
+ * (matched by prefix). Defaults represent the healthy path: git checkout is
+ * clean and up to date, and bun is present and succeeds.
  */
 class RecordingRunner implements Runner {
   calls: Array<{ bin: string; argv: string[]; cwd?: string }> = [];
@@ -47,9 +51,6 @@ class RecordingRunner implements Runner {
       return { code: 0, stdout: "origin/main\n", stderr: "" };
     }
     if (bin === "git" && argv.join(" ") === "rev-parse HEAD") return { code: 0, stdout: "deadbeef\n", stderr: "" };
-    if (bin === "omp" && argv[0] === "plugin" && argv[1] === "list") {
-      return { code: 0, stdout: ompPluginListJson(["project"]), stderr: "" };
-    }
     return { code: 0, stdout: "", stderr: "" };
   }
 
@@ -85,75 +86,65 @@ function baseOptions(overrides: Partial<UpdateOptions>, home: string, checkoutRo
   return { checkoutRoot, home, skipPull: false, skipPlugin: false, ...overrides };
 }
 
-function ompUpgradeCalls(runner: RecordingRunner): Array<{ bin: string; argv: string[]; cwd?: string }> {
-  return runner.calls.filter((call) => call.bin === "omp" && call.argv[0] === "plugin" && call.argv[1] === "upgrade");
-}
-
-function ompMarketplaceUpdateCalls(runner: RecordingRunner): Array<{ bin: string; argv: string[]; cwd?: string }> {
-  return runner.calls.filter(
-    (call) => call.bin === "omp" && call.argv[0] === "plugin" && call.argv[1] === "marketplace" && call.argv[2] === "update",
-  );
+/** Builds a checkout with a buildable, versioned plugin package at `packages/omp-plugin`. */
+function makeCheckout(root: string): void {
+  const pluginDir = checkoutPluginDir(root);
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: "@foreman/omp-plugin", version: "1.2.3" }));
 }
 
 describe("runUpdate", () => {
-  it("upgrades marketplace before any repo, scoping each upgrade to its own cwd", async () => {
+  it("pulls, installs, and builds in order", async () => {
     const home = makeTempHome();
     const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    const repoB = join(home, "repos", "b");
     try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      mkdirSync(repoB, { recursive: true });
-      writeConfig(home, { a: { path: repoA }, b: { path: repoB } });
+      makeCheckout(checkoutRoot);
+      writeConfig(home, {});
       const runner = new RecordingRunner();
       const log: string[] = [];
 
       await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
 
-      const marketplaceIndex = runner.calls.findIndex(
-        (call) => call.bin === "omp" && call.argv[0] === "plugin" && call.argv[1] === "marketplace" && call.argv[2] === "update",
-      );
-      const upgradeIndexes = ompUpgradeCalls(runner).map((call) => runner.calls.indexOf(call));
-      expect(marketplaceIndex).toBeGreaterThanOrEqual(0);
-      expect(upgradeIndexes.length).toBeGreaterThan(0);
-      for (const upgradeIndex of upgradeIndexes) {
-        expect(marketplaceIndex).toBeLessThan(upgradeIndex);
-      }
-      const upgradeCwds = ompUpgradeCalls(runner).map((call) => call.cwd);
-      expect(upgradeCwds).toContain(repoA);
-      expect(upgradeCwds).toContain(repoB);
+      const order = runner.calls.map((call) => `${call.bin} ${call.argv[0]}`);
+      const pullIndex = order.indexOf("git pull");
+      const installIndex = order.indexOf("bun install");
+      const buildIndex = order.findIndex((entry, i) => entry === "bun run" && runner.calls[i]!.argv[1] === "build");
+      expect(pullIndex).toBeGreaterThanOrEqual(0);
+      expect(installIndex).toBeGreaterThan(pullIndex);
+      expect(buildIndex).toBeGreaterThan(installIndex);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("upgrades every registered repo, not just one", async () => {
+  it("--skip-pull skips git but still rebuilds", async () => {
     const home = makeTempHome();
     const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    const repoB = join(home, "repos", "b");
     try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      mkdirSync(repoB, { recursive: true });
-      writeConfig(home, { a: { path: repoA }, b: { path: repoB } });
+      makeCheckout(checkoutRoot);
+      writeConfig(home, {});
       const runner = new RecordingRunner();
       const log: string[] = [];
 
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+      await runUpdate(baseOptions({ skipPull: true }, home, checkoutRoot), { runner, log: (m) => log.push(m) });
 
-      expect(ompUpgradeCalls(runner)).toHaveLength(2);
+      const gitCalls = runner.calls.filter((call) => call.bin === "git");
+      expect(gitCalls).toHaveLength(0);
+      const installCalls = runner.calls.filter((call) => call.bin === "bun" && call.argv[0] === "install");
+      const buildCalls = runner.calls.filter((call) => call.bin === "bun" && call.argv.join(" ") === "run build");
+      expect(installCalls).toHaveLength(1);
+      expect(buildCalls).toHaveLength(1);
+      expect(log.some((line) => line.includes("skipped the pull"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("skips git pull on a dirty checkout but still rebuilds", async () => {
+  it("dirty tree refuses to pull but still rebuilds", async () => {
     const home = makeTempHome();
     const checkoutRoot = join(home, "checkout");
     try {
-      mkdirSync(checkoutRoot, { recursive: true });
+      makeCheckout(checkoutRoot);
       writeConfig(home, {});
       const runner = new RecordingRunner({
         responses: { "git status --porcelain": { stdout: " M src/update.ts\n" } },
@@ -174,166 +165,94 @@ describe("runUpdate", () => {
     }
   });
 
-  it("runs no git pull with skipPull, but still rebuilds", async () => {
+  it("re-asserts the global link after rebuilding", async () => {
     const home = makeTempHome();
     const checkoutRoot = join(home, "checkout");
     try {
-      mkdirSync(checkoutRoot, { recursive: true });
+      makeCheckout(checkoutRoot);
       writeConfig(home, {});
       const runner = new RecordingRunner();
       const log: string[] = [];
 
-      await runUpdate(baseOptions({ skipPull: true }, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
 
-      const gitCalls = runner.calls.filter((call) => call.bin === "git");
-      expect(gitCalls).toHaveLength(0);
-      const installCalls = runner.calls.filter((call) => call.bin === "bun" && call.argv[0] === "install");
-      const buildCalls = runner.calls.filter((call) => call.bin === "bun" && call.argv.join(" ") === "run build");
-      expect(installCalls).toHaveLength(1);
-      expect(buildCalls).toHaveLength(1);
-      expect(log.some((line) => line.includes("skipped the pull"))).toBe(true);
+      const globalLink = join(home, ".foreman", "plugin");
+      expect(lstatSync(globalLink).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(globalLink)).toBe(checkoutPluginDir(checkoutRoot));
+      expect(log.some((line) => line.includes(".foreman/plugin"))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("performs no omp commands at all with skipPlugin", async () => {
+  it("repairs a registered repo whose activation drifted", async () => {
     const home = makeTempHome();
     const checkoutRoot = join(home, "checkout");
+    const repoA = join(home, "repos", "a");
     try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      writeConfig(home, {});
+      makeCheckout(checkoutRoot);
+      mkdirSync(repoA, { recursive: true });
+      writeConfig(home, { a: { path: repoA } });
+
+      // Activate once so the lock exists, then delete the symlink to simulate drift.
+
+      writeGlobalPluginLink(checkoutRoot, home);
+      activateRepoPlugin(repoA, home);
+      unlinkSync(repoPluginLinkPath(repoA));
+
+      const runner = new RecordingRunner();
+      const log: string[] = [];
+
+      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+
+
+      expect(inspectRepoActivation(repoA, home).active).toBe(true);
+      expect(log.some((line) => line.includes("a — repaired"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("warns about a repo whose path is gone without aborting the others", async () => {
+    const home = makeTempHome();
+    const checkoutRoot = join(home, "checkout");
+    const repoA = join(home, "repos", "a");
+    const repoB = join(home, "repos", "b");
+    try {
+      makeCheckout(checkoutRoot);
+      mkdirSync(repoB, { recursive: true });
+      writeConfig(home, { a: { path: repoA }, b: { path: repoB } });
+
+      const runner = new RecordingRunner();
+      const log: string[] = [];
+
+      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+
+      expect(log.some((line) => line.includes("a") && line.includes("no longer exists"))).toBe(true);
+      expect(inspectRepoActivation(repoB, home).active).toBe(true);
+      expect(log.some((line) => line.includes("b —"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("--skip-plugin leaves the global link and every repo untouched", async () => {
+    const home = makeTempHome();
+    const checkoutRoot = join(home, "checkout");
+    const repoA = join(home, "repos", "a");
+    try {
+      makeCheckout(checkoutRoot);
+      mkdirSync(repoA, { recursive: true });
+      writeConfig(home, { a: { path: repoA } });
+
       const runner = new RecordingRunner();
       const log: string[] = [];
 
       await runUpdate(baseOptions({ skipPlugin: true }, home, checkoutRoot), { runner, log: (m) => log.push(m) });
 
-      const ompCalls = runner.calls.filter((call) => call.bin === "omp");
-      expect(ompCalls).toHaveLength(0);
+      expect(existsSync(join(home, ".foreman", "plugin"))).toBe(false);
+      expect(inspectRepoActivation(repoA, home).active).toBe(false);
       expect(log.some((line) => line.includes("skipped") && line.includes("skip-plugin"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("attempts no repo upgrade when marketplace update fails", async () => {
-    const home = makeTempHome();
-    const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      writeConfig(home, { a: { path: repoA } });
-      const runner = new RecordingRunner({
-        responses: { "omp plugin marketplace update foreman": { code: 1 } },
-      });
-      const log: string[] = [];
-
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
-
-      expect(ompMarketplaceUpdateCalls(runner)).toHaveLength(1);
-      expect(ompUpgradeCalls(runner)).toHaveLength(0);
-      const listCalls = runner.calls.filter((call) => call.bin === "omp" && call.argv[0] === "plugin" && call.argv[1] === "list");
-      expect(listCalls).toHaveLength(0);
-      expect(log.some((line) => line.includes("marketplace update failed"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("skips a repo with no project scope in `omp plugin list`", async () => {
-    const home = makeTempHome();
-    const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      writeConfig(home, { a: { path: repoA } });
-      const runner = new RecordingRunner({
-        responses: { "omp plugin list": { stdout: ompPluginListJson(["user"]) } },
-      });
-      const log: string[] = [];
-
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
-
-      expect(ompUpgradeCalls(runner)).toHaveLength(0);
-      expect(log.some((line) => line.includes("no project install"))).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("reports an unreadable plugin list as itself, not as a missing install", async () => {
-    const home = makeTempHome();
-    const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      writeConfig(home, { a: { path: repoA } });
-      // The human table: exactly what a probe that lost `--json` returns,
-      // and it reports a plugin that *is* installed. Sending the operator
-      // to `foreman init` here is the failure mode being guarded.
-      const runner = new RecordingRunner({
-        responses: { "omp plugin list": { stdout: OMP_PLUGIN_LIST_TABLE } },
-      });
-      const log: string[] = [];
-
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
-
-      expect(ompUpgradeCalls(runner)).toHaveLength(0);
-      expect(log.some((line) => line.includes("could not read"))).toBe(true);
-      expect(log.some((line) => line.includes("no project install"))).toBe(false);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("treats a zero-exit upgrade printing 'Failed to upgrade' as a failure", async () => {
-    const home = makeTempHome();
-    const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      writeConfig(home, { a: { path: repoA } });
-      const runner = new RecordingRunner({
-        responses: {
-          "omp plugin upgrade foreman@foreman": { code: 0, stdout: "Failed to upgrade: cache missing\n" },
-        },
-      });
-      const log: string[] = [];
-
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
-
-      expect(ompUpgradeCalls(runner)).toHaveLength(1);
-      expect(log.some((line) => line.includes("upgrade failed") && line.includes("Failed to upgrade"))).toBe(true);
-      expect(log.some((line) => line.includes("✓") && line.includes(" a — "))).toBe(false);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("treats a zero-exit upgrade printing '3 plugins, 0 failed' as a success", async () => {
-    const home = makeTempHome();
-    const checkoutRoot = join(home, "checkout");
-    const repoA = join(home, "repos", "a");
-    try {
-      mkdirSync(checkoutRoot, { recursive: true });
-      mkdirSync(repoA, { recursive: true });
-      writeConfig(home, { a: { path: repoA } });
-      const runner = new RecordingRunner({
-        responses: {
-          "omp plugin upgrade foreman@foreman": { code: 0, stdout: "3 plugins, 0 failed\n" },
-        },
-      });
-      const log: string[] = [];
-
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
-
-      expect(ompUpgradeCalls(runner)).toHaveLength(1);
-      expect(log.some((line) => line.includes("upgrade failed"))).toBe(false);
-      expect(log.some((line) => line.includes("✓") && line.includes(" a — "))).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

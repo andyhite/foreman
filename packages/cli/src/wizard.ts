@@ -1,28 +1,39 @@
 /**
  * `foreman setup` wizard body (SPEC §3.10, §3.1, §17.4).
  *
- * Per-machine only: tool preflight, the Linear API key, the omp marketplace
- * catalog, and (with `--link`) the foreman CLI dev shim. It never installs
- * or links the omp plugin itself and never touches the `repos` registry —
- * the plugin only makes sense scoped to a specific repo (see
- * plugin-commands.ts), so `foreman init` is what installs it, once per
- * repo, after this has registered the marketplace it installs from.
- * Nothing here is a hard failure except a missing `bun` — everything else
- * degrades to a printed instruction so a partial environment still
+ * Per-machine only: tool preflight, the Linear API key, the one global omp
+ * plugin link, and (with `--link`) the foreman CLI dev shim. This is
+ * deliberately the *only* place that ever calls `omp` at all, and even here
+ * it never does — `writeGlobalPluginLink` just points `~/.foreman/plugin` at
+ * this checkout's `packages/omp-plugin` with a symlink. There is no
+ * marketplace, no plugin cache, and no network involved: omp discovers a
+ * project plugin from a lock file plus a `node_modules` symlink alone (see
+ * plugin-activation.ts for the full case), so the only thing a *machine*
+ * needs is one stable place for those per-repo symlinks to point at. Setting
+ * that up is `foreman init`'s job, once per repo, after this has run.
+ *
+ * The other machine-state task here is the opposite of installing anything:
+ * `omp plugin link` (the command this design does *not* use, precisely
+ * because of this) silently installs user-wide even when asked for project
+ * scope, so this also detects and removes a stray machine-wide install on
+ * every run — see `findUserScopeInstall` for why that's worth checking
+ * every time rather than once.
+ *
+ * Nothing here is a hard failure except a missing `bun` or `git`; everything
+ * else degrades to a printed instruction so a partial environment still
  * finishes with a usable config.
  */
 
 import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
-import { FOREMAN_MARKETPLACE_NAME, ompMarketplaceAddArgv, ompMarketplaceListArgv } from "./plugin-commands.ts";
+import { findUserScopeInstall, removeUserScopeInstall, writeGlobalPluginLink } from "./plugin-activation.ts";
 import type { Prompter } from "./prompt.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 
 export interface WizardOptions {
   home: string;
   checkoutRoot: string;
-  githubRepo: string;
   /** Link the foreman CLI itself to this checkout's source (no rebuild-to-see-changes). */
   linkCli: boolean;
   skipLinear: boolean;
@@ -61,7 +72,7 @@ async function preflight(deps: WizardDeps): Promise<PreflightResult> {
   }
   const hasOmp = await deps.runner.exists("omp");
   const mark = hasOmp ? style("green", "✓") : style("dim", "○");
-  const note = "needed to install the omp plugin — https://github.com/andyhite/oh-my-pi";
+  const note = "omp is what actually runs the plugin — https://github.com/andyhite/oh-my-pi";
   deps.log(`  ${mark} omp: ${hasOmp ? "found" : `not found (${note})`}`);
   const hasHerdr = await deps.runner.exists("herdr");
   const herdrMark = hasHerdr ? style("green", "✓") : style("dim", "○");
@@ -130,46 +141,51 @@ async function configureGlobalConfig(
   log(`  wrote ${configPath}`);
 }
 
-async function marketplaceAlreadyRegistered(deps: WizardDeps, githubRepo: string): Promise<boolean> {
-  const { code, stdout } = await deps.runner.capture("omp", ompMarketplaceListArgv());
-  if (code !== 0) return false;
-  return stdout.includes(FOREMAN_MARKETPLACE_NAME) || stdout.includes(githubRepo);
+/**
+ * Points the one global plugin link at this checkout, and reports what it
+ * found — the sole per-machine omp step there is, now that a project plugin
+ * root is two files `foreman init` writes with no omp involvement at all.
+ */
+async function linkGlobalPlugin(deps: WizardDeps, options: WizardOptions): Promise<void> {
+  printSection(deps.log, "Foreman plugin (global)");
+  const result = writeGlobalPluginLink(options.checkoutRoot, options.home);
+  if (result.changed) {
+    deps.log(`  ${style("green", "✓")} linked ${result.path} → ${result.target}`);
+  } else {
+    deps.log(`  ${style("cyan", "i")} ${result.path} already points at ${result.target}`);
+  }
+  deps.log("  every repo `foreman init` registers links to this path, so the plugin is active only there.");
 }
 
 /**
- * Registers the marketplace catalog `foreman init` installs the plugin
- * from — the sole per-machine omp step left after the project-scope
- * cutover. omp only has a catalog to add here; no plugin install or link
- * happens until a repo runs `foreman init` (plugin-commands.ts).
+ * Undoes a stray machine-wide install — `omp plugin link` silently writes
+ * one even when asked for project scope (see the module header), so this
+ * checks and self-heals on every run rather than trusting it was never hit.
  */
-async function registerMarketplace(deps: WizardDeps, options: WizardOptions, hasOmp: boolean): Promise<void> {
-  printSection(deps.log, "omp marketplace");
-  if (!hasOmp) {
-    deps.log(
-      `  omp not found on PATH — skipped. Install omp, then re-run \`foreman setup\`, and \`foreman init\` will install the plugin per repo.`,
-    );
+async function removeStrayUserScopeInstall(deps: WizardDeps, options: WizardOptions): Promise<void> {
+  const install = findUserScopeInstall(options.home);
+  if (!install) return;
+  printSection(deps.log, "Machine-wide install found");
+  deps.log(
+    `  ${style("yellow", "!")} ${install.root} carries a machine-wide Foreman install — that makes its rules, ` +
+      "skills, and agents fire in every repo on this machine, not just registered ones.",
+  );
+  const confirmed = await deps.prompter.confirm("Remove the machine-wide install?", true);
+  if (!confirmed) {
+    deps.log("  left in place — re-run `foreman setup` to remove it later.");
     return;
   }
-  if (await marketplaceAlreadyRegistered(deps, options.githubRepo)) {
-    deps.log(`  ${style("cyan", "i")} marketplace "${FOREMAN_MARKETPLACE_NAME}" is already registered.`);
-    return;
-  }
-  const argv = ompMarketplaceAddArgv(options.githubRepo);
-  const code = await deps.runner.run("omp", argv);
-  if (code !== 0 && !(await marketplaceAlreadyRegistered(deps, options.githubRepo))) {
-    throw new Error(
-      `omp plugin marketplace add failed (exit ${code}): \`omp ${argv.join(" ")}\`. The command's output is above. ` +
-        "Common causes: no network, or `omp` not authenticated.",
-    );
-  }
-  deps.log(`  ${style("green", "✓")} registered ${options.githubRepo} as marketplace "${FOREMAN_MARKETPLACE_NAME}".`);
+  const { lockChanged, linkRemoved } = removeUserScopeInstall(install);
+  if (lockChanged) deps.log(`  ${style("green", "✓")} removed the lock entry from ${install.lockPath}`);
+  if (linkRemoved) deps.log(`  ${style("green", "✓")} removed the leftover symlink at ${install.linkPath}`);
 }
 
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
-  const { missingGh, hasOmp } = await preflight(deps);
+  const { missingGh } = await preflight(deps);
   await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
-  await registerMarketplace(deps, options, hasOmp);
+  await linkGlobalPlugin(deps, options);
+  await removeStrayUserScopeInstall(deps, options);
 
   if (options.linkCli) {
     printSection(deps.log, "foreman CLI (dev mode)");
@@ -184,7 +200,8 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
 
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Machine setup complete.`);
-  deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it and install the omp plugin there.`);
+  deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it and activate the plugin there.`);
+  deps.log(`  ${style("cyan", "→")} Run \`foreman doctor\` any time to verify the plugin link is healthy.`);
   if (missingGh) {
     deps.log(`  ${style("yellow", "!")} gh not found — Foreman cannot open PRs until you install it: https://cli.github.com`);
   }

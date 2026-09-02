@@ -1,4 +1,4 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, Type } from "../typebox.ts";
 import { envelope } from "./envelope.ts";
 
 export const FindingSeverity = Type.Union(

@@ -16,7 +16,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "../typebox.ts";
 import {
   type ControlEvent,
   type ControlOp,

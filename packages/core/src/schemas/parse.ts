@@ -1,5 +1,4 @@
-import type { Static, TSchema, TUnion } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { type Static, type TSchema, type TUnion, Value } from "../typebox.ts";
 import { AGENT_OUTPUT_SCHEMAS, type ForemanAgentName } from "./index.ts";
 import type { BlockRecord } from "./envelope.ts";
 

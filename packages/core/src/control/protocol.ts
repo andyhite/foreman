@@ -20,7 +20,7 @@
  * in validation, never silently misrender.
  */
 
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, Type } from "../typebox.ts";
 import type { LoopId, LoopKind } from "./paths.ts";
 
 export type LoopMode = "confirm" | "yolo";

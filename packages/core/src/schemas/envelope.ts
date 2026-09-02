@@ -1,4 +1,4 @@
-import { type Static, type TSchema, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "../typebox.ts";
 
 /**
  * BlockRecord — returned by any agent *instead of* its normal result (SPEC §6, §9).

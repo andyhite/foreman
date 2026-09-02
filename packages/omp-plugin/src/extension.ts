@@ -312,8 +312,8 @@ export async function handleCaptured(
  * The plugin directory, derived from this module's own location rather than
  * received as an argument: omp calls the factory with `(pi)` alone, so an
  * `options.pluginRoot` parameter is `undefined` at load time and takes the
- * whole extension down with it. Both the source (`src/extension.ts`) and the
- * bundle (`dist/extension.js`) sit one level below the plugin root.
+ * whole extension down with it. This module is `src/extension.ts`, one level
+ * below the plugin root, which is what the two `dirname` calls strip.
  */
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
