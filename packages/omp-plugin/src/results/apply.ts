@@ -25,6 +25,7 @@ import {
   encodeMarker,
   MARKER_KIND,
   resolveState,
+  TYPE_LABEL,
   resolveTeamKey,
 } from "@foreman/core";
 import {
@@ -67,6 +68,18 @@ async function moveToState(deps: ApplyDeps, issue: Issue, stateKey: Parameters<t
   await deps.linear.updateIssue(issue.id, { stateId: target.id });
 }
 
+/**
+ * Linear drops an API-created issue into the team's default state, which on a
+ * triage-enabled team is `Triage` - the shared inbox `foreman team` consumes
+ * (§7.1). Every issue the extension creates is already classified, so it has
+ * to name Backlog explicitly (§7.2 sub-issues, §7.3 `discoveredWork`, §7.6
+ * plan), or agent-authored work re-enters intake as if a human had filed it.
+ */
+async function backlogStateId(deps: ApplyDeps, teamId: string): Promise<string> {
+  const states = await deps.linear.workflowStates(teamId);
+  return resolveState("backlog", states).id;
+}
+
 /** SPEC §7.1: one comment per item, `agent:proposed`, nothing else — no state change, no priority. */
 async function applyTriage(deps: ApplyDeps, result: TriageProposal): Promise<void> {
   for (const item of result.items) {
@@ -107,6 +120,9 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
 
   await deps.linear.updateIssue(issue.id, mutation);
 
+  const needsBacklog = result.subIssues.length > 0 || result.spikeCreated !== null;
+  const backlog = needsBacklog ? await backlogStateId(deps, issue.team.id) : null;
+
   for (const subIssue of result.subIssues) {
     const subDescription = renderIssueDescription({
       context: subIssue.description,
@@ -123,16 +139,20 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
       parentId: issue.id,
       projectId: issue.project?.id,
       labelIds: [subTypeLabel.id],
+      stateId: backlog ?? undefined,
     });
   }
 
   if (result.spikeCreated) {
     const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
+    const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue.team.id);
     const spike = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: result.spikeCreated.title,
       description: spikeBody,
       projectId: issue.project?.id,
+      labelIds: [spikeTypeLabel.id],
+      stateId: backlog ?? undefined,
     });
     await deps.linear.createRelation({
       issueId: spike.id,
@@ -150,6 +170,8 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`ImplementResult references unknown issue ${result.issueId}.`);
 
+  const backlog = result.discoveredWork.length > 0 ? await backlogStateId(deps, issue.team.id) : null;
+
   for (const discovered of result.discoveredWork) {
     const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue.team.id);
     const created = await deps.linear.createIssue({
@@ -158,6 +180,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
       description: discovered.description,
       projectId: issue.project?.id,
       labelIds: [discoveredTypeLabel.id],
+      stateId: backlog ?? undefined,
     });
     // `blocks` means "the discovered issue blocks this one" (SPEC schema
     // wording), the orientation `blockedByRelations` reads as incoming.
@@ -196,6 +219,8 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
   const teamRef = teams.find((candidate) => candidate.key === teamKey);
   if (!teamRef) throw new Error(`Team "${teamKey}" was not found while applying a plan result.`);
 
+  const backlog = await backlogStateId(deps, teamRef.id);
+
   for (const proposed of result.proposedIssues) {
     const description = renderIssueDescription({
       context: proposed.description,
@@ -212,6 +237,7 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
       estimate: proposed.proposedEstimate ?? undefined,
       projectId: result.projectId,
       labelIds: [typeLabel.id],
+      stateId: backlog,
     });
   }
 

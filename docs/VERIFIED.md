@@ -358,3 +358,41 @@ exactly what §17 describes.
   the other direction why every Foreman agent must declare `blocking: true`
   (§3.5 item 7): the `SingleResult` — and with it `structuredOutput` — exists
   only for an inline spawn.
+
+## Verified writing issues to Linear
+
+Every GraphQL document Foreman sends is now validated against Linear's own
+schema, fetched by introspection and checked with `graphql`'s `validate` -
+read-only, so mutations are covered as safely as queries. That pass found
+three documents the API would reject outright, none of which any test could
+see, because every fake answered without ever looking at the query text.
+
+- **`Team.workflowStates` does not exist. The field is `Team.states`.** Linear
+  rejects the whole document with a 400 - `Cannot query field
+  "workflowStates" on type "Team". Did you mean "draftWorkflowState",
+  "mergeWorkflowState", or "startWorkflowState"?` - so `workflowStates()`
+  threw on every call, and with it **every `moveToState`**: refine's move to
+  Todo and review's move back to Todo could never have run against the real
+  API. `linear.test.ts` now asserts the document names `states`.
+- **`Document.content` is a `String`.** Both `*_QUERY_OBJECT_CONTENT`
+  documents selected `content { body }`, which is invalid, so the
+  "retry with the other shape" fallback in `project()`/`initiative()` could
+  only ever turn one error into two. The scalar form is the only valid one;
+  the fallback, its two documents, and the two shape caches are gone.
+- **`issueLabels(filter: { team: { id: { eq: $teamId } } })` needs `ID`, not
+  `String`.** `LABELS_QUERY` declared `$teamId: String` and would have been
+  rejected - it was also unreachable, since `labels()` pages the workspace
+  query and filters in memory. Deleted rather than fixed.
+- **An API-created issue lands in the team's default state, which is `Triage`
+  on a triage-enabled team, unless `stateId` is passed.** Observed: 8 planned
+  issues created with no `stateId` all arrived in Triage - the shared inbox
+  `foreman team` consumes (§7.1) - so agent-authored, already-classified work
+  re-entered intake as if a human had filed it. Every extension-created issue
+  (plan's `proposedIssues`, refine's `subIssues` and spike, implement's
+  `discoveredWork`) now names Backlog explicitly. The spike was also created
+  with no `type:` label at all, which §13.1 requires on every issue leaving
+  Triage.
+- **`resolveState` maps all eight Foreman states against a real workspace.**
+  Measured on team PLT (9 states): Triage, Backlog, Todo, In Progress, In
+  Review, Done, Canceled, Duplicate all resolve by name, so none of the
+  category fallbacks are load-bearing there.

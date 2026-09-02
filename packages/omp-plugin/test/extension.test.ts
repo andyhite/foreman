@@ -17,6 +17,7 @@ import { applyBoundResult, blockedOutcome, handleCaptured, __resetAppliedDispatc
 import type { ApplyDeps, AgentOutcome } from "../src/results/apply.ts";
 import { extractFromToolResult } from "../src/results/sink.ts";
 
+const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 1 };
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Progress", type: "started", position: 3 };
 
@@ -110,7 +111,7 @@ class FakeLinear implements LinearWriter {
     return [];
   }
   async workflowStates(): Promise<WorkflowState[]> {
-    return [STATE_TODO, STATE_IN_PROGRESS];
+    return [STATE_BACKLOG, STATE_TODO, STATE_IN_PROGRESS];
   }
   async labels(): Promise<IssueLabel[]> {
     return [...this.labelsById.values()];
@@ -518,6 +519,10 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     expect(notices).toEqual([]);
     expect(linear.createIssueCalls.map((call) => call.title)).toEqual(TITLES);
     expect(linear.createIssueCalls.every((call) => call.projectId === PROJECT_ID)).toBe(true);
+    // Named explicitly, because Linear's own default for an API-created issue
+    // on a triage-enabled team is Triage - the inbox `foreman team` consumes.
+    // Eight planned issues landed there once, which is what this asserts away.
+    expect(linear.createIssueCalls.map((call) => call.stateId)).toEqual(TITLES.map(() => STATE_BACKLOG.id));
     expect(linear.projectStatusCalls).toEqual([{ projectId: PROJECT_ID, type: "planned" }]);
   });
 

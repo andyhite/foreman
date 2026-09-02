@@ -151,6 +151,15 @@ packages/omp-plugin/
     extension.js                # COMMITTED build artifact — see below
 ```
 
+`@foreman/core` carries the matching guard for the other fabricable surface:
+`scripts/validate-linear-schema.ts` (`bun run schema:linear`) checks every
+document in `src/linear/queries.ts` against Linear's schema, fetched by
+introspection. It is not part of `bun run check` because it needs a live
+credential and `check` runs offline, but it is the only thing that can catch
+a field name Linear does not have: a fake answers whatever shape it is asked
+for, so `Team.workflowStates` passed the whole suite while failing every real
+call (§16). Run it after touching a query.
+
 `/foreman:status`, `/foreman:apply`, `/foreman:merge`, and `/foreman:unblock`
 are `pi.registerCommand` calls in `src/`, not files in `commands/` — they run
 code rather than expanding a prompt. Both tools are likewise registered by the

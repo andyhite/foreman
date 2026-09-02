@@ -84,7 +84,7 @@ export const COMMENTS_QUERY = `
   }
 `;
 
-/** Document content as a scalar `String`. Tried first; see `client.ts` for the fallback. */
+/** Project overview plus its documents. `content` is a `String` on both (schema-validated). */
 export const PROJECT_QUERY_SCALAR_CONTENT = `
   query ProjectDocuments($projectId: String!) {
     project(id: $projectId) {
@@ -94,21 +94,6 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
       content
       documents {
         nodes { id title content updatedAt }
-      }
-    }
-  }
-`;
-
-/** Document content as a sub-selection. Used only when the scalar form errors. */
-export const PROJECT_QUERY_OBJECT_CONTENT = `
-  query ProjectDocuments($projectId: String!) {
-    project(id: $projectId) {
-      id
-      name
-      description
-      content
-      documents {
-        nodes { id title content { body } updatedAt }
       }
     }
   }
@@ -127,7 +112,7 @@ export const PROJECT_INITIATIVES_QUERY = `
   }
 `;
 
-/** Initiative documents as a scalar `String`. Tried first; see `client.ts` for the fallback. */
+/** Initiative documents. `content` is a `String` (schema-validated). */
 export const INITIATIVE_QUERY_SCALAR_CONTENT = `
   query InitiativeDocuments($initiativeId: String!) {
     initiative(id: $initiativeId) {
@@ -140,33 +125,18 @@ export const INITIATIVE_QUERY_SCALAR_CONTENT = `
   }
 `;
 
-/** Initiative documents as a sub-selection. Used only when the scalar form errors. */
-export const INITIATIVE_QUERY_OBJECT_CONTENT = `
-  query InitiativeDocuments($initiativeId: String!) {
-    initiative(id: $initiativeId) {
-      id
-      name
-      documents {
-        nodes { id title content { body } updatedAt }
-      }
-    }
-  }
-`;
-
+/**
+ * `Team.states`, not `Team.workflowStates`: the latter does not exist on
+ * Linear's `Team` and the API rejects the whole document with a 400
+ * (`Cannot query field "workflowStates" on type "Team"`). Measured against
+ * the live API - every `moveToState` call failed until this was corrected.
+ */
 export const WORKFLOW_STATES_QUERY = `
   query TeamWorkflowStates($teamId: String!) {
     team(id: $teamId) {
-      workflowStates {
+      states {
         nodes { id name type position }
       }
-    }
-  }
-`;
-
-export const LABELS_QUERY = `
-  query TeamLabels($teamId: String) {
-    issueLabels(filter: { team: { id: { eq: $teamId } } }) {
-      nodes { id name isGroup parent { id name } }
     }
   }
 `;

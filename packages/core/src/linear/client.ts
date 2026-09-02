@@ -36,7 +36,6 @@ import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
   INITIATIVE_PROJECTS_QUERY,
-  INITIATIVE_QUERY_OBJECT_CONTENT,
   INITIATIVE_QUERY_SCALAR_CONTENT,
   INITIATIVE_TO_PROJECT_CREATE_MUTATION,
   INITIATIVES_QUERY,
@@ -49,7 +48,6 @@ import {
   ISSUES_QUERY,
   PROJECT_CREATE_MUTATION,
   PROJECT_INITIATIVES_QUERY,
-  PROJECT_QUERY_OBJECT_CONTENT,
   PROJECT_QUERY_SCALAR_CONTENT,
   PROJECT_STATUS_QUERY,
   PROJECT_STATUSES_QUERY,
@@ -194,10 +192,6 @@ export class LinearClient implements LinearWriter {
   private readonly projectInitiativesCache = new Map<string, InitiativeRef[]>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
   private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
-  /** Once the working project-document content shape is discovered, reuse it. */
-  private projectContentShape: "scalar" | "object" | null = null;
-  /** Once the working initiative-document content shape is discovered, reuse it. */
-  private initiativeContentShape: "scalar" | "object" | null = null;
   private viewerIdCache: string | null = null;
 
   constructor(options: LinearClientOptions) {
@@ -549,26 +543,14 @@ export class LinearClient implements LinearWriter {
     return results;
   }
 
+  /**
+   * `Document.content` is a `String` in Linear's schema - validated by
+   * introspection, so there is no second "object" shape to fall back to. An
+   * earlier version tried a `content { body }` sub-selection when the scalar
+   * form errored; that document is invalid against the live schema and could
+   * only ever have turned one error into two.
+   */
   async project(projectId: string): Promise<Project | null> {
-    const shape = this.projectContentShape ?? "scalar";
-    try {
-      return await this.fetchProject(projectId, shape);
-    } catch (error) {
-      if (shape === "object" || !(error instanceof LinearApiError)) throw error;
-      // Scalar `content` selection errored — Linear wants the object
-      // sub-selection instead (documents/content shape is unverified per the
-      // scout report). Retry once with the alternate shape and cache it.
-      const result = await this.fetchProject(projectId, "object");
-      this.projectContentShape = "object";
-      return result;
-    }
-  }
-
-  private async fetchProject(
-    projectId: string,
-    shape: "scalar" | "object",
-  ): Promise<Project | null> {
-    const document = shape === "scalar" ? PROJECT_QUERY_SCALAR_CONTENT : PROJECT_QUERY_OBJECT_CONTENT;
     const data = await this.request<{
       project: {
         id: string;
@@ -579,14 +561,13 @@ export class LinearClient implements LinearWriter {
           nodes: Array<{
             id: string;
             title: string;
-            content: string | { body: string } | null;
+            content: string | null;
             updatedAt: string;
           }>;
         };
       } | null;
-    }>(document, { projectId });
+    }>(PROJECT_QUERY_SCALAR_CONTENT, { projectId });
     if (!data.project) return null;
-    this.projectContentShape = shape;
     return {
       id: data.project.id,
       name: data.project.name,
@@ -595,12 +576,7 @@ export class LinearClient implements LinearWriter {
       documents: data.project.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
-        content:
-          doc.content === null
-            ? null
-            : typeof doc.content === "string"
-              ? doc.content
-              : doc.content.body,
+        content: doc.content,
         updatedAt: doc.updatedAt,
       })),
     };
@@ -717,25 +693,8 @@ export class LinearClient implements LinearWriter {
     return data.viewer.id;
   }
 
+  /** Same as `project()`: `Document.content` is a `String`, so there is one valid shape. */
   async initiative(initiativeId: string): Promise<Initiative | null> {
-    const shape = this.initiativeContentShape ?? "scalar";
-    try {
-      return await this.fetchInitiative(initiativeId, shape);
-    } catch (error) {
-      if (shape === "object" || !(error instanceof LinearApiError)) throw error;
-      // Scalar `content` selection errored — Linear wants the object
-      // sub-selection instead, mirroring the project-document fallback.
-      const result = await this.fetchInitiative(initiativeId, "object");
-      this.initiativeContentShape = "object";
-      return result;
-    }
-  }
-
-  private async fetchInitiative(
-    initiativeId: string,
-    shape: "scalar" | "object",
-  ): Promise<Initiative | null> {
-    const document = shape === "scalar" ? INITIATIVE_QUERY_SCALAR_CONTENT : INITIATIVE_QUERY_OBJECT_CONTENT;
     const data = await this.request<{
       initiative: {
         id: string;
@@ -744,26 +703,20 @@ export class LinearClient implements LinearWriter {
           nodes: Array<{
             id: string;
             title: string;
-            content: string | { body: string } | null;
+            content: string | null;
             updatedAt: string;
           }>;
         };
       } | null;
-    }>(document, { initiativeId });
+    }>(INITIATIVE_QUERY_SCALAR_CONTENT, { initiativeId });
     if (!data.initiative) return null;
-    this.initiativeContentShape = shape;
     return {
       id: data.initiative.id,
       name: data.initiative.name,
       documents: data.initiative.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
-        content:
-          doc.content === null
-            ? null
-            : typeof doc.content === "string"
-              ? doc.content
-              : doc.content.body,
+        content: doc.content,
         updatedAt: doc.updatedAt,
       })),
     };
@@ -771,9 +724,9 @@ export class LinearClient implements LinearWriter {
 
   async workflowStates(teamId: string): Promise<WorkflowState[]> {
     const data = await this.request<{
-      team: { workflowStates: { nodes: Array<WireStateRef & { position: number }> } };
+      team: { states: { nodes: Array<WireStateRef & { position: number }> } };
     }>(WORKFLOW_STATES_QUERY, { teamId });
-    return data.team.workflowStates.nodes.map((state) => ({
+    return data.team.states.nodes.map((state) => ({
       id: state.id,
       name: state.name,
       type: state.type as WorkflowState["type"],

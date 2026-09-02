@@ -8256,19 +8256,6 @@ var PROJECT_QUERY_SCALAR_CONTENT = `
     }
   }
 `;
-var PROJECT_QUERY_OBJECT_CONTENT = `
-  query ProjectDocuments($projectId: String!) {
-    project(id: $projectId) {
-      id
-      name
-      description
-      content
-      documents {
-        nodes { id title content { body } updatedAt }
-      }
-    }
-  }
-`;
 var PROJECT_INITIATIVES_QUERY = `
   query ProjectInitiatives($projectId: String!) {
     project(id: $projectId) {
@@ -8291,21 +8278,10 @@ var INITIATIVE_QUERY_SCALAR_CONTENT = `
     }
   }
 `;
-var INITIATIVE_QUERY_OBJECT_CONTENT = `
-  query InitiativeDocuments($initiativeId: String!) {
-    initiative(id: $initiativeId) {
-      id
-      name
-      documents {
-        nodes { id title content { body } updatedAt }
-      }
-    }
-  }
-`;
 var WORKFLOW_STATES_QUERY = `
   query TeamWorkflowStates($teamId: String!) {
     team(id: $teamId) {
-      workflowStates {
+      states {
         nodes { id name type position }
       }
     }
@@ -8457,8 +8433,6 @@ class LinearClient {
   projectInitiativeCache = new Map;
   projectInitiativesCache = new Map;
   projectStatusIdCache = new Map;
-  projectContentShape = null;
-  initiativeContentShape = null;
   viewerIdCache = null;
   constructor(options) {
     this.apiKey = options.apiKey;
@@ -8725,23 +8699,9 @@ class LinearClient {
     return results;
   }
   async project(projectId) {
-    const shape = this.projectContentShape ?? "scalar";
-    try {
-      return await this.fetchProject(projectId, shape);
-    } catch (error) {
-      if (shape === "object" || !(error instanceof LinearApiError))
-        throw error;
-      const result = await this.fetchProject(projectId, "object");
-      this.projectContentShape = "object";
-      return result;
-    }
-  }
-  async fetchProject(projectId, shape) {
-    const document = shape === "scalar" ? PROJECT_QUERY_SCALAR_CONTENT : PROJECT_QUERY_OBJECT_CONTENT;
-    const data = await this.request(document, { projectId });
+    const data = await this.request(PROJECT_QUERY_SCALAR_CONTENT, { projectId });
     if (!data.project)
       return null;
-    this.projectContentShape = shape;
     return {
       id: data.project.id,
       name: data.project.name,
@@ -8750,7 +8710,7 @@ class LinearClient {
       documents: data.project.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
-        content: doc.content === null ? null : typeof doc.content === "string" ? doc.content : doc.content.body,
+        content: doc.content,
         updatedAt: doc.updatedAt
       }))
     };
@@ -8833,37 +8793,23 @@ class LinearClient {
     return data.viewer.id;
   }
   async initiative(initiativeId) {
-    const shape = this.initiativeContentShape ?? "scalar";
-    try {
-      return await this.fetchInitiative(initiativeId, shape);
-    } catch (error) {
-      if (shape === "object" || !(error instanceof LinearApiError))
-        throw error;
-      const result = await this.fetchInitiative(initiativeId, "object");
-      this.initiativeContentShape = "object";
-      return result;
-    }
-  }
-  async fetchInitiative(initiativeId, shape) {
-    const document = shape === "scalar" ? INITIATIVE_QUERY_SCALAR_CONTENT : INITIATIVE_QUERY_OBJECT_CONTENT;
-    const data = await this.request(document, { initiativeId });
+    const data = await this.request(INITIATIVE_QUERY_SCALAR_CONTENT, { initiativeId });
     if (!data.initiative)
       return null;
-    this.initiativeContentShape = shape;
     return {
       id: data.initiative.id,
       name: data.initiative.name,
       documents: data.initiative.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
-        content: doc.content === null ? null : typeof doc.content === "string" ? doc.content : doc.content.body,
+        content: doc.content,
         updatedAt: doc.updatedAt
       }))
     };
   }
   async workflowStates(teamId) {
     const data = await this.request(WORKFLOW_STATES_QUERY, { teamId });
-    return data.team.workflowStates.nodes.map((state) => ({
+    return data.team.states.nodes.map((state) => ({
       id: state.id,
       name: state.name,
       type: state.type,
@@ -10755,6 +10701,10 @@ async function moveToState(deps, issue2, stateKey) {
   const target = resolveState(stateKey, states2);
   await deps.linear.updateIssue(issue2.id, { stateId: target.id });
 }
+async function backlogStateId(deps, teamId) {
+  const states2 = await deps.linear.workflowStates(teamId);
+  return resolveState("backlog", states2).id;
+}
 async function applyTriage(deps, result) {
   for (const item of result.items) {
     const issue2 = await deps.linear.issue(item.issueId);
@@ -10789,6 +10739,8 @@ async function applyRefine(deps, result) {
     mutation.addedLabelIds = [...mutation.addedLabelIds ?? [], readyLabel.id];
   }
   await deps.linear.updateIssue(issue2.id, mutation);
+  const needsBacklog = result.subIssues.length > 0 || result.spikeCreated !== null;
+  const backlog = needsBacklog ? await backlogStateId(deps, issue2.team.id) : null;
   for (const subIssue of result.subIssues) {
     const subDescription = renderIssueDescription({
       context: subIssue.description,
@@ -10804,16 +10756,20 @@ async function applyRefine(deps, result) {
       estimate: subIssue.estimate,
       parentId: issue2.id,
       projectId: issue2.project?.id,
-      labelIds: [subTypeLabel.id]
+      labelIds: [subTypeLabel.id],
+      stateId: backlog ?? undefined
     });
   }
   if (result.spikeCreated) {
     const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue2.identifier });
+    const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue2.team.id);
     const spike = await deps.linear.createIssue({
       teamId: issue2.team.id,
       title: result.spikeCreated.title,
       description: spikeBody,
-      projectId: issue2.project?.id
+      projectId: issue2.project?.id,
+      labelIds: [spikeTypeLabel.id],
+      stateId: backlog ?? undefined
     });
     await deps.linear.createRelation({
       issueId: spike.id,
@@ -10829,6 +10785,7 @@ async function applyImplement(deps, result) {
   const issue2 = await deps.linear.issue(result.issueId);
   if (!issue2)
     throw new Error(`ImplementResult references unknown issue ${result.issueId}.`);
+  const backlog = result.discoveredWork.length > 0 ? await backlogStateId(deps, issue2.team.id) : null;
   for (const discovered of result.discoveredWork) {
     const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue2.team.id);
     const created = await deps.linear.createIssue({
@@ -10836,7 +10793,8 @@ async function applyImplement(deps, result) {
       title: discovered.title,
       description: discovered.description,
       projectId: issue2.project?.id,
-      labelIds: [discoveredTypeLabel.id]
+      labelIds: [discoveredTypeLabel.id],
+      stateId: backlog ?? undefined
     });
     await deps.linear.createRelation({
       issueId: discovered.relation === "blocks" ? created.id : issue2.id,
@@ -10868,6 +10826,7 @@ async function applyPlan(deps, result) {
   const teamRef = teams.find((candidate) => candidate.key === teamKey);
   if (!teamRef)
     throw new Error(`Team "${teamKey}" was not found while applying a plan result.`);
+  const backlog = await backlogStateId(deps, teamRef.id);
   for (const proposed of result.proposedIssues) {
     const description = renderIssueDescription({
       context: proposed.description,
@@ -10883,7 +10842,8 @@ async function applyPlan(deps, result) {
       priority: proposed.proposedPriority,
       estimate: proposed.proposedEstimate ?? undefined,
       projectId: result.projectId,
-      labelIds: [typeLabel2.id]
+      labelIds: [typeLabel2.id],
+      stateId: backlog
     });
   }
   await deps.linear.updateProjectStatus({ projectId: result.projectId, type: "planned" });

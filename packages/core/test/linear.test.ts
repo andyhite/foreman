@@ -60,6 +60,38 @@ describe("LinearClient auth", () => {
   });
 });
 
+describe("LinearClient workflowStates", () => {
+  // Linear's `Team` has `states`, not `workflowStates`. Asking for the latter
+  // makes the API reject the whole document with a 400, so every
+  // `moveToState` - refine to Todo, review back to Todo - failed outright.
+  // The query text is the contract here, which is why it is asserted.
+  it("reads the team's states connection, the field Linear actually exposes", async () => {
+    let document = "";
+    const fetchStub: FetchLike = async (_url, init) => {
+      document = JSON.parse(String(init.body)).query;
+      return jsonResponse(200, {
+        data: {
+          team: {
+            states: {
+              nodes: [
+                { id: "s-backlog", name: "Backlog", type: "backlog", position: 1 },
+                { id: "s-todo", name: "Todo", type: "unstarted", position: 2 },
+              ],
+            },
+          },
+        },
+      });
+    };
+    const client = new LinearClient({ apiKey: "k", fetch: fetchStub });
+    const states = await client.workflowStates("team-1");
+
+    expect(document).toContain("states {");
+    expect(document).not.toContain("workflowStates {");
+    expect(states.map((state) => state.name)).toEqual(["Backlog", "Todo"]);
+    expect(states[0]?.type).toBe("backlog");
+  });
+});
+
 describe("LinearClient projects", () => {
   it("maps the projects connection into ProjectRef[]", async () => {
     const fetchStub: FetchLike = async () =>
@@ -558,37 +590,52 @@ describe("incompleteBlockers", () => {
   });
 });
 
-describe("LinearClient project document content fallback", () => {
-  it("retries with the object content selection when the scalar selection errors", async () => {
+describe("LinearClient project documents", () => {
+  // `Document.content` is a `String` in Linear's schema (introspection-
+  // validated, docs/VERIFIED.md). An earlier version selected `content` as a
+  // scalar, and on error retried with `content { body }` - a document the API
+  // rejects too, so the retry could only ever turn one error into two. There
+  // is one valid shape, and a content error is terminal.
+  it("reads document content as a scalar string in one request", async () => {
     let calls = 0;
+    let document = "";
     const fetchStub: FetchLike = async (_url, init) => {
       calls += 1;
-      const body = JSON.parse(init.body) as { query: string };
-      if (body.query.includes("content {")) {
-        return jsonResponse(200, {
-          data: {
-            project: {
-              id: "proj-1",
-              name: "Project",
-              description: null,
-              documents: {
-                nodes: [{ id: "doc-1", title: "Context", content: { body: "hello" }, updatedAt: "" }],
-              },
-            },
+      document = JSON.parse(String(init.body)).query;
+      return jsonResponse(200, {
+        data: {
+          project: {
+            id: "proj-1",
+            name: "Project",
+            description: null,
+            content: "overview",
+            documents: { nodes: [{ id: "doc-1", title: "Context", content: "hello", updatedAt: "" }] },
           },
-        });
-      }
-      return jsonResponse(200, { data: null, errors: [{ message: "Field 'content' must have a selection of subfields" }] });
+        },
+      });
     };
     const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
     const project = await client.project("proj-1");
-    expect(calls).toBe(2);
-    expect(project?.documents[0]?.content).toBe("hello");
 
-    calls = 0;
-    const project2 = await client.project("proj-1");
     expect(calls).toBe(1);
-    expect(project2?.documents[0]?.content).toBe("hello");
+    expect(document).not.toContain("content {");
+    expect(project?.content).toBe("overview");
+    expect(project?.documents[0]?.content).toBe("hello");
+  });
+
+  it("propagates a content error instead of retrying an invalid selection", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(200, {
+        data: null,
+        errors: [{ message: "Field 'content' must have a selection of subfields" }],
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    await expect(client.project("proj-1")).rejects.toThrow("must have a selection of subfields");
+    expect(calls).toBe(1);
   });
 });
 
