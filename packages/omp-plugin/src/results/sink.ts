@@ -64,16 +64,20 @@ function agentOf(entry: unknown): string | null {
   return typeof entry.agent === "string" ? entry.agent : null;
 }
 
-/** Reads the `aborted` flag off a `SingleResult` (or its enclosing tool result), defaulting to false when absent. */
+/** Reads the `aborted` flag off a `SingleResult`, defaulting to false when absent. */
 function abortedOf(entry: unknown): boolean {
   if (!isRecord(entry)) return false;
   return entry.aborted === true;
 }
 
 /**
- * Extracts every `CapturedOutput` from a `tool_result`-shaped payload:
- * `{ toolName: "task", input: { tasks: [{ agent, task }] }, result: { details: { results: [{ structuredOutput }] } } }`.
+ * Extracts every `CapturedOutput` from a `tool_result` event:
+ * `{ toolName: "task", input: { tasks: [{ agent, task }] }, details: { results: [{ structuredOutput }] } }`.
  * Also tolerates the flat single-spawn `task` shape, where `input` itself is the one task entry.
+ *
+ * `details` sits flat on the event - measured, not assumed (docs/VERIFIED.md).
+ * Reading it through an enclosing `result` field, which the runtime does not
+ * emit, silently captured nothing for every stage.
  */
 export function extractFromToolResult(payload: unknown): CapturedOutput[] {
   if (!isRecord(payload) || payload.toolName !== "task") return [];
@@ -81,8 +85,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
   const input = isRecord(payload.input) ? payload.input : {};
   const tasks = Array.isArray(input.tasks) ? input.tasks : "task" in input ? [input] : [];
 
-  const result = isRecord(payload.result) ? payload.result : {};
-  const details = isRecord(result.details) ? result.details : {};
+  const details = isRecord(payload.details) ? payload.details : {};
   const results = Array.isArray(details.results) ? details.results : [];
 
   const captured: CapturedOutput[] = [];
@@ -104,7 +107,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
       dispatchId,
       agent,
       data: structuredOutput.data,
-      aborted: abortedOf(single) || abortedOf(payload.result),
+      aborted: abortedOf(single),
       issueId,
       previousStateId,
     });

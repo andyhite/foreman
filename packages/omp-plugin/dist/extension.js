@@ -11017,8 +11017,7 @@ function extractFromToolResult(payload) {
     return [];
   const input = isRecord(payload.input) ? payload.input : {};
   const tasks = Array.isArray(input.tasks) ? input.tasks : ("task" in input) ? [input] : [];
-  const result = isRecord(payload.result) ? payload.result : {};
-  const details = isRecord(result.details) ? result.details : {};
+  const details = isRecord(payload.details) ? payload.details : {};
   const results = Array.isArray(details.results) ? details.results : [];
   const captured = [];
   for (let index = 0;index < results.length; index += 1) {
@@ -11036,7 +11035,7 @@ function extractFromToolResult(payload) {
       dispatchId,
       agent,
       data: structuredOutput.data,
-      aborted: abortedOf(single) || abortedOf(payload.result),
+      aborted: abortedOf(single),
       issueId,
       previousStateId
     });

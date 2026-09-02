@@ -329,3 +329,32 @@ exactly what §17 describes.
   concurrency semantics match N parallel single calls". One prompt therefore
   buys N concurrent agents and N `SingleResult`s in one `tool_result`, which is
   the mechanism §17.4 rests on.
+
+## Verified capturing a `tool_result`
+
+- **`tool_result` carries `details` flat on the event. There is no enclosing
+  `result` field.** Measured off the live runtime with a probe hook that
+  logged `Object.keys(event)`:
+  `["type", "toolName", "toolCallId", "input", "content", "details", "isError"]`,
+  with `details` holding `{ projectAgentsDir, results, totalDurationMs, usage,
+  outputPaths }` and each `results[]` entry the documented `SingleResult`
+  (`structuredOutput` among its ~30 fields). The plugin read
+  `payload.result.details.results`; `payload.result` is `undefined`, so the
+  extractor iterated an empty array and **captured nothing for any stage,
+  ever** — the agent yielded a valid result, the operator saw a clean run, and
+  Linear was never written. `src/omp-runtime.d.ts` is what hid it: the
+  hand-written declaration promised `result: ExtensionToolResult`, so the
+  wrong access typechecked, and every test built payloads in that fabricated
+  shape. A/B on one real event: reading `event.details` captures the result
+  with its dispatch id and parsed `data`; reading `event.result.details`
+  captures zero.
+- **A revised `tool_call` input *is* visible on the later `tool_result`.** A
+  hook that appends a marker to `input.tasks[].task` and returns `{ input }`
+  sees the appended marker in `tool_result`'s `input`, so keying a capture on
+  a marker the guard injects is sound — this was the other candidate
+  explanation for the silence, and it is ruled out rather than assumed.
+- **A background (non-`blocking`) spawn's `tool_result` carries
+  `details.results: []`** and an `async` marker in `details`, confirming from
+  the other direction why every Foreman agent must declare `blocking: true`
+  (§3.5 item 7): the `SingleResult` — and with it `structuredOutput` — exists
+  only for an inline spawn.

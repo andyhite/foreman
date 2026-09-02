@@ -154,11 +154,21 @@ declare module "@oh-my-pi/pi-coding-agent" {
     input?: Record<string, unknown>;
   }
 
+  /**
+   * Measured against the running runtime (docs/VERIFIED.md), not inferred:
+   * `tool_result` carries `details` *flat on the event*, alongside `content`
+   * and `isError`. There is no enclosing `result` field - declaring one is
+   * what let `payload.result.details.results` typecheck while reading
+   * `undefined` on every real dispatch.
+   */
   export interface ToolResultEvent {
+    type: "tool_result";
     toolName: string;
     toolCallId: string;
     input: Record<string, unknown>;
-    result: ExtensionToolResult;
+    content: Array<{ type: string; text: string }>;
+    details?: Record<string, unknown>;
+    isError: boolean;
   }
 
   export interface ExtensionLogger {

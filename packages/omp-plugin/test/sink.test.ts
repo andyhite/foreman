@@ -8,10 +8,11 @@ import {
 } from "../src/results/sink.ts";
 
 describe("extractFromToolResult", () => {
-  // Every `structuredOutput` literal below is omp's real shape, copied off a
-  // recorded `SingleResult`: `{ source, mode, status, data }`. There is no
-  // `valid` boolean — an earlier guard demanded one and silently dropped
-  // every genuine result (docs/VERIFIED.md).
+  // Every payload below is the shape the runtime actually emits, measured
+  // against a live `tool_result` (docs/VERIFIED.md): `details` flat on the
+  // event next to `content`/`isError`, with no enclosing `result` field, and
+  // `structuredOutput` as `{ source, mode, status, data }` - no `valid`
+  // boolean. Both fabrications silently dropped every genuine result.
   it("extracts structuredOutput from a tool_result-shaped payload", () => {
     const payload = {
       toolName: "task",
@@ -19,15 +20,12 @@ describe("extractFromToolResult", () => {
       input: {
         tasks: [{ agent: "foreman-implement", task: "Implement.\n\nFOREMAN-DISPATCH: foreman-implement-ENG-1-1\n" }],
       },
-      result: {
-        content: [],
-        details: {
-          results: [
-            {
-              structuredOutput: { source: "agent", mode: "strict", status: "valid", data: { issueId: "ENG-1" } },
-            },
-          ],
-        },
+      details: {
+        results: [
+          {
+            structuredOutput: { source: "agent", mode: "strict", status: "valid", data: { issueId: "ENG-1" } },
+          },
+        ],
       },
     };
     const captured = extractFromToolResult(payload);
@@ -47,13 +45,10 @@ describe("extractFromToolResult", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
-      result: {
-        content: [],
-        details: {
-          results: [
-            { structuredOutput: { source: "agent", mode: "strict", status: "invalid", data: {}, error: "schema_violation" } },
-          ],
-        },
+      details: {
+        results: [
+          { structuredOutput: { source: "agent", mode: "strict", status: "invalid", data: {}, error: "schema_violation" } },
+        ],
       },
     };
     const captured = extractFromToolResult(payload);
@@ -66,10 +61,7 @@ describe("extractFromToolResult", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-plan", task: "FOREMAN-DISPATCH: d-2\n" }] },
-      result: {
-        content: [],
-        details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "unavailable", data: null } }] },
-      },
+      details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "unavailable", data: null } }] },
     };
     expect(extractFromToolResult(payload).map((item) => item.dispatchId)).toEqual(["d-2"]);
   });
@@ -78,7 +70,7 @@ describe("extractFromToolResult", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-implement", task: "FOREMAN-DISPATCH: d-1\n" }] },
-      result: { content: [], details: { results: [{ structuredOutput: { notAStructuredOutput: true } }] } },
+      details: { results: [{ structuredOutput: { notAStructuredOutput: true } }] },
     };
     expect(extractFromToolResult(payload)).toEqual([]);
   });
@@ -87,16 +79,28 @@ describe("extractFromToolResult", () => {
     const payload = {
       toolName: "task",
       input: { tasks: [{ agent: "foreman-plan", task: "FOREMAN-PROJECT: project-1\n" }] },
+      details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "valid", data: {} } }] },
+    };
+    expect(extractFromToolResult(payload)).toEqual([]);
+  });
+
+  it("ignores a non-task tool_result", () => {
+    expect(extractFromToolResult({ toolName: "read", details: {} })).toEqual([]);
+  });
+
+  // The shape this asserts is dead is the one the plugin used to read: an
+  // enclosing `result` field the runtime never emits. Every stage's result
+  // was dropped in silence, so the absence has to stay asserted.
+  it("captures nothing from a payload whose details hide under a `result` field", () => {
+    const payload = {
+      toolName: "task",
+      input: { tasks: [{ agent: "foreman-plan", task: "FOREMAN-DISPATCH: d-3\n" }] },
       result: {
         content: [],
         details: { results: [{ structuredOutput: { source: "agent", mode: "strict", status: "valid", data: {} } }] },
       },
     };
     expect(extractFromToolResult(payload)).toEqual([]);
-  });
-
-  it("ignores a non-task tool_result", () => {
-    expect(extractFromToolResult({ toolName: "read", result: {} })).toEqual([]);
   });
 });
 

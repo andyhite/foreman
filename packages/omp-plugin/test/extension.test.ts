@@ -455,20 +455,19 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
           },
         ],
       },
-      result: {
-        content: [],
-        details: {
-          results: [
-            {
-              index: 0,
-              id: "PlanAppSettings",
-              agent: "foreman-plan",
-              exitCode: 0,
-              aborted: false,
-              structuredOutput: { source: "agent", mode: "strict", status: "valid", data },
-            },
-          ],
-        },
+      content: [],
+      isError: false,
+      details: {
+        results: [
+          {
+            index: 0,
+            id: "PlanAppSettings",
+            agent: "foreman-plan",
+            exitCode: 0,
+            aborted: false,
+            structuredOutput: { source: "agent", mode: "strict", status: "valid", data },
+          },
+        ],
       },
     };
   }
