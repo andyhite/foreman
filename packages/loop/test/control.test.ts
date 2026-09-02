@@ -32,15 +32,17 @@ class FakeDispatcher implements Dispatcher {
     this.#available = available;
   }
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
-    return {
-      dispatchId: request.dispatchId,
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
+      issueId: item.issueId,
       startedAt: new Date().toISOString(),
+      batchId,
       pid: 4242,
       herdr: null,
-    };
+    }));
   }
 
   async status(): Promise<DispatchStatus> {
@@ -75,7 +77,7 @@ function makeConfig(): GlobalConfig {
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql" },
-    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr" },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", orchestratorMaxBatches: 20 },
     repoDefaults: {
       baseBranch: "main",
       pr: { required: true, draft: false, ciRequired: true },
@@ -112,14 +114,15 @@ function makeDispatchingWorker(name = "refine"): Worker {
       counter += 1;
       const issueId = `ENG-${counter}`;
       const dispatchId = `d-${counter}`;
-      const handle = await ctx.dispatcher.dispatch({
+      const handles = await ctx.dispatcher.dispatch({
         agent: "foreman-refine",
-        issueId,
-        command: `/foreman-refine ${issueId}`,
-        dispatchId,
+        command: "/foreman-refine",
         cwd: ctx.entry.repoPath,
-        worktree: null,
+        alias: "product",
+        items: [{ issueId, subject: issueId, dispatchId, worktree: null }],
       });
+      const handle = handles[0];
+      if (!handle) throw new Error("no handle");
       ctx.bookkeeping.recordDispatch({
         agent: "foreman-refine",
         issueId,
@@ -130,8 +133,8 @@ function makeDispatchingWorker(name = "refine"): Worker {
       return {
         worker: "refine",
         ranAt: ctx.now().toISOString(),
-        decisions: [{ agent: "foreman-refine", issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
-        dispatched: [{ agent: "foreman-refine", issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
+        decisions: [{ agent: "foreman-refine", issueId, subject: issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
+        dispatched: [{ agent: "foreman-refine", issueId, subject: issueId, command: `/foreman-refine ${issueId}`, reason: "test" }],
         skipped: [],
         errors: [],
       };
@@ -147,6 +150,7 @@ function makeSupervisor(dispatcher: Dispatcher = new FakeDispatcher("print", tru
     dispatcher,
     bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),
     stateDir,
+    reservationsDir: join(stateDir, "reservations"),
     entry: makeEntry(),
     now: () => new Date(),
     log: () => {},

@@ -1648,11 +1648,16 @@ separate, swappable concern behind a small interface:
 
 ```ts
 interface Dispatcher {
-  dispatch(agent, issueId, command): Promise<Handle>
+  dispatch(request): Promise<Handle[]>   // one handle per item in the batch
   status(handle): "starting" | "running" | "settled" | "lost"
   attach?(handle): void        // herdr only
 }
 ```
+
+A request carries a *batch* of items — a stage's whole tick — rather than one,
+for the reason §17.4 gives: the session a dispatcher launches is a shim whose
+one job is to turn the slash command into a single `task` call, and only that
+call's `tool_result` carries structured output.
 
 Two implementations:
 
@@ -1709,20 +1714,24 @@ entirely if left at defaults.
 | Herdr object | Foreman mapping |
 |---|---|
 | Workspace | One per repo — the instance and its bound initiatives (§3.11). |
-| Tab | One per in-flight issue, named for the issue (`ENG-142`). |
-| Pane | The agent, `--cwd` set to that issue's worktree. |
-| `foreman` workspace | The `foreman-board` and `foreman team` panes plus a scratch tab for short-lived triage/refine/review agents, which need no worktree. Each repo workspace holds its own `foreman repo` pane (§3.11). |
+| Tab | One per stage, holding that stage's shared orchestrator (§17.4); one per in-flight *implementing* issue, named for the issue (`ENG-142`). |
+| Pane | The agent. `--cwd` is the repo for a stage orchestrator, that issue's worktree for an implement agent. |
+| `foreman` workspace | The `foreman-board` and `foreman team` panes. Each repo workspace holds its own `foreman repo` pane (§3.11). |
 
 Tabs are bounded by the WIP limit (§17.6), so at WIP 3 the layout stays legible
 rather than becoming a wall of panes.
 
 **Naming.** Agent names must match `[a-z][a-z0-9_-]{0,31}`, must be unique among
-live agents, and the alias is cleared when the agent exits. Use
-`foreman-<issue-id>` lowercased — naturally unique per in-flight issue, and it
-matches the lock model exactly. Capture pane IDs from the JSON that creation
-commands return; never predict them, and re-read `.result.move_result.pane.pane_id`
-after any `pane move`, since moving a pane between workspaces changes its
-qualified ID.
+live agents, and the alias is cleared when the agent exits — but herdr keeps a
+`done` agent's name reserved until its pane closes, which is why a recycled
+orchestrator's pane is closed rather than left behind. A stage orchestrator is
+`foreman-<alias>-<stage>`: the repo alias is in the name because two loops on
+one machine would otherwise both want `foreman-refine`. An implement agent is
+named for its dispatch id, not its issue, so a redispatch before merge cannot
+collide with the still-reserved name of the previous attempt. Capture pane IDs
+from the JSON that creation commands return; never predict them, and re-read
+`.result.move_result.pane.pane_id` after any `pane move`, since moving a pane
+between workspaces changes its qualified ID.
 
 **Sidebar tokens.** Herdr accepts pane and workspace metadata tokens that render
 in sidebar rows. Push the issue ID and current gate state as tokens with a TTL,
@@ -1742,6 +1751,77 @@ neither layer can hang forever.
 **Worktrees stay Foreman's.** Herdr can create them; don't let it. Foreman owns
 worktree lifecycle (§3.7, §12), and a terminal manager deciding branch and
 checkout contracts is exactly the coupling to avoid.
+
+### 17.4 Shared stage orchestrators
+
+§17.1 rules out an orchestrator *agent* that decides what to run next. This is
+not that: routing stays in the supervisor's predicates, and the session
+described here has no routing authority at all. It receives an explicit list of
+subjects and fans them out. Read the two sections together — the distinction is
+the whole reason this is allowed.
+
+**What the dispatched session actually is.** It is not the worker. It runs
+`/foreman:refine ENG-1 ENG-2`, and the command's only instruction is to make one
+`task` call with one item per subject. The real work happens in the
+`foreman-refine` subagents. So the parent session holds no issue state, no
+worktree, and nothing worth keeping between batches — which is exactly what
+makes it shareable.
+
+**Why a batch, and why blocking.** A `foreman-*` agent's structured output
+reaches the parent on exactly one channel: the `tool_result` of the `task` call.
+A background spawn's `async-result` delivery carries prose and no structured
+data, and the `task:subagent:*` events carry status only. Every Foreman agent
+therefore declares `blocking: true`. Blocking does not mean serial: an
+all-blocking `task` call runs its items concurrently under omp's session
+semaphore and returns every `SingleResult` in one payload, and the extension's
+capture path already loops over them. One prompt, N agents, N results.
+
+**One orchestrator per stage, not one per tick.** Per-stage sharing costs four
+session boots per loop lifetime instead of one per dispatch. Sharing a single
+session across *all* stages saves three more boots and is not worth it: a long
+batch in one stage would block every other stage's prompt for its whole
+duration, and one crash would take out the board.
+
+**Implement is excluded.** A non-isolated omp subagent inherits its parent
+session's cwd, so subagents of a repo-rooted orchestrator would write in the
+repo root rather than the issue's worktree (§12). Implement keeps a per-issue
+agent in a worktree-backed workspace — which is also the one stage where a
+dedicated pane earns its keep, since the operator attaches to inspect code.
+
+**Never prompt a working orchestrator.** `herdr agent prompt` accepts a
+submission while its target is `working` — it does not track turns — and omp
+delivers that submission as a queued user message that interrupts the turn's
+in-flight tool calls. Interrupting a turn whose tool call *is* the batch
+abandons the batch. The dispatcher checks `agent get` first: `idle`/`done`
+reuses the session, `working` defers the whole batch to the stage's next tick as
+a routine skip, `blocked` is the §17.3 anomaly, and `unknown` gets the pane
+closed and a fresh agent started. Deferring is safe precisely because nothing
+was recorded in flight yet.
+
+**Dispatch ids move to a reservations file.** The loop must own dispatch ids:
+the reaper compares the id it tracks against the id the agent wrote into the
+Linear lock comment, and a divergence marks a working issue blocked. One
+`FOREMAN_DISPATCH_ID` in the environment cannot serve many items across many
+turns, so the loop writes one reservation per item — agent, subject, id,
+timestamp — to a per-agent file under its state dir, named by
+`FOREMAN_DISPATCH_RESERVATIONS`. The task guard resolves each item's id by the
+subject marker the model already writes, so no id is ever transcribed by a
+model. Reservations are consumed on use and pruned at the lock TTL, so a subject
+dispatched again later cannot pick up an abandoned run's id. Precedence in the
+guard: reservation, then the inherited one-shot env id (still how an operator's
+own dispatch hands its id down), then mint.
+
+**Recycling.** The orchestrator carries no state between batches, so recycling
+exists only to bound context growth: after `agent.orchestratorMaxBatches`
+settled batches (default 20) the loop closes its pane and the next dispatch
+starts a fresh session. Even at 20 that is a twentieth of the boots the
+one-agent-per-dispatch model paid for.
+
+**Settling a batch.** One prompt is one turn, so items dispatched together
+settle together: the dispatcher waits once per batch and hands the same outcome
+to every handle in it. Wait for `idle` as well as `done` — an interactive omp
+session does not exit when its turn ends, so a `done`-only wait never matches
+and every dispatch would sit in flight until its timeout.
 
 ### 17.5 Stage workers
 

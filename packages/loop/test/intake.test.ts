@@ -58,6 +58,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      orchestratorMaxBatches: 20,
     },
     repoDefaults: {
       baseBranch: "main",
@@ -109,16 +110,18 @@ class FakeDispatcher implements Dispatcher {
   readonly kind = "print" as const;
   calls: DispatchRequest[] = [];
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
     this.calls.push(request);
-    return {
-      dispatchId: request.dispatchId,
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
+      issueId: item.issueId,
       startedAt: new Date().toISOString(),
+      batchId,
       pid: null,
       herdr: null,
-    };
+    }));
   }
   async status(): Promise<DispatchStatus> {
     return "settled";
@@ -265,6 +268,7 @@ function makeTriageItem(overrides: Partial<TriageItem> = {}): TriageItem {
 function makeContext(overrides: Partial<IntakeContext> & { config: GlobalConfig; linear: LinearWriter; dispatcher: Dispatcher }): IntakeContext {
   return {
     bookkeeping: freshBookkeeping(),
+    reservationsDir: mkdtempSync(join(tmpdir(), `foreman-intake-test-reservations-${(issueSeq += 1)}-`)),
     team: "ENG",
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},

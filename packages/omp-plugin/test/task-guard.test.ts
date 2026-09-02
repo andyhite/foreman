@@ -1,10 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderLockComment, type LockRecord } from "@foreman/core";
 import {
   AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
   BLOCKED_LABEL,
+  lockTtlMs,
   PRIORITY,
+  reserveDispatches,
+  reservationsPath,
   TYPE_LABEL,
 } from "@foreman/core";
 import type {
@@ -18,7 +24,13 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
-import { prepareTaskCall, __setInheritedDispatchIdForTest, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
+import {
+  prepareTaskCall,
+  __setInheritedDispatchIdForTest,
+  __setReservationsPathForTest,
+  type TaskCallInput,
+  type TaskGuardDeps,
+} from "../src/enforce/task-guard.ts";
 import { extractDispatchInfo } from "../src/results/sink.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
@@ -200,6 +212,7 @@ function makeConfig(): GlobalConfig {
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      orchestratorMaxBatches: 20,
     },
     repoDefaults: {
       baseBranch: "main",
@@ -588,4 +601,152 @@ describe("prepareTaskCall — unwindPrepared releases the live-dispatch registra
     // reaper sweep, not this in-process registry, is what recovers it.
     expect(released).toEqual(["foreman-implement-ENG-1-dispatch-1"]);
   });
+});
+
+describe("prepareTaskCall — reservation-based dispatch ids", () => {
+  function withReservationsDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+    const dir = mkdtempSync(join(tmpdir(), "foreman-reservations-"));
+    return run(dir).finally(() => {
+      __setReservationsPathForTest(null);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  it("prefers a fresh reservation over both the inherited env id and a freshly minted one", async () =>
+    withReservationsDir(async (dir) => {
+      const path = reservationsPath(dir, "foreman-implement");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const config = makeConfig();
+      reserveDispatches(
+        path,
+        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-eng-1", reservedAt: now.toISOString() }],
+        now,
+        lockTtlMs(config),
+      );
+      __setReservationsPathForTest(path);
+      __setInheritedDispatchIdForTest("inherited-id-nobody-should-use");
+      try {
+        const issue = makeIssue();
+        const linear = new FakeLinear([issue]);
+        const deps = makeDeps(linear, {
+          config,
+          newDispatchId: () => {
+            throw new Error("must not mint when a reservation matches");
+          },
+        });
+        const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
+        expect(decision.block).toBeUndefined();
+        const task = decision.input?.tasks?.[0]?.task ?? "";
+        expect(extractDispatchInfo(task).dispatchId).toBe("reserved-eng-1");
+      } finally {
+        __setInheritedDispatchIdForTest(null);
+      }
+    }));
+
+  it("resolves three different reserved ids by subject in one batch", async () =>
+    withReservationsDir(async (dir) => {
+      const path = reservationsPath(dir, "foreman-implement");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const config = makeConfig();
+      reserveDispatches(
+        path,
+        [
+          { agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-eng-1", reservedAt: now.toISOString() },
+          { agent: "foreman-implement", subject: "ENG-2", dispatchId: "reserved-eng-2", reservedAt: now.toISOString() },
+          { agent: "foreman-implement", subject: "ENG-3", dispatchId: "reserved-eng-3", reservedAt: now.toISOString() },
+        ],
+        now,
+        lockTtlMs(config),
+      );
+      __setReservationsPathForTest(path);
+      const first = makeIssue();
+      const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
+      const third = makeIssue({ id: "issue-3", identifier: "ENG-3", labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
+      const linear = new FakeLinear([first, second, third]);
+      const deps = makeDeps(linear, { config });
+      const input: TaskCallInput = {
+        tasks: [
+          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-1\n" },
+          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-2\n" },
+          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-3\n" },
+        ],
+      };
+      const decision = await prepareTaskCall(input, deps);
+      expect(decision.block).toBeUndefined();
+      const tasks = decision.input?.tasks ?? [];
+      expect(extractDispatchInfo(tasks[0]?.task ?? "").dispatchId).toBe("reserved-eng-1");
+      expect(extractDispatchInfo(tasks[1]?.task ?? "").dispatchId).toBe("reserved-eng-2");
+      expect(extractDispatchInfo(tasks[2]?.task ?? "").dispatchId).toBe("reserved-eng-3");
+    }));
+
+  it("falls back to minting when the reservations file has no entry for this subject", async () =>
+    withReservationsDir(async (dir) => {
+      const path = reservationsPath(dir, "foreman-implement");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const config = makeConfig();
+      reserveDispatches(
+        path,
+        [{ agent: "foreman-implement", subject: "ENG-999", dispatchId: "reserved-eng-999", reservedAt: now.toISOString() }],
+        now,
+        lockTtlMs(config),
+      );
+      __setReservationsPathForTest(path);
+      const issue = makeIssue();
+      const linear = new FakeLinear([issue]);
+      const deps = makeDeps(linear, { config });
+      const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
+      expect(decision.block).toBeUndefined();
+      const task = decision.input?.tasks?.[0]?.task ?? "";
+      expect(extractDispatchInfo(task).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
+    }));
+
+  it("ignores an expired reservation and mints instead", async () =>
+    withReservationsDir(async (dir) => {
+      const path = reservationsPath(dir, "foreman-implement");
+      const config = makeConfig();
+      const ttlMs = lockTtlMs(config);
+      const reservedAt = new Date(new Date("2026-01-01T00:00:00.000Z").getTime() - ttlMs - 1000);
+      reserveDispatches(
+        path,
+        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "stale-reservation", reservedAt: reservedAt.toISOString() }],
+        reservedAt,
+        ttlMs,
+      );
+      __setReservationsPathForTest(path);
+      const issue = makeIssue();
+      const linear = new FakeLinear([issue]);
+      const deps = makeDeps(linear, { config });
+      const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
+      expect(decision.block).toBeUndefined();
+      const task = decision.input?.tasks?.[0]?.task ?? "";
+      expect(extractDispatchInfo(task).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
+    }));
+
+  it("consumes a reservation so a second identical call does not reuse it", async () =>
+    withReservationsDir(async (dir) => {
+      const path = reservationsPath(dir, "foreman-implement");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const config = makeConfig();
+      reserveDispatches(
+        path,
+        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-once", reservedAt: now.toISOString() }],
+        now,
+        lockTtlMs(config),
+      );
+      __setReservationsPathForTest(path);
+
+      const firstIssue = makeIssue();
+      const firstLinear = new FakeLinear([firstIssue]);
+      const firstDeps = makeDeps(firstLinear, { config });
+      const firstDecision = await prepareTaskCall(implementTask("ENG-1"), firstDeps);
+      expect(extractDispatchInfo(firstDecision.input?.tasks?.[0]?.task ?? "").dispatchId).toBe("reserved-once");
+
+      const secondIssue = makeIssue();
+      const secondLinear = new FakeLinear([secondIssue]);
+      const secondDeps = makeDeps(secondLinear, { config });
+      const secondDecision = await prepareTaskCall(implementTask("ENG-1"), secondDeps);
+      const secondTask = secondDecision.input?.tasks?.[0]?.task ?? "";
+      expect(extractDispatchInfo(secondTask).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
+      expect(extractDispatchInfo(secondTask).dispatchId).not.toBe("reserved-once");
+    }));
 });

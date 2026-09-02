@@ -14,9 +14,9 @@ var __export = (target, all) => {
 };
 
 // src/extension.ts
-import { existsSync as existsSync8, mkdtempSync, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync9, mkdtempSync, rmSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ../core/src/apply/cleanup.ts
@@ -3324,7 +3324,8 @@ var AgentSettingsSchema = Type.Object({
   lockTtlMarginMs: Type.Integer({ default: 1800000, minimum: 0 }),
   ompBin: Type.String({ default: "omp", minLength: 1 }),
   approvalMode: Type.Union([Type.Literal("always-ask"), Type.Literal("write"), Type.Literal("yolo")], { default: "yolo" }),
-  herdrBin: Type.String({ default: "herdr", minLength: 1 })
+  herdrBin: Type.String({ default: "herdr", minLength: 1 }),
+  orchestratorMaxBatches: Type.Integer({ default: 20, minimum: 1 })
 }, { additionalProperties: false, default: {} });
 var InitiativeBindingSchema = Type.Union([
   Type.String({ minLength: 1 }),
@@ -6983,7 +6984,8 @@ function loopPaths(config, id, home) {
     bookkeeping: join2(dir, "bookkeeping.json"),
     status: join2(dir, "status.json"),
     socket: socketPathFor(dir),
-    log: join2(dir, "loop.log")
+    log: join2(dir, "loop.log"),
+    reservations: join2(dir, "reservations")
   };
 }
 // ../core/src/control/protocol.ts
@@ -7674,6 +7676,55 @@ function readStatusFile(path) {
   } catch {
     return null;
   }
+}
+// ../core/src/dispatch/reservations.ts
+import { existsSync as existsSync7, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname3, join as join3 } from "node:path";
+var RESERVATIONS_ENV = "FOREMAN_DISPATCH_RESERVATIONS";
+function isReservation(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const record = value;
+  return typeof record.agent === "string" && typeof record.subject === "string" && typeof record.dispatchId === "string" && typeof record.reservedAt === "string";
+}
+function readReservations(path) {
+  if (!existsSync7(path))
+    return [];
+  try {
+    const parsed = JSON.parse(readFileSync4(path, "utf8"));
+    if (!Array.isArray(parsed))
+      return [];
+    return parsed.filter(isReservation);
+  } catch {
+    return [];
+  }
+}
+function saveReservations(path, entries) {
+  mkdirSync4(dirname3(path), { recursive: true });
+  if (entries.length === 0) {
+    if (existsSync7(path))
+      unlinkSync3(path);
+    return;
+  }
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync2(temp, `${JSON.stringify(entries, null, 2)}
+`, { mode: 384 });
+  renameSync2(temp, path);
+}
+function fresh(entry, now, ttlMs) {
+  const age = now.getTime() - Date.parse(entry.reservedAt);
+  return Number.isFinite(age) && age < ttlMs;
+}
+function takeReservation(path, agent, subject, now, ttlMs) {
+  const entries = readReservations(path);
+  if (entries.length === 0)
+    return null;
+  const index = entries.findIndex((entry) => entry.agent === agent && entry.subject === subject && fresh(entry, now, ttlMs));
+  const taken = index >= 0 ? entries[index] : undefined;
+  const remaining = entries.filter((entry, at) => at !== index && fresh(entry, now, ttlMs));
+  if (remaining.length !== entries.length)
+    saveReservations(path, remaining);
+  return taken?.dispatchId ?? null;
 }
 // ../core/src/domain/priority.ts
 var PRIORITY = {
@@ -9549,9 +9600,9 @@ async function resolveTeamKey(deps) {
   ]);
 }
 // src/enforce/skill-guard.ts
-import { existsSync as existsSync7, readdirSync, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync8, readdirSync, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 var AUTOLOAD_RE = /^autoloadSkills:\s*\[([^\]]*)\]\s*$/m;
 function parseAutoloadSkills(frontmatter) {
   const match = AUTOLOAD_RE.exec(frontmatter);
@@ -9564,21 +9615,21 @@ function frontmatterOf(agentFileContent) {
   return parts[1] ?? "";
 }
 function skillExistsAt(skillsRoot, skillName) {
-  return existsSync7(join3(skillsRoot, skillName, "SKILL.md"));
+  return existsSync8(join4(skillsRoot, skillName, "SKILL.md"));
 }
 function checkSkillAutoload(options) {
   const home = options.home ?? homedir2();
-  const agentsDir = join3(options.pluginRoot, "agents");
-  const pluginSkillsRoot = join3(options.pluginRoot, "skills");
-  const projectSkillsRoot = join3(options.cwd, ".omp", "skills");
-  const userSkillsRoot = join3(home, ".omp", "agent", "skills");
+  const agentsDir = join4(options.pluginRoot, "agents");
+  const pluginSkillsRoot = join4(options.pluginRoot, "skills");
+  const projectSkillsRoot = join4(options.cwd, ".omp", "skills");
+  const userSkillsRoot = join4(home, ".omp", "agent", "skills");
   const problems = [];
-  if (!existsSync7(agentsDir))
+  if (!existsSync8(agentsDir))
     return problems;
   const agentFiles = readdirSync(agentsDir).filter((name) => name.startsWith("foreman-") && name.endsWith(".md"));
   for (const fileName of agentFiles) {
     const agentName = fileName.replace(/\.md$/, "");
-    const content = readFileSync4(join3(agentsDir, fileName), "utf8");
+    const content = readFileSync5(join4(agentsDir, fileName), "utf8");
     const skills = parseAutoloadSkills(frontmatterOf(content));
     for (const skillName of skills) {
       if (skillExistsAt(projectSkillsRoot, skillName)) {
@@ -9586,7 +9637,7 @@ function checkSkillAutoload(options) {
           agent: agentName,
           skill: skillName,
           reason: "shadowed",
-          shadowedBy: join3(projectSkillsRoot, skillName)
+          shadowedBy: join4(projectSkillsRoot, skillName)
         });
         continue;
       }
@@ -9595,7 +9646,7 @@ function checkSkillAutoload(options) {
           agent: agentName,
           skill: skillName,
           reason: "shadowed",
-          shadowedBy: join3(userSkillsRoot, skillName)
+          shadowedBy: join4(userSkillsRoot, skillName)
         });
         continue;
       }
@@ -9617,6 +9668,7 @@ function formatSkillGuardProblem(problem) {
 var FOREMAN_PREFIX = "foreman-";
 var ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/m;
 var inheritedDispatchId = process.env.FOREMAN_DISPATCH_ID ?? null;
+var reservationsPath = process.env[RESERVATIONS_ENV] ?? null;
 function stageFor(agent) {
   if (agent === "foreman-triage")
     return "triage";
@@ -9699,7 +9751,8 @@ ${lines.join(`
 `;
 }
 function takeDispatchId(deps, agent, subject, now) {
-  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
+  const reserved = reservationsPath ? takeReservation(reservationsPath, agent, subject, now, lockTtlMs(deps.config)) : null;
+  const dispatchId = reserved ?? inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
   inheritedDispatchId = null;
   deps.registerLiveDispatch(dispatchId);
   return dispatchId;
@@ -11024,10 +11077,10 @@ function toGuardDeps() {
       const prior = reviewDiffDirs.get(issueId);
       if (prior)
         rmSync(prior, { recursive: true, force: true });
-      const dir = mkdtempSync(join4(tmpdir2(), `foreman-review-${issueId}-`));
+      const dir = mkdtempSync(join5(tmpdir2(), `foreman-review-${issueId}-`));
       reviewDiffDirs.set(issueId, dir);
-      const path = join4(dir, "diff.patch");
-      writeFileSync2(path, diff);
+      const path = join5(dir, "diff.patch");
+      writeFileSync3(path, diff);
       return path;
     },
     liveDispatchIds,
@@ -11169,7 +11222,7 @@ ${parsed.problems.map((problem) => `- ${problem}`).join(`
     }
   }
 }
-var PLUGIN_ROOT = dirname3(dirname3(fileURLToPath(import.meta.url)));
+var PLUGIN_ROOT = dirname4(dirname4(fileURLToPath(import.meta.url)));
 function createForemanExtension(pi) {
   pi.setLabel("Foreman");
   registerLinearReadTool(pi);
@@ -11246,7 +11299,7 @@ function createForemanExtension(pi) {
       }
       return;
     }
-    if (existsSync8(join4(PLUGIN_ROOT, "agents"))) {
+    if (existsSync9(join5(PLUGIN_ROOT, "agents"))) {
       const problems = checkSkillAutoload({ pluginRoot: PLUGIN_ROOT, cwd: ctx.cwd });
       for (const problem of problems)
         ctx.ui.notify(formatSkillGuardProblem(problem), "error");

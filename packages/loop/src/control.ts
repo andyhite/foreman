@@ -128,8 +128,13 @@ export function createControlHandlers(options: ControlHandlersOptions): ControlH
       }
       if (handle.pid === null) throw new Error(`print dispatch ${dispatchId} has no process id to kill`);
       process.kill(handle.pid, "SIGTERM");
-      supervisor.bookkeeping.clearDispatch(dispatchId);
-      supervisor.forgetHandle(dispatchId);
+      // One print dispatch is one process for the whole batch (SPEC §17.4):
+      // killing its pid ends every item in the batch, so every dispatch
+      // record in the batch is cleared here, not just the one requested.
+      for (const batched of supervisor.handlesInBatch(dispatchId)) {
+        supervisor.bookkeeping.clearDispatch(batched.dispatchId);
+        supervisor.forgetHandle(batched.dispatchId);
+      }
       supervisor.bookkeeping.save();
     },
   };

@@ -20,7 +20,7 @@ import type {
   ResolvedRepoEntry,
   ControlEvent,
 } from "@foreman/core";
-import { DENY_CONFIRMER, repoLoopId, YOLO_CONFIRMER } from "@foreman/core";
+import { DENY_CONFIRMER, readReservations, repoLoopId, reservationsPath, YOLO_CONFIRMER } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import {
   LoopLockHeldError,
@@ -45,15 +45,17 @@ class FakeDispatcher implements Dispatcher {
     this.#available = available;
   }
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
-    return {
-      dispatchId: request.dispatchId,
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
+      issueId: item.issueId,
       startedAt: new Date().toISOString(),
+      batchId,
       pid: null,
       herdr: null,
-    };
+    }));
   }
 
   async status(): Promise<DispatchStatus> {
@@ -88,7 +90,7 @@ function makeConfig(mode: LoopMode = "confirm"): GlobalConfig {
     },
     intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
     linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql" },
-    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr" },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", orchestratorMaxBatches: 20 },
     repoDefaults: {
       baseBranch: "main",
       pr: { required: true, draft: false, ciRequired: true },
@@ -252,7 +254,7 @@ function makeStubWorker(): Worker {
     name: "refine",
     cadenceMs: 0,
     async run(ctx: WorkerContext): Promise<WorkerReport> {
-      const decision = { agent: "foreman-refine" as const, issueId: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." };
+      const decision = { agent: "foreman-refine" as const, issueId: "ENG-1", subject: "ENG-1", command: "/foreman-refine ENG-1", reason: "Backlog, priority 1." };
       const approved = await ctx.confirm({ kind: "dispatch", summary: "dispatch foreman-refine for ENG-1" });
       return {
         worker: "refine",
@@ -274,6 +276,7 @@ function makeSupervisor(logs: string[], confirmer: Confirmer = YOLO_CONFIRMER, v
     dispatcher: new FakeDispatcher("print", true),
     bookkeeping: Bookkeeping.load(join(stateDir, "bookkeeping.json")),
     stateDir,
+    reservationsDir: join(stateDir, "reservations"),
     entry: makeEntry(),
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: (message) => logs.push(message),
@@ -347,14 +350,15 @@ function makeDispatchAndWatchWorker(): Worker {
     async run(ctx: WorkerContext): Promise<WorkerReport> {
       seq += 1;
       const dispatchId = `foreman-implement-ENG-1-2026060${seq}T120000Z-abc`;
-      const handle = await ctx.dispatcher.dispatch({
+      const handles = await ctx.dispatcher.dispatch({
         agent: "foreman-implement",
-        issueId: "ENG-1",
-        command: "/foreman:implement ENG-1",
-        dispatchId,
+        command: "/foreman:implement",
         cwd: ctx.entry.repoPath,
-        worktree: null,
+        alias: "product",
+        items: [{ issueId: "ENG-1", subject: "ENG-1", dispatchId, worktree: null }],
       });
+      const handle = handles[0];
+      if (!handle) throw new Error("no handle");
       ctx.bookkeeping.recordDispatch({
         agent: "foreman-implement",
         issueId: "ENG-1",
@@ -362,7 +366,7 @@ function makeDispatchAndWatchWorker(): Worker {
         startedAt: handle.startedAt,
         stage: "implement",
       });
-      ctx.watchSettle(handle, "implement");
+      ctx.watchSettle(handles, "implement");
       return {
         worker: "implement",
         ranAt: ctx.now().toISOString(),
@@ -380,15 +384,17 @@ class SettlingDispatcher implements Dispatcher {
   readonly kind = "print" as const;
   constructor(private readonly exitCode: number) {}
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
-    return {
-      dispatchId: request.dispatchId,
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
+      issueId: item.issueId,
       startedAt: new Date().toISOString(),
+      batchId,
       pid: null,
       herdr: null,
-    };
+    }));
   }
   async status(): Promise<DispatchStatus> {
     return "settled";
@@ -466,6 +472,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
       dispatcher: new SettlingDispatcher(1),
       bookkeeping,
       stateDir,
+      reservationsDir: join(stateDir, "reservations"),
       entry: makeEntry(),
       now: () => new Date("2026-06-01T12:00:00.000Z"),
       log: () => {},
@@ -510,6 +517,7 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
       dispatcher: new SettlingDispatcher(0),
       bookkeeping,
       stateDir,
+      reservationsDir: join(stateDir, "reservations"),
       entry: makeEntry(),
       now: () => new Date("2026-06-01T12:00:00.000Z"),
       log: () => {},
@@ -524,5 +532,108 @@ describe("Supervisor#watchSettle (SPEC §17.8: agent failures must reach the ret
     await flushBackgroundWork();
     expect(bookkeeping.attemptCount("implement", "ENG-1")).toBe(0);
     expect(bookkeeping.state.inFlight).toHaveLength(0);
+  });
+});
+
+// ---- reservations / batched dispatch (SPEC §17.4, §11) --------------------
+
+/** Dispatches a fixed 3-item batch in one request and hands every resulting handle to a single `watchSettle`. */
+function makeBatchDispatchAndWatchWorker(): Worker {
+  return {
+    name: "refine",
+    cadenceMs: 0,
+    async run(ctx: WorkerContext): Promise<WorkerReport> {
+      const items = ["ENG-1", "ENG-2", "ENG-3"].map((issueId) => ({
+        issueId,
+        subject: issueId,
+        dispatchId: `foreman-refine-${issueId}-batch`,
+        worktree: null,
+      }));
+      const handles = await ctx.dispatcher.dispatch({
+        agent: "foreman-refine",
+        command: "/foreman:refine",
+        cwd: ctx.entry.repoPath,
+        alias: ctx.entry.alias,
+        items,
+      });
+      for (const handle of handles) {
+        ctx.bookkeeping.recordDispatch({
+          agent: "foreman-refine",
+          issueId: handle.issueId,
+          dispatchId: handle.dispatchId,
+          startedAt: handle.startedAt,
+          stage: "refine",
+        });
+      }
+      ctx.watchSettle(handles, "refine");
+      return {
+        worker: "refine",
+        ranAt: ctx.now().toISOString(),
+        decisions: [],
+        dispatched: [],
+        skipped: [],
+        errors: [],
+      };
+    },
+  };
+}
+
+describe("Supervisor — reservations and batch settle (SPEC §17.4, §11)", () => {
+  it("writes one DispatchReservation per item to the agent's reservations file before dispatching", async () => {
+    const stateDir = tempStateDir();
+    const reservationsDir = join(stateDir, "reservations");
+    const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
+    const supervisor = new Supervisor({
+      config: makeConfig("yolo"),
+      linear: new NoopLinear() as unknown as LinearWriter,
+      dispatcher: new FakeDispatcher("print", true),
+      bookkeeping,
+      stateDir,
+      reservationsDir,
+      entry: makeEntry(),
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: () => {},
+      confirmer: YOLO_CONFIRMER,
+      loopId: repoLoopId("acme"),
+      statusPath: null,
+      version: "0.1.0-test",
+      team: "ENG",
+    });
+
+    await supervisor.runTick([makeBatchDispatchAndWatchWorker()]);
+
+    const reservations = readReservations(reservationsPath(reservationsDir, "foreman-refine"));
+    expect(reservations).toHaveLength(3);
+    expect(reservations.map((entry) => entry.subject).sort()).toEqual(["ENG-1", "ENG-2", "ENG-3"]);
+    expect(reservations.every((entry) => entry.dispatchId.startsWith("foreman-refine-"))).toBe(true);
+  });
+
+  it("settling the batch once clears every in-flight record in it", async () => {
+    const stateDir = tempStateDir();
+    const bookkeeping = Bookkeeping.load(join(stateDir, "bookkeeping.json"));
+    const supervisor = new Supervisor({
+      config: makeConfig("yolo"),
+      linear: new NoopLinear() as unknown as LinearWriter,
+      dispatcher: new SettlingDispatcher(0),
+      bookkeeping,
+      stateDir,
+      reservationsDir: join(stateDir, "reservations"),
+      entry: makeEntry(),
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: () => {},
+      confirmer: YOLO_CONFIRMER,
+      loopId: repoLoopId("acme"),
+      statusPath: null,
+      version: "0.1.0-test",
+      team: "ENG",
+    });
+
+    await supervisor.runTick([makeBatchDispatchAndWatchWorker()]);
+    await flushBackgroundWork();
+
+    expect(bookkeeping.state.inFlight).toHaveLength(0);
+    for (const issueId of ["ENG-1", "ENG-2", "ENG-3"]) {
+      expect(supervisor.handleFor(`foreman-refine-${issueId}-batch`)).toBeNull();
+    }
   });
 });

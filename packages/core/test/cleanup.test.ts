@@ -11,7 +11,7 @@ class SpyDispatcher implements Dispatcher {
   readonly kind = "print" as const;
   cleanupCalls: Array<{ issueId: string; repoPath: string }> = [];
 
-  async dispatch(): Promise<DispatchHandle> {
+  async dispatch(): Promise<DispatchHandle[]> {
     throw new Error("not used in these tests");
   }
   async status(): Promise<DispatchStatus> {

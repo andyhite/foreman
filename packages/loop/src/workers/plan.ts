@@ -6,7 +6,15 @@
  * "fully planned" flag to maintain (see `routing.ts`'s `routePlan`).
  */
 
-import { BLOCKED_HUMAN_FILTER, MAINTENANCE_PROJECT_NAME, inInitiatives, newDispatchId } from "@foreman/core";
+import {
+  BLOCKED_HUMAN_FILTER,
+  DISPATCH_COMMAND,
+  MAINTENANCE_PROJECT_NAME,
+  inInitiatives,
+  newDispatchId,
+  type DispatchItem,
+} from "@foreman/core";
+import { isOrchestratorBusy } from "../dispatch/index.ts";
 import type { BoardSnapshot, DispatchDecision, PlanCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
@@ -67,10 +75,10 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
   };
 
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
+  const confirmed: DispatchDecision[] = [];
   for (const decision of decisions) {
     if (decision.agent !== "foreman-plan" || !decision.projectId) continue;
     const project = planCandidates.find((candidate) => candidate.project.id === decision.projectId)?.project;
-    const dispatchId = newDispatchId(decision.agent, decision.projectId, now);
     const summary = `dispatch ${decision.agent} for project ${project?.name ?? decision.projectId}`;
     if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
       skipped.push({
@@ -82,27 +90,52 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
       });
       continue;
     }
+    confirmed.push(decision);
+  }
+
+  if (confirmed.length > 0) {
+    const items: DispatchItem[] = confirmed.map((decision) => ({
+      issueId: null,
+      subject: decision.subject,
+      dispatchId: newDispatchId(decision.agent, decision.subject ?? "batch", now),
+      worktree: null,
+    }));
     try {
-      const handle = await ctx.dispatcher.dispatch({
-        agent: decision.agent,
-        issueId: null,
-        command: decision.command,
-        dispatchId,
+      const handles = await ctx.dispatcher.dispatch({
+        agent: "foreman-plan",
+        command: DISPATCH_COMMAND.plan,
         cwd: ctx.entry.repoPath,
-        worktree: null,
+        alias: ctx.entry.alias,
+        items,
       });
-      ctx.bookkeeping.recordDispatch({
-        agent: decision.agent,
-        issueId: null,
-        projectId: decision.projectId,
-        dispatchId: handle.dispatchId,
-        startedAt: handle.startedAt,
-        stage: "plan",
+      handles.forEach((handle, index) => {
+        const decision = confirmed[index];
+        if (!decision) return;
+        ctx.bookkeeping.recordDispatch({
+          agent: decision.agent,
+          issueId: null,
+          projectId: decision.projectId,
+          dispatchId: handle.dispatchId,
+          startedAt: handle.startedAt,
+          stage: "plan",
+        });
+        dispatched.push(decision);
       });
-      ctx.watchSettle(handle, "plan");
-      dispatched.push(decision);
+      ctx.watchSettle(handles, "plan");
     } catch (error) {
-      errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
+      if (isOrchestratorBusy(error)) {
+        for (const decision of confirmed) {
+          skipped.push({
+            stage: "plan",
+            issueId: null,
+            projectId: decision.projectId,
+            code: "orchestrator-busy",
+            message: `foreman-plan orchestrator is busy: ${error.message}`,
+          });
+        }
+      } else {
+        errors.push(`dispatch ${DISPATCH_COMMAND.plan} failed: ${String(error)}`);
+      }
     }
   }
 

@@ -17,9 +17,12 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { isHerdrUnavailable } from "./dispatch/index.ts";
 import {
+  BATCH_SUBJECT,
   IN_FLIGHT_FILTER,
   LinearApiError,
   lockTtlMs,
+  reservationsPath,
+  reserveDispatches,
   style,
   writeStatusFile,
   type AgentStatus,
@@ -28,6 +31,7 @@ import {
   type Confirmer,
   type Dispatcher,
   type DispatchHandle,
+  type DispatchReservation,
   type GlobalConfig,
   type LinearWriter,
   type LoopId,
@@ -247,8 +251,9 @@ export interface SupervisorOptions {
   printDispatcher?: Dispatcher;
   bookkeeping: Bookkeeping;
   stateDir: string;
-  /** This instance's resolved registry entry (SPEC §3.11), threaded to every worker. */
   entry: ResolvedRepoEntry;
+  /** Directory of per-agent dispatch-id reservation files (SPEC §17.4) — `loopPaths(...).reservations`. */
+  reservationsDir: string;
   now?: () => Date;
   log?: (message: string) => void;
   confirmer: Confirmer;
@@ -275,6 +280,7 @@ export class Supervisor {
   readonly #dispatcher: Dispatcher;
   readonly #printDispatcher: Dispatcher | null;
   readonly #entry: ResolvedRepoEntry;
+  readonly #reservationsDir: string;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
   readonly #bookkeeping: Bookkeeping;
@@ -321,6 +327,7 @@ export class Supervisor {
     this.#printDispatcher = options.printDispatcher ?? null;
     this.#bookkeeping = options.bookkeeping;
     this.#entry = options.entry;
+    this.#reservationsDir = options.reservationsDir;
     const writeLog = options.log ?? ((message: string) => console.log(`[foreman-repo] ${message}`));
     this.#log = (message) => {
       writeLog(message);
@@ -391,6 +398,13 @@ export class Supervisor {
   /** The `DispatchHandle` the wrapped dispatcher recorded for `dispatchId`, or null once cleared. */
   handleFor(dispatchId: string): DispatchHandle | null {
     return this.#handles.get(dispatchId) ?? null;
+  }
+
+  /** Every handle sharing `dispatchId`'s `batchId` — killing a print dispatch's single process kills every item in its batch (SPEC §17.4). */
+  handlesInBatch(dispatchId: string): DispatchHandle[] {
+    const handle = this.#handles.get(dispatchId);
+    if (!handle) return [];
+    return [...this.#handles.values()].filter((candidate) => candidate.batchId === handle.batchId);
   }
 
   /** Drops everything this supervisor tracked about a dispatch — the counterpart to `Bookkeeping.clearDispatch`. */
@@ -569,7 +583,7 @@ export class Supervisor {
       log: this.#log,
       mode: stage ? effectiveMode(stage, config.loop) : config.loop.mode,
       confirm: (request) => this.#confirmer.confirm(request),
-      watchSettle: (handle, workerStage) => this.#watchSettle(handle, workerStage),
+      watchSettle: (handles, workerStage) => this.#watchSettle(handles, workerStage),
     };
   }
 
@@ -581,27 +595,34 @@ export class Supervisor {
    * tick — `void`-started so `runTick` returns without waiting on the
    * dispatch to finish.
    */
-  #watchSettle(handle: DispatchHandle, stage: StageName): void {
+  #watchSettle(handles: readonly DispatchHandle[], stage: StageName): void {
+    const first = handles[0];
+    if (!first) return;
     void (async () => {
       try {
-        const outcome = await this.#dispatcher.settle(handle);
+        const outcome = await this.#dispatcher.settle(first);
         this.#logVerbose(
-          `settled ${handle.dispatchId} (${handle.agent}${handle.issueId ? ` ${handle.issueId}` : ""}): status=${outcome.status} exitCode=${outcome.exitCode ?? "null"}`,
+          `settled batch ${first.batchId} (${handles.length} item(s), ${first.agent}): status=${outcome.status} exitCode=${outcome.exitCode ?? "null"}`,
         );
         if (outcome.status !== "settled" || (outcome.exitCode ?? 0) !== 0) {
-          const pending = this.#bookkeeping.recordAttemptFailure(
-            stage,
-            handle.issueId ?? "",
-            this.#config().loop.retryCap,
-            this.#now(),
-          );
-          if (pending) await applyPendingDecisions(this.#context(), [pending]);
+          for (const handle of handles) {
+            const pending = this.#bookkeeping.recordAttemptFailure(
+              stage,
+              handle.issueId ?? "",
+              this.#config().loop.retryCap,
+              this.#now(),
+            );
+            if (pending) await applyPendingDecisions(this.#context(), [pending]);
+          }
         }
       } catch (error) {
-        this.#log(`watchSettle failed for ${handle.dispatchId}: ${String(error)}`);
+        this.#log(`watchSettle failed for batch ${first.batchId}: ${String(error)}`);
         if (this.#verbose && error instanceof Error && error.stack) this.#logVerbose(error.stack);
       } finally {
-        this.#bookkeeping.clearDispatch(handle.dispatchId);
+        for (const handle of handles) {
+          this.#bookkeeping.clearDispatch(handle.dispatchId);
+          this.forgetHandle(handle.dispatchId);
+        }
         try {
           this.#bookkeeping.save();
         } catch (error) {
@@ -617,21 +638,43 @@ export class Supervisor {
    * `DispatchHandle`'s `pid`/`herdr` pane, since workers call `dispatch()`
    * directly and never hand the handle back beyond what `Bookkeeping`
    * already stores (agent/issueId/dispatchId/startedAt/stage, no pane info).
+   *
+   * Also where reservations are written (SPEC §17.4, §11): a shared
+   * orchestrator's session environment can't carry a per-item dispatch id,
+   * so the loop writes one `DispatchReservation` per item to the file the
+   * dispatched session's task guard reads, keyed by subject — before the
+   * spawn itself, so the reservation is on disk before the agent's first
+   * turn could possibly read it.
    */
   #wrappedDispatcher(): Dispatcher {
     const inner = this.#dispatcher;
     return {
       kind: inner.kind,
       dispatch: async (request) => {
-        const handle = await this.#dispatchWithFallback((dispatcher) => dispatcher.dispatch(request));
-        this.#handles.set(handle.dispatchId, handle);
-        this.#statuses.set(handle.dispatchId, "starting");
-        this.#logVerbose(
-          `dispatch ${handle.dispatchId} (${handle.agent}): cwd=${request.cwd} ` +
-            (handle.herdr ? `pane=${handle.herdr.paneId}` : `pid=${handle.pid ?? "unknown"}`) +
-            ` command="${request.command}"`,
+        const now = this.#now();
+        const entries: DispatchReservation[] = request.items.map((item) => ({
+          agent: request.agent,
+          subject: item.subject ?? BATCH_SUBJECT,
+          dispatchId: item.dispatchId,
+          reservedAt: now.toISOString(),
+        }));
+        reserveDispatches(
+          reservationsPath(this.#reservationsDir, request.agent),
+          entries,
+          now,
+          lockTtlMs(this.#config()),
         );
-        return handle;
+        const handles = await this.#dispatchWithFallback((dispatcher) => dispatcher.dispatch(request));
+        for (const handle of handles) {
+          this.#handles.set(handle.dispatchId, handle);
+          this.#statuses.set(handle.dispatchId, "starting");
+          this.#logVerbose(
+            `dispatch ${handle.dispatchId} (${handle.agent}): cwd=${request.cwd} ` +
+              (handle.herdr ? `pane=${handle.herdr.paneId}` : `pid=${handle.pid ?? "unknown"}`) +
+              ` command="${request.command}"`,
+          );
+        }
+        return handles;
       },
       status: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.status(handle)),
       settle: (handle) => this.#dispatchWithFallback((dispatcher) => dispatcher.settle(handle)),

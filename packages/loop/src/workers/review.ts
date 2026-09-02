@@ -7,6 +7,7 @@
 import type { ReviewResult } from "@foreman/core";
 import {
   BLOCKED_HUMAN_FILTER,
+  DISPATCH_COMMAND,
   GitHubClient,
   MARKER_KIND,
   branchNameFor,
@@ -14,7 +15,9 @@ import {
   latestMarker,
   newDispatchId,
   nodeRunner,
+  type DispatchItem,
 } from "@foreman/core";
+import { isOrchestratorBusy } from "../dispatch/index.ts";
 import type { BoardSnapshot, DispatchDecision, ReviewCandidate } from "../routing.ts";
 import { nextActions } from "../routing.ts";
 import { toQueueItem } from "../snapshot.ts";
@@ -120,47 +123,73 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const { decisions, skipped } = nextActions(snapshot, ctx.config, ctx.bookkeeping);
   skipped.push(...candidateSkips);
 
+  const confirmed: Array<{ decision: DispatchDecision; candidate: ReviewCandidate; issueId: string }> = [];
   for (const decision of decisions) {
     if (!decision.issueId) continue;
-    const candidate = reviewCandidates.find((c) => c.issue.identifier === decision.issueId);
+    const issueId = decision.issueId;
+    const candidate = reviewCandidates.find((c) => c.issue.identifier === issueId);
     if (!candidate) continue;
 
-    const dispatchId = newDispatchId(decision.agent, decision.issueId, now);
-    const summary = `dispatch ${decision.agent} for ${decision.issueId}`;
+    const summary = `dispatch ${decision.agent} for ${issueId}`;
     if (!(await ctx.confirm({ kind: "dispatch", summary, detail: [`command: ${decision.command}`, `cwd: ${ctx.entry.repoPath}`] }))) {
-      skipped.push({ stage: "review", issueId: decision.issueId, code: "dispatch-declined", message: `Operator declined: ${summary}` });
+      skipped.push({ stage: "review", issueId, code: "dispatch-declined", message: `Operator declined: ${summary}` });
       continue;
     }
+    confirmed.push({ decision, candidate, issueId });
+  }
+
+  if (confirmed.length > 0) {
+    const items: DispatchItem[] = confirmed.map(({ decision }) => ({
+      issueId: decision.issueId,
+      subject: decision.subject,
+      dispatchId: newDispatchId(decision.agent, decision.subject ?? "batch", now),
+      worktree: null,
+    }));
     try {
-      const handle = await ctx.dispatcher.dispatch({
-        agent: decision.agent,
-        issueId: decision.issueId,
-        command: decision.command,
-        dispatchId,
+      const handles = await ctx.dispatcher.dispatch({
+        agent: "foreman-review",
+        command: DISPATCH_COMMAND.review,
         cwd: ctx.entry.repoPath,
-        worktree: null,
+        alias: ctx.entry.alias,
+        items,
       });
-      ctx.bookkeeping.recordDispatch({
-        agent: decision.agent,
-        issueId: decision.issueId,
-        dispatchId: handle.dispatchId,
-        startedAt: handle.startedAt,
-        stage: "review",
-      });
-      ctx.watchSettle(handle, "review");
-      dispatched.push(decision);
-      const previousSha = ctx.bookkeeping.reviewedSha(decision.issueId);
-      if (previousSha !== null && previousSha !== candidate.headSha) {
-        const pending = ctx.bookkeeping.recordReviewCycle(decision.issueId, ctx.config.loop.reviewCycleCap, now);
-        if (pending) {
-          errors.push(...(await applyPendingDecisions(ctx, [pending])));
-          ctx.bookkeeping.drainPendingDecisions();
-          continue;
+      for (const [index, handle] of handles.entries()) {
+        const entry = confirmed[index];
+        if (!entry) continue;
+        const { decision, candidate, issueId } = entry;
+        ctx.bookkeeping.recordDispatch({
+          agent: decision.agent,
+          issueId,
+          dispatchId: handle.dispatchId,
+          startedAt: handle.startedAt,
+          stage: "review",
+        });
+        dispatched.push(decision);
+        const previousSha = ctx.bookkeeping.reviewedSha(issueId);
+        if (previousSha !== null && previousSha !== candidate.headSha) {
+          const pending = ctx.bookkeeping.recordReviewCycle(issueId, ctx.config.loop.reviewCycleCap, now);
+          if (pending) {
+            errors.push(...(await applyPendingDecisions(ctx, [pending])));
+            ctx.bookkeeping.drainPendingDecisions();
+            continue;
+          }
         }
+        ctx.bookkeeping.setReviewedSha(issueId, candidate.headSha);
       }
-      ctx.bookkeeping.setReviewedSha(decision.issueId, candidate.headSha);
+      ctx.watchSettle(handles, "review");
     } catch (error) {
-      errors.push(`dispatch ${decision.command} failed: ${String(error)}`);
+      if (isOrchestratorBusy(error)) {
+        for (const { decision } of confirmed) {
+          skipped.push({
+            stage: "review",
+            issueId: decision.issueId,
+            code: "orchestrator-busy",
+            message: `foreman-review orchestrator is busy: ${error.message}`,
+          });
+        }
+      } else {
+        errors.push(`dispatch ${DISPATCH_COMMAND.review} failed: ${String(error)}`);
+      }
     }
   }
 

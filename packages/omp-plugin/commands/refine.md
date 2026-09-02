@@ -1,20 +1,26 @@
 ---
-description: Refine a prioritized issue into an implementable description with acceptance criteria
-argument-hint: <ISSUE-ID>
+description: Refine one or more prioritized issues into implementable descriptions with acceptance criteria
+argument-hint: <ISSUE-ID>...
 ---
 
-Resolve issue `$1` via `foreman_linear_read`. Assemble the shared `context`
-from the two-layer `Context` digest (§4.7) plus this issue's current state
-(description, priority, estimate, labels, relations).
+Resolve each issue id in `$ARGUMENTS` via `foreman_linear_read`. Assemble
+each one's shared `context` from the two-layer `Context` digest (§4.7) plus
+that issue's current state (description, priority, estimate, labels,
+relations).
 
-Gate: Priority ≠ `None`. If the issue is unprioritized, do not dispatch — tell
-the operator to set a priority first.
+Gate per issue: Priority ≠ `None`. If an issue is unprioritized, do not
+dispatch it — tell the operator to set a priority first; dispatch the rest
+of the batch normally.
 
-Dispatch `foreman-refine` through the `task` tool with `agent: foreman-refine`
-and the assembled `context`. `foreman-refine` is `blocking: true`, so this
-runs inline in the current session rather than in the background. The
-extension revises the call to force `schemaMode: "strict"`; do not set it
-yourself and do not try to override it.
+Every issue id in `$ARGUMENTS` that passes the gate gets its own `tasks[]`
+entry, each with `agent: foreman-refine`, its own assembled `context`, and
+its own `FOREMAN-ISSUE: <ISSUE-ID>` marker in the task text — dispatch all
+of them in a SINGLE `task` call, never one `task` call per issue id and
+never a partial batch. Every `foreman-*` agent is `blocking: true`, so one
+call with N items runs them concurrently and returns all N structured
+results on the one channel the extension can capture; splitting the call
+loses that. The extension revises the call to force `schemaMode: "strict"`
+on every item; do not set it yourself and do not try to override it.
 
 The agent returns a `RefineResult`; the extension applies the description,
 any sub-issues or spike, `agent:ready`, the move to Todo, and strips

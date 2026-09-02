@@ -17,6 +17,7 @@
 import { homedir } from "node:os";
 import { HerdrDispatcher, PrintDispatcher } from "./dispatch/index.ts";
 import {
+  BATCH_SUBJECT,
   ControlServer,
   DISPATCH_COMMAND,
   INBOX_FILTER,
@@ -28,8 +29,11 @@ import {
   findApprovedUnapplied,
   initiativeIndex,
   loadGlobalConfig,
+  lockTtlMs,
   loopPaths,
   newDispatchId,
+  reservationsPath,
+  reserveDispatches,
   resolveLinearApiKey,
   resolveRepoEntry,
   resolveTeamKey,
@@ -186,6 +190,8 @@ export interface IntakeContext {
   config: GlobalConfig;
   linear: LinearWriter;
   dispatcher: Dispatcher;
+  /** Directory of per-agent dispatch-id reservation files (SPEC §17.4) — `loopPaths(...).reservations`. */
+  reservationsDir: string;
   bookkeeping: Bookkeeping;
   team: string;
   now: () => Date;
@@ -237,7 +243,6 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
       if (inbox.length === 0) {
         skipReason = "inbox empty";
       } else {
-        const dispatchId = newDispatchId("foreman-triage", "batch", now);
         const scratchCwd = `${expandHome(ctx.config.loop.stateDir)}/intake/scratch`;
         const identifiers = inbox.map((issue) => issue.identifier).join(" ");
         const command = `${DISPATCH_COMMAND.triage} --stale-low-days ${ctx.config.intake.staleLowDays} ${identifiers}`;
@@ -250,19 +255,28 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
           skipReason = "operator declined";
         } else {
           try {
-            const handle = await ctx.dispatcher.dispatch({
+            const dispatchId = newDispatchId("foreman-triage", "batch", now);
+            reserveDispatches(
+              reservationsPath(ctx.reservationsDir, "foreman-triage"),
+              [{ agent: "foreman-triage", subject: BATCH_SUBJECT, dispatchId, reservedAt: now.toISOString() }],
+              now,
+              lockTtlMs(ctx.config),
+            );
+            const handles = await ctx.dispatcher.dispatch({
               agent: "foreman-triage",
-              issueId: null,
               // The triage agent holds no config-reading tool, so the dispatch
               // command is the only channel that carries `intake.staleLowDays`
               // (SPEC §3.10, §3.12) — the same channel `intake.batchSize`
-              // already uses to size `identifiers` above.
+              // already uses to size `identifiers` above. `subject` stays null:
+              // the whole identifier list is already embedded in `command`
+              // above, so nothing needs appending (SPEC §17.4's `BATCH_SUBJECT`
+              // is only the reservation key for this one item).
               command,
-              dispatchId,
               cwd: scratchCwd,
-              worktree: null,
+              alias: "intake",
+              items: [{ issueId: null, subject: null, dispatchId, worktree: null }],
             });
-            void handle;
+            void handles;
             ctx.bookkeeping.setLastTriageRun(now);
             ctx.bookkeeping.setLastRun("intake", now);
             dispatched = true;
@@ -552,8 +566,8 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
 
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
-      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] }),
+      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations }),
+      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations }),
     },
     log,
   );
@@ -573,6 +587,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     config,
     linear,
     dispatcher,
+    reservationsDir: controlPaths.reservations,
     bookkeeping,
     team,
     now: () => new Date(),

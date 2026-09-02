@@ -39,6 +39,7 @@ import {
   worktreePathFor,
   YOLO_CONFIRMER,
 } from "@foreman/core";
+import { OrchestratorBusyError } from "../src/dispatch/index.ts";
 import type { ConfirmRequest } from "@foreman/core";
 import { implementWorker } from "../src/workers/implement.ts";
 import { Bookkeeping } from "../src/bookkeeping.ts";
@@ -79,6 +80,7 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      orchestratorMaxBatches: 20,
     },
     repoDefaults: {
       baseBranch: "main",
@@ -149,16 +151,18 @@ class FakeDispatcher implements Dispatcher {
   /** Overridable per-test; `Dispatcher.cleanup` is optional and print mode leaves it unset by default. */
   cleanup?: (issueId: string, repoPath: string) => Promise<void>;
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
     this.calls.push(request);
-    return {
-      dispatchId: request.dispatchId,
+    const batchId = `batch-${Math.random().toString(36).slice(2)}`;
+    return request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
+      issueId: item.issueId,
       startedAt: new Date().toISOString(),
+      batchId,
       pid: null,
       herdr: null,
-    };
+    }));
   }
   async status(): Promise<DispatchStatus> {
     return "settled";
@@ -335,6 +339,25 @@ describe("implementWorker — scope resolution (SPEC §3.11)", () => {
     expect(dispatcher.calls).toHaveLength(1);
     expect(report.dispatched).toHaveLength(1);
   });
+
+  it("dispatches one request per issue, each carrying its own worktree (SPEC §17.4)", async () => {
+    const issueA = makeIssue();
+    const issueB = makeIssue();
+    const linear = new FakeLinear([issueA, issueB], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"], repoPath: "/repos/product" });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry, YOLO_CONFIRMER);
+
+    const report = await implementWorker.run(ctx);
+
+    expect(report.dispatched).toHaveLength(2);
+    expect(dispatcher.calls).toHaveLength(2);
+    for (const call of dispatcher.calls) {
+      expect(call.items).toHaveLength(1);
+      expect(call.items[0]?.worktree).not.toBeNull();
+    }
+  });
 });
 
 // ---- refine worker -----------------------------------------------------------
@@ -400,6 +423,85 @@ describe("refineWorker — scope resolution (SPEC §3.11)", () => {
     expect(report.skipped.some((s) => s.code === "out-of-scope")).toBe(false);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]?.cwd).toBe("/repos/product");
+  });
+});
+
+describe("refineWorker — batched dispatch (SPEC §17.4)", () => {
+  function backlogIssue(): Issue {
+    return makeIssue({
+      state: { id: "state-0", name: "Backlog", type: "backlog", position: 0 },
+      priority: 2,
+      labels: [{ id: `label-${TYPE_LABEL.feature}`, name: TYPE_LABEL.feature, parentId: null }],
+    });
+  }
+
+  /** Room enough that overlapping readyBufferCount noise (FakeLinear returns the same list to every query) never trips a WIP or buffer cap. */
+  function roomyConfig(): GlobalConfig {
+    const base = makeConfig();
+    return { ...base, loop: { ...base.loop, wipGlobal: 10, wip: { ...base.loop.wip, refine: 10 }, readyBufferTarget: 20 } };
+  }
+
+  it("issues exactly one dispatch call carrying all confirmed decisions as items", async () => {
+    const issues = [backlogIssue(), backlogIssue(), backlogIssue()];
+    const linear = new FakeLinear(issues, async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, roomyConfig(), dispatcher, entry, YOLO_CONFIRMER);
+
+    const report = await refineWorker.run(ctx);
+
+    expect(report.dispatched).toHaveLength(3);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items).toHaveLength(3);
+  });
+
+  it("excludes a declined decision from the batch while the rest still dispatch", async () => {
+    const issues = [backlogIssue(), backlogIssue(), backlogIssue()];
+    const linear = new FakeLinear(issues, async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const dispatcher = new FakeDispatcher();
+    const declinedId = issues[1]?.identifier;
+    const confirmer = { confirm: async (request: ConfirmRequest) => !request.summary.includes(declinedId as string) };
+    const ctx = makeContext(linear, roomyConfig(), dispatcher, entry, confirmer);
+
+    const report = await refineWorker.run(ctx);
+
+    expect(report.dispatched).toHaveLength(2);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items).toHaveLength(2);
+    expect(dispatcher.calls[0]?.items.some((item) => item.subject === declinedId)).toBe(false);
+    const skip = report.skipped.find((s) => s.code === "dispatch-declined");
+    expect(skip?.issueId).toBe(declinedId);
+  });
+
+  it("converts an OrchestratorBusyError into one orchestrator-busy skip per item, with no errors[] entry", async () => {
+    class BusyDispatcher implements Dispatcher {
+      readonly kind = "print" as const;
+      async dispatch(): Promise<DispatchHandle[]> {
+        throw new OrchestratorBusyError("foreman-refine-product", "foreman-refine-product is mid-turn");
+      }
+      async status(): Promise<DispatchStatus> {
+        return "settled";
+      }
+      async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
+        return { handle, status: "settled", exitCode: 0, log: "" };
+      }
+      async available(): Promise<boolean> {
+        return true;
+      }
+    }
+    const issues = [backlogIssue(), backlogIssue(), backlogIssue()];
+    const linear = new FakeLinear(issues, async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const dispatcher = new BusyDispatcher();
+    const ctx = makeContext(linear, roomyConfig(), dispatcher, entry, YOLO_CONFIRMER);
+
+    const report = await refineWorker.run(ctx);
+
+    expect(report.dispatched).toEqual([]);
+    expect(report.errors).toEqual([]);
+    const busySkips = report.skipped.filter((s) => s.code === "orchestrator-busy");
+    expect(busySkips).toHaveLength(3);
   });
 });
 
@@ -509,7 +611,8 @@ describe("planWorker — bare-project discovery (SPEC §7.6)", () => {
     expect(report.errors).toEqual([]);
     expect(dispatcher.calls).toHaveLength(1);
     expect(dispatcher.calls[0]).toMatchObject({ agent: "foreman-plan", cwd: "/repos/product" });
-    expect(dispatcher.calls[0]?.command).toBe(`${DISPATCH_COMMAND.plan} ${bareProject.id}`);
+    expect(dispatcher.calls[0]?.command).toBe(DISPATCH_COMMAND.plan);
+    expect(dispatcher.calls[0]?.items[0]?.subject).toBe(bareProject.id);
   });
 
   it("never dispatches at a project that already has at least one issue", async () => {

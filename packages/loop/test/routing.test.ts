@@ -37,6 +37,7 @@ function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
+      orchestratorMaxBatches: 20,
     },
     repoDefaults: {
       baseBranch: "main",
@@ -294,13 +295,14 @@ describe("nextActions — refine buffer depth", () => {
     expect(decisions.some((d) => d.agent === "foreman-refine")).toBe(true);
   });
 
-  it("dispatches the /foreman:refine slash command with the issue identifier", () => {
+  it("names the /foreman:refine command and the issue as its subject, leaving the dispatcher to join them", () => {
     const config = makeConfig({ readyBufferTarget: 5 });
     const issue = makeIssue({ identifier: "ENG-1", priority: 2 });
     const snapshot = emptySnapshot({ backlog: [issue], readyBufferCount: 2 });
     const { decisions } = nextActions(snapshot, config, freshBookkeeping());
     const decision = decisions.find((d) => d.agent === "foreman-refine");
-    expect(decision?.command).toBe(`${DISPATCH_COMMAND.refine} ENG-1`);
+    expect(decision?.command).toBe(DISPATCH_COMMAND.refine);
+    expect(decision?.subject).toBe("ENG-1");
   });
 });
 
@@ -418,7 +420,8 @@ describe("nextActions — plan", () => {
       agent: "foreman-plan",
       issueId: null,
       projectId: candidate.project.id,
-      command: `${DISPATCH_COMMAND.plan} ${candidate.project.id}`,
+      command: DISPATCH_COMMAND.plan,
+      subject: candidate.project.id,
     });
   });
 

@@ -260,8 +260,8 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     return;
   }
 
-  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
-  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv] });
+  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations });
+  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations });
 
   const dispatcher = await resolveDispatcher(
     {
@@ -283,6 +283,7 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     printDispatcher,
     bookkeeping,
     stateDir,
+    reservationsDir: controlPaths.reservations,
     entry,
     confirmer,
     log,

@@ -56,6 +56,8 @@ export interface LoopPaths {
   status: string;
   socket: string;
   log: string;
+  /** Directory of per-agent dispatch-id reservation files handed to dispatched sessions (SPEC §17.4). */
+  reservations: string;
 }
 
 export function stateRoot(config: GlobalConfig, home?: string): string {
@@ -119,5 +121,6 @@ export function loopPaths(config: GlobalConfig, id: LoopId, home?: string): Loop
     status: join(dir, "status.json"),
     socket: socketPathFor(dir),
     log: join(dir, "loop.log"),
+    reservations: join(dir, "reservations"),
   };
 }

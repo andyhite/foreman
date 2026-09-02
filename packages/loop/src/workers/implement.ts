@@ -11,6 +11,7 @@ import {
   inState,
   newDispatchId,
   worktreePathFor,
+  type DispatchItem,
 } from "@foreman/core";
 import { nextActions } from "../routing.ts";
 import type { BoardSnapshot, DispatchDecision } from "../routing.ts";
@@ -56,14 +57,23 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
     try {
       const worktreePath = worktreePathFor(ctx.entry.worktreePattern, ctx.entry.repoPath, issue);
       const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
-      const handle = await ctx.dispatcher.dispatch({
+      const items: DispatchItem[] = [
+        {
+          issueId: decision.issueId,
+          subject: decision.subject,
+          dispatchId: newDispatchId(decision.agent, decision.subject ?? "batch", now),
+          worktree: { path: worktreePath, branch, baseBranch: ctx.entry.baseBranch },
+        },
+      ];
+      const handles = await ctx.dispatcher.dispatch({
         agent: decision.agent,
-        issueId: decision.issueId,
         command: decision.command,
-        dispatchId,
         cwd: ctx.entry.repoPath,
-        worktree: { path: worktreePath, branch, baseBranch: ctx.entry.baseBranch },
+        alias: ctx.entry.alias,
+        items,
       });
+      const handle = handles[0];
+      if (!handle) throw new Error("dispatcher returned no handle for a single-item request");
       ctx.bookkeeping.recordDispatch({
         agent: decision.agent,
         issueId: decision.issueId,
@@ -71,7 +81,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
         startedAt: handle.startedAt,
         stage: "implement",
       });
-      ctx.watchSettle(handle, "implement");
+      ctx.watchSettle(handles, "implement");
       dispatched.push(decision);
       ctx.bookkeeping.resetAttempts("implement", decision.issueId);
     } catch (error) {

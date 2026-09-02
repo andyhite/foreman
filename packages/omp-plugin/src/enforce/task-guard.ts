@@ -16,6 +16,7 @@ import {
   AGENT_OUTPUT_SCHEMAS,
   assertIssueInScope,
   LABEL_GROUP,
+  RESERVATIONS_ENV,
   branchNameFor,
   diffRange,
   gateSummary,
@@ -28,6 +29,7 @@ import {
   refinementGate,
   renderLockComment,
   resolveState,
+  takeReservation,
   worktreePathFor,
 } from "@foreman/core";
 
@@ -103,6 +105,18 @@ let inheritedDispatchId: string | null = process.env.FOREMAN_DISPATCH_ID ?? null
 /** Test seam: inject or clear the one-shot inherited dispatch id without reloading the module. */
 export function __setInheritedDispatchIdForTest(id: string | null): void {
   inheritedDispatchId = id;
+}
+
+// A shared orchestrator (SPEC §17.4) serves many items across many turns, so
+// it cannot carry a single inherited id in its environment — the loop writes
+// this file instead, one reservation per agent+subject, and the guard
+// resolves each item's id by subject as it prepares it. Read once at module
+// scope, mirroring the inherited id above.
+let reservationsPath: string | null = process.env[RESERVATIONS_ENV] ?? null;
+
+/** Test seam: point the guard at a temp reservations file, or clear it, without reloading the module. */
+export function __setReservationsPathForTest(path: string | null): void {
+  reservationsPath = path;
 }
 
 type Stage = "triage" | "plan" | "refine" | "implement" | "review";
@@ -200,13 +214,20 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
 }
 
 /**
- * Resolves the dispatch id for one prepared item: the inherited one when the
- * caller (loop or operator dispatcher) already minted it, otherwise a fresh
- * one. Consumes the inherited id so a call preparing several items never
- * reuses it, and registers the result as live in this process.
+ * Resolves the dispatch id for one prepared item, in precedence order: (a) a
+ * fresh reservation the loop wrote for this exact agent+subject — the shared
+ * orchestrator's own env cannot carry a per-item id, so this is how it stays
+ * attributable per SPEC §17.4; (b) the inherited one when the caller (a
+ * single-item loop dispatch or an operator dispatch) already minted it;
+ * (c) a freshly minted one. Consumes both the reservation and the inherited
+ * id so a call preparing several items never reuses either, and registers
+ * the result as live in this process.
  */
 function takeDispatchId(deps: TaskGuardDeps, agent: string, subject: string, now: Date): string {
-  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
+  const reserved = reservationsPath
+    ? takeReservation(reservationsPath, agent, subject, now, lockTtlMs(deps.config))
+    : null;
+  const dispatchId = reserved ?? inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
   inheritedDispatchId = null;
   deps.registerLiveDispatch(dispatchId);
   return dispatchId;

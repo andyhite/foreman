@@ -19,8 +19,14 @@ dispatch before doing anything.
 
 Dispatch `foreman-implement` through the `task` tool with
 `agent: foreman-implement` and the assembled `context`, including the
-dispatch ID. The extension revises the call to force `schemaMode: "strict"`;
-do not set it yourself and do not try to override it.
+dispatch ID, as a single `tasks[]` entry — unlike plan/refine/review, which
+may batch several subjects into one `task` call, an implement dispatch is
+always one issue per invocation, never a batch: each issue needs its own
+Foreman-managed worktree, and a non-isolated `task` spawn inherits its
+parent session's cwd, so implement keeps its own per-issue agent rather than
+sharing one orchestrator session. The extension revises the call to force
+`schemaMode: "strict"`; do not set it yourself and do not try to override
+it.
 
 The agent returns an `ImplementResult`; the extension moves the issue to In
 Review, releases the lock, and files any `discoveredWork` as new Backlog

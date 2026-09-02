@@ -214,6 +214,14 @@ export const AgentSettingsSchema = Type.Object(
       { default: "yolo" },
     ),
     herdrBin: Type.String({ default: "herdr", minLength: 1 }),
+    /**
+     * Batches a stage's shared orchestrator serves before the loop recycles
+     * its session (SPEC §17.4). The orchestrator carries no state between
+     * batches, so this only bounds context growth — and even at 20 it still
+     * avoids all but a twentieth of the session boots the one-agent-per-
+     * dispatch model paid for.
+     */
+    orchestratorMaxBatches: Type.Integer({ default: 20, minimum: 1 }),
   },
   { additionalProperties: false, default: {} },
 );

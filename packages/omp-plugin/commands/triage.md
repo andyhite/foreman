@@ -13,9 +13,13 @@ uses it instead of an assumed default. Resolve each issue via
 `Context` digest (§4.7) plus the full batch of resolved items — triage works
 on the batch, not a single issue.
 
-Dispatch `foreman-triage` through the `task` tool with `agent: foreman-triage`
-and the assembled `context`. The extension revises the call to force
-`schemaMode: "strict"`; do not set it yourself and do not try to override it.
+Dispatch `foreman-triage` through the `task` tool as a single `tasks[]`
+entry with `agent: foreman-triage` and the assembled `context` — unlike
+plan/refine/review, triage is always one item per invocation, never one item
+per issue: the whole batch of issue ids named in `$ARGUMENTS` goes into that
+one item's `context`, because triage proposes over the batch as a unit, not
+issue by issue. The extension revises the call to force `schemaMode:
+"strict"`; do not set it yourself and do not try to override it.
 
 Gate: none. Triage is read-only and has no precondition — it runs over
 whatever is currently in the Inbox.

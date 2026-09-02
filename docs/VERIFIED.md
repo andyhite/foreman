@@ -287,3 +287,45 @@ exactly what §17 describes.
   wrote.** Nothing had produced that file since the command was written; it
   always read as absent. The command now reads the `status.json` the control
   plane publishes (§20.1), which is a file something actually writes.
+
+## Verified building shared stage orchestrators
+
+- **`herdr agent get <name>` puts the status at `.result.agent.agent_status`,
+  not `.result.status`.** The response is
+  `{ result: { type: "agent_info", agent: { name, agent_status, pane_id, tab_id,
+  workspace_id, cwd, agent_session, ... } } }`, and `agent list` returns the same
+  records under `.result.agents[]` (with `name` absent for an agent started
+  without an alias). The dispatcher's `status()` read `.result.status`, which is
+  always `undefined`, so its switch fell through to `default` and **every herdr
+  dispatch reported `running` forever** — including inside `reconcile`, where a
+  handle that always looks live keeps its in-flight record until the TTL expires.
+  Measured against a live server, not inferred from docs.
+- **`agent wait` with no `--until` matches `idle`, `done`, or `blocked`; an
+  interactive omp session never reaches `done`.** It goes to `idle` when its
+  turn ends and only reports `done` once the process exits, which a session
+  herdr launched interactively does not do on its own. `settle()` waited
+  `--until done` alone, so it could only ever end at its own timeout
+  (`maxRuntimeMs + lockTtlMarginMs`, ~2.5 h by default) rather than when the
+  agent finished. Waiting on `idle` as well is what makes a batch's completion
+  observable.
+- **`agent prompt` does not reject a `working` target and does not track
+  turns.** Its own help says so: submission is refused only when the agent is
+  `blocked` (`agent_blocked`), and "if the agent is already working, that active
+  turn's completion may match" the `--wait` state. omp delivers the submission
+  as a queued user message that **interrupts the current turn's in-flight tool
+  calls** — observed directly: parallel tool calls in an active turn came back
+  as "Skipped due to queued user message". A shared orchestrator must therefore
+  be prompted only when `agent get` reports `idle` or `done` (§17.4).
+- **`agent explain` reports `screen_detection_skip_reason:
+  full_lifecycle_hook_authority` for an omp agent.** omp reports its lifecycle
+  to herdr through a hook rather than being screen-scraped, so for `--kind omp`
+  the state model is authoritative rather than heuristic. That does not change
+  §17.3's rule — herdr state still drives no routing decision — but it is why
+  the busy check in §17.4 can be trusted to gate a prompt.
+- **A sync `task` batch is concurrent, not serial.** With every item's agent
+  declaring `blocking: true` the whole call runs inline, and the items are still
+  bounded only by the session-scoped semaphore that async job bodies share
+  (`task.maxConcurrency`, 32 on the build machine): "lifecycle, revival, and
+  concurrency semantics match N parallel single calls". One prompt therefore
+  buys N concurrent agents and N `SingleResult`s in one `tool_result`, which is
+  the mechanism §17.4 rests on.

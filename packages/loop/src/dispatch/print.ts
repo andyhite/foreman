@@ -8,6 +8,7 @@
  * ask.
  */
 
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import type {
@@ -18,14 +19,16 @@ import type {
   DispatchStatus,
   GlobalConfig,
 } from "@foreman/core";
+import { reservationsPath, RESERVATIONS_ENV } from "@foreman/core";
 
 /** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
 
 interface RunningProcess {
-  handle: DispatchHandle;
+  handles: DispatchHandle[];
   outcome: Promise<DispatchOutcome>;
   settled: boolean;
+  prunedBy: Set<string>;
   status: DispatchStatus;
 }
 
@@ -34,25 +37,35 @@ export class PrintDispatcher implements Dispatcher {
 
   readonly #config: GlobalConfig;
   readonly #scrubEnv: readonly string[];
+  readonly #reservationsDir: string | undefined;
   readonly #running = new Map<string, RunningProcess>();
 
-  constructor(config: GlobalConfig, options?: { scrubEnv?: string[] }) {
+  constructor(config: GlobalConfig, options?: { scrubEnv?: string[]; reservationsDir?: string }) {
     this.#config = config;
     this.#scrubEnv = options?.scrubEnv ?? [];
+    this.#reservationsDir = options?.reservationsDir;
   }
 
-  async dispatch(request: DispatchRequest): Promise<DispatchHandle> {
-    const handle: DispatchHandle = {
-      dispatchId: request.dispatchId,
+  async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
+    const batchId = randomUUID();
+    const startedAt = new Date().toISOString();
+    const handles: DispatchHandle[] = request.items.map((item) => ({
+      dispatchId: item.dispatchId,
       agent: request.agent,
-      issueId: request.issueId,
-      startedAt: new Date().toISOString(),
+      issueId: item.issueId,
+      startedAt,
+      batchId,
       pid: null,
       herdr: null,
-    };
+    }));
 
     const { promise: outcomeReady, resolve: resolveOutcome } =
       Promise.withResolvers<DispatchOutcome>();
+
+    const subjects = request.items
+      .map((item) => item.subject)
+      .filter((subject): subject is string => subject !== null);
+    const prompt = [request.command, ...subjects].join(" ");
 
     const argv = [
       "-p",
@@ -60,7 +73,7 @@ export class PrintDispatcher implements Dispatcher {
       this.#config.agent.approvalMode,
       "--cwd",
       request.cwd,
-      request.command,
+      prompt,
     ];
 
     // FOREMAN-SEC-001: an implement agent has bash and inherits this child's
@@ -72,7 +85,15 @@ export class PrintDispatcher implements Dispatcher {
     for (const name of this.#scrubEnv) {
       delete env[name];
     }
-    env.FOREMAN_DISPATCH_ID = request.dispatchId;
+    // Only a single-item request gets the legacy per-item id: a batch has no
+    // one dispatch id to hand the child, and its items resolve theirs from
+    // the reservations file instead (see below).
+    if (request.items.length === 1) {
+      env.FOREMAN_DISPATCH_ID = handles[0]?.dispatchId;
+    }
+    if (this.#reservationsDir) {
+      env[RESERVATIONS_ENV] = reservationsPath(this.#reservationsDir, request.agent);
+    }
 
     const child = spawn(this.#config.agent.ompBin, argv, {
       cwd: request.cwd,
@@ -80,7 +101,9 @@ export class PrintDispatcher implements Dispatcher {
       env,
     });
 
-    handle.pid = child.pid ?? null;
+    for (const handle of handles) {
+      handle.pid = child.pid ?? null;
+    }
 
     const logChunks: Buffer[] = [];
     let logSize = 0;
@@ -116,12 +139,13 @@ export class PrintDispatcher implements Dispatcher {
         : undefined;
 
     const entry: RunningProcess = {
-      handle,
+      handles,
       status: "starting",
       settled: false,
+      prunedBy: new Set(),
       outcome: outcomeReady,
     };
-    this.#running.set(handle.dispatchId, entry);
+    this.#running.set(batchId, entry);
 
     child.on("spawn", () => {
       entry.status = "running";
@@ -131,12 +155,13 @@ export class PrintDispatcher implements Dispatcher {
       clearTimeout(killTimer);
       entry.status = "lost";
       entry.settled = true;
-      // Retained (not deleted) until `settle()` consumes and prunes it: a
-      // caller that awaits `settle()` after the child has already exited is
-      // the normal case for a short print-mode run, not a race to lose.
+      // Retained (not deleted) until every handle in the batch has consumed
+      // it via `settle()`: a caller that awaits `settle()` after the child
+      // has already exited is the normal case for a short print-mode run,
+      // not a race to lose.
       appendCapped(Buffer.from(`\n${String(error)}`));
       resolveOutcome({
-        handle,
+        handle: handles[0] as DispatchHandle,
         status: "lost",
         exitCode: null,
         log: Buffer.concat(logChunks, logSize).toString("utf8"),
@@ -151,31 +176,34 @@ export class PrintDispatcher implements Dispatcher {
       entry.status = "settled";
       entry.settled = true;
       resolveOutcome({
-        handle,
+        handle: handles[0] as DispatchHandle,
         status: "settled",
         exitCode: code,
         log: Buffer.concat(logChunks, logSize).toString("utf8"),
       });
     });
 
-    return handle;
+    return handles;
   }
 
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
-    const entry = this.#running.get(handle.dispatchId);
+    const entry = this.#running.get(handle.batchId);
     return entry ? entry.status : "settled";
   }
 
-  /** Awaits and prunes the tracked entry — the one place a settled outcome is released. */
+  /** Awaits and prunes the tracked entry once every handle in the batch has settled. */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
-    const entry = this.#running.get(handle.dispatchId);
+    const entry = this.#running.get(handle.batchId);
     if (!entry) {
       // Never tracked (e.g. a handle from another process); nothing to report.
       return { handle, status: "settled", exitCode: null, log: "" };
     }
     const outcome = await entry.outcome;
-    this.#running.delete(handle.dispatchId);
-    return outcome;
+    entry.prunedBy.add(handle.dispatchId);
+    if (entry.prunedBy.size >= entry.handles.length) {
+      this.#running.delete(handle.batchId);
+    }
+    return { ...outcome, handle };
   }
 
   async available(): Promise<boolean> {

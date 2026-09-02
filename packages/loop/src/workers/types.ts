@@ -51,8 +51,8 @@ export interface WorkerContext {
    * `yolo`; under `confirm` it asks on the loop's own terminal (SPEC §17.9).
    */
   confirm(request: ConfirmRequest): Promise<boolean>;
-  /** Observe a launched dispatch to completion in the background; failures reach the retry cap. */
-  watchSettle(handle: DispatchHandle, stage: StageName): void;
+  /** Observe a launched batch to completion in the background; failures reach the retry cap. Settling the first handle settles the whole batch (SPEC §17.4: dispatchers dedup per `batchId`). */
+  watchSettle(handles: readonly DispatchHandle[], stage: StageName): void;
 }
 
 export interface Worker {

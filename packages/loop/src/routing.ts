@@ -47,7 +47,10 @@ export interface DispatchDecision {
   issueId: string | null;
   /** Set only for `plan` decisions, which target a project rather than an issue. */
   projectId?: string | null;
+  /** The bare slash command with no arguments — the dispatcher appends `subject` itself (SPEC §17.4). */
   command: string;
+  /** The argument the slash command takes for this decision: an issue identifier, a project id, or `null` for triage (not produced here). */
+  subject: string | null;
   reason: string;
 }
 
@@ -253,7 +256,8 @@ function routeRefine(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
     ctx.decisions.push({
       agent: "foreman-refine",
       issueId: issue.identifier,
-      command: `${DISPATCH_COMMAND.refine} ${issue.identifier}`,
+      command: DISPATCH_COMMAND.refine,
+      subject: issue.identifier,
       reason: `Backlog, priority ${issue.priority}, buffer below target.`,
     });
     admitDecision(ctx, "refine");
@@ -279,7 +283,8 @@ function routeImplement(ctx: RoutingContext, snapshot: BoardSnapshot, backpressu
     ctx.decisions.push({
       agent: "foreman-implement",
       issueId: issue.identifier,
-      command: `${DISPATCH_COMMAND.implement} ${issue.identifier}`,
+      command: DISPATCH_COMMAND.implement,
+      subject: issue.identifier,
       reason: "Implementation gate passes.",
     });
     admitDecision(ctx, "implement");
@@ -302,7 +307,8 @@ function routeReview(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
     ctx.decisions.push({
       agent: "foreman-review",
       issueId: issue.identifier,
-      command: `${DISPATCH_COMMAND.review} ${issue.identifier}`,
+      command: DISPATCH_COMMAND.review,
+      subject: issue.identifier,
       reason: `No ReviewResult for head ${candidate.headSha}.`,
     });
     admitDecision(ctx, "review");
@@ -341,7 +347,8 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
       agent: "foreman-plan",
       issueId: null,
       projectId: project.id,
-      command: `${DISPATCH_COMMAND.plan} ${project.id}`,
+      command: DISPATCH_COMMAND.plan,
+      subject: project.id,
       reason: `"${project.name}" has no issues yet.`,
     });
     admitDecision(ctx, "plan");
