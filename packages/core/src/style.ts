@@ -3,7 +3,7 @@
  * output.
  *
  * Truecolor is deliberately not used — 16-color SGR only, safe across herdr
- * panes, tmux, and SSH. `packages/core/src/render/status.ts` renders into an
+ * panes, tmux, and SSH. `packages/omp-plugin/src/render/status.ts` renders into an
  * omp chat session instead of a terminal and must never import this module;
  * it stays Markdown.
  */

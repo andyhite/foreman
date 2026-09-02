@@ -51,9 +51,73 @@ risks granting the very thing §5 forbids. The real mechanism is omitting both
 `spawns` and `task` from an explicit `tools` allowlist, which is what the agents
 do, with a YAML comment saying so.
 
-**The manifest lives at `.omp-plugin/plugin.json`.** §3.1 says
+**The manifest lives at `.omp-plugin/plugin.json`.** §3.1 said
 `.claude-plugin/plugin.json`; that is the Claude Code fallback. The omp-native
-location is `.omp-plugin/`.
+location is `.omp-plugin/`. (§3.1 has since been corrected.)
+
+**A gitignored `dist/` ships a plugin whose extension never loads.** `omp
+plugin install <name>@<marketplace>` copies the plugin directory out of a git
+clone of the marketplace repo and symlinks it into the scope's `node_modules`;
+it never runs a package manager and never builds. `package.json` pointed
+`omp.extensions` at `./dist/extension.js` while `.gitignore` excluded `dist/`,
+so every repo that installed Foreman the normal way got a plugin with no
+extension entrypoint at all — and omp includes a declared entry only if the
+file exists, dropping a missing one without a warning. The failure is
+especially convincing because `agents/`, `commands/`, `skills/`, and `rules/`
+are auto-discovered straight from the copied tree: `/foreman:plan` expanded its
+prompt exactly as designed while both tools, the task guard, the lock manager,
+the result appliers, and all four `pi.registerCommand` commands were absent.
+Confirmed by A/B: in a repo whose install lacked the bundle the agent reported
+no `foreman_linear_read` in any form, and the same repo loaded and called it
+top-level once given a copied tree that carried `dist/extension.js`.
+So the bundle is committed, and CI plus `check-contract.ts` guard it.
+
+**omp replaces an extension's bare `@sinclair/typebox` with its own shim, and
+the shim rejects `default: {}`.** Bisected with one-file probe extensions: a
+trivial `.ts` extension loads, and one registering a tool with `.default(50)`
+loads, so TypeScript entrypoints are genuinely supported and our own tool
+schemas are fine. A probe whose only statement is `import { AGENT_LABEL } from
+"@foreman/core"` fails with `ParseError: A mutable default value must be
+specified as a factory`, thrown by `rejectMutableStaticDefault` in
+`@oh-my-pi/omptype/src/type.ts`. `config/schema.ts` sets `default: {}` on
+eleven schemas; real TypeBox 0.34.52 treats that as inert JSON Schema metadata
+and emits it unchanged. The substitution is provable independently: a probe
+importing `@sinclair/typebox` resolves under omp and throws, while plain `bun
+run` on the same file cannot resolve the package at all — omp is supplying it.
+
+**The remap covers the bare specifier only, and a probe with real installed
+dependencies proves both halves.** A self-contained package declaring
+`@sinclair/typebox` in `dependencies`, with `bun install` actually run, loads
+as an extension and imports it — so the docs are right that extensions may use
+runtime dependencies. Inside that same graph the root import is still omp's
+shim: `JSON.stringify` of a shim schema returns `undefined`, real
+`Value.Check` on one throws `Unknown type`, and `Value.Default` crashes,
+because `@sinclair/typebox/value` is *not* remapped — the filter is
+`/^(?:@sinclair\/typebox|typebox)$/`. Switching the root import to the subpath
+`@sinclair/typebox/type` makes all four behaviors correct: `default: {}`
+accepted, JSON-serializable, `Value.Check` true, `Value.Default` populating.
+So the shim is escapable, and the earlier claim that vendoring could not help
+was wrong.
+
+**None of that is why the bundle exists.** The bundle exists because a
+marketplace install runs no package manager — the installed copy has no
+`node_modules` at all — and the plugin's only dependency, `@foreman/core`, is
+`private: true` and `workspace:*`. Bundling resolves the root TypeBox specifier
+at build time as a side effect, which is why the shim never fires in
+production. Adopting omptype in core instead is not an option: `packages/cli`
+ships the standalone `foreman` binary, depends on core, and has no omp
+dependency, and `foreman init` is what installs the omp plugin — so core would
+need omp's internals to read `~/.foreman/config.json` before omp is present.
+
+**A malformed frontmatter scalar silently strips a command's whole
+frontmatter.** `commands/triage.md` shipped
+`argument-hint: [--stale-low-days <days>] <ISSUE-ID...>`, which YAML reads as a
+flow sequence followed by unexpected tokens. omp logs one `Failed to parse YAML
+frontmatter` warning and drops the block entirely: the description and argument
+hint vanish, and the `---` fence leaks into the prompt body the agent receives.
+`check-contract.ts`'s `readFrontmatter` is deliberately not a YAML parser and
+read the file happily, so the contract check passed a file omp rejected. It now
+parses every discovered markdown frontmatter with `Bun.YAML.parse`.
 
 **`autoload-skills` is spelled `autoloadSkills`.** Kebab-case keys are
 normalized to camelCase, but the documented agent-frontmatter field name is the
@@ -96,6 +160,23 @@ exactly what §17 describes.
 - Tool parameter schemas are built with `pi.zod`. `pi.typebox` is documented as a
   legacy shim but is absent from the type surface actually shipped; nothing in
   the plugin depends on it.
+- **An extension tool that does not set `loadMode: "essential"` is hidden from
+  the model's tool list.** Extension registrations default to
+  `loadMode: "discoverable"`, and omp's `tools.xdev` layer (default on) moves
+  every discoverable tool out of the tool list into an `xd://` device, in any
+  session that holds `write` without naming the tool in an explicit allowlist.
+  The supervisor session that runs `/foreman:*` is exactly that shape, so both
+  Foreman tools were mounted as `xd://foreman_linear_read` and
+  `xd://foreman_github_pr` while every command, agent, and skill told the
+  caller to use the bare name. The first `/foreman:plan` dispatch spent its
+  opening turns reasoning *"I don't see a `foreman_linear_read` tool in my
+  available list"* and never reached Linear. Subagents hid the bug: the four
+  read-only agents are granted no `write`, so xdev never engages for them, and
+  `foreman-implement` names both tools in its frontmatter, which pins them
+  top-level regardless. `essential` also restores the full parameter schema in
+  the prompt — `tools.xdevDocs` defaults to `"builtins"`, which gives an
+  external device a one-line summary and no schema. `check-contract.ts` now
+  fails on any registration that is not `essential`.
 - Linear personal API keys go in `Authorization: <KEY>` with **no** `Bearer`
   prefix. OAuth tokens take `Bearer`.
 - `IssueRelation.type` is `String!` when read and the `IssueRelationType` enum

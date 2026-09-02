@@ -1,4 +1,4 @@
-import type { SpikeSpec } from "../schemas/refine.ts";
+import type { SpikeSpec } from "@foreman/core";
 
 /** SPEC §13.3 — a spike issue is `type:spike` with a question, a budget, and a Deliverable. */
 export function renderSpikeIssue(spec: SpikeSpec, blocks: { identifier: string }): string {

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GlobalConfig } from "../src/config/schema.ts";
+import type { GlobalConfig } from "@foreman/core";
+import { herdrAgentName } from "../src/dispatch/herdr.ts";
 import { PrintDispatcher } from "../src/dispatch/print.ts";
 
 /** A fake `omp` binary: ignores every argument and exits with the given code. */
@@ -67,5 +68,48 @@ describe("PrintDispatcher.settle (SPEC §17.8: retained logs must be pruned on s
     // default (exitCode null).
     const second = await dispatcher.settle(handle);
     expect(second.exitCode).toBeNull();
+  });
+});
+
+describe("PrintDispatcher", () => {
+  it("scrubs configured credentials and returns the actual settled outcome", async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), "foreman-print-"));
+    const scriptPath = join(scriptDir, "print-env");
+    writeFileSync(scriptPath, "#!/bin/sh\nprintf '%s' \"${FOREMAN_TEST_SCRUB-unset}\"\n");
+    chmodSync(scriptPath, 0o755);
+    const prior = process.env.FOREMAN_TEST_SCRUB;
+    process.env.FOREMAN_TEST_SCRUB = "secret";
+    try {
+      const config = {
+        agent: { ompBin: scriptPath, approvalMode: "yolo", maxRuntimeMs: 0 },
+      } as GlobalConfig;
+      const dispatcher = new PrintDispatcher(config, { scrubEnv: ["FOREMAN_TEST_SCRUB"] });
+      const handle = await dispatcher.dispatch({
+        agent: "foreman-implement",
+        issueId: "ENG-142",
+        command: "/foreman-implement",
+        dispatchId: "dispatch-1",
+        cwd: scriptDir,
+        worktree: null,
+      });
+
+      const outcome = await dispatcher.settle(handle);
+      expect(outcome).toMatchObject({ status: "settled", exitCode: 0, log: "unset" });
+    } finally {
+      if (prior === undefined) delete process.env.FOREMAN_TEST_SCRUB;
+      else process.env.FOREMAN_TEST_SCRUB = prior;
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("herdrAgentName", () => {
+  it("retains the random dispatch-id suffix when truncating batch agent names", () => {
+    const first = herdrAgentName("triage-batch-20260829T120000-aaaa1111");
+    const second = herdrAgentName("triage-batch-20260829T120000-bbbb2222");
+    expect(first).not.toBe(second);
+    expect(first).toEndWith("aaaa1111");
+    expect(second).toEndWith("bbbb2222");
+    expect(first.length).toBeLessThanOrEqual(32);
   });
 });

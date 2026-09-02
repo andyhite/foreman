@@ -12,12 +12,14 @@
  * was given another.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_OUTPUT_SCHEMAS, SCHEMA_FILENAMES } from "@foreman/core";
 import { stageFor } from "../src/enforce/task-guard.ts";
+import { registerGitHubPrTool } from "../src/tools/github-pr.ts";
+import { registerLinearReadTool } from "../src/tools/linear-read.ts";
 
 // Defaults to this plugin. An explicit argument lets the check run against a
 // mutated copy, which is how its own failure paths get tested.
@@ -34,11 +36,44 @@ const OMP_TOOLS: Record<string, true> = {
   web_search: true, write: true, yield: true,
 };
 
-/** Tools this extension registers. */
-const FOREMAN_TOOLS: Record<string, true> = {
-  foreman_linear_read: true,
-  foreman_github_pr: true,
-};
+/**
+ * Every tool the extension registers, collected by running the registration
+ * code against a stub `pi` rather than restating it in a table here. A
+ * hand-maintained list is the same silent-failure class this script exists to
+ * catch: it would drift from the extension and then happily validate agent
+ * frontmatter against tools that no longer exist.
+ *
+ * The stub only satisfies the schema builders the registrations call. One node
+ * answers every builder and every chained refinement by returning itself, and
+ * `execute` is never invoked, so collecting the configs touches neither Linear
+ * nor GitHub.
+ */
+function registeredTools(): Array<{ name: string; loadMode?: string }> {
+  const zod: Record<string, unknown> = {};
+  for (const method of [
+    "object", "string", "boolean", "number", "array", "enum",
+    "optional", "describe", "default", "int", "positive", "min",
+  ]) {
+    zod[method] = () => zod;
+  }
+  const configs: Array<{ name: string; loadMode?: string }> = [];
+  const pi = {
+    zod,
+    registerTool: (config: { name: string; loadMode?: string }) => {
+      configs.push(config);
+    },
+  };
+  registerLinearReadTool(pi as never);
+  registerGitHubPrTool(pi as never);
+  return configs;
+}
+
+const FOREMAN_TOOL_CONFIGS = registeredTools();
+
+/** Tools this extension registers, keyed for the frontmatter allowlist check. */
+const FOREMAN_TOOLS: Record<string, true> = Object.fromEntries(
+  FOREMAN_TOOL_CONFIGS.map((config) => [config.name, true as const]),
+);
 
 /** Spellings the SPEC used that omp does not have. Named so the error is useful. */
 const WRONG_TOOL_NAMES: Record<string, string> = {
@@ -152,6 +187,51 @@ const problems: string[] = [];
 const agentFiles = readdirSync(join(pluginRoot, "agents")).filter((f) => f.endsWith(".md"));
 const skillDirs = new Set(readdirSync(join(pluginRoot, "skills")));
 
+/*
+ * `readFrontmatter` above is deliberately not a YAML parser, so it happily
+ * reads a block omp's real parser rejects. omp logs one warning and drops the
+ * whole frontmatter — losing the description, the argument hint, and the
+ * `---` fence, which then leaks into the prompt body the agent receives. That
+ * is the silent-degradation class this script exists to catch, so every
+ * discovered markdown file gets parsed by an actual YAML parser here.
+ * `commands/triage.md` shipped broken this way: an unquoted
+ * `argument-hint: [--stale-low-days <days>] <ISSUE-ID...>` reads as a flow
+ * sequence followed by garbage.
+ */
+for (const dir of ["agents", "commands", "rules", "skills"]) {
+  const root = join(pluginRoot, dir);
+  if (!existsSync(root)) continue;
+  const files = dir === "skills"
+    ? readdirSync(root).flatMap((entry) => {
+        const nested = join(root, entry);
+        if (!statSync(nested).isDirectory()) return [];
+        return readdirSync(nested)
+          .filter((f) => f.endsWith(".md"))
+          .map((f) => join(nested, f));
+      })
+    : readdirSync(root)
+        .filter((f) => f.endsWith(".md"))
+        .map((f) => join(root, f));
+
+  for (const file of files.sort()) {
+    const text = readFileSync(file, "utf8");
+    if (!text.startsWith("---\n")) continue;
+    const close = text.indexOf("\n---", 3);
+    if (close === -1) {
+      problems.push(`${relative(pluginRoot, file)}: unterminated frontmatter fence`);
+      continue;
+    }
+    try {
+      Bun.YAML.parse(text.slice(4, close));
+    } catch (error) {
+      problems.push(
+        `${relative(pluginRoot, file)}: frontmatter is not valid YAML — omp drops it entirely and the ` +
+          `fence leaks into the prompt body (${error instanceof Error ? error.message.split("\n")[0] : String(error)})`,
+      );
+    }
+  }
+}
+
 if (agentFiles.length !== Object.keys(AGENT_OUTPUT_SCHEMAS).length) {
   problems.push(
     `agents/ has ${agentFiles.length} definitions but AGENT_OUTPUT_SCHEMAS has ` +
@@ -162,6 +242,57 @@ if (agentFiles.length !== Object.keys(AGENT_OUTPUT_SCHEMAS).length) {
 for (const agent of Object.keys(AGENT_OUTPUT_SCHEMAS)) {
   if (stageFor(agent) === null) {
     problems.push(`AGENT_OUTPUT_SCHEMAS key "${agent}" has no stageFor branch, so its agent can never dispatch`);
+  }
+}
+
+/*
+ * omp defaults an extension tool to `loadMode: "discoverable"`, and its
+ * `tools.xdev` layer — on by default — then demotes every discoverable tool out
+ * of the model's tool list into an `xd://` device, in any session that holds
+ * `write` without naming the tool in an explicit allowlist. The supervisor
+ * session that runs every `/foreman:*` command is exactly that shape, and the
+ * commands, agents, and skills all name these tools directly. A demoted
+ * registration therefore turns that prose into a reference the supervisor
+ * cannot resolve, and it burns the dispatch hunting for a tool that looks
+ * missing. Nothing warns: the demotion is silent, which is why it lives here.
+ */
+for (const config of FOREMAN_TOOL_CONFIGS) {
+  if (config.loadMode !== "essential") {
+    problems.push(
+      `src: tool "${config.name}" registers loadMode ${JSON.stringify(config.loadMode ?? "discoverable")}; ` +
+        `it must be "essential", or omp mounts it as an xd:// device and drops it ` +
+        `from the tool list of every session that names it`,
+    );
+  }
+}
+
+/*
+ * Every `omp.extensions` entry must exist on disk. omp includes a declared
+ * entry only if the file is there, and drops a missing one without a warning
+ * — so the entrypoint is exactly the silent-failure class this script guards.
+ * It matters more than it looks: `omp plugin install` copies this package out
+ * of a git clone and never runs a package manager, so an entrypoint that is
+ * only ever produced locally by `bun run build` is absent for every installed
+ * repo. The markdown agents, commands, skills, and rules still discover from
+ * the copied tree, which makes the plugin look installed while both tools, the
+ * task guard, the lock manager, and the result appliers are all missing.
+ */
+const manifest = JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")) as {
+  omp?: { extensions?: string[] };
+};
+const entrypoints = manifest.omp?.extensions ?? [];
+if (entrypoints.length === 0) {
+  problems.push(
+    `package.json: no \`omp.extensions\` array — the extension module never loads, and ` +
+      `omp resolves \`omp\` before the legacy \`pi\` key, so a misspelled key fails in silence`,
+  );
+}
+for (const entry of entrypoints) {
+  if (!existsSync(join(pluginRoot, entry))) {
+    problems.push(
+      `package.json: \`omp.extensions\` entry "${entry}" does not exist. It is a build ` +
+        `artifact that must be committed — run \`bun run build\``,
+    );
   }
 }
 
@@ -369,5 +500,6 @@ if (problems.length > 0) {
 
 console.log(
   `agent contract OK: ${agentFiles.length} agents, ${skillDirs.size} skills, ` +
+    `${FOREMAN_TOOL_CONFIGS.length} essential tools, ` +
     `schemas match AGENT_OUTPUT_SCHEMAS (agents + schemas/*.json)`,
 );

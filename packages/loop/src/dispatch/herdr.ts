@@ -19,14 +19,14 @@
  */
 
 import { execFile } from "node:child_process";
-import type { GlobalConfig } from "../config/schema.ts";
 import type {
   DispatchHandle,
   DispatchOutcome,
   Dispatcher,
   DispatchRequest,
   DispatchStatus,
-} from "./types.ts";
+  GlobalConfig,
+} from "@foreman/core";
 
 /** Every herdr subprocess gets this ceiling — a hung CLI must not wedge dispatch or settle. */
 export const HERDR_EXEC_TIMEOUT_MS = 30_000;

@@ -1,4 +1,4 @@
-import type { Finding, ReviewResult } from "../schemas/review.ts";
+import type { Finding, ReviewResult } from "@foreman/core";
 
 const SEVERITY_ORDER = ["blocking", "should-fix", "nit"] as const;
 

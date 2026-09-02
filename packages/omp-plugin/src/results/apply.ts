@@ -24,14 +24,16 @@ import {
   LEGACY_LABEL,
   encodeMarker,
   MARKER_KIND,
+  resolveState,
+  resolveTeamKey,
+} from "@foreman/core";
+import {
   renderBlockComment,
   renderIssueDescription,
   renderProposalComment,
   renderReviewComment,
   renderSpikeIssue,
-  resolveState,
-  resolveTeamKey,
-} from "@foreman/core";
+} from "../render/index.ts";
 
 /** The discriminated union `parseAgentOutput` returns per agent, narrowed to `result | block`. */
 export type AgentOutcome =

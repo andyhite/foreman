@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { GlobalConfig } from "../src/config/schema.ts";
+import type { GlobalConfig } from "@foreman/core";
 import {
   HerdrDispatcher,
   HerdrUnavailableError,

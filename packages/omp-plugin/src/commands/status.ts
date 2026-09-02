@@ -4,7 +4,7 @@
  * registry, loop state. Blocked queue first (SPEC §9).
  */
 
-import type { AgentRegistryEntry, AgentStatus, BackpressureState, Issue, LinearWriter, LoopState, StatusState, WorkerLoopState } from "@foreman/core";
+import type { AgentStatus, Issue, LinearWriter } from "@foreman/core";
 import {
   BLOCKED_HUMAN_FILTER,
   IN_FLIGHT_FILTER,
@@ -17,9 +17,16 @@ import {
   MARKER_KIND,
   readLockComment,
   readStatusFile,
-  renderStatusConsole,
   statusStaleThresholdMs,
 } from "@foreman/core";
+import type {
+  AgentRegistryEntry,
+  BackpressureState,
+  LoopState,
+  StatusState,
+  WorkerLoopState,
+} from "../render/index.ts";
+import { renderStatusConsole } from "../render/index.ts";
 import { getConfig, getEntry, liveDispatchIds } from "../runtime.ts";
 
 /** `AgentStatus` (contract §J) has no `"idle"`/`"parked"`/`"aborted"` distinction; this is the closest honest mapping onto the older registry vocabulary `/foreman:status` already renders. */

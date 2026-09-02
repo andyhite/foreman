@@ -44,6 +44,12 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
     description: "Create or view the pull request for a branch. The one mutation tool any Foreman agent holds.",
     parameters: pi.zod.object(shape),
     approval: "write",
+    // Essential for the same reason as `foreman_linear_read` (see the comment
+    // in `linear-read.ts`): a `discoverable` registration is demoted to an
+    // `xd://` device in any session holding `write` that does not name the tool
+    // in an explicit allowlist, and every instruction naming this tool would
+    // then point at something the caller cannot see in its tool list.
+    loadMode: "essential",
     execute: async (_toolCallId, params: InferShape<typeof shape>) => {
       const entry = getEntry();
       let repoPath: string;

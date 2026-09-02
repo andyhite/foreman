@@ -116,40 +116,95 @@ the whole run (it stops before touching any repo, per the invariant above)
 and treats each repo's plugin upgrade as independently best-effort, so one
 repo missing project scope or failing to upgrade does not block the rest.
 
+Everything below `packages/omp-plugin/` except `package.json` and `src/` is
+*auto-discovered by convention*: omp scans an installed plugin tree for
+`agents/`, `commands/`, `skills/`, `rules/`, `prompts/`, `hooks/`, `tools/`,
+and `.mcp.json` with no manifest entry naming any of them. Only the extension
+module has to be declared.
+
 ```
 packages/omp-plugin/
-  .claude-plugin/plugin.json
-  package.json                  # omp.extensions declaration
-  agents/
-    foreman-triage.md
-    foreman-refine.md
-    foreman-implement.md
-    foreman-review.md
-  skills/
-    triage-inbox/SKILL.md
-    refine-issue/SKILL.md
-    spike/SKILL.md
-    implement-issue/SKILL.md
-    review-diff/SKILL.md
-    block-protocol/SKILL.md
-  commands/
-    foreman-triage.md  foreman-refine.md  foreman-implement.md
-    foreman-review.md  foreman-status.md  foreman-unblock.md
-  rules/
-    no-interactive-questions.md
-    no-scope-expansion.md
-    no-gate-bypass.md
+  .omp-plugin/plugin.json       # omp-native manifest (Claude's is .claude-plugin/)
+  package.json                  # omp.extensions declaration — the ONLY declared path
+  agents/                       # auto-discovered (§3.2)
+    foreman-triage.md  foreman-refine.md  foreman-plan.md
+    foreman-implement.md  foreman-review.md
+  skills/                       # auto-discovered (§3.3); dir name is the skill name
+    foreman-triage-inbox/SKILL.md   foreman-refine-issue/SKILL.md
+    foreman-plan-project/SKILL.md   foreman-implement-issue/SKILL.md
+    foreman-review-diff/SKILL.md    foreman-spike/SKILL.md
+    foreman-block-protocol/SKILL.md
+  commands/                     # auto-discovered; one per agent dispatch, `$1`-substituted
+    triage.md  refine.md  plan.md  implement.md  review.md
+  rules/                        # auto-discovered (§15)
+    foreman-no-interactive-questions.md
+    foreman-no-scope-expansion.md
+    foreman-no-gate-bypass.md
   schemas/                      # JSON Schema for each agent's output (§6)
+  scripts/check-contract.ts     # the enforcement-surface guard (§3.13)
   src/
-    extension.ts
-    dispatch/                   # Dispatcher interface + print/herdr impls (§17.2)
+    extension.ts                # the declared entrypoint's source
+    tools/                      # foreman_linear_read, foreman_github_pr
+    render/                     # Linear comment and issue-body rendering (§3.1.1)
+    enforce/  lock/  results/  commands/
   dist/
+    extension.js                # COMMITTED build artifact — see below
 ```
+
+`/foreman:status`, `/foreman:apply`, `/foreman:merge`, and `/foreman:unblock`
+are `pi.registerCommand` calls in `src/`, not files in `commands/` — they run
+code rather than expanding a prompt. Both tools are likewise registered by the
+extension rather than dropped in `tools/`, because each one closes over the
+lazily-initialized runtime (`getLinear()`, `getEntry()`) that `session_start`
+builds; an auto-discovered `tools/` module is a separate module graph and would
+not share that state.
 
 **Manifest footgun:** the omp key for extension modules is `omp.extensions` (an
 array), not `omp.hooks`. Resolution is `pkg.omp` first with fallback to
 `pkg.pi`; declaring the wrong key means the extension silently never loads and
 nothing warns you. There is a public bug trail on exactly this.
+
+**The bundle is committed, and that is load-bearing.** `omp plugin install`
+copies this package out of a git clone of the marketplace repo and never runs a
+package manager, so a gitignored `dist/` means the declared entrypoint is simply
+absent — omp includes a declared entry only if the file exists, and drops a
+missing one silently. The auto-discovered markdown above still loads from the
+copied tree, so `/foreman:plan` expands normally while both tools, the task
+guard, the lock manager, and the result appliers are all missing. CI rebuilds
+and fails on drift; `check-contract.ts` fails when the entrypoint is missing.
+
+**Bundling is not an omp requirement — it is a requirement of *this* package.**
+omp runs TypeScript directly, a `.ts` entrypoint loads fine, and an extension
+may import genuine runtime dependencies from its own `node_modules`. Exactly
+one reason is load-bearing:
+
+**The installed copy has no dependencies and cannot get any.** A marketplace
+install copies `packages/omp-plugin/` out of a git clone, symlinks it into the
+scope's `node_modules`, and runs no package manager — the installed tree has no
+`node_modules` at all. The plugin's sole dependency is `@foreman/core`, which
+is `private: true` and specified `workspace:*`: unpublishable to a registry and
+unresolvable by any package manager outside this monorepo. Bundling inlines it,
+so the shipped extension resolves nothing at runtime.
+
+Everything else about TypeBox is downstream of that and changes no decision.
+omp remaps an extension's bare `@sinclair/typebox` import to its
+`@oh-my-pi/omptype` facade, which rejects `default: {}` — `config/schema.ts`
+carries eleven of them. This never fires in the shipped plugin, because
+bundling resolves the specifier at build time. It is also escapable if it ever
+matters: the filter is `/^(?:@sinclair\/typebox|typebox)$/`, so the subpath
+`@sinclair/typebox/type` exports the same `Type` builder and reaches real
+TypeBox untouched.
+
+**Core must not adopt omp's TypeBox**, which is otherwise the obvious
+simplification. `packages/cli` ships the standalone `foreman` binary, depends
+on core, and has no omp dependency — `foreman init` is what installs the omp
+plugin in the first place, so it necessarily runs before omp's runtime exists
+in a repo. Routing core's schemas through `@oh-my-pi/omptype` would make the
+tool that bootstraps omp depend on omp's internals to read
+`~/.foreman/config.json`. The two libraries also disagree on semantics that
+§3.10's sparse-override design rests on: omptype validates a default as an
+instance of its schema, while TypeBox treats `default` as inert annotation that
+`Value.Default` later applies.
 
 ```json
 {
@@ -163,6 +218,53 @@ nothing warns you. There is a public bug trail on exactly this.
 
 Plugin names: lowercase alphanumeric, hyphens and dots, start and end
 alphanumeric, ≤64 chars. `foreman` is valid; underscores and capitals are not.
+
+#### 3.1.1 What `@foreman/core` is for
+
+Core exists because two independent writers mutate the same Linear workspace:
+the omp plugin (operator commands and agent dispatches) and the loop supervisor
+(autonomous). A duplicated filter or label constant means the two disagree
+about whether an issue is Ready, and both claim it. Core is that shared state
+contract, not a general utility bin.
+
+Measured against the actual import graph — 103 distinct core identifiers
+imported by `omp-plugin`, 100 by `loop`, 15 by `cli`, with 45 used by both the
+plugin and the loop:
+
+| Module | Shared by plugin + loop | Contract it protects |
+| --- | --- | --- |
+| `linear/` | 9 | saved-view filters and the API client |
+| `config/` | 8 (all three packages) | `~/.foreman/config.json` semantics |
+| `domain/` | 7 | label, priority, and state vocabulary |
+| `markers/` | 4 | comment-marker encoding for lock/dispatch/merge records |
+| `schemas/` `apply/` `lock/` | 9 | agent output contracts and the lock protocol |
+
+`control/` looks lopsided (21 loop identifiers against 4 from the plugin) but
+belongs here for the same reason: it *is* the wire protocol, with the loop
+calling `writeStatusFile` and the plugin calling `readStatusFile`. One writer,
+one reader, one definition.
+
+Two directories used to sit in core without a shared consumer and have been
+moved out. Neither belongs back:
+
+- `dispatch/herdr.ts` and `dispatch/print.ts` (795 lines) had zero plugin and
+  zero CLI imports and now live in `packages/loop/src/dispatch/`. Only
+  `dispatch/types.ts` stays in core, because `apply/cleanup.ts` takes a
+  type-only `Dispatcher`. The plugin bundle shrank 15 KB on the move: it had
+  been inlining both dispatcher implementations it never called.
+- `render/` (444 lines) was imported by the plugin alone and by nothing inside
+  core; it now lives in `packages/omp-plugin/src/render/`.
+
+`renderPrBody` survived the move with no production caller — it is exercised
+only by `packages/omp-plugin/test/render.test.ts`. The implement agent writes
+its own PR body through `foreman_github_pr`, so either that helper is dead or
+the agent should be using it; resolve the question rather than leaving it.
+
+`index.ts` re-exports every module with `export *`, which makes all 349 names
+public while 182 of them are imported by no consumer. That flat barrel is also
+why importing a single label constant evaluates `config/schema.ts` — the
+failure mode recorded in docs/VERIFIED.md. Prefer narrowing the barrel over
+adding to it.
 
 ### 3.2 Agent discovery precedence
 
@@ -235,6 +337,11 @@ that must be real code:
    an agent tool (principle 9). This is stronger than a read/write tool split:
    there is no allowlist mistake that can hand an agent write access, because
    no write tool exists to grant.
+   Both tools register with `loadMode: "essential"`. That is load-bearing, not
+   cosmetic: an extension tool defaults to `discoverable`, which omp's
+   `tools.xdev` layer demotes into an `xd://` device — invisible under the bare
+   name every command, agent, and skill uses (docs/VERIFIED.md). The contract
+   check fails on any registration that is not `essential`.
 2. **Gate validators.** Pure functions over a Linear issue returning
    pass/fail + reason, consumed by agents, commands, and pre-hooks alike. One
    implementation, never reimplemented in prose inside a skill.

@@ -15,14 +15,13 @@
  */
 
 import { homedir } from "node:os";
+import { HerdrDispatcher, PrintDispatcher } from "./dispatch/index.ts";
 import {
   ControlServer,
   DISPATCH_COMMAND,
-  HerdrDispatcher,
   INBOX_FILTER,
   INTAKE_LOOP_ID,
   LinearClient,
-  PrintDispatcher,
   PROPOSALS_FILTER,
   emptyBoardCounts,
   expandHome,

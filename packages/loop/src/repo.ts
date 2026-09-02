@@ -18,14 +18,13 @@
  * (SPEC §3.12).
  */
 
+import { HerdrDispatcher, PrintDispatcher } from "./dispatch/index.ts";
 import {
   ConfigError,
   ControlServer,
   ensureMaintenanceProjects,
-  HerdrDispatcher,
   LinearClient,
   loopPaths,
-  PrintDispatcher,
   repoLoopId,
   entryForCwd,
   loadGlobalConfig,

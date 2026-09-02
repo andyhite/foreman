@@ -15,9 +15,9 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { isHerdrUnavailable } from "./dispatch/index.ts";
 import {
   IN_FLIGHT_FILTER,
-  isHerdrUnavailable,
   LinearApiError,
   lockTtlMs,
   style,

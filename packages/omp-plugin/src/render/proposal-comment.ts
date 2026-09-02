@@ -1,6 +1,5 @@
-import { AGENT_LABEL } from "../domain/labels.ts";
-import { priorityName } from "../domain/priority.ts";
-import type { TriageItem } from "../schemas/triage.ts";
+import { AGENT_LABEL, priorityName } from "@foreman/core";
+import type { TriageItem } from "@foreman/core";
 
 /**
  * SPEC §7.1 — the human rendering of one `TriageItem`. The extension pairs

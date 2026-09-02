@@ -1,6 +1,6 @@
 ---
 description: Triage the Linear Inbox and propose classification, priority, and destination for each item
-argument-hint: [--stale-low-days <days>] <ISSUE-ID...>
+argument-hint: "[--stale-low-days <days>] <ISSUE-ID...>"
 ---
 
 Triage exactly the issues named in `$ARGUMENTS` (space-separated identifiers,

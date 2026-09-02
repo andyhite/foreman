@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { acceptanceCriteria } from "../src/linear/issue.ts";
+import { acceptanceCriteria, openQuestions } from "@foreman/core";
 import {
   renderBlockComment,
   renderIssueDescription,
@@ -9,11 +9,7 @@ import {
   renderSpikeIssue,
   renderStatusConsole,
 } from "../src/render/index.ts";
-import type { BlockRecord } from "../src/schemas/envelope.ts";
-import type { ImplementResult } from "../src/schemas/implement.ts";
-import type { SpikeSpec } from "../src/schemas/refine.ts";
-import type { ReviewResult } from "../src/schemas/review.ts";
-import type { TriageItem } from "../src/schemas/triage.ts";
+import type { BlockRecord, ImplementResult, SpikeSpec, ReviewResult, TriageItem } from "@foreman/core";
 import type { StatusState } from "../src/render/status.ts";
 
 describe("renderIssueDescription", () => {
@@ -318,5 +314,18 @@ describe("renderStatusConsole", () => {
     const output = renderStatusConsole(empty);
     expect(output).toContain("clear");
     expect(output.split("\n").filter((line) => line.includes("_none_")).length).toBeGreaterThan(0);
+  });
+});
+
+describe("openQuestions", () => {
+  it("round-trips a freshly rendered description with no open questions as empty", () => {
+    const description = renderIssueDescription({
+      context: "Context",
+      acceptanceCriteria: [],
+      affectedAreas: [],
+      outOfScope: [],
+    });
+
+    expect(openQuestions(description)).toEqual([]);
   });
 });

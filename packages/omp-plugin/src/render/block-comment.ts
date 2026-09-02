@@ -1,4 +1,4 @@
-import type { BlockRecord } from "../schemas/envelope.ts";
+import type { BlockRecord } from "@foreman/core";
 
 /**
  * SPEC §9 — the Linear comment for a `BlockRecord`. For `type: "dependency"`

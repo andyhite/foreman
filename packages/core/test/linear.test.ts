@@ -8,7 +8,6 @@ import {
   incompleteBlockers,
   openQuestions,
 } from "../src/linear/issue.ts";
-import { renderIssueDescription } from "../src/render/issue-description.ts";
 import type { Issue } from "../src/linear/types.ts";
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -814,17 +813,5 @@ describe("acceptance criteria parsing", () => {
     ].join("\n");
     expect(acceptanceCriteria(description)).toEqual(["First behavior", "Second behavior"]);
     expect(hasAcceptanceCriteria(description)).toBe(true);
-  });
-});
-describe("openQuestions", () => {
-  it("round-trips a freshly rendered description with no open questions as empty", () => {
-    const description = renderIssueDescription({
-      context: "Context",
-      acceptanceCriteria: [],
-      affectedAreas: [],
-      outOfScope: [],
-    });
-
-    expect(openQuestions(description)).toEqual([]);
   });
 });

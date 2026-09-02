@@ -10,14 +10,14 @@
 
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
-import type { GlobalConfig } from "../config/schema.ts";
 import type {
   DispatchHandle,
   DispatchOutcome,
   Dispatcher,
   DispatchRequest,
   DispatchStatus,
-} from "./types.ts";
+  GlobalConfig,
+} from "@foreman/core";
 
 /** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;

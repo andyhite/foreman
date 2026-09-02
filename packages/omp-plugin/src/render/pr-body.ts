@@ -1,4 +1,4 @@
-import type { DiscoveredWork, ImplementResult } from "../schemas/implement.ts";
+import type { DiscoveredWork, ImplementResult } from "@foreman/core";
 
 export interface PrBodyInput {
   issue: { identifier: string; url: string; title: string };
