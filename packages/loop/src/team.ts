@@ -14,9 +14,11 @@
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { HerdrDispatcher, PrintDispatcher } from "./dispatch/index.ts";
 import {
+  activateRepoPlugin,
   BATCH_SUBJECT,
   ControlServer,
   DISPATCH_COMMAND,
@@ -202,6 +204,57 @@ export async function repoEntryForIssue(
   }
 }
 
+/**
+ * Refreshes `<scratchCwd>/repos/`: one symlink per registered repo alias,
+ * pointing at that repo's real working tree. `foreman-triage` holds no
+ * config-reading tool (SPEC §3.12), so this is the only way it can reach
+ * real code for repro without ever seeing `~/.foreman/config.json`.
+ *
+ * Recreated from scratch on every tick rather than diffed — `repos/` is
+ * disposable scratch state, and a stale symlink to a deregistered or moved
+ * repo is worse than the cost of relinking everything each time. An alias
+ * whose path no longer resolves on disk is skipped and logged rather than
+ * failing the tick, mirroring `repoEntryForIssue`'s non-fatal handling of
+ * an initiative bound to no registry entry.
+ */
+function ensureRepoLinks(scratchCwd: string, config: GlobalConfig, log: (message: string) => void): void {
+  const reposDir = `${scratchCwd}/repos`;
+  rmSync(reposDir, { recursive: true, force: true });
+  mkdirSync(reposDir, { recursive: true });
+  for (const alias of Object.keys(config.repos)) {
+    const { repoPath } = resolveRepoEntry(config, alias);
+    if (!existsSync(repoPath)) {
+      log(style("yellow", `~ repos.${alias} points at ${repoPath}, which does not exist — skipping its repro symlink`));
+      continue;
+    }
+    symlinkSync(repoPath, `${reposDir}/${alias}`);
+  }
+}
+
+/**
+ * Writes `<scratchCwd>/repos/index.json`: issue identifier → repro alias,
+ * for every batch item whose initiative resolves to a registered repo.
+ * `ensureRepoLinks` makes the code reachable; this is what tells
+ * `foreman-triage` — which cannot compute the mapping itself, for the same
+ * config-reading-tool reason — which `repos/<alias>` (if any) to read for
+ * each item. Built from `repoEntryForIssue`, so the two never disagree
+ * about how an issue resolves to a repo.
+ */
+async function writeRepoManifest(
+  scratchCwd: string,
+  linear: Pick<LinearWriter, "projectInitiative">,
+  index: Record<string, string>,
+  config: GlobalConfig,
+  inbox: readonly Issue[],
+): Promise<void> {
+  const manifest: Record<string, { alias: string; path: string } | null> = {};
+  for (const issue of inbox) {
+    const entry = await repoEntryForIssue(linear, index, config, issue);
+    manifest[issue.identifier] = entry ? { alias: entry.alias, path: `repos/${entry.alias}` } : null;
+  }
+  writeFileSync(`${scratchCwd}/repos/index.json`, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
 export interface IntakeContext {
   config: GlobalConfig;
   linear: LinearWriter;
@@ -213,6 +266,15 @@ export interface IntakeContext {
   now: () => Date;
   log: (message: string) => void;
   confirm(request: ConfirmRequest): Promise<boolean>;
+  /**
+   * Makes Foreman's omp plugin discoverable from `repoRoot` (SPEC §3.12) —
+   * `scratchCwd` is a synthetic workspace with no `foreman init` of its own
+   * to have activated it, so `runIntakeTick` calls this itself before
+   * dispatching `foreman-triage` there. Real wiring is
+   * `activateRepoPlugin` (`@foreman/core`); throwing here surfaces as the
+   * same dispatch-failure `skipReason` a Linear or reservation error would.
+   */
+  ensurePluginActive(repoRoot: string): void;
   /** `--verbose`: full error stacks alongside the one-line failures already logged unconditionally. */
   verbose?: boolean;
 }
@@ -273,6 +335,27 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
           skipReason = "operator declined";
         } else {
           try {
+            // The triage stage has no repo checkout of its own (SPEC §3.12)
+            // — `scratchCwd` is a synthetic workspace, not a git repo, so
+            // unlike every per-repo dispatch (plan/refine/review/implement,
+            // which reuse `ctx.entry.repoPath`) it is never created by
+            // another process and must be ensured here before the
+            // dispatcher (herdr `workspace create --cwd`) is handed a path
+            // that doesn't exist yet. Likewise, unlike a registered repo —
+            // activated once by `foreman init` — the scratch workspace has
+            // no activation step of its own, so `foreman-triage` would
+            // dispatch into a cwd with none of the plugin's tools or
+            // skills discoverable; `ensurePluginActive` makes that surface
+            // present before every dispatch, idempotently.
+            mkdirSync(scratchCwd, { recursive: true });
+            ctx.ensurePluginActive(scratchCwd);
+            // Gives foreman-triage what its "Required reads" section
+            // promises — real code for repro — without a config-reading
+            // tool of its own: a symlink per registered repo, plus
+            // repos/index.json naming which one (if any) applies to each
+            // item in this batch (SPEC §3.12).
+            ensureRepoLinks(scratchCwd, ctx.config, ctx.log);
+            await writeRepoManifest(scratchCwd, ctx.linear, initiativeIndex(ctx.config), ctx.config, inbox);
             const dispatchId = newDispatchId("foreman-triage", "batch", now);
             reserveDispatches(
               reservationsPath(ctx.reservationsDir, "foreman-triage"),
@@ -637,6 +720,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   lock.acquire(process.pid, new Date());
 
   const statusPath = args.once || args.noControl ? null : controlPaths.status;
+  const home = args.homePath ?? homedir();
 
   const ctx: IntakeContext = {
     config,
@@ -648,6 +732,9 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     now: () => new Date(),
     log,
     confirm: (request) => confirmer.confirm(request),
+    ensurePluginActive: (repoRoot) => {
+      activateRepoPlugin(repoRoot, home);
+    },
     verbose: args.verbose,
   };
   const runtime = new IntakeRuntime();
@@ -689,7 +776,6 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   try {
-    const home = args.homePath ?? homedir();
     controlServer = args.once || args.noControl
       ? null
       : new ControlServer({

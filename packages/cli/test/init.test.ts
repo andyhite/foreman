@@ -1,10 +1,9 @@
-import { loadGlobalConfig } from "@foreman/core";
+import { loadGlobalConfig, repoPluginLinkPath, repoPluginLockPath } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runInit, type InitDeps, type InitOptions } from "../src/init.ts";
-import { repoPluginLinkPath, repoPluginLockPath } from "../src/plugin-activation.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 
 class ScriptedPrompter implements Prompter {

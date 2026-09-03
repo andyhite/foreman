@@ -1,14 +1,8 @@
+import { activateRepoPlugin, checkoutPluginDir, inspectRepoActivation, repoPluginLinkPath, writeGlobalPluginLink } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  activateRepoPlugin,
-  checkoutPluginDir,
-  inspectRepoActivation,
-  repoPluginLinkPath,
-  writeGlobalPluginLink,
-} from "../src/plugin-activation.ts";
 import type { Runner } from "../src/exec.ts";
 import { runUpdate, type UpdateOptions } from "../src/update.ts";
 

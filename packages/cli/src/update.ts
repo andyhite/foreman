@@ -34,8 +34,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { expandHome, loadGlobalConfig } from "@foreman/core";
-import { activateRepoPlugin, inspectRepoActivation, writeGlobalPluginLink } from "./plugin-activation.ts";
+import { activateRepoPlugin, expandHome, inspectRepoActivation, loadGlobalConfig, writeGlobalPluginLink } from "@foreman/core";
 import type { Runner } from "./exec.ts";
 import { printSection, style } from "./tui.ts";
 

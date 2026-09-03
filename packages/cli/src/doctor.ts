@@ -15,19 +15,20 @@
  * exactly one code path that knows how to make the surface healthy.
  */
 
-import { expandHome, loadGlobalConfig } from "@foreman/core";
-import { existsSync, statSync } from "node:fs";
-import { findCheckoutRoot } from "./checkout.ts";
-import { readGlobalConfig } from "./global-config.ts";
 import {
   activateRepoPlugin,
   ensureGitExclude,
+  expandHome,
   findUserScopeInstall,
   inspectRepoActivation,
+  loadGlobalConfig,
   readGlobalPluginLink,
   removeUserScopeInstall,
   writeGlobalPluginLink,
-} from "./plugin-activation.ts";
+} from "@foreman/core";
+import { existsSync, statSync } from "node:fs";
+import { findCheckoutRoot } from "./checkout.ts";
+import { readGlobalConfig } from "./global-config.ts";
 import type { Runner } from "./exec.ts";
 import { printSection, style, statusLine } from "./tui.ts";
 

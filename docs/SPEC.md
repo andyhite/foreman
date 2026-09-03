@@ -697,6 +697,33 @@ run from cron/launchd or a herdr pane in the
 (§17.7). The apply pass (§7.1) also runs here on every tick, so approvals are
 picked up without a manual `/foreman:apply`.
 
+**Scratch workspace, plugin activation.** The dispatch cwd
+(`~/.foreman/state/intake/scratch`) is a synthetic workspace, not a
+registered repo — `foreman-triage` runs there instead of inside a checkout
+because intake is team-scoped, not repo-scoped. It never goes through
+`foreman init`, which is what activates Foreman's omp plugin for every
+per-repo dispatch (§3.10, `plugin-activation.ts`), so `runIntakeTick`
+activates it there itself, on every dispatch, before handing the dispatcher
+a cwd — otherwise `foreman-triage` would run with none of the plugin's
+tools or skills discoverable. Same primitive as `foreman init`
+(`activateRepoPlugin`, exported from `@foreman/core` since both the loop
+and the CLI call it), just aimed at the scratch directory instead of a git
+repo; a missing global link (`foreman setup` never run) surfaces as a
+failed dispatch, the same as any other `runIntakeTick` error.
+
+**Repo access for repro.** `foreman-triage-inbox` (§7.1's skill) requires
+repro reads against real code, resolved via the global `repos` registry —
+but the agent holds no config-reading tool, so it cannot resolve that
+registry itself. `runIntakeTick` does it on the agent's behalf, refreshed
+every dispatch alongside the plugin link: `scratch/repos/<alias>` — one
+symlink per registered repo, pointing at that repo's real working tree —
+plus `scratch/repos/index.json`, mapping each batch item's identifier to
+the `repos/<alias>` (if any) its initiative resolves to, built from the
+same `repoEntryForIssue` lookup §3.12's repo-lookup paragraph above
+describes. An item with no resolvable repo gets a `null` manifest entry;
+repro stays unavailable for it, same as an initiative unbound in the
+registry.
+
 ---
 
 ## 4. Linear data model

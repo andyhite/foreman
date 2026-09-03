@@ -16,9 +16,8 @@
  * risks clobbering their edits for a cosmetic cleanup that buys nothing.
  */
 
-import { type CommandRunner, expandHome, loadGlobalConfig, type RepoEntry } from "@foreman/core";
+import { type CommandRunner, deactivateRepoPlugin, expandHome, loadGlobalConfig, type RepoEntry } from "@foreman/core";
 import { writeGlobalConfig } from "./global-config.ts";
-import { deactivateRepoPlugin } from "./plugin-activation.ts";
 import type { Prompter } from "./prompt.ts";
 import { printSection, style } from "./tui.ts";
 

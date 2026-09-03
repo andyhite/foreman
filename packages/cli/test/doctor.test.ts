@@ -1,9 +1,9 @@
+import { activateRepoPlugin, repoPluginLinkPath, writeGlobalPluginLink } from "@foreman/core";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
-import { activateRepoPlugin, repoPluginLinkPath, writeGlobalPluginLink } from "../src/plugin-activation.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "../src/global-config.ts";
 import { runDoctor, type DoctorOptions } from "../src/doctor.ts";
 

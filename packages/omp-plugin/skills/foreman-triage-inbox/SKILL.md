@@ -21,7 +21,10 @@ implementation gate downstream cares about `type:`, priority, and estimate.
 
 - Each item: title, description, comments, reporter.
 - The existing backlog, for dedupe (`foreman_linear_read`).
-- The repo, read-only, for repro; resolved via the global `repos` registry.
+- The repo, read-only, for repro: your cwd's `repos/index.json` maps each
+  item's identifier to a `repos/<alias>` symlink (a real checkout) when its
+  initiative resolves to a registered repo; a `null` entry means it doesn't
+  — treat repro as unavailable for that item, not an error.
 
 ## Procedure
 

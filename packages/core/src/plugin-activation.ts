@@ -1,5 +1,11 @@
 /**
- * Activates Foreman's omp plugin for exactly the repos that opted in.
+ * Activates Foreman's omp plugin for exactly the repos that opted in — plus,
+ * since `runIntakeTick` (`packages/loop/src/team.ts`, SPEC §3.12) calls
+ * `activateRepoPlugin` the same way `foreman init` does, the team-level
+ * intake process's scratch workspace. Lives in `@foreman/core` rather than
+ * `packages/cli` (its original home) so both the CLI and the loop can reach
+ * it without a `loop -> cli` dependency, which `packages/cli` already has
+ * the other way around.
  *
  * ## Why this is hand-written rather than an `omp plugin` call
  *

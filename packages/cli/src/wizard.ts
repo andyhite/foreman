@@ -24,10 +24,10 @@
  * finishes with a usable config.
  */
 
+import { findUserScopeInstall, removeUserScopeInstall, writeGlobalPluginLink } from "@foreman/core";
 import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
-import { findUserScopeInstall, removeUserScopeInstall, writeGlobalPluginLink } from "./plugin-activation.ts";
 import type { Prompter } from "./prompt.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 

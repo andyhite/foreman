@@ -21,11 +21,14 @@
  */
 
 import {
+  activateRepoPlugin,
   type CommandRunner,
+  ensureGitExclude,
   type InitiativeBinding,
   type InitiativeRef,
   LinearApiError,
   LinearClient,
+  PLUGIN_PACKAGE_NAME,
   boundInitiativeIds,
   expandHome,
   loadGlobalConfig,
@@ -35,7 +38,6 @@ import {
 } from "@foreman/core";
 import { basename } from "node:path";
 import { readGlobalConfig, writeGlobalConfig } from "./global-config.ts";
-import { activateRepoPlugin, ensureGitExclude, PLUGIN_PACKAGE_NAME } from "./plugin-activation.ts";
 import type { CheckboxChoice, Prompter } from "./prompt.ts";
 import { printSection, style } from "./tui.ts";
 

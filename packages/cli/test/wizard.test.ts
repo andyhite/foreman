@@ -1,10 +1,10 @@
+import { globalPluginLinkPath, PLUGIN_PACKAGE_NAME } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBinDir } from "../src/cli-link.ts";
 import type { Runner } from "../src/exec.ts";
-import { globalPluginLinkPath, PLUGIN_PACKAGE_NAME } from "../src/plugin-activation.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
 

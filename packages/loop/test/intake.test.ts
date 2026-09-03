@@ -20,7 +20,7 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { DISPATCH_COMMAND, encodeMarker, INBOX_FILTER as INBOX, MARKER_KIND, PROPOSALS_FILTER as PROPOSED, PRIORITY, TYPE_LABEL } from "@foreman/core";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bookkeeping } from "../src/bookkeeping.ts";
@@ -286,6 +286,7 @@ function makeContext(overrides: Partial<IntakeContext> & { config: GlobalConfig;
     now: () => new Date("2026-06-01T12:00:00.000Z"),
     log: () => {},
     confirm: async () => true,
+    ensurePluginActive: () => {},
     ...overrides,
   };
 }
@@ -334,15 +335,34 @@ describe("runIntakeTick — window guard", () => {
   });
 
   it("dispatches once the window has passed and the batch has not already run today", async () => {
-    const config = makeConfig();
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-intake-"));
+    const config = makeConfig({
+      loop: {
+        wipGlobal: 3,
+        wip: { refine: 2, implement: 3, review: 2, plan: 1 },
+        readyBufferTarget: 5,
+        backpressureThreshold: 5,
+        retryCap: 2,
+        claimGraceMs: 300_000,
+        reviewCycleCap: 2,
+        cadenceMinutes: 5,
+        mode: "yolo",
+        workerModes: {},
+        mergeDetection: true,
+        cleanupMergedWorktrees: true,
+        stateDir,
+      },
+    });
     const dispatcher = new FakeDispatcher();
     const issue = makeIssue();
     const linear = new FakeLinear([issue], []);
+    const pluginActivations: string[] = [];
     const ctx = makeContext({
       config,
       linear,
       dispatcher,
       now: () => new Date("2026-06-01T12:00:00.000Z"),
+      ensurePluginActive: (repoRoot) => pluginActivations.push(repoRoot),
     });
 
     const report = await runIntakeTick(ctx);
@@ -353,6 +373,40 @@ describe("runIntakeTick — window guard", () => {
     expect(dispatcher.calls[0]?.command).toBe(
       `${DISPATCH_COMMAND.triage} --stale-low-days ${config.intake.staleLowDays} ${issue.identifier}`,
     );
+    // Regression: the triage stage has no repo checkout backing its cwd
+    // (unlike plan/refine/review/implement, which reuse ctx.entry.repoPath),
+    // so runIntakeTick must create it itself before dispatching — otherwise
+    // herdr's `workspace create --cwd` fails against a nonexistent directory.
+    const dispatchedCwd = dispatcher.calls[0]?.cwd;
+    const expectedCwd = join(stateDir, "intake", "scratch");
+    expect(dispatchedCwd).toBe(expectedCwd);
+    expect(existsSync(dispatchedCwd!)).toBe(true);
+    // Regression: the scratch workspace has no `foreman init` of its own to
+    // activate the omp plugin there, so runIntakeTick must ensure it itself
+    // before dispatching — otherwise foreman-triage runs with none of the
+    // plugin's tools or skills discoverable.
+    expect(pluginActivations).toEqual([expectedCwd]);
+  });
+
+  it("turns an ensurePluginActive failure into a dispatch-failure skip, without dispatching", async () => {
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      ensurePluginActive: () => {
+        throw new Error("~/.foreman/plugin does not exist — run `foreman setup` first");
+      },
+    });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(false);
+    expect(report.skipReason).toContain("foreman setup");
+    expect(dispatcher.calls).toHaveLength(0);
   });
 
   it("carries a non-default intake.staleLowDays through to the dispatched command", async () => {
@@ -449,6 +503,102 @@ describe("runIntakeTick — window guard", () => {
 
     expect(approvedReport.dispatched).toBe(true);
     expect(dispatcher.calls).toHaveLength(1);
+  });
+});
+
+// ---- repro repo links and manifest (SPEC §3.12) ------------------------
+
+describe("runIntakeTick — repro repo links and manifest (SPEC §3.12)", () => {
+  it("symlinks every registered repo into scratch/repos and writes an issue→alias manifest", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-intake-repos-"));
+    const repoPath = mkdtempSync(join(tmpdir(), "foreman-intake-repo-fixture-"));
+    const config = makeConfig({
+      loop: { ...makeConfig().loop, stateDir },
+      repos: { plotroom: { path: repoPath, initiatives: ["init-1"] } },
+    });
+    const dispatcher = new FakeDispatcher();
+    const withRepo = makeIssue({ project: { id: "proj-1", name: "Project" } });
+    const withoutRepo = makeIssue({ project: null });
+    const linear = new FakeLinear([withRepo, withoutRepo], [], async (projectId) => {
+      if (projectId === "proj-1") return { id: "init-1", name: "Plotroom" };
+      throw new Error(`unexpected project ${projectId}`);
+    });
+    const ctx = makeContext({ config, linear, dispatcher, now: () => new Date("2026-06-01T12:00:00.000Z") });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(true);
+    const scratchCwd = join(stateDir, "intake", "scratch");
+    const linkPath = join(scratchCwd, "repos", "plotroom");
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(linkPath)).toBe(repoPath);
+
+    const manifest = JSON.parse(readFileSync(join(scratchCwd, "repos", "index.json"), "utf8"));
+    expect(manifest[withRepo.identifier]).toEqual({ alias: "plotroom", path: "repos/plotroom" });
+    // No project → repoEntryForIssue can't even attempt a Linear lookup, so it stays unresolved.
+    expect(manifest[withoutRepo.identifier]).toBeNull();
+  });
+
+  it("skips a registered repo whose path no longer exists on disk, without failing the tick", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-intake-repos-"));
+    const goneRepo = join(mkdtempSync(join(tmpdir(), "foreman-intake-gone-")), "does-not-exist");
+    const config = makeConfig({
+      loop: { ...makeConfig().loop, stateDir },
+      repos: { gone: { path: goneRepo, initiatives: ["init-1"] } },
+    });
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const messages: string[] = [];
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+      log: (message) => messages.push(message),
+    });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(true);
+    const scratchCwd = join(stateDir, "intake", "scratch");
+    expect(existsSync(join(scratchCwd, "repos", "gone"))).toBe(false);
+    expect(messages.some((message) => message.includes("gone") && message.includes("does not exist"))).toBe(true);
+  });
+
+  it("recreates repos/ fresh each tick, dropping a symlink for a repo removed from the registry", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "foreman-intake-repos-"));
+    const repoPath = mkdtempSync(join(tmpdir(), "foreman-intake-repo-fixture-"));
+    const withRepo = makeConfig({
+      loop: { ...makeConfig().loop, stateDir },
+      repos: { plotroom: { path: repoPath, initiatives: ["init-1"] } },
+    });
+    const dispatcher = new FakeDispatcher();
+    const first = makeContext({
+      config: withRepo,
+      linear: new FakeLinear([makeIssue()], []),
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+    });
+    await runIntakeTick(first);
+
+    const scratchCwd = join(stateDir, "intake", "scratch");
+    expect(existsSync(join(scratchCwd, "repos", "plotroom"))).toBe(true);
+
+    // A fresh context (new bookkeeping) stands in for the next calendar
+    // day's tick, so it actually reaches the dispatch branch that rebuilds
+    // repos/ — reusing the first tick's bookkeeping would just hit the
+    // "already dispatched today" skip and never touch the symlinks.
+    const withoutRepo = makeConfig({ loop: { ...makeConfig().loop, stateDir }, repos: {} });
+    const second = makeContext({
+      config: withoutRepo,
+      linear: new FakeLinear([makeIssue()], []),
+      dispatcher,
+      now: () => new Date("2026-06-02T12:00:00.000Z"),
+    });
+    const report = await runIntakeTick(second);
+
+    expect(report.dispatched).toBe(true);
+    expect(existsSync(join(scratchCwd, "repos", "plotroom"))).toBe(false);
   });
 });
 

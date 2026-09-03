@@ -1,9 +1,9 @@
+import { activateRepoPlugin, repoPluginLockPath, repoPluginRoot } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDeinit, type DeinitDeps, type DeinitOptions } from "../src/deinit.ts";
-import { activateRepoPlugin, repoPluginLockPath, repoPluginRoot } from "../src/plugin-activation.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 
 class ScriptedPrompter implements Prompter {

@@ -24,6 +24,7 @@ export * from "./github/index.ts";
 export * from "./linear/index.ts";
 export * from "./lock.ts";
 export * from "./markers.ts";
+export * from "./plugin-activation.ts";
 export * from "./repo.ts";
 export * from "./sanitize.ts";
 export * from "./schemas/index.ts";
