@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultAndValidateGlobalConfig } from "../src/config/load.ts";
 import type { GlobalConfig } from "../src/config/schema.ts";
-import { ControlClient, probeSocket, waitForSocket } from "../src/control/client.ts";
+import { ControlClient, probeSocket, sendLoopReport, waitForSocket } from "../src/control/client.ts";
 import { discoverLoops, readStatusFile, writeStatusFile } from "../src/control/registry.ts";
 import { FrameDecoder, LOOP_MODES, emptyBoardCounts, isLoopMode } from "../src/control/protocol.ts";
 import type { ControlOp, LoopSnapshot, LoopMode, ServerInfo } from "../src/control/protocol.ts";
@@ -109,6 +109,9 @@ function makeHandlers(snapshot: LoopSnapshot, calls: HandlerCall[]): ControlHand
     killAgent: (dispatchId) => {
       calls.push({ op: "killAgent", args: [dispatchId] });
     },
+    report: (report) => {
+      calls.push({ op: "report", args: [report] });
+    },
   };
 }
 
@@ -157,6 +160,7 @@ describe("ControlServer / ControlClient round trip", () => {
       reload: () => {},
       attachAgent: () => {},
       killAgent: () => {},
+      report: () => {},
     };
     const server = new ControlServer({ socketPath, handlers, info: makeInfo() });
     await server.listen();
@@ -201,6 +205,52 @@ describe("ControlServer / ControlClient round trip", () => {
       client.close();
       await server.close();
     }
+  });
+});
+
+describe("sendLoopReport", () => {
+  it("round-trips an AgentReport over a real socket, and reports invalid params or a dead socket without throwing", async () => {
+    const dir = tempDir();
+    const socketPath = join(dir, "control.sock");
+    const snapshot = makeSnapshot();
+    const calls: HandlerCall[] = [];
+    const server = new ControlServer({ socketPath, handlers: makeHandlers(snapshot, calls), info: makeInfo() });
+    await server.listen();
+    const report = {
+      dispatchId: "foreman-plan-project-1-20260101T000000Z-abc123",
+      agent: "foreman-plan",
+      status: "applied" as const,
+      subject: "Auth revamp",
+      summary: 'planned "Auth revamp": 1 issue(s)',
+      created: [
+        {
+          kind: "issue" as const,
+          id: "issue-1",
+          identifier: "ENG-142",
+          title: "Add token refresh endpoint",
+          url: "https://linear.app/x/issue/ENG-142",
+        },
+      ],
+      movedTo: null,
+    };
+    try {
+      await expect(sendLoopReport(socketPath, report)).resolves.toBe(true);
+      expect(calls).toEqual([{ op: "report", args: [report] }]);
+
+      const client = new ControlClient({ socketPath });
+      try {
+        await client.connect();
+        await expect(client.request("report", { report: { bogus: true } })).rejects.toMatchObject({
+          code: "invalid-params",
+        });
+      } finally {
+        client.close();
+      }
+    } finally {
+      await server.close();
+    }
+
+    await expect(sendLoopReport(join(dir, "nothing.sock"), report)).resolves.toBe(false);
   });
 });
 

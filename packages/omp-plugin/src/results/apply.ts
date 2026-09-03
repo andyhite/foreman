@@ -7,7 +7,9 @@
  */
 
 import type {
+  AgentReport,
   BlockRecord,
+  CreatedEntity,
   GitHubClient,
   Issue,
   ImplementResult,
@@ -53,6 +55,17 @@ export type AgentOutcome =
   | { kind: "result"; agent: "foreman-review"; result: ReviewResult }
   | { kind: "blocked"; agent: string; block: BlockRecord; issueId: string };
 
+/**
+ * What an applier observed while writing to Linear: the loop-facing half of
+ * an apply. `applyBoundResult` completes it into an `AgentReport` by adding
+ * the dispatch metadata only the extension knows.
+ */
+export type AppliedFacts = Omit<AgentReport, "dispatchId" | "agent" | "status">;
+
+function createdIssue(issue: Issue): CreatedEntity {
+  return { kind: "issue", id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url };
+}
+
 /** The Linear/GitHub surface `apply` needs. Injected for testability. */
 export interface ApplyDeps {
   linear: LinearWriter;
@@ -89,7 +102,7 @@ async function backlogStateId(deps: ApplyDeps, teamId: string): Promise<string> 
 }
 
 /** SPEC §7.1: one comment per item, `agent:proposed`, nothing else — no state change, no priority. */
-async function applyTriage(deps: ApplyDeps, result: TriageProposal): Promise<void> {
+async function applyTriage(deps: ApplyDeps, result: TriageProposal): Promise<AppliedFacts> {
   for (const item of result.items) {
     const issue = await deps.linear.issue(item.issueId);
     if (!issue) continue;
@@ -99,10 +112,11 @@ async function applyTriage(deps: ApplyDeps, result: TriageProposal): Promise<voi
     const proposedLabel = await deps.linear.ensureLabel(AGENT_LABEL.proposed, issue.team.id);
     await deps.linear.updateIssue(issue.id, { addedLabelIds: [proposedLabel.id] });
   }
+  return { subject: null, summary: `proposed triage for ${result.items.length} issue(s)`, created: [], movedTo: null };
 }
 
 /** SPEC §7.2: description, estimate, sub-issues, spike (with its native `blocks` relation), `agent:ready` only when ready, move to Todo, strip `legacy`. */
-async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void> {
+async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`RefineResult references unknown issue ${result.issueId}.`);
 
@@ -136,6 +150,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
   // an existing child with this title is a completed step, not a duplicate
   // to create again.
   const existingChildTitles = new Set(issue.children.map((child) => child.title));
+  const created: CreatedEntity[] = [];
   for (const subIssue of result.subIssues) {
     if (existingChildTitles.has(subIssue.title)) continue;
     const subDescription = renderIssueDescription({
@@ -145,7 +160,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
       outOfScope: [],
     });
     const subTypeLabel = await deps.linear.ensureLabel(subIssue.type, issue.team.id);
-    await deps.linear.createIssue({
+    const child = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: subIssue.title,
       description: subDescription,
@@ -155,6 +170,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
       labelIds: [subTypeLabel.id],
       stateId: backlog ?? undefined,
     });
+    created.push(createdIssue(child));
   }
 
   if (result.spikeCreated) {
@@ -180,20 +196,29 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<void>
         relatedIssueId: issue.id,
         type: "blocks",
       });
+      created.push(createdIssue(spike));
     }
   }
 
   if (result.readyForImplementation) await moveToState(deps, issue, "todo");
   await releaseLock(deps, issue);
+  return {
+    subject: issue.identifier,
+    summary: `refined ${issue.identifier} (estimate ${result.estimate}, ` +
+      `${result.readyForImplementation ? "ready" : "not ready"})`,
+    created,
+    movedTo: result.readyForImplementation ? "todo" : null,
+  };
 }
 
 /** SPEC §7.3: move to In Review, file `discoveredWork` as new Backlog issues with native relations, comment the result, release the lock. */
-async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise<void> {
+async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`ImplementResult references unknown issue ${result.issueId}.`);
 
   const backlog = result.discoveredWork.length > 0 ? await backlogStateId(deps, issue.team.id) : null;
 
+  const createdEntities: CreatedEntity[] = [];
   for (const discovered of result.discoveredWork) {
     const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue.team.id);
     const created = await deps.linear.createIssue({
@@ -211,6 +236,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
       relatedIssueId: discovered.relation === "blocks" ? issue.id : created.id,
       type: discovered.relation,
     });
+    createdEntities.push(createdIssue(created));
   }
 
   const humanSummary = [
@@ -223,6 +249,13 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 
   await moveToState(deps, issue, "inReview");
   await releaseLock(deps, issue);
+  return {
+    subject: issue.identifier,
+    summary: `implemented ${issue.identifier} on ${result.branch}` +
+      (result.prUrl.length > 0 ? ` (${result.prUrl})` : " (no PR)"),
+    created: createdEntities,
+    movedTo: "inReview",
+  };
 }
 
 /**
@@ -230,10 +263,12 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
  * project. Nothing else — plan never claims `agent:running`, so there is no
  * lock to release, and it never touches an existing issue's state.
  */
-async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
+async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFacts> {
   const project = await deps.linear.project(result.projectId);
   if (!project) throw new Error(`PlanResult references unknown project ${result.projectId}.`);
-  if (result.proposedIssues.length === 0) return;
+  if (result.proposedIssues.length === 0) {
+    return { subject: project.name, summary: `planned "${project.name}": no issues proposed`, created: [], movedTo: null };
+  }
 
   const teamRef = await resolveTeamRef(deps, "plan");
 
@@ -284,6 +319,13 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
   }
 
   await deps.linear.updateProjectStatus({ projectId: result.projectId, type: "planned" });
+  return {
+    subject: project.name,
+    summary: `planned "${project.name}": ${result.proposedIssues.length} issue(s)` +
+      (result.fullyPlanned ? "" : ", partially planned"),
+    created: [...createdByKey.values()].map(createdIssue),
+    movedTo: null,
+  };
 }
 
 /**
@@ -293,7 +335,7 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
  * entirely to the operator — no auto-merge, ever. The lock is released
  * either way: review is a terminal result.
  */
-async function applyReview(deps: ApplyDeps, result: ReviewResult): Promise<void> {
+async function applyReview(deps: ApplyDeps, result: ReviewResult): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`ReviewResult references unknown issue ${result.issueId}.`);
 
@@ -303,10 +345,16 @@ async function applyReview(deps: ApplyDeps, result: ReviewResult): Promise<void>
   const blocking = result.findings.filter((finding) => finding.severity === "blocking");
   if (blocking.length > 0) await moveToState(deps, issue, "todo");
   await releaseLock(deps, issue);
+  return {
+    subject: issue.identifier,
+    summary: `reviewed ${issue.identifier}: ${result.verdict}, ${blocking.length} blocking finding(s)`,
+    created: [],
+    movedTo: blocking.length > 0 ? "todo" : null,
+  };
 }
 
 /** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no `blocked:*` label, back to Todo. */
-async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<void> {
+async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
   for (const blockerId of block.blockedByIssues) {
     const blocker = await deps.linear.issue(blockerId);
     if (!blocker) continue;
@@ -331,6 +379,7 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
   await deps.linear.createComment({ issueId: issue.id, body });
   await releaseLock(deps, issue);
   await moveToState(deps, issue, "todo");
+  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: "todo" };
 }
 
 const BLOCK_TYPE_LABEL: Record<Exclude<BlockRecord["type"], "dependency">, string> = {
@@ -341,7 +390,7 @@ const BLOCK_TYPE_LABEL: Record<Exclude<BlockRecord["type"], "dependency">, strin
 };
 
 /** SPEC §9 Case B: every other block type applies the matching `blocked:*` label, comments, releases the lock, back to Todo. */
-async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<void> {
+async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
   const labelName = BLOCK_TYPE_LABEL[block.type as Exclude<BlockRecord["type"], "dependency">];
   const label = await deps.linear.ensureLabel(labelName, issue.team.id);
   await deps.linear.updateIssue(issue.id, { addedLabelIds: [label.id] });
@@ -349,18 +398,18 @@ async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord
   await deps.linear.createComment({ issueId: issue.id, body });
   await releaseLock(deps, issue);
   await moveToState(deps, issue, "todo");
+  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: "todo" };
 }
 
 /** Routes a `BlockRecord` through SPEC §9 instead of the normal result path. */
-export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord): Promise<void> {
+export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(issueId);
   if (!issue) throw new Error(`Block references unknown issue ${issueId}.`);
 
   if (block.type === "dependency") {
-    await applyDependencyBlock(deps, issue, block);
-  } else {
-    await applyHumanBlock(deps, issue, block);
+    return applyDependencyBlock(deps, issue, block);
   }
+  return applyHumanBlock(deps, issue, block);
 }
 
 /** Marks a dispatch id as applied (SPEC contract item 3's idempotency mechanism). Uses its own marker kind, distinct from `MARKER_KIND.applied` (the triage-proposal apply marker `hasLaterApplied` scans), so the two dedup mechanisms never collide. */
@@ -401,7 +450,7 @@ async function applyRoadmapResult(
   deps: ApplyDeps,
   result: RoadmapResult,
   notify?: Notify,
-): Promise<void> {
+): Promise<AppliedFacts> {
   const teamRef = await resolveTeamRef(deps, "roadmap");
   const report = await applyRoadmap(deps.linear, result, { teamId: teamRef.id });
 
@@ -414,7 +463,16 @@ async function applyRoadmapResult(
     );
   }
 
-  if (report.problems.length === 0) return;
+  const facts: AppliedFacts = {
+    subject: null,
+    summary: `roadmap: created ${report.createdProjects.length} of ${result.proposedProjects.length} project(s)`,
+    created: report.createdProjects.map((entry) => ({
+      kind: "project" as const, id: entry.projectId, identifier: null, title: entry.name, url: null,
+    })),
+    movedTo: null,
+  };
+
+  if (report.problems.length === 0) return facts;
   const detail = report.problems.map((problem) => `${problem.key}: ${problem.error}`).join("; ");
   if (report.createdProjects.length === 0) {
     throw new Error(`No project in this roadmap could be created — ${detail}`);
@@ -424,6 +482,7 @@ async function applyRoadmapResult(
       `Unresolved: ${detail}`,
     "error",
   );
+  return facts;
 }
 
 /**
@@ -438,23 +497,24 @@ async function applyRoadmapResult(
  * report worth showing an operator mid-apply; every other stage either
  * succeeds outright or throws.
  */
-export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notify?: Notify): Promise<void> {
+export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notify?: Notify): Promise<AppliedFacts> {
   if (outcome.kind === "blocked") {
-    if (!outcome.issueId) return;
-    await applyBlock(deps, outcome.issueId, outcome.block);
-    return;
+    if (!outcome.issueId) {
+      return { subject: null, summary: `dropped a block from ${outcome.agent}: no issue to write it to`, created: [], movedTo: null };
+    }
+    return applyBlock(deps, outcome.issueId, outcome.block);
   }
   if (outcome.agent === "foreman-triage") {
-    await applyTriage(deps, outcome.result);
+    return applyTriage(deps, outcome.result);
   } else if (outcome.agent === "foreman-plan") {
-    await applyPlan(deps, outcome.result);
+    return applyPlan(deps, outcome.result);
   } else if (outcome.agent === "foreman-roadmap") {
-    await applyRoadmapResult(deps, outcome.result, notify);
+    return applyRoadmapResult(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-refine") {
-    await applyRefine(deps, outcome.result);
+    return applyRefine(deps, outcome.result);
   } else if (outcome.agent === "foreman-implement") {
-    await applyImplement(deps, outcome.result);
+    return applyImplement(deps, outcome.result);
   } else {
-    await applyReview(deps, outcome.result);
+    return applyReview(deps, outcome.result);
   }
 }

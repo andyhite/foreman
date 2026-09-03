@@ -44,6 +44,7 @@ import {
   YOLO_CONFIRMER,
   type ConfirmRequest,
   type Confirmer,
+  type AgentReport,
   type ControlEvent,
   type ControlHandlers,
   type Dispatcher,
@@ -506,6 +507,15 @@ function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime,
       runtime.tickRequested = true;
       runtime.wake?.();
     },
+    report: (report: AgentReport) => {
+      ctx.log(
+        `${report.agent} ${report.status}${report.subject ? ` ${report.subject}` : ""}: ${report.summary}`,
+      );
+      for (const entity of report.created) {
+        ctx.log(`  + ${entity.kind} ${entity.identifier ?? entity.id} — ${entity.title}`);
+      }
+      runtime.emit({ event: "report", report }, ctx.now);
+    },
     setMode: () => {
       throw new Error("intake has no mode — it always runs at the operator's configured autonomy; see loop.mode for a repo loop instead");
     },
@@ -605,10 +615,14 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   const intakeStateDir = controlPaths.dir;
   const bookkeeping = Bookkeeping.load(bookkeepingPathFor(intakeStateDir));
 
+  // `--once` and `--no-control` start no control server, so a dispatched
+  // session has nothing to report to; the env var is then simply absent.
+  const controlSocket = args.once || args.noControl ? undefined : controlPaths.socket;
+
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations }),
-      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations }),
+      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket }),
+      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket }),
     },
     log,
   );

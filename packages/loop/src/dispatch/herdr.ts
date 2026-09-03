@@ -32,7 +32,7 @@ import type {
   ForemanAgentName,
   GlobalConfig,
 } from "@foreman/core";
-import { BATCH_SUBJECT, RESERVATIONS_ENV, reservationsPath } from "@foreman/core";
+import { BATCH_SUBJECT, RESERVATIONS_ENV, reservationsPath, LOOP_SOCKET_ENV } from "@foreman/core";
 import { OrchestratorBusyError } from "./busy.ts";
 
 /** Every herdr subprocess gets this ceiling — a hung CLI must not wedge dispatch or settle. */
@@ -173,6 +173,7 @@ export class HerdrDispatcher implements Dispatcher {
   readonly #runner: HerdrRunner;
   readonly #scrubEnv: readonly string[];
   readonly #reservationsDir: string | undefined;
+  readonly #controlSocket: string | undefined;
   /**
    * `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID`/`HERDR_PANE_ID` — injected by herdr
    * into every pane it manages — locate *this process's own* pane when it
@@ -188,13 +189,14 @@ export class HerdrDispatcher implements Dispatcher {
 
   constructor(
     config: GlobalConfig,
-    options?: { runner?: HerdrRunner; scrubEnv?: string[]; reservationsDir?: string; env?: NodeJS.ProcessEnv },
+    options?: { runner?: HerdrRunner; scrubEnv?: string[]; reservationsDir?: string; env?: NodeJS.ProcessEnv; controlSocket?: string },
   ) {
     this.#config = config;
     this.#runner = options?.runner ?? nodeHerdrRunner;
     this.#scrubEnv = options?.scrubEnv ?? [];
     this.#reservationsDir = options?.reservationsDir;
     this.#env = options?.env ?? process.env;
+    this.#controlSocket = options?.controlSocket;
   }
 
   /** Runs an herdr command and throws with its stderr when it exits non-zero. */
@@ -635,6 +637,9 @@ export class HerdrDispatcher implements Dispatcher {
     }
     if (this.#reservationsDir) {
       envArgs.push("--env", `${RESERVATIONS_ENV}=${reservationsPath(this.#reservationsDir, request.agent)}`);
+    }
+    if (this.#controlSocket) {
+      envArgs.push("--env", `${LOOP_SOCKET_ENV}=${this.#controlSocket}`);
     }
     // A shared orchestrator serves many items across many turns, so it can
     // never carry one item's id in its environment — the loop hands it

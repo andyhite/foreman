@@ -103,6 +103,8 @@ export function createControlHandlers(options: ControlHandlersOptions): ControlH
 
     tick: (workers) => supervisor.requestTick(workers),
 
+    report: (report) => supervisor.recordAgentReport(report),
+
     setMode: (mode: LoopMode) => {
       if (!isLoopMode(mode)) throw new Error(`invalid loop mode: ${String(mode)}`);
       supervisor.setMode(mode);

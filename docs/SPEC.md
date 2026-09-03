@@ -2437,7 +2437,10 @@ pass immediately, outside the cadence), `setMode` (change `loop.mode`),
 `patchConfig` (merge a partial config document and hot-reload it), `reload`
 (re-read config from disk without a patch), `attachAgent` / `killAgent`
 (herdr-pane operations, §17.3 — a no-op reply naming the print-mode fallback
-when there is no herdr pane to attach to), and `logs` (tail the loop's own
+when there is no herdr pane to attach to), `report` (a dispatched session's
+extension handing back what it applied — status, subject, one-line summary,
+and every Linear issue or project it created — which the loop logs and
+re-broadcasts as a `report` event; §17.5), and `logs` (tail the loop's own
 log, not an agent's).
 
 A `LoopSnapshot`, by field group rather than a full type dump: identity (loop

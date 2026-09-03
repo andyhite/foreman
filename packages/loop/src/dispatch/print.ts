@@ -19,7 +19,7 @@ import type {
   DispatchStatus,
   GlobalConfig,
 } from "@foreman/core";
-import { reservationsPath, RESERVATIONS_ENV } from "@foreman/core";
+import { reservationsPath, RESERVATIONS_ENV, LOOP_SOCKET_ENV } from "@foreman/core";
 
 /** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
@@ -37,12 +37,14 @@ export class PrintDispatcher implements Dispatcher {
   readonly #config: GlobalConfig;
   readonly #scrubEnv: readonly string[];
   readonly #reservationsDir: string | undefined;
+  readonly #controlSocket: string | undefined;
   readonly #running = new Map<string, RunningProcess>();
 
-  constructor(config: GlobalConfig, options?: { scrubEnv?: string[]; reservationsDir?: string }) {
+  constructor(config: GlobalConfig, options?: { scrubEnv?: string[]; reservationsDir?: string; controlSocket?: string }) {
     this.#config = config;
     this.#scrubEnv = options?.scrubEnv ?? [];
     this.#reservationsDir = options?.reservationsDir;
+    this.#controlSocket = options?.controlSocket;
   }
 
   async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
@@ -92,6 +94,12 @@ export class PrintDispatcher implements Dispatcher {
     }
     if (this.#reservationsDir) {
       env[RESERVATIONS_ENV] = reservationsPath(this.#reservationsDir, request.agent);
+    }
+    // The dispatched session's Foreman extension reports its applied result
+    // back over this socket (`report` op). Absent when the loop was started
+    // with `--once`/`--no-control` — exactly when no server is listening.
+    if (this.#controlSocket) {
+      env[LOOP_SOCKET_ENV] = this.#controlSocket;
     }
 
     const child = spawn(this.#config.agent.ompBin, argv, {

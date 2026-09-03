@@ -284,8 +284,12 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
     return;
   }
 
-  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations });
-  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations });
+  // `--once` and `--no-control` start no control server, so a dispatched
+  // session has nothing to report to; the env var is then simply absent.
+  const controlSocket = args.once || args.noControl ? undefined : controlPaths.socket;
+
+  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket });
+  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket });
 
   const dispatcher = await resolveDispatcher(
     {

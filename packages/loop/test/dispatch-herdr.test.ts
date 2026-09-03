@@ -630,6 +630,22 @@ describe("HerdrDispatcher.dispatch — env passthrough", () => {
     expect(tabCreateCall?.some((arg) => arg.startsWith("FOREMAN_DISPATCH_ID="))).toBe(false);
     expect(tabCreateCall).toContain("FOREMAN_DISPATCH_RESERVATIONS=/state/reservations/foreman-refine.json");
   });
+
+  it("sets FOREMAN_LOOP_SOCKET when controlSocket is passed", async () => {
+    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner, controlSocket: "/state/control.sock" });
+
+    await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    const tabCreateCall = calls.find((call) => call.includes("tab") && call.includes("create"));
+    expect(tabCreateCall).toContain("FOREMAN_LOOP_SOCKET=/state/control.sock");
+  });
 });
 
 describe("HerdrDispatcher.dispatch — writing stages get a dedicated worktree workspace", () => {

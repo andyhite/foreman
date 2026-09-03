@@ -25,6 +25,7 @@ import {
   reserveDispatches,
   style,
   writeStatusFile,
+  type AgentReport,
   type AgentStatus,
   type ControlEvent,
   type EmittableEvent as CoreEmittableEvent,
@@ -435,6 +436,30 @@ export class Supervisor {
   forgetHandle(dispatchId: string): void {
     this.#handles.delete(dispatchId);
     this.#statuses.delete(dispatchId);
+  }
+
+  /**
+   * A dispatched session's applied result, delivered by the Foreman extension
+   * over the control socket (`report` op). The dispatcher only ever reported
+   * exit codes, so this is where the loop's own log learns which issues a
+   * plan created and which state a stage left its issue in.
+   */
+  recordAgentReport(report: AgentReport): void {
+    const stage = report.agent.replace(/^foreman-/, "");
+    const mark =
+      report.status === "applied"
+        ? style("green", "✓")
+        : report.status === "blocked"
+          ? style("yellow", "⊘")
+          : style("red", "✗");
+    this.#log(
+      `${mark} ${stage} ${report.status}${report.subject ? ` ${report.subject}` : ""}: ${report.summary}` +
+        (report.movedTo ? ` → ${report.movedTo}` : ""),
+    );
+    for (const entity of report.created) {
+      this.#log(`  ${style("dim", "+")} ${entity.kind} ${entity.identifier ?? entity.id} — ${entity.title}`);
+    }
+    this.#emit({ event: "report", report });
   }
 
   /**

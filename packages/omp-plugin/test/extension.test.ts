@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AGENT_LABEL, BLOCKED_LABEL, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions } from "@foreman/core";
 import type {
+  AgentReport,
   BlockRecord,
   CreateIssueInput,
   Issue,
@@ -551,6 +552,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     expect(captured[0]?.dispatchId).toBe(DISPATCH_ID);
 
     const notices: string[] = [];
+    const reports: AgentReport[] = [];
     await handleCaptured(
       captured[0]!.dispatchId,
       captured[0]!.agent,
@@ -561,6 +563,9 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       (message, level) => notices.push(`${level}: ${message}`),
       makeDeps(linear, { entry: { team: "ENG" } }),
       { wasApplied: async () => false },
+      async (report) => {
+        reports.push(report);
+      },
     );
 
     expect(notices).toEqual([]);
@@ -571,6 +576,11 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     // Eight planned issues landed there once, which is what this asserts away.
     expect(linear.createIssueCalls.map((call) => call.stateId)).toEqual(TITLES.map(() => STATE_BACKLOG.id));
     expect(linear.projectStatusCalls).toEqual([{ projectId: PROJECT_ID, type: "planned" }]);
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.status).toBe("applied");
+    expect(reports[0]?.subject).toBe("App settings");
+    expect(reports[0]?.created.map((entity) => entity.title)).toEqual(TITLES);
   });
 
   it("stores a description the parser can read back — one template, not one nested in another", async () => {

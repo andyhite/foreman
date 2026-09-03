@@ -31,6 +31,14 @@ export type LoopId = string;
 
 export const INTAKE_LOOP_ID: LoopId = "intake";
 
+/**
+ * Absolute path to the dispatching loop's control socket, handed to every
+ * dispatched session so its Foreman extension can report applied results back
+ * (SPEC §20.2 `report`). Absent outside a loop dispatch, and absent when the
+ * loop runs with `--once`/`--no-control` — there is no server to report to.
+ */
+export const LOOP_SOCKET_ENV = "FOREMAN_LOOP_SOCKET";
+
 export function repoLoopId(alias: string): LoopId {
   return `repo:${alias}`;
 }

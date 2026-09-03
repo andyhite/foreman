@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallDecision, ToolCallEvent, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
-import type { BlockRecord, LinearWriter } from "@foreman/core";
+import type { AgentReport, BlockRecord, LinearWriter } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   ConfigError,
@@ -24,6 +24,7 @@ import {
   newDispatchId,
   parseAgentOutput,
   resolveTeamKey,
+  sendLoopReport,
   YOLO_CONFIRMER,
   type ForemanAgentName,
 } from "@foreman/core";
@@ -37,7 +38,7 @@ import { renderStatus } from "./commands/status.ts";
 import { COMMAND_NAMES } from "./commands/names.ts";
 import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
-import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome } from "./results/apply.ts";
+import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome, type AppliedFacts } from "./results/apply.ts";
 import { extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
 import {
   getConfig,
@@ -45,6 +46,7 @@ import {
   getGitHub,
   getLinear,
   getContextDigest,
+  getLoopSocket,
   initRuntime,
   isRepoRegistered,
   liveDispatchIds,
@@ -153,6 +155,18 @@ function isForemanAgentName(agent: string): agent is ForemanAgentName {
 }
 
 /**
+ * Ships an `AgentReport` to the loop that dispatched this session, when one
+ * did. Awaited rather than fired and forgotten: `omp -p` exits the moment the
+ * turn ends, and an unawaited socket write would die with the process.
+ * `sendLoopReport` swallows every transport failure, so this never throws.
+ */
+async function defaultReportSink(report: AgentReport): Promise<void> {
+  const socketPath = getLoopSocket();
+  if (!socketPath) return;
+  await sendLoopReport(socketPath, report);
+}
+
+/**
  * Applies an `AgentOutcome` after verifying it targets the issue this
  * dispatch's lock was actually taken against (Step 4): a result naming a
  * different issue than the dispatch's `FOREMAN-ISSUE` line is rejected
@@ -169,7 +183,7 @@ export async function applyBoundResult(
   dispatchId: string,
   previousStateId: string | null,
   notify: (message: string, level: "warn" | "error") => void,
-): Promise<void> {
+): Promise<AgentReport> {
   if (
     outcome.kind === "result" &&
     target &&
@@ -198,11 +212,20 @@ export async function applyBoundResult(
       if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(lockedIssue.id, mutation);
     }
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
-    return;
+    return {
+      dispatchId,
+      agent,
+      status: "rejected",
+      subject: target,
+      summary: `reported issue ${reported}, but this dispatch locked ${target}`,
+      created: [],
+      movedTo: null,
+    };
   }
-  await applyOutcome(deps, outcome, notify);
+  const facts = await applyOutcome(deps, outcome, notify);
   const issueId = issueIdOf(outcome);
   if (issueId) await markApplied(deps, issueId, dispatchId);
+  return { dispatchId, agent, status: outcome.kind === "blocked" ? "blocked" : "applied", ...facts };
 }
 
 /**
@@ -222,6 +245,7 @@ export async function handleCaptured(
   notify: (message: string, level: "warn" | "error") => void,
   deps: ApplyDeps = toApplyDeps(),
   tracker: AppliedTracker = markerAppliedTracker(),
+  sendReport: (report: AgentReport) => Promise<void> = defaultReportSink,
 ): Promise<void> {
   if (!isForemanAgentName(agent)) return;
   if (appliedDispatchIds.has(dispatchId)) return;
@@ -247,16 +271,20 @@ export async function handleCaptured(
     try {
       const parsed = parseAgentOutput(agent, data);
       if (parsed.kind === "invalid") {
-        if (isBudgetTruncation({ aborted, problems: parsed.problems })) {
+        const truncated = isBudgetTruncation({ aborted, problems: parsed.problems });
+        if (truncated) {
           if (target) {
-            await applyOutcome(deps, blockedOutcome(agent, {
+            const facts = await applyOutcome(deps, blockedOutcome(agent, {
               blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
               whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
               options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
               costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
             }, target));
+            await sendReport({ dispatchId, agent, status: "blocked", ...facts });
           } else {
             notify(`Foreman dropped a budget-truncated ${agent} result: no issue was locked for this dispatch, so there is nothing to mark blocked.`, "error");
+            await sendReport({ dispatchId, agent, status: "rejected", subject: null,
+              summary: "budget-truncated result with no locked issue", created: [], movedTo: null });
           }
         } else {
           const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
@@ -274,19 +302,26 @@ export async function handleCaptured(
             if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
           }
           notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
+          await sendReport({ dispatchId, agent, status: "rejected", subject: target,
+            summary: `invalid result: ${parsed.problems.join("; ")}`, created: [], movedTo: null });
         }
         appliedDispatchIds.add(dispatchId);
         return;
       }
       if (parsed.kind === "blocked" && target === null) {
         notify(`Foreman received a block from ${agent} with no locked issue: ${parsed.block.whatINeed}`, "warn");
+        await sendReport({ dispatchId, agent, status: "rejected", subject: null,
+          summary: `block with no locked issue: ${parsed.block.whatINeed}`, created: [], movedTo: null });
         appliedDispatchIds.add(dispatchId);
         return;
       }
+      const applied: { report: AgentReport | null } = { report: null };
       await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
         const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-        await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, previousStateId, notify);
+        applied.report = await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, previousStateId, notify);
       });
+      const report = applied.report;
+      if (report) await sendReport(report);
       // Recorded only after the sink callback (applyOutcome + markApplied)
       // resolves: if either throws, the id must not stay poisoned in the set,
       // or a redelivery of the same result through the other subscribed

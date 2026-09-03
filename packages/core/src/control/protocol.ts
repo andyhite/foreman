@@ -264,6 +264,40 @@ export const StatusFileSchema = Type.Object(
 );
 export type StatusFile = Static<typeof StatusFileSchema>;
 
+const CreatedEntitySchema = Type.Object(
+  {
+    kind: Type.Union([Type.Literal("issue"), Type.Literal("project")]),
+    id: Type.String(),
+    /** `ENG-142` for an issue; null for a project, which has no human identifier. */
+    identifier: Type.Union([Type.String(), Type.Null()]),
+    title: Type.String(),
+    url: Type.Union([Type.String(), Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+export type CreatedEntity = Static<typeof CreatedEntitySchema>;
+
+/**
+ * What a dispatched agent session's extension tells the loop it applied
+ * (SPEC §20.2 `report`). The loop's own dispatch tracking sees exit codes
+ * only; this is the sole channel carrying what actually landed in Linear.
+ */
+export const AgentReportSchema = Type.Object(
+  {
+    dispatchId: Type.String(),
+    agent: Type.String(),
+    status: Type.Union([Type.Literal("applied"), Type.Literal("blocked"), Type.Literal("rejected")]),
+    /** `ENG-142`, a project name, or null for a batch that has no single subject. */
+    subject: Type.Union([Type.String(), Type.Null()]),
+    summary: Type.String(),
+    created: Type.Array(CreatedEntitySchema),
+    /** The `ForemanStateKey` the applier moved the subject issue to, or null. */
+    movedTo: Type.Union([Type.String(), Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+export type AgentReport = Static<typeof AgentReportSchema>;
+
 export const CONTROL_PROTOCOL_VERSION = 1 as const;
 
 const ControlOpSchema = Type.Union([
@@ -280,6 +314,7 @@ const ControlOpSchema = Type.Union([
   Type.Literal("attachAgent"),
   Type.Literal("killAgent"),
   Type.Literal("logs"),
+  Type.Literal("report"),
 ]);
 export type ControlOp = Static<typeof ControlOpSchema>;
 
@@ -355,6 +390,15 @@ const SnapshotEventSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+const ReportEventSchema = Type.Object(
+  {
+    event: Type.Literal("report"),
+    seq: Type.Number(),
+    at: Type.String(),
+    report: AgentReportSchema,
+  },
+  { additionalProperties: false },
+);
 
 export const ControlEventSchema = Type.Union([
   LogEventSchema,
@@ -362,6 +406,7 @@ export const ControlEventSchema = Type.Union([
   TickEventSchema,
   DispatchEventSchema,
   SnapshotEventSchema,
+  ReportEventSchema,
 ]);
 export type ControlEvent = Static<typeof ControlEventSchema>;
 

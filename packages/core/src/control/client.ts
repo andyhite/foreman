@@ -12,6 +12,7 @@
 
 import { createConnection, type Socket } from "node:net";
 import {
+  type AgentReport,
   type ControlEvent,
   type ControlOp,
   type ControlResponse,
@@ -222,4 +223,27 @@ export async function waitForSocket(socketPath: string, timeoutMs: number): Prom
     }
   }
   return null;
+}
+
+/**
+ * One-shot `report` from a dispatched agent session back to the loop that
+ * dispatched it. Best-effort by contract: the loop may have exited, or been
+ * started with `--no-control`, and neither may fail the apply that produced
+ * the report — so every failure is swallowed and reported as `false`.
+ */
+export async function sendLoopReport(
+  socketPath: string,
+  report: AgentReport,
+  timeoutMs = 2000,
+): Promise<boolean> {
+  const client = new ControlClient({ socketPath, timeoutMs });
+  try {
+    await client.connect();
+    await client.request("report", { report });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    client.close();
+  }
 }

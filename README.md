@@ -278,7 +278,7 @@ team` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
 speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
 after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
 `subscribe`, `pause`, `resume`, `stop`, `tick`, `setMode`, `patchConfig`,
-`reload`, `attachAgent`, `killAgent`, `logs`. `stop` takes
+`reload`, `attachAgent`, `killAgent`, `report`, `logs`. `stop` takes
 `mode: "graceful" | "now"`: both transition to `draining` and release the
 lock once shutdown completes. `"graceful"` lets the in-flight tick finish
 every worker in the pass; `"now"` cuts the tick short between workers, wakes

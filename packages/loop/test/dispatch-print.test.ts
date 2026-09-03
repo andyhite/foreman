@@ -158,6 +158,38 @@ describe("PrintDispatcher", () => {
     }
   });
 
+  it("sets FOREMAN_LOOP_SOCKET only when controlSocket is passed", async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), "foreman-print-socket-"));
+    const scriptPath = join(scriptDir, "print-env");
+    writeFileSync(scriptPath, "#!/bin/sh\nprintf '%s' \"${FOREMAN_LOOP_SOCKET-unset}\"\n");
+    chmodSync(scriptPath, 0o755);
+    try {
+      const withSocket = new PrintDispatcher(makeConfig(scriptPath), { controlSocket: "/state/control.sock" });
+      const withHandles = await withSocket.dispatch({
+        agent: "foreman-implement",
+        command: "/foreman:implement",
+        cwd: scriptDir,
+        alias: "acme",
+        items: [{ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1", worktree: null }],
+      });
+      const withOutcome = await withSocket.settle(withHandles[0] as never);
+      expect(withOutcome.log).toBe("/state/control.sock");
+
+      const withoutSocket = new PrintDispatcher(makeConfig(scriptPath));
+      const withoutHandles = await withoutSocket.dispatch({
+        agent: "foreman-implement",
+        command: "/foreman:implement",
+        cwd: scriptDir,
+        alias: "acme",
+        items: [{ issueId: "ENG-2", subject: "ENG-2", dispatchId: "dispatch-2", worktree: null }],
+      });
+      const withoutOutcome = await withoutSocket.settle(withoutHandles[0] as never);
+      expect(withoutOutcome.log).toBe("unset");
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+
   it("scrubs configured credentials and returns the actual settled outcome", async () => {
     const scriptDir = mkdtempSync(join(tmpdir(), "foreman-print-"));
     const scriptPath = join(scriptDir, "print-env");

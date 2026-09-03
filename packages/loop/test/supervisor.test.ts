@@ -317,6 +317,32 @@ describe("Supervisor.runTick — decision observability", () => {
     expect(events.some((event) => event.event === "log" && event.line.includes("unprioritized"))).toBe(true);
   });
 
+  it("recordAgentReport logs each created title and the summary, and emits a report event", async () => {
+    const supervisor = makeSupervisor([]);
+    const events: ControlEvent[] = [];
+    supervisor.onEvent((event) => events.push(event));
+    supervisor.recordAgentReport({
+      dispatchId: "foreman-plan-project-1-20260101T000000Z-abc123",
+      agent: "foreman-plan",
+      status: "applied",
+      subject: "Auth revamp",
+      summary: 'planned "Auth revamp": 1 issue(s)',
+      created: [
+        {
+          kind: "issue",
+          id: "issue-1",
+          identifier: "ENG-142",
+          title: "Add token refresh endpoint",
+          url: "https://linear.app/x/issue/ENG-142",
+        },
+      ],
+      movedTo: null,
+    });
+    expect(events.some((event) => event.event === "log" && event.line.includes("Add token refresh endpoint"))).toBe(true);
+    expect(events.some((event) => event.event === "log" && event.line.includes('planned "Auth revamp"'))).toBe(true);
+    expect(events.some((event) => event.event === "report")).toBe(true);
+  });
+
   it("a denying confirmer produces no dispatch; YOLO_CONFIRMER dispatches", async () => {
     const deniedLogs: string[] = [];
     const deniedSupervisor = makeSupervisor(deniedLogs, DENY_CONFIRMER);

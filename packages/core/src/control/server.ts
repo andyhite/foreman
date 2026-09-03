@@ -18,6 +18,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node
 import { dirname } from "node:path";
 import { Value } from "../typebox.ts";
 import {
+  type AgentReport,
+  AgentReportSchema,
   type ControlEvent,
   type ControlOp,
   type EmittableEvent,
@@ -47,6 +49,8 @@ export interface ControlHandlers {
   reload(): Promise<void> | void;
   attachAgent(dispatchId: string): Promise<void> | void;
   killAgent(dispatchId: string): Promise<void> | void;
+  /** A dispatched agent session reporting what it applied (SPEC §20.2). */
+  report(report: AgentReport): Promise<void> | void;
 }
 
 export interface ControlServerOptions {
@@ -353,6 +357,14 @@ export class ControlServer {
         case "killAgent":
           await this.#handlers.killAgent(String(params?.dispatchId ?? ""));
           return { ok: true };
+        case "report": {
+          const report = params?.report;
+          if (!Value.Check(AgentReportSchema, report)) {
+            return { ok: false, error: { code: "invalid-params", message: "invalid agent report" } };
+          }
+          await this.#handlers.report(report);
+          return { ok: true };
+        }
         default:
           return { ok: false, error: { code: "unknown-op", message: `unknown op: ${op}` } };
       }
