@@ -8,6 +8,7 @@ import {
   BLOCKED_LABEL,
   IN_FLIGHT_FILTER,
   hasLabel,
+  isTerminal,
   lockState,
   readLockComment,
   type BlockedItem,
@@ -53,14 +54,19 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
     if (!classification.orphaned) continue;
 
     const summary = `release the stale agent lock on ${issue.identifier}`;
+    const terminal = isTerminal(issue.state);
     if (await ctx.confirm({ kind: "linear-write", summary })) {
       try {
         const runningLabelIds = issue.labels
           .filter((label) => label.name === AGENT_LABEL.running)
           .map((label) => label.id);
-        const needsInputLabel = await ctx.linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
+        const addedLabelIds: string[] = [];
+        if (!terminal) {
+          const needsInputLabel = await ctx.linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
+          addedLabelIds.push(needsInputLabel.id);
+        }
         await ctx.linear.updateIssue(issue.id, {
-          addedLabelIds: [needsInputLabel.id],
+          addedLabelIds,
           removedLabelIds: runningLabelIds,
         });
         await ctx.linear.createComment({
@@ -76,14 +82,29 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
       }
     }
 
+    const stage = record?.data.agent === "foreman-refine"
+      ? "refine"
+      : record?.data.agent === "foreman-review"
+        ? "review"
+        : record?.data.agent === "foreman-plan"
+          ? "plan"
+          : "implement";
+
+    if (terminal) {
+      // The issue is already completed/canceled — releasing the lock is the
+      // whole job here. Raising blocked:needs-input on it would feed the
+      // loop's backpressure signal forever, for work nobody will return to.
+      skipped.push({
+        stage,
+        issueId: issue.identifier,
+        code: "lock-orphaned-terminal",
+        message: `Lock released without raising a decision — ${issue.identifier} is already ${issue.state.name}.`,
+      });
+      continue;
+    }
+
     skipped.push({
-      stage: record?.data.agent === "foreman-refine"
-        ? "refine"
-        : record?.data.agent === "foreman-review"
-          ? "review"
-          : record?.data.agent === "foreman-plan"
-            ? "plan"
-            : "implement",
+      stage,
       issueId: issue.identifier,
       code: "lock-orphaned",
       message: classification.reason ?? "Lock past TTL and absent from every liveness source.",

@@ -16,12 +16,15 @@ import type {
   RefineResult,
   ResolvedRepoEntry,
   ReviewResult,
+  RoadmapResult,
+  TeamRef,
   TriageProposal,
 } from "@foreman/core";
 import {
   AGENT_LABEL,
   BLOCKED_LABEL,
   LEGACY_LABEL,
+  applyRoadmap,
   encodeMarker,
   MARKER_KIND,
   resolveState,
@@ -37,10 +40,14 @@ import {
   renderSpikeIssue,
 } from "../render/index.ts";
 
+/** The operator-facing channel `handleCaptured` owns; threaded in rather than imported to keep this module free of extension state. */
+export type Notify = (message: string, level: "warn" | "error") => void;
+
 /** The discriminated union `parseAgentOutput` returns per agent, narrowed to `result | block`. */
 export type AgentOutcome =
   | { kind: "result"; agent: "foreman-triage"; result: TriageProposal }
   | { kind: "result"; agent: "foreman-plan"; result: PlanResult }
+  | { kind: "result"; agent: "foreman-roadmap"; result: RoadmapResult }
   | { kind: "result"; agent: "foreman-refine"; result: RefineResult }
   | { kind: "result"; agent: "foreman-implement"; result: ImplementResult }
   | { kind: "result"; agent: "foreman-review"; result: ReviewResult }
@@ -51,7 +58,7 @@ export interface ApplyDeps {
   linear: LinearWriter;
   github: GitHubClient;
   now: () => Date;
-  /** Only `applyPlan` needs this, to resolve the team a new issue must carry (SPEC §7.6). */
+  /** `applyPlan` and `applyRoadmap` need this, to resolve the team a new issue or project must carry (SPEC §7.6, §7.7). */
   entry?: Pick<ResolvedRepoEntry, "team">;
 }
 
@@ -227,15 +234,15 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
   const project = await deps.linear.project(result.projectId);
   if (!project) throw new Error(`PlanResult references unknown project ${result.projectId}.`);
   if (result.proposedIssues.length === 0) return;
-  if (!deps.entry) throw new Error("applyPlan requires deps.entry to resolve the team.");
 
-  const teams = await deps.linear.teams();
-  const teamKey = await resolveTeamKey({ linear: { teams: async () => teams }, entryTeam: deps.entry.team });
-  const teamRef = teams.find((candidate) => candidate.key === teamKey);
-  if (!teamRef) throw new Error(`Team "${teamKey}" was not found while applying a plan result.`);
+  const teamRef = await resolveTeamRef(deps, "plan");
 
   const backlog = await backlogStateId(deps, teamRef.id);
 
+  // Pass one: create every issue first and record `key -> created Issue`, so
+  // pass two can wire a `blockedBy` reference to a sibling created later in
+  // `proposedIssues` — array order is not dependency order.
+  const createdByKey = new Map<string, Issue>();
   for (const proposed of result.proposedIssues) {
     const description = renderIssueDescription({
       context: proposed.description,
@@ -244,7 +251,7 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
       outOfScope: result.outOfScope,
     });
     const typeLabel = await deps.linear.ensureLabel(proposed.type, teamRef.id);
-    await deps.linear.createIssue({
+    const created = await deps.linear.createIssue({
       teamId: teamRef.id,
       title: proposed.title,
       description,
@@ -254,6 +261,26 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<void> {
       labelIds: [typeLabel.id],
       stateId: backlog,
     });
+    createdByKey.set(proposed.key, created);
+  }
+
+  // Pass two: turn each `blockedBy` key into a native `blocks` relation. The
+  // graph lives here, as relations, rather than as labels or prose in the
+  // description, because the implement gate (SPEC dependency gating) reads
+  // native relations only — a dependency that isn't a relation gates nothing.
+  for (const proposed of result.proposedIssues) {
+    const blocked = createdByKey.get(proposed.key);
+    if (!blocked) throw new Error(`applyPlan: proposal key "${proposed.key}" was not created.`);
+    for (const blockerKey of proposed.blockedBy) {
+      const blocker = createdByKey.get(blockerKey);
+      if (!blocker) {
+        throw new Error(`applyPlan: proposal "${proposed.key}" blockedBy unknown key "${blockerKey}".`);
+      }
+      // Linear stores "A blocks B" as `{ issueId: A, relatedIssueId: B }` —
+      // the same orientation as `applyImplement`'s discovered-work relations
+      // and `applyRefine`'s spike case, not the inverse.
+      await deps.linear.createRelation({ issueId: blocker.id, relatedIssueId: blocked.id, type: "blocks" });
+    }
   }
 
   await deps.linear.updateProjectStatus({ projectId: result.projectId, type: "planned" });
@@ -345,13 +372,73 @@ export async function markApplied(deps: ApplyDeps, issueId: string, dispatchId: 
 }
 
 /**
- * Dispatches one `AgentOutcome` to the matching applier. A blocked outcome
- * with no `issueId` (only possible for `foreman-plan`, which operates on a
- * project rather than an issue) has nothing to write to — Linear has no
- * project-level `blocked:*` surface — so it is a documented no-op; the block
- * is still visible in the loop's own log and `/foreman-status`.
+ * Resolves the team every new Linear entity has to carry. Shared by the two
+ * appliers that create rather than update: `ProjectCreateInput` and
+ * `IssueCreateInput` both require a team, and neither agent is told one —
+ * the instance's registry entry is the authority (SPEC §3.11).
  */
-export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome): Promise<void> {
+async function resolveTeamRef(deps: ApplyDeps, forWhat: string): Promise<TeamRef> {
+  if (!deps.entry) throw new Error(`${forWhat} requires deps.entry to resolve the team.`);
+  const teams = await deps.linear.teams();
+  const teamKey = await resolveTeamKey({ linear: { teams: async () => teams }, entryTeam: deps.entry.team });
+  const teamRef = teams.find((candidate) => candidate.key === teamKey);
+  if (!teamRef) throw new Error(`Team "${teamKey}" was not found while applying a ${forWhat} result.`);
+  return teamRef;
+}
+
+/**
+ * SPEC §7.7: creates every proposed project, wires its dependency edges, and
+ * clamps any `startDate` that precedes a blocker's `targetDate`.
+ *
+ * `applyRoadmap` reports rather than throws, because a roadmap is a batch:
+ * one unresolvable blocker must not discard the projects that did apply. So
+ * the report is surfaced to the operator here — clamped dates as a warning,
+ * per-entry failures as an error — and only a run that created nothing at
+ * all is escalated to a throw, since that is indistinguishable from a failed
+ * apply and should be visible as one.
+ */
+async function applyRoadmapResult(
+  deps: ApplyDeps,
+  result: RoadmapResult,
+  notify?: Notify,
+): Promise<void> {
+  const teamRef = await resolveTeamRef(deps, "roadmap");
+  const report = await applyRoadmap(deps.linear, result, { teamId: teamRef.id });
+
+  for (const adjustment of report.dateAdjustments) {
+    notify?.(
+      `Foreman moved "${adjustment.key}" to ${adjustment.appliedStartDate} → ${adjustment.appliedTargetDate} ` +
+        `(proposed ${adjustment.requestedStartDate} → ${adjustment.requestedTargetDate}): it cannot start before ` +
+        `its last prerequisite ends on ${adjustment.forcedByTargetDate}.`,
+      "warn",
+    );
+  }
+
+  if (report.problems.length === 0) return;
+  const detail = report.problems.map((problem) => `${problem.key}: ${problem.error}`).join("; ");
+  if (report.createdProjects.length === 0) {
+    throw new Error(`No project in this roadmap could be created — ${detail}`);
+  }
+  notify?.(
+    `Foreman applied ${report.createdProjects.length} of ${result.proposedProjects.length} proposed projects. ` +
+      `Unresolved: ${detail}`,
+    "error",
+  );
+}
+
+/**
+ * Dispatches one `AgentOutcome` to the matching applier. A blocked outcome
+ * with no `issueId` (possible for `foreman-plan` and `foreman-roadmap`, which
+ * operate on a project and an initiative rather than an issue) has nothing to
+ * write to — Linear has no project-level `blocked:*` surface — so it is a
+ * documented no-op; the block is still visible in the loop's own log and
+ * `/foreman-status`.
+ *
+ * `notify` is optional because only the roadmap applier has a partial-success
+ * report worth showing an operator mid-apply; every other stage either
+ * succeeds outright or throws.
+ */
+export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notify?: Notify): Promise<void> {
   if (outcome.kind === "blocked") {
     if (!outcome.issueId) return;
     await applyBlock(deps, outcome.issueId, outcome.block);
@@ -361,6 +448,8 @@ export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome): Prom
     await applyTriage(deps, outcome.result);
   } else if (outcome.agent === "foreman-plan") {
     await applyPlan(deps, outcome.result);
+  } else if (outcome.agent === "foreman-roadmap") {
+    await applyRoadmapResult(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-refine") {
     await applyRefine(deps, outcome.result);
   } else if (outcome.agent === "foreman-implement") {

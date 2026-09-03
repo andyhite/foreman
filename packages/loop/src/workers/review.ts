@@ -10,11 +10,13 @@ import {
   DISPATCH_COMMAND,
   GitHubClient,
   MARKER_KIND,
+  all,
   branchNameFor,
   inState,
   latestMarker,
   newDispatchId,
   nodeRunner,
+  notInTerminalProject,
   type DispatchItem,
 } from "@foreman/core";
 import { isOrchestratorBusy } from "../dispatch/index.ts";
@@ -37,7 +39,7 @@ async function buildReviewCandidates(
     viewerId = null;
   }
   const inReviewIssues = await ctx.linear.issues({
-    filter: inState("In Review"),
+    filter: all(inState("In Review"), notInTerminalProject()),
     limit: 500,
     includeComments: true,
   });

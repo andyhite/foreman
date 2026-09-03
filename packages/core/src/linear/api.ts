@@ -18,6 +18,9 @@ import type {
   LinearId,
   Project,
   ProjectRef,
+  ProjectRelation,
+  ProjectRelationAnchor,
+  ProjectRelationType,
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
@@ -75,6 +78,12 @@ export interface LinearReader {
   initiativeProjects(initiativeId: string): Promise<ProjectRef[]>;
   /** A project's current native status (`backlog`/`planned`/.../`canceled`). Null when the project itself is absent. */
   projectStatus(projectId: string): Promise<ProjectStatus | null>;
+  /**
+   * A project's dependency edges (SPEC §4.10a), both directions, merged and
+   * reoriented so `anchor`/`otherAnchor` read from the queried project.
+   * Empty when the project is absent or carries none.
+   */
+  projectRelations(projectId: string): Promise<ProjectRelation[]>;
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
@@ -122,6 +131,9 @@ export interface LinearWriter extends LinearReader {
     teamIds: LinearId[];
     description?: string;
     content?: string;
+    /** `TimelessDate` (`YYYY-MM-DD`). Linear rejects a timestamp here. */
+    startDate?: string;
+    targetDate?: string;
   }): Promise<ProjectRef>;
   /**
    * Attaches an existing project to an initiative.
@@ -150,6 +162,20 @@ export interface LinearWriter extends LinearReader {
     type: IssueRelationType;
   }): Promise<void>;
   deleteRelation(relationId: LinearId): Promise<void>;
+  /**
+   * Creates a project dependency edge. `anchorType`/`relatedAnchorType` are
+   * required by `ProjectRelationCreateInput` (measured) and carry the
+   * direction's meaning: `end` -> `start` is "`projectId` must finish before
+   * `relatedProjectId` starts".
+   */
+  createProjectRelation(input: {
+    projectId: LinearId;
+    relatedProjectId: LinearId;
+    type: ProjectRelationType;
+    anchorType: ProjectRelationAnchor;
+    relatedAnchorType: ProjectRelationAnchor;
+  }): Promise<void>;
+  deleteProjectRelation(relationId: LinearId): Promise<void>;
   createLabel(input: {
     name: string;
     teamId?: LinearId;

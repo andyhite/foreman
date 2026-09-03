@@ -181,6 +181,11 @@ class FakeLinear implements LinearWriter {
     this.relationCalls.push(input);
   }
   async deleteRelation() {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation() {}
+  async deleteProjectRelation() {}
   async createLabel(input: { name: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);

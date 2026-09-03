@@ -7,7 +7,7 @@
  * to its canceled state plus a duplicate relation.
  */
 
-import type { WorkflowState, WorkflowStateType } from "../linear/types.ts";
+import type { ProjectStatusType, WorkflowState, WorkflowStateType } from "../linear/types.ts";
 
 export const FOREMAN_STATE = {
   triage: "Triage",
@@ -76,12 +76,54 @@ export function resolveState(
   throw new StateResolutionError(key, states);
 }
 
+/**
+ * The two workflow-state categories that mean no further work will happen
+ * here. Declared once and read by every terminal check, so "what counts as
+ * finished" has exactly one definition (SPEC §4.2a).
+ */
+export const TERMINAL_STATE_TYPES: readonly WorkflowStateType[] = ["completed", "canceled"];
+
 /** True when a state means the work is finished, either shipped or abandoned. */
 export function isTerminal(state: { type: WorkflowStateType }): boolean {
-  return state.type === "completed" || state.type === "canceled";
+  return TERMINAL_STATE_TYPES.includes(state.type);
 }
 
 /** True when a blocker no longer blocks: it completed or was abandoned. */
 export function blockerIsResolved(state: { type: WorkflowStateType }): boolean {
   return isTerminal(state);
+}
+
+/**
+ * `TERMINAL_STATE_TYPES`' project-level sibling. A separate list because
+ * `ProjectStatusType` is a separate enum, not because the two disagree.
+ *
+ * `paused` is deliberately absent: a paused project is on hold, not
+ * finished. Un-pausing it must resume the loop with no other edit, and
+ * treating it as terminal here would make that resume silent and
+ * indistinguishable from abandonment (SPEC §7.6a). Pausing does hold one
+ * specific transition — see `isPausedProjectStatus`.
+ */
+export const TERMINAL_PROJECT_STATUS_TYPES: readonly ProjectStatusType[] = ["completed", "canceled"];
+
+/**
+ * True when a project has shipped or been abandoned. A project with no
+ * status at all is *not* terminal — an unset status means the operator never
+ * picked one, which is the opposite of a decision to stop.
+ */
+export function isTerminalProjectStatus(status: { type: ProjectStatusType } | null | undefined): boolean {
+  return status != null && TERMINAL_PROJECT_STATUS_TYPES.includes(status.type);
+}
+
+/**
+ * True when a project is on the operator's reversible hold.
+ *
+ * Narrower than terminal by design, and read by exactly one transition:
+ * refinement, whose whole output is a *new* issue in Todo (SPEC §4.2b).
+ * Pausing a project says "commit nothing further here for now", so
+ * promoting more of its Backlog into the implementable queue is the one
+ * thing that must stop. Work already in Todo or further right is already
+ * committed and keeps moving — a pause is not a recall.
+ */
+export function isPausedProjectStatus(status: { type: ProjectStatusType } | null | undefined): boolean {
+  return status?.type === "paused";
 }

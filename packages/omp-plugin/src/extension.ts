@@ -137,13 +137,14 @@ export function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord, 
 function issueIdOf(outcome: AgentOutcome): string {
   if (outcome.kind === "blocked") return outcome.issueId;
   if (outcome.agent === "foreman-triage") return outcome.result.items[0]?.issueId ?? "";
-  // A plan result creates issues rather than referencing one — there is no
-  // pre-existing anchor for the applied-marker dedup, so it is skipped
-  // (`handleCaptured` no-ops `markApplied` on an empty string). Duplicate
-  // application risk is bounded upstream: routing only ever dispatches
-  // `foreman-plan` at a bare (zero-issue) project, and a project stops being
-  // a candidate the moment its first issue lands.
-  if (outcome.agent === "foreman-plan") return "";
+  // Plan and roadmap results create Linear entities rather than referencing
+  // one — there is no pre-existing anchor for the applied-marker dedup, so it
+  // is skipped (`handleCaptured` no-ops `markApplied` on an empty string).
+  // Duplicate application risk is bounded upstream: routing only ever
+  // dispatches `foreman-plan` at a bare (zero-issue) project, and a project
+  // stops being a candidate the moment its first issue lands; `foreman-roadmap`
+  // is operator-invoked and never dispatched by the loop at all.
+  if (outcome.agent === "foreman-plan" || outcome.agent === "foreman-roadmap") return "";
   return outcome.result.issueId;
 }
 
@@ -173,6 +174,7 @@ export async function applyBoundResult(
     outcome.kind === "result" &&
     target &&
     agent !== "foreman-plan" &&
+    agent !== "foreman-roadmap" &&
     agent !== "foreman-triage" &&
     "issueId" in outcome.result &&
     outcome.result.issueId !== target
@@ -198,7 +200,7 @@ export async function applyBoundResult(
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
     return;
   }
-  await applyOutcome(deps, outcome);
+  await applyOutcome(deps, outcome, notify);
   const issueId = issueIdOf(outcome);
   if (issueId) await markApplied(deps, issueId, dispatchId);
 }
@@ -232,13 +234,16 @@ export async function handleCaptured(
 
   const work = (async () => {
     if (appliedDispatchIds.has(dispatchId)) return;
-    // Plan and triage dispatch ids carry a project id or the literal
-    // "batch" where the issue-stage ids carry an identifier, so decoding one
-    // back into a "locked issue" would hand every downstream branch a target
-    // that is not an issue at all. Neither stage locks anything: no target.
+    // Plan, roadmap, and triage dispatch ids carry a project id, an
+    // initiative id, or the literal "batch" where the issue-stage ids carry
+    // an identifier, so decoding one back into a "locked issue" would hand
+    // every downstream branch a target that is not an issue at all. None of
+    // those stages lock anything: no target.
     const target =
       lockedIssueId ??
-      (agent === "foreman-plan" || agent === "foreman-triage" ? null : issueIdFromDispatchId(dispatchId));
+      (agent === "foreman-plan" || agent === "foreman-roadmap" || agent === "foreman-triage"
+        ? null
+        : issueIdFromDispatchId(dispatchId));
     try {
       const parsed = parseAgentOutput(agent, data);
       if (parsed.kind === "invalid") {

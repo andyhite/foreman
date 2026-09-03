@@ -19,13 +19,14 @@
  * worker per decision, not gated here.
  */
 
-import type { GlobalConfig, Issue, LoopMode, ProjectRef } from "@foreman/core";
+import type { GlobalConfig, Issue, LoopMode, ProjectRef, ProjectRelation } from "@foreman/core";
 import {
   AGENT_LABEL,
   DISPATCH_COMMAND,
   LABEL_GROUP,
   hasLabel,
   implementationGate,
+  incompleteBlockers,
   labelsInGroup,
   priorityRank,
 } from "@foreman/core";
@@ -100,9 +101,15 @@ export interface BoardSnapshot {
   planCandidates: PlanCandidate[];
 }
 
-/** A bare project: in scope, not the standing Maintenance project, zero issues in any state. */
+/**
+ * A bare project: in scope, not the standing Maintenance project, zero
+ * issues in any state. `blockedBy` is the project's *incomplete* project
+ * blockers only — already filtered by the worker that discovered it, so
+ * routing never has to re-derive completeness from a raw relation list.
+ */
 export interface PlanCandidate {
   project: ProjectRef;
+  blockedBy: ProjectRelation[];
 }
 
 export interface RoutingResult {
@@ -248,6 +255,22 @@ function routeRefine(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
       pushSkip(ctx, "refine", issue.identifier, "has-agent-label", "Already carries `agent:ready`.");
       continue;
     }
+    // Refining a blocked issue promotes it straight to Todo with
+    // `agent:ready`, where it just parks at the implementation gate
+    // (`incomplete-blockers`, packages/core/src/gates/implementation.ts) —
+    // so gating here too keeps the Ready buffer from filling with work that
+    // cannot start while starving work that can.
+    const blockers = incompleteBlockers(issue);
+    if (blockers.length > 0) {
+      pushSkip(
+        ctx,
+        "refine",
+        issue.identifier,
+        "incomplete-blockers",
+        `${blockers.length} incomplete blocker(s): ${blockers.map((relation) => relation.other.identifier).join(", ")}.`,
+      );
+      continue;
+    }
     if (snapshot.readyBufferCount + ctx.decisions.filter((d) => d.agent === "foreman-refine").length >=
       ctx.loop.readyBufferTarget) {
       pushSkip(ctx, "refine", issue.identifier, "buffer-satisfied", "Ready buffer reached target mid-pass.");
@@ -323,10 +346,26 @@ function routeReview(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureT
  * separate "fully planned" flag is needed; Linear's own state is the stop
  * condition. `planInFlightProjectIds` covers the one gap that leaves: a
  * dispatch already running whose issues haven't landed yet.
+ *
+ * The dependency check runs before anything else: a bare project whose
+ * prerequisites haven't shipped is exactly the project whose brief cannot
+ * be decomposed accurately yet — the issues it should produce depend on
+ * decisions its blockers haven't settled — and planning it early is how a
+ * roadmap's intended sequence gets lost.
  */
 function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTripped: boolean): void {
   for (const candidate of snapshot.planCandidates) {
     const { project } = candidate;
+    if (candidate.blockedBy.length > 0) {
+      pushProjectSkip(
+        ctx,
+        "plan",
+        project.id,
+        "incomplete-project-blockers",
+        `"${project.name}" is blocked by: ${candidate.blockedBy.map((relation) => relation.other.name).join(", ")}.`,
+      );
+      continue;
+    }
     if (ctx.planInFlightProjectIds.has(project.id)) {
       pushProjectSkip(ctx, "plan", project.id, "already-in-flight", `"${project.name}" already has a plan dispatch in flight.`);
       continue;

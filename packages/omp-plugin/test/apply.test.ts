@@ -167,6 +167,11 @@ class FakeLinear implements LinearWriter {
     this.relationCalls.push(input);
   }
   async deleteRelation() {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation() {}
+  async deleteProjectRelation() {}
   async createLabel(input: { name: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);
@@ -433,12 +438,14 @@ function makePlanResult(overrides: Partial<PlanResult> = {}): PlanResult {
     projectId: "project-1",
     proposedIssues: [
       {
+        key: "search-index",
         title: "Wire the search index",
         type: TYPE_LABEL.feature,
         description: "## Context\nBuild the index.",
         acceptanceCriteria: ["Search returns results for a known query"],
         proposedPriority: PRIORITY.Medium,
         proposedEstimate: 2,
+        blockedBy: [],
       },
     ],
     outOfScope: ["Ranking tuning"],
@@ -451,7 +458,16 @@ function makePlanResult(overrides: Partial<PlanResult> = {}): PlanResult {
 describe("applyOutcome — plan", () => {
   it("creates one Backlog issue per proposedIssue, tagged with its type label", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
     await applyOutcome(makeDeps(linear, { team: "ENG" }), {
       kind: "result",
@@ -469,11 +485,87 @@ describe("applyOutcome — plan", () => {
     const typeLabel = [...linear.labelsById.values()].find((entry) => call?.labelIds?.includes(entry.id));
     expect(typeLabel?.name).toBe(TYPE_LABEL.feature);
     expect(linear.updateProjectStatusCalls).toEqual([{ projectId: "project-1", type: "planned" }]);
+    expect(linear.relationCalls).toHaveLength(0);
+  });
+
+  it("creates one native `blocks` relation per blockedBy edge, blocker as issueId", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    await applyOutcome(makeDeps(linear, { team: "ENG" }), {
+      kind: "result",
+      agent: "foreman-plan",
+      result: makePlanResult({
+        proposedIssues: [
+          {
+            key: "schema",
+            title: "Define schema",
+            type: TYPE_LABEL.feature,
+            description: "## Context\nSchema.",
+            acceptanceCriteria: ["Schema exists"],
+            proposedPriority: PRIORITY.Medium,
+            proposedEstimate: 1,
+            blockedBy: [],
+          },
+          {
+            key: "api",
+            title: "Build the API",
+            type: TYPE_LABEL.feature,
+            description: "## Context\nAPI.",
+            acceptanceCriteria: ["API responds"],
+            proposedPriority: PRIORITY.Medium,
+            proposedEstimate: 2,
+            blockedBy: ["schema"],
+          },
+          {
+            key: "ui",
+            title: "Build the UI",
+            type: TYPE_LABEL.feature,
+            description: "## Context\nUI.",
+            acceptanceCriteria: ["UI renders"],
+            proposedPriority: PRIORITY.Medium,
+            proposedEstimate: 2,
+            blockedBy: ["schema", "api"],
+          },
+        ],
+      }),
+    });
+
+    expect(linear.createIssueCalls).toHaveLength(3);
+    expect(linear.relationCalls).toHaveLength(3);
+    const schemaId = "created-1";
+    const apiId = "created-2";
+    const uiId = "created-3";
+    expect(linear.relationCalls).toEqual(
+      expect.arrayContaining([
+        { issueId: schemaId, relatedIssueId: apiId, type: "blocks" },
+        { issueId: schemaId, relatedIssueId: uiId, type: "blocks" },
+        { issueId: apiId, relatedIssueId: uiId, type: "blocks" },
+      ]),
+    );
   });
 
   it("leaves the project status untouched when proposedIssues is empty", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
     await applyOutcome(makeDeps(linear, { team: "ENG" }), {
       kind: "result",
       agent: "foreman-plan",
@@ -484,7 +576,16 @@ describe("applyOutcome — plan", () => {
 
   it("creates nothing when proposedIssues is empty", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: "project-1", name: "Search revamp", description: null, content: "Brief.", documents: [] };
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
     await applyOutcome(makeDeps(linear, { team: "ENG" }), {
       kind: "result",
       agent: "foreman-plan",

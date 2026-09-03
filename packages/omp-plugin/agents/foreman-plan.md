@@ -61,6 +61,8 @@ output: |
                   "title": "ProposedIssue",
                   "type": "object",
                   "required": [
+                    "key",
+                    "blockedBy",
                     "title",
                     "type",
                     "description",
@@ -69,6 +71,18 @@ output: |
                     "proposedEstimate"
                   ],
                   "properties": {
+                    "key": {
+                      "minLength": 1,
+                      "description": "A short identifier for this proposal, unique within this result and referenced by other entries' `blockedBy` (e.g. `schema`, `api`, `ui`). Local to the result only — never written to Linear, which assigns the real identifiers on creation.",
+                      "type": "string"
+                    },
+                    "blockedBy": {
+                      "description": "`key`s of other entries in this same result that must ship before this one. The extension turns each into a native Linear `blocks` relation, which is what stops the loop from implementing this issue before its prerequisites are done (SPEC §10). Empty for anything that can start immediately. Must not form a cycle.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
                     "title": {
                       "minLength": 1,
                       "type": "string"
@@ -385,7 +399,12 @@ Follow `foreman-plan-project` for the full method. In outline:
    `type:` label, a rough `proposedPriority`, and a rough
    `proposedEstimate`. These are starting points — `foreman-refine` verifies
    and revises every one of them against the code before it reaches Todo,
-   exactly as it already does for intake-drafted issues.
+   exactly as it already does for intake-drafted issues. Give each a short
+   stable `key` and, in `blockedBy`, the `key`s of sibling entries that must
+   ship first — a real prerequisite only, never a preference or a preferred
+   reading order. Leave `blockedBy` empty for anything that can start
+   immediately; the graph must stay a DAG, since a cycle or dangling
+   reference drops the whole result.
 4. Record explicit non-goals in `outOfScope` so a later planning pass (should
    the project ever go bare again) does not re-propose them.
 5. Set `fullyPlanned` when `proposedIssues` covers the brief end to end.
@@ -393,9 +412,12 @@ Follow `foreman-plan-project` for the full method. In outline:
 
 ## Output
 
-Fill `PlanResult`. Yield a `BlockRecord` only when the brief itself is
-missing or too vague to decompose with any confidence — not merely thin.
-Prefer proposing a small, honestly-scoped first slice over blocking.
+Fill `PlanResult`. The extension creates each issue, then wires every
+`blockedBy` edge into a native Linear `blocks` relation — that relation, not
+a label or prose, is what later gates a dependent issue in the implement
+loop. Yield a `BlockRecord` only when the brief itself is missing or too
+vague to decompose with any confidence — not merely thin. Prefer proposing a
+small, honestly-scoped first slice over blocking.
 
 ## Non-goals
 

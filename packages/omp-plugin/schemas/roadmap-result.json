@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "foreman/plan-output",
+  "$id": "foreman/roadmap-output",
   "additionalProperties": false,
   "type": "object",
   "required": [
@@ -18,167 +18,88 @@
       "anyOf": [
         {
           "additionalProperties": false,
-          "title": "PlanResult",
+          "title": "RoadmapResult",
           "type": "object",
           "required": [
-            "projectId",
-            "proposedIssues",
-            "outOfScope",
-            "fullyPlanned",
+            "initiativeId",
+            "proposedProjects",
             "rationale"
           ],
           "properties": {
-            "projectId": {
+            "initiativeId": {
               "minLength": 1,
+              "description": "The initiative every proposed project is attached to. One initiative per result.",
               "type": "string"
             },
-            "proposedIssues": {
-              "description": "New Backlog issues that decompose the project brief into agent-sized units. The extension creates each one directly; none of them get `agent:ready` — they enter the normal refine funnel once the operator sets a priority.",
+            "proposedProjects": {
+              "minItems": 1,
+              "description": "The projects to create, in no particular array order — `blockedBy` carries the sequence, not position. The extension creates each one, attaches it to the initiative, sets its dates, and wires its dependency edges.",
               "type": "array",
               "items": {
                 "additionalProperties": false,
-                "title": "ProposedIssue",
+                "title": "ProposedProject",
                 "type": "object",
                 "required": [
                   "key",
-                  "blockedBy",
-                  "title",
-                  "type",
+                  "name",
                   "description",
-                  "acceptanceCriteria",
-                  "proposedPriority",
-                  "proposedEstimate"
+                  "brief",
+                  "blockedBy",
+                  "blockedByExisting",
+                  "startDate",
+                  "targetDate"
                 ],
                 "properties": {
                   "key": {
                     "minLength": 1,
-                    "description": "A short identifier for this proposal, unique within this result and referenced by other entries' `blockedBy` (e.g. `schema`, `api`, `ui`). Local to the result only — never written to Linear, which assigns the real identifiers on creation.",
+                    "description": "A short identifier for this proposal, unique within this result and referenced by other entries' `blockedBy`. Local to the result only — Linear assigns the real id.",
                     "type": "string"
                   },
-                  "blockedBy": {
-                    "description": "`key`s of other entries in this same result that must ship before this one. The extension turns each into a native Linear `blocks` relation, which is what stops the loop from implementing this issue before its prerequisites are done (SPEC §10). Empty for anything that can start immediately. Must not form a cycle.",
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "title": {
+                  "name": {
                     "minLength": 1,
+                    "description": "The project name as it will read in Linear's sidebar. A shippable increment, not a theme.",
                     "type": "string"
-                  },
-                  "type": {
-                    "description": "The `type:` label this issue should carry.",
-                    "anyOf": [
-                      {
-                        "const": "type:bug",
-                        "type": "string"
-                      },
-                      {
-                        "const": "type:feature",
-                        "type": "string"
-                      },
-                      {
-                        "const": "type:chore",
-                        "type": "string"
-                      },
-                      {
-                        "const": "type:spike",
-                        "type": "string"
-                      },
-                      {
-                        "const": "type:docs",
-                        "type": "string"
-                      }
-                    ]
                   },
                   "description": {
                     "minLength": 1,
-                    "description": "The `## Context` body only — why this issue exists, in prose. The extension renders the SPEC §13.1 template around it from this plus `acceptanceCriteria` and `outOfScope`, so emitting the headings yourself nests one template inside another. This is a starting point, not a finished refinement — `foreman-refine` verifies and revises it against the code, exactly as it already does for intake-drafted issues (SPEC §3.12).",
+                    "description": "Linear's one-line summary. Orientation for someone scanning the initiative, not the brief.",
                     "type": "string"
                   },
-                  "acceptanceCriteria": {
-                    "description": "Draft observable behaviors. `foreman-refine` may revise these once it reads the code.",
+                  "brief": {
+                    "minLength": 1,
+                    "description": "The project brief (SPEC §4.7) in markdown, written to the project's `content` — the field Linear's UI shows as the project overview, and the document `foreman-plan` later decomposes into issues. Without it a created project is unplannable.",
+                    "type": "string"
+                  },
+                  "blockedBy": {
+                    "description": "`key`s of other entries in this same result that must finish before this project starts. The extension creates a native `dependency` relation for each, which is what keeps the plan worker off this project until its prerequisites ship (SPEC §17.5).",
                     "type": "array",
                     "items": {
-                      "minLength": 1,
                       "type": "string"
                     }
                   },
-                  "proposedPriority": {
-                    "description": "0 None, 1 Urgent, 2 High, 3 Medium, 4 Low (SPEC §4.3). Prefer a real priority — `None` leaves the issue outside the refine funnel until the operator sets one.",
-                    "anyOf": [
-                      {
-                        "const": 0,
-                        "type": "number"
-                      },
-                      {
-                        "const": 1,
-                        "type": "number"
-                      },
-                      {
-                        "const": 2,
-                        "type": "number"
-                      },
-                      {
-                        "const": 3,
-                        "type": "number"
-                      },
-                      {
-                        "const": 4,
-                        "type": "number"
-                      }
-                    ]
+                  "blockedByExisting": {
+                    "description": "Ids of projects that already exist in Linear and must finish before this one starts. Same relation, one end of which is not being created by this result.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   },
-                  "proposedEstimate": {
-                    "description": "Rough size, or null when genuinely unknown. `foreman-refine` re-estimates against the code.",
-                    "anyOf": [
-                      {
-                        "description": "A rough call, not a commitment — `foreman-refine` re-estimates each issue against the code.",
-                        "anyOf": [
-                          {
-                            "const": 1,
-                            "type": "number"
-                          },
-                          {
-                            "const": 2,
-                            "type": "number"
-                          },
-                          {
-                            "const": 3,
-                            "type": "number"
-                          },
-                          {
-                            "const": 5,
-                            "type": "number"
-                          },
-                          {
-                            "const": 8,
-                            "type": "number"
-                          }
-                        ]
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
+                  "startDate": {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "Calendar day, `YYYY-MM-DD`. Not a timestamp — Linear rejects one.",
+                    "type": "string"
+                  },
+                  "targetDate": {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "Calendar day, `YYYY-MM-DD`. Not a timestamp — Linear rejects one.",
+                    "type": "string"
                   }
                 }
               }
             },
-            "outOfScope": {
-              "description": "Explicit non-goals for this pass, so a later planning pass does not re-propose them.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "fullyPlanned": {
-              "description": "True when proposedIssues, together with anything already in the project, cover the brief end to end. Informational only: Foreman has no durable per-project flag, so this does not change dispatch behavior on its own (SPEC known gap) — the real stop condition is that a project with at least one issue never triggers `foreman-plan` again.",
-              "type": "boolean"
-            },
             "rationale": {
               "minLength": 1,
-              "description": "How proposedIssues maps to the brief. Logged for the operator, not written to Linear.",
+              "description": "Why this decomposition and this sequence, including what the dates were derived from. Logged for the operator, never written to Linear.",
               "type": "string"
             }
           }

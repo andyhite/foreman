@@ -5,7 +5,7 @@ inbox, refine prioritized issues, implement them in worktrees, and review the
 diff, with every mutation applied by the extension from validated structured
 output.
 
-The plugin ships five agents, seven skills, nine commands (five Markdown,
+The plugin ships six agents, eight skills, ten commands (six Markdown,
 four registered by the extension), three TTSR rules, and one extension
 module (`src/extension.ts`) that owns the Linear write client, gate
 validators, lock manager, and config loader.
@@ -45,6 +45,8 @@ Foreman reads one global config file:
 | Command | Dispatches | Argument |
 |---|---|---|
 | `/foreman:triage` | `foreman-triage` over the Inbox | none |
+| `/foreman:plan` | `foreman-plan` over one or more bare projects | `<PROJECT-ID>...` |
+| `/foreman:roadmap` | `foreman-roadmap` over one initiative — creates sequenced projects | `<INITIATIVE-ID>` |
 | `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
 | `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` | `<ISSUE-ID or PR>` |

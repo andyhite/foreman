@@ -8,6 +8,7 @@ import type {
   IssueMutation,
   IssueRelationType,
   LinearWriter,
+  Project,
   RefineResult,
   TeamRef,
   WorkflowState,
@@ -65,7 +66,7 @@ class FakeLinear implements LinearWriter {
   relationCalls: Array<{ issueId: string; relatedIssueId: string; type: IssueRelationType }> = [];
   createIssueCalls: CreateIssueInput[] = [];
   projectStatusCalls: Array<{ projectId: string; type: string }> = [];
-  projectRecord: { id: string; name: string; description: string | null; content: string | null; documents: [] } | null = null;
+  projectRecord: Project | null = null;
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -161,6 +162,11 @@ class FakeLinear implements LinearWriter {
     this.relationCalls.push(input);
   }
   async deleteRelation() {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation() {}
+  async deleteProjectRelation() {}
   async createLabel(input: { name: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);
@@ -519,7 +525,11 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
         fullyPlanned: true,
         rationale: "Four slices, one per pane plus the ceilings, which have a different consumer story.",
         outOfScope: ["Enforcement of the ceilings in the fleet mesh"],
+        // A chain, not a flat list: each slice waits on the previous one, so
+        // this fixture also exercises `applyPlan`'s relation pass.
         proposedIssues: TITLES.map((title, index) => ({
+          key: `slice-${index}`,
+          blockedBy: index === 0 ? [] : [`slice-${index - 1}`],
           title,
           type: TYPE_LABEL.feature,
           description: `## Context\n${title} is a thin surface over existing machinery.`,
@@ -533,7 +543,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
 
   it("creates one Backlog issue per proposedIssue and marks the project planned", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", documents: [] };
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
 
     const captured = extractFromToolResult(toolResultPayload(planEnvelope()));
@@ -565,7 +575,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
 
   it("stores a description the parser can read back — one template, not one nested in another", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", documents: [] };
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
 
     const captured = extractFromToolResult(toolResultPayload(planEnvelope()));

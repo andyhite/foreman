@@ -1,14 +1,38 @@
 import { describe, expect, it } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
 import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
-import { inState } from "../src/linear/filters.ts";
+import {
+  BLOCKED_DEPS_FILTER,
+  BLOCKED_HUMAN_FILTER,
+  INBOX_FILTER,
+  IN_FLIGHT_FILTER,
+  PROPOSALS_FILTER,
+  hasLabelNamed,
+  inState,
+  inStateType,
+  notInPausedProject,
+  notInTerminalProject,
+  notTerminalState,
+  readyFilter,
+} from "../src/linear/filters.ts";
+import { isPausedProjectStatus, isTerminal, isTerminalProjectStatus } from "../src/domain/states.ts";
 import {
   acceptanceCriteria,
   hasAcceptanceCriteria,
   incompleteBlockers,
   openQuestions,
 } from "../src/linear/issue.ts";
-import type { Issue } from "../src/linear/types.ts";
+import {
+  blockingProjectRelations,
+  incompleteProjectBlockers,
+  latestTargetDate,
+} from "../src/linear/project.ts";
+import type {
+  Issue,
+  ProjectRelation,
+  ProjectRelationAnchor,
+  ProjectStatusType,
+} from "../src/linear/types.ts";
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -470,6 +494,100 @@ describe("LinearClient team scope", () => {
   });
 });
 
+describe("terminal exclusion", () => {
+  const TERMINAL = ["completed", "canceled"];
+
+  // The predicate every gate reads. `paused` is the interesting case: it is a
+  // reversible operator hold, so treating it as terminal would make
+  // un-pausing a project silently indistinguishable from abandoning it.
+  it("counts completed and canceled as terminal, and nothing else", () => {
+    expect(isTerminal({ type: "completed" })).toBe(true);
+    expect(isTerminal({ type: "canceled" })).toBe(true);
+    expect(isTerminal({ type: "started" })).toBe(false);
+    expect(isTerminal({ type: "backlog" })).toBe(false);
+
+    expect(isTerminalProjectStatus({ type: "completed" })).toBe(true);
+    expect(isTerminalProjectStatus({ type: "canceled" })).toBe(true);
+    expect(isTerminalProjectStatus({ type: "paused" })).toBe(false);
+    expect(isTerminalProjectStatus({ type: "started" })).toBe(false);
+  });
+
+  // An unset status means the operator never picked one, which is the
+  // opposite of a decision to stop — so it must not read as terminal.
+  it("does not treat an absent project status as terminal", () => {
+    expect(isTerminalProjectStatus(null)).toBe(false);
+    expect(isTerminalProjectStatus(undefined)).toBe(false);
+  });
+
+  it("excludes terminal issues by state type", () => {
+    expect(notTerminalState()).toEqual({ state: { type: { nin: TERMINAL } } });
+  });
+
+  // Project-less issues must survive: they are out of scope for a more
+  // specific reason (`issueScope`'s `no-project`), and that is the verdict
+  // the operator needs to see instead of the issue silently vanishing.
+  it("excludes terminal projects while keeping project-less issues", () => {
+    expect(notInTerminalProject()).toEqual({
+      or: [{ project: { null: true } }, { project: { status: { type: { nin: TERMINAL } } } }],
+    });
+  });
+
+  // The human queue's *count* is the loop's backpressure signal (SPEC
+  // §17.7). A `blocked:` label stranded on a canceled issue used to hold
+  // every worker stopped forever, with no operator remedy.
+  it("guards every view whose count or contents drive a decision", () => {
+    for (const view of [BLOCKED_HUMAN_FILTER, BLOCKED_DEPS_FILTER, PROPOSALS_FILTER]) {
+      expect(view.and).toContainEqual(notTerminalState());
+      expect(view.and).toContainEqual(notInTerminalProject());
+    }
+    // `Todo` already pins the state, so `ready` needs the project guard only.
+    expect(readyFilter().and).toContainEqual(notInTerminalProject());
+    expect(readyFilter().and).not.toContainEqual(notTerminalState());
+  });
+
+  // A lock still held on an issue completed since it was taken is exactly
+  // the stale lock the reaper exists to release (SPEC §11) — filtering it
+  // out would strand the lock and hide it from the operator.
+  it("leaves the in-flight and inbox views unguarded on purpose", () => {
+    expect(IN_FLIGHT_FILTER).toEqual(hasLabelNamed("agent:running"));
+    expect(INBOX_FILTER).toEqual(inStateType("triage"));
+  });
+});
+
+describe("paused hold", () => {
+  // Narrower than terminal by design: a pause withholds the commitment a
+  // refinement makes, and recalls nothing already committed (SPEC §4.2b).
+  it("recognizes only paused, and never confuses it with terminal", () => {
+    expect(isPausedProjectStatus({ type: "paused" })).toBe(true);
+    expect(isPausedProjectStatus({ type: "completed" })).toBe(false);
+    expect(isPausedProjectStatus({ type: "canceled" })).toBe(false);
+    expect(isPausedProjectStatus({ type: "backlog" })).toBe(false);
+    expect(isPausedProjectStatus({ type: "started" })).toBe(false);
+    expect(isPausedProjectStatus(null)).toBe(false);
+    expect(isPausedProjectStatus(undefined)).toBe(false);
+
+    // The two predicates partition, rather than nest: neither implies the
+    // other, so a paused project is held but not closed out.
+    expect(isTerminalProjectStatus({ type: "paused" })).toBe(false);
+  });
+
+  it("excludes paused projects while keeping project-less issues", () => {
+    expect(notInPausedProject()).toEqual({
+      or: [{ project: { null: true } }, { project: { status: { type: { neq: "paused" } } } }],
+    });
+  });
+
+  // The Ready buffer counts what implement will actually do, and implement
+  // is not held by a pause — so a paused project's ready issues stay in the
+  // count. Guarding it here would make refine chase a target it can never
+  // reach, dispatching against projects it is allowed to touch forever.
+  it("leaves every view unguarded against paused, including the ready buffer", () => {
+    for (const view of [BLOCKED_HUMAN_FILTER, BLOCKED_DEPS_FILTER, PROPOSALS_FILTER, readyFilter()]) {
+      expect(view.and).not.toContainEqual(notInPausedProject());
+    }
+  });
+});
+
 describe("LinearClient relation normalization", () => {
   it("marks an edge this issue owns as outgoing with the related issue as other", async () => {
     const wire = baseWireIssue({
@@ -590,6 +708,149 @@ describe("incompleteBlockers", () => {
   });
 });
 
+describe("LinearClient project relation normalization", () => {
+  function wireProjectRef(id: string, statusType: string, dates: { startDate?: string | null; targetDate?: string | null } = {}) {
+    return {
+      id,
+      name: `Project ${id}`,
+      startDate: dates.startDate ?? null,
+      targetDate: dates.targetDate ?? null,
+      status: { id: `ps-${id}`, name: statusType, type: statusType },
+    };
+  }
+
+  function relationsResponse(
+    outgoing: unknown[],
+    incoming: unknown[],
+  ): FetchLike {
+    return async () =>
+      jsonResponse(200, {
+        data: {
+          project: {
+            id: "proj-1",
+            relations: { nodes: outgoing },
+            inverseRelations: { nodes: incoming },
+          },
+        },
+      });
+  }
+
+  const DEPENDENCY = { type: "dependency", anchorType: "end", relatedAnchorType: "start" };
+
+  it("keeps an outgoing edge's anchors as sent, with the related project as other", async () => {
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: relationsResponse([{ id: "rel-1", ...DEPENDENCY, relatedProject: wireProjectRef("2", "backlog") }], []),
+    });
+    const [relation] = await client.projectRelations("proj-1");
+    expect(relation?.direction).toBe("outgoing");
+    expect(relation?.anchor).toBe("end");
+    expect(relation?.otherAnchor).toBe("start");
+    expect(relation?.other.id).toBe("2");
+  });
+
+  // The wire pair is relative to the row's own `project`, which is the far
+  // side of an incoming edge. Without the swap, a blocker would read as a
+  // blockee and `incompleteProjectBlockers` would gate the wrong project.
+  it("swaps an incoming edge's anchors onto the queried project", async () => {
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: relationsResponse([], [{ id: "rel-2", ...DEPENDENCY, project: wireProjectRef("3", "backlog") }]),
+    });
+    const [relation] = await client.projectRelations("proj-1");
+    expect(relation?.direction).toBe("incoming");
+    expect(relation?.anchor).toBe("start");
+    expect(relation?.otherAnchor).toBe("end");
+    expect(relation?.other.id).toBe("3");
+  });
+
+  it("de-duplicates a relation id present in both connections", async () => {
+    const client = new LinearClient({
+      apiKey: "key",
+      fetch: relationsResponse(
+        [{ id: "rel-3", ...DEPENDENCY, relatedProject: wireProjectRef("4", "backlog") }],
+        [{ id: "rel-3", ...DEPENDENCY, project: wireProjectRef("4", "backlog") }],
+      ),
+    });
+    const relations = await client.projectRelations("proj-1");
+    expect(relations).toHaveLength(1);
+    expect(relations[0]?.direction).toBe("outgoing");
+  });
+
+  it("returns no relations for a project that does not resolve", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { project: null } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.projectRelations("missing")).toEqual([]);
+  });
+});
+
+describe("incompleteProjectBlockers", () => {
+  function blocker(statusType: ProjectStatusType, anchors: { anchor: ProjectRelationAnchor; otherAnchor: ProjectRelationAnchor }): ProjectRelation {
+    return {
+      id: "rel-1",
+      type: "dependency",
+      direction: "incoming",
+      anchor: anchors.anchor,
+      otherAnchor: anchors.otherAnchor,
+      other: {
+        id: "proj-2",
+        name: "Blocker",
+        status: { id: "ps-1", name: statusType, type: statusType },
+      },
+    };
+  }
+
+  const GATING = { anchor: "start", otherAnchor: "end" } as const;
+
+  it("counts a blocker that has not shipped", () => {
+    expect(incompleteProjectBlockers([blocker("backlog", GATING)])).toHaveLength(1);
+    expect(incompleteProjectBlockers([blocker("started", GATING)])).toHaveLength(1);
+    expect(incompleteProjectBlockers([blocker("paused", GATING)])).toHaveLength(1);
+  });
+
+  it("excludes a blocker that completed or was canceled", () => {
+    expect(incompleteProjectBlockers([blocker("completed", GATING)])).toHaveLength(0);
+    expect(incompleteProjectBlockers([blocker("canceled", GATING)])).toHaveLength(0);
+  });
+
+  // `start` -> `start` and `end` -> `end` are Linear's alignment edges: they
+  // say two projects share a boundary, not that one waits on the other.
+  it("ignores anchor pairs that are alignment rather than prerequisite", () => {
+    expect(incompleteProjectBlockers([blocker("backlog", { anchor: "start", otherAnchor: "start" })])).toHaveLength(0);
+    expect(incompleteProjectBlockers([blocker("backlog", { anchor: "end", otherAnchor: "end" })])).toHaveLength(0);
+  });
+
+  it("ignores an outgoing edge, which blocks the other project rather than this one", () => {
+    const outgoing: ProjectRelation = { ...blocker("backlog", { anchor: "end", otherAnchor: "start" }), direction: "outgoing" };
+    expect(incompleteProjectBlockers([outgoing])).toHaveLength(0);
+    expect(blockingProjectRelations([outgoing])).toHaveLength(1);
+  });
+
+  it("treats a missing status as unresolved rather than assuming it shipped", () => {
+    const noStatus: ProjectRelation = {
+      ...blocker("backlog", GATING),
+      other: { id: "proj-3", name: "Unknown" },
+    };
+    expect(incompleteProjectBlockers([noStatus])).toHaveLength(1);
+  });
+});
+
+describe("latestTargetDate", () => {
+  it("returns the last target date, ignoring projects without one", () => {
+    expect(
+      latestTargetDate([
+        { id: "a", name: "A", targetDate: "2026-12-31" },
+        { id: "b", name: "B", targetDate: null },
+        { id: "c", name: "C", targetDate: "2027-06-30" },
+      ]),
+    ).toBe("2027-06-30");
+  });
+
+  it("returns null when no project carries a target date", () => {
+    expect(latestTargetDate([{ id: "a", name: "A" }])).toBeNull();
+  });
+});
+
 describe("LinearClient project documents", () => {
   // `Document.content` is a `String` in Linear's schema (introspection-
   // validated, docs/VERIFIED.md). An earlier version selected `content` as a
@@ -609,6 +870,9 @@ describe("LinearClient project documents", () => {
             name: "Project",
             description: null,
             content: "overview",
+            startDate: "2026-09-01",
+            targetDate: "2026-12-31",
+            status: { id: "ps-1", name: "Backlog", type: "backlog" },
             documents: { nodes: [{ id: "doc-1", title: "Context", content: "hello", updatedAt: "" }] },
           },
         },
@@ -621,6 +885,8 @@ describe("LinearClient project documents", () => {
     expect(document).not.toContain("content {");
     expect(project?.content).toBe("overview");
     expect(project?.documents[0]?.content).toBe("hello");
+    expect(project?.startDate).toBe("2026-09-01");
+    expect(project?.status?.type).toBe("backlog");
   });
 
   it("propagates a content error instead of retrying an invalid selection", async () => {

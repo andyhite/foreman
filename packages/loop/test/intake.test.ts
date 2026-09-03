@@ -227,6 +227,11 @@ class FakeLinear implements LinearWriter {
   async updateProjectStatus(): Promise<void> {}
   async createRelation(): Promise<void> {}
   async deleteRelation(): Promise<void> {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation(): Promise<void> {}
+  async deleteProjectRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not used in these tests");
   }

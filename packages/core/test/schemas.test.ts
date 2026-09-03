@@ -46,12 +46,14 @@ const validPlanResult = {
   projectId: "project-1",
   proposedIssues: [
     {
+      key: "search-index",
       title: "Wire the search index",
       type: "type:feature",
       description: "## Context\nBuild the index.",
       acceptanceCriteria: ["Search returns results for a known query"],
       proposedPriority: 3,
       proposedEstimate: 2,
+      blockedBy: [],
     },
   ],
   outOfScope: ["Ranking tuning"],
@@ -130,6 +132,88 @@ describe("parseAgentOutput", () => {
       block: null,
     });
     expect(parsed.kind).toBe("invalid");
+  });
+
+  it("parses a valid plan dependency DAG to kind: result", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [
+          { ...validPlanResult.proposedIssues[0], key: "schema", blockedBy: [] },
+          { ...validPlanResult.proposedIssues[0], key: "api", blockedBy: ["schema"] },
+          { ...validPlanResult.proposedIssues[0], key: "ui", blockedBy: ["schema", "api"] },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("rejects a plan result with duplicate proposal keys", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [
+          { ...validPlanResult.proposedIssues[0], key: "dup", blockedBy: [] },
+          { ...validPlanResult.proposedIssues[0], key: "dup", blockedBy: [] },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/proposedIssues"))).toBe(true);
+    }
+  });
+
+  it("rejects a plan result whose blockedBy names no sibling key", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [{ ...validPlanResult.proposedIssues[0], key: "schema", blockedBy: ["ghost"] }],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/proposedIssues"))).toBe(true);
+    }
+  });
+
+  it("rejects a plan result whose proposal blocks itself", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [{ ...validPlanResult.proposedIssues[0], key: "schema", blockedBy: ["schema"] }],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/proposedIssues"))).toBe(true);
+    }
+  });
+
+  it("rejects a plan result with a two-node dependency cycle", () => {
+    const parsed = parseAgentOutput("foreman-plan", {
+      blocked: false,
+      result: {
+        ...validPlanResult,
+        proposedIssues: [
+          { ...validPlanResult.proposedIssues[0], key: "a", blockedBy: ["b"] },
+          { ...validPlanResult.proposedIssues[0], key: "b", blockedBy: ["a"] },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/proposedIssues"))).toBe(true);
+    }
   });
 
   it("parses a valid block envelope to kind: blocked", () => {

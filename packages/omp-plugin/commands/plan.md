@@ -25,10 +25,13 @@ The extension revises the call to force `schemaMode: "strict"` on every
 item; do not set it yourself and do not try to override it.
 
 The agent returns a `PlanResult`; the extension creates each
-`proposedIssues[]` entry as a new Backlog issue under the project. Nothing
-else changes state — none of the new issues carry `agent:ready`, and none of
-them move out of Backlog until the operator sets a priority and
-`foreman-refine` picks them up through the normal funnel.
+`proposedIssues[]` entry as a new Backlog issue under the project, then
+wires every `blockedBy` edge into a native Linear `blocks` relation between
+the created issues — the relation, not a label or prose, is what later
+gates a dependent issue in the implement loop. Nothing else changes state —
+none of the new issues carry `agent:ready`, and none of them move out of
+Backlog until the operator sets a priority and `foreman-refine` picks them
+up through the normal funnel.
 
 `/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
 are extension code, not agent dispatches; they live in `src/extension.ts`,

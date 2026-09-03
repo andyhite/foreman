@@ -758,6 +758,54 @@ Linear's native set; no custom states.
 
 Treat "Todo" and "Refined" as synonyms.
 
+### 4.2a Terminal state
+
+**Terminal means `completed` or `canceled`**, at two levels: an issue's
+workflow-state type (`TERMINAL_STATE_TYPES`) and a project's native status
+type (`TERMINAL_PROJECT_STATUS_TYPES`, §7.6a) — both defined once in
+`packages/core/src/domain/states.ts` and read everywhere else (`isTerminal`,
+`isTerminalProjectStatus`). No part of the loop acts on terminal work: the
+saved views (§4.10) and stage-worker predicates (§17.5) exclude it via
+`notTerminalState()` / `notInTerminalProject()`
+(`packages/core/src/linear/filters.ts`), except the three carve-outs below,
+whose whole job is processing terminal things.
+
+`paused` is explicitly **not** terminal. It carries no claim that the work
+is over — it is a reversible operator hold, not an abandonment — so it stays
+out of the terminal definition above and out of every terminal carve-out.
+It is, however, no longer read-nowhere: refinement alone honors it (§4.2b).
+Everything else keeps running exactly as if the project were active —
+implement, review, merge-detection, the reaper, and the plan worker all
+still act on a paused project's issues.
+
+| Carve-out | Why it must still see terminal work |
+|---|---|
+| `IN_FLIGHT_FILTER` + the reaper (§11) | A lock held on an issue that has since been completed or canceled is exactly the stale lock the reaper exists to release. |
+| merge-detect worker (§17.5) | Marking a merged issue Done *is* the terminal transition — skip it and the issue is stranded In Review forever. |
+| the project-status worker (§7.6a) | It is the thing that writes `completed` in the first place. |
+
+### 4.2b Paused projects
+
+A `paused` project status (§7.6a) withholds exactly one thing: refinement
+never picks up that project's issues. Nothing else changes.
+
+Refinement is the transition that *commits* new work — its output is an
+issue moved to Todo, estimated and labeled `agent:ready`, which implement
+then picks up unattended. Pausing a project withholds that commitment and
+nothing more; it is not a recall of work already committed. So implement,
+review, merge-detection, the reaper, and the plan worker all keep treating a
+paused project's issues normally — an issue already in Todo still gets
+implemented, its PR still gets reviewed and merged, and a stale lock on it
+still gets reaped. Only the refine worker's two reads (Backlog, plus
+`legacy` in Backlog or Todo — §4.9, §17.5) exclude a paused project's
+issues, via `notInPausedProject()` (`packages/core/src/linear/filters.ts`),
+alongside `notInTerminalProject()`. The same hold applies to
+`/foreman:refine` (§10), via `evaluateGate`'s `paused-project` refusal.
+
+`readyFilter()` (§4.10.5) deliberately does **not** exclude paused
+projects: an issue already sitting Ready in a paused project is work
+implement will still do, so it is genuine buffer, not phantom capacity.
+
 ### 4.3 Priority
 
 Linear's native Priority is the **single** urgency/severity axis. No separate
@@ -887,16 +935,43 @@ requires project membership (§10).
 ### 4.10 Required saved views
 
 1. **Inbox** — state = Triage
-2. **Blocked (human)** — any `blocked:*` label
-3. **Blocked (deps)** — incomplete `blocked by` relation
-4. **Proposals** — `agent:proposed`
-5. **Ready** — Todo AND `agent:ready` AND estimate set AND priority ≠ None
-6. **In flight** — `agent:running`
+2. **Blocked (human)** — any `blocked:*` label, excluding terminal issues and issues in a terminal project (§4.2a)
+3. **Blocked (deps)** — incomplete `blocked by` relation, same terminal exclusion
+4. **Proposals** — `agent:proposed`, same terminal exclusion
+5. **Ready** — Todo AND `agent:ready` AND estimate set AND priority ≠ None, plus excludes issues in a terminal project (the `Todo` clause already rules out a terminal *issue* state)
+6. **In flight** — `agent:running` — deliberately unfiltered (§4.2a carve-out 1); the reaper needs it to see locks on issues that finished mid-hold
 
 **Verify during build:** Linear can filter on relation *existence*; whether it
 can filter on *incomplete* blockers specifically is unconfirmed. If it can't,
 keep views 2 and 3 separate rather than contorting a compound filter — a filter
 that silently under-reports costs a stalled issue; two views cost nothing.
+
+View 2's count is the backpressure signal (§17.7): without the terminal
+exclusion, a `blocked:*` label stranded on a canceled issue held the entire
+loop stopped with no operator remedy short of finding and unlabeling it by
+hand. View 1 is unfiltered because triage is never terminal by construction.
+
+### 4.10a Project dependencies
+
+Linear models a project dependency as a `ProjectRelation` of `type:
+"dependency"` anchored `end` -> `start`: the source project's finish gates
+the target project's start. Read from the target that edge is "blocked by";
+read from the source it is "blocks" — the project-level mirror of §4.4's
+issue relations. The other anchor pairs Linear permits (`start`/`start`,
+`end`/`end`) express alignment, not a prerequisite, and are deliberately
+never treated as blockers.
+
+`ProjectFilter` has the same gap §4.10's saved views hit for issues: it can
+answer "has a dependency edge" and nothing about the blocker's state, so
+completeness is evaluated in code from the blocker's own project status —
+`completed` or `canceled` resolves it, anything else does not
+(`projectBlockerIsResolved`, `incompleteProjectBlockers`).
+
+Project relations are fetched **per project**, never nested under
+`initiative.projects(first: 250)`: querying both relation connections on
+every project inside that one page exceeds Linear's query-complexity
+ceiling (`Query too complex`), so a candidate project's relations are read
+in their own, separate call.
 
 ---
 
@@ -909,10 +984,10 @@ in prose.
 | Field | Behavior | Foreman policy |
 |---|---|---|
 | `tools` | Explicit allowlist. `hub` is force-added regardless. `exec` expands to `eval` + `bash`. `task` is auto-added if `spawns` is set. | The security boundary. Enumerate per agent (§7). No agent gets any Linear or GitHub mutation tool except implement's `foreman_github_pr` (principle 9). |
-| `spawns` | Grants the child the `task` tool so it can fan out further. | **`false` on all five.** Recursive fan-out inside a workflow agent is exactly the uncontrolled behavior Foreman exists to prevent. Set explicitly; do not rely on the depth gate. |
+| `spawns` | Grants the child the `task` tool so it can fan out further. | **`false` on all six.** Recursive fan-out inside a workflow agent is exactly the uncontrolled behavior Foreman exists to prevent. Set explicitly; do not rely on the depth gate. |
 | `blocking` | `true` runs the spawn inline; default is a background job whose result is delivered into the parent conversation later. No bundled agent sets it. | `true` only for `foreman-refine` (short-lived; inline is right both when the operator invokes it and in the loop's print-mode parent). Everything else background. |
 | `thinking-level` | The agent's effort selector. `auto` does per-prompt classification. Per-spawn `effort` overrides it, but only when `task.enableEffort=true` (default off) — so in practice frontmatter is the real control. | Per agent, §7. Don't rely on `effort` unless you enable the setting. |
-| `output` | JSON Schema for structured output. Precedence: per-call `outputSchema` → frontmatter `output` → inherited parent schema. Pair with `schemaMode: strict`. | **Required on all five.** See §6. |
+| `output` | JSON Schema for structured output. Precedence: per-call `outputSchema` → frontmatter `output` → inherited parent schema. Pair with `schemaMode: strict`. | **Required on all six.** See §6. |
 | `advisor` | Pairs the child with an advisor session that raises concerns and blockers mid-run. `on` / `off` / model pattern. Subagents default to none. | `on` for `foreman-refine` and `foreman-plan` — the two agents that draft, rather than verify against code, so a second opinion is cheap insurance. The advisor interrupts the *agent*, not the operator — it does not violate §9. |
 | `prewalk` | Starts on the normal model and hands off to a cheaper one at the first edit/write. | **`false` everywhere.** For `foreman-implement` the edits *are* the hard part; downgrading exactly when writing begins is backwards. |
 | `autoload-skills` | Skill names loaded **before the first assignment**, as CSV or a list. **Unknown names are silently ignored** — no error, no warning. | Bind each agent's procedure skill plus `foreman-block-protocol`. Guard against the silent-ignore failure mode (§8). |
@@ -935,7 +1010,7 @@ Every agent returns a validated object. This is the largest single change from a
 prose-artifact design: gate checks become schema validation, and the extension
 drives Linear from `structuredOutput.data` instead of parsing markdown.
 
-Set `schemaMode: strict` on all five. Permissive mode defeats the purpose.
+Set `schemaMode: strict` on all six. Permissive mode defeats the purpose.
 
 With principle 9, these objects are not just the return channel — they are the
 *complete* specification of every mutation the extension applies. Anything an
@@ -987,6 +1062,19 @@ A union of the normal result and `BlockRecord` is what each `output` schema
 declares. The extension branches on `blocked` — that is the whole interrupt
 protocol reduced to a discriminated union, which is far more reliable than
 regex-matching a markdown heading.
+
+**A keyed dependency graph is validated at parse time, not applied
+partially.** `foreman-plan`'s `proposedIssues[]` and `foreman-roadmap`'s
+`proposedProjects[]` (§7.7) each carry a `key` and a `blockedBy[]` of
+sibling keys — the only way to express order among entries that don't exist
+in Linear yet. Duplicate keys, a `blockedBy` referencing a key not in the
+result, a self-block, and a cycle are all schema-adjacent checks JSON Schema
+cannot express, so they run once, from the shared graph validator, and any
+violation makes the whole result `invalid` rather than creating the entries
+that do resolve. A cycle in particular can never be partially applied
+correctly: every entry in it gates on another, so none could ever be picked
+up, and a slate with an unbuildable cycle inside it is not an improvement
+over rejecting the whole proposal.
 
 The Markdown artifacts in §13 are still produced, but as *renderings* of the
 structured data written into Linear, not as the agent's return channel.
@@ -1219,7 +1307,7 @@ schemaMode: strict
 | | |
 |---|---|
 | **Transition** | none — creates new Backlog issues under a project; touches no existing issue's state |
-| **Trigger** | The loop's `plan` worker (§17.5), at any in-scope, non-Maintenance project with zero issues in any state. Never called mid-flow by another agent. |
+| **Trigger** | The loop's `plan` worker (§17.5), at any in-scope, non-Maintenance project with zero issues in any state and zero incomplete project blockers (§4.10a). Never called mid-flow by another agent. |
 | **Model role** | `plan` — decomposing a brief into a coherent issue set is a drafting task, not a lookup |
 
 This is the gap §3.12's `newProject { ..., seedIssues[] }` sketch always
@@ -1239,6 +1327,19 @@ estimates against, §4.6), and draft each as a `ProposedIssue` — title,
 renders the template; the agent never writes the headings), draft acceptance
 criteria, a rough priority, and a rough estimate. Record explicit non-goals
 in `outOfScope`.
+
+**The decomposition ships its own dependency graph.** Each `ProposedIssue`
+carries a `key` and a `blockedBy[]` of sibling keys, so a project that
+decomposes into an ordered set of slices says so before any of them exist
+in Linear. That has to be the agent's job: the implementation gate reads
+native relations (§10), and a sequence expressed only as array order or
+prose in the description is invisible to it — five issues shipped in "the
+right order" with no relation between them gates nothing, and
+`foreman-implement` is free to pick up the last one before the first
+merges. The extension resolves each `blockedBy` key against the sibling
+issue it created for that key and applies it as a native `blocks` relation
+(`applyPlan`), the same mechanism §4.4 already uses for hand-authored
+dependencies.
 
 **Output:** a `PlanResult`. The extension creates each `proposedIssues[]`
 entry as a new Backlog issue under the project, and marks the project
@@ -1299,17 +1400,83 @@ code, the same authority class as `/foreman:apply` (§7.1) and the reaper
 
 **Deliberately restrained.** Only the two directions with no reasonable
 disagreement are automated. `paused` and `canceled` are exclusively the
-operator's call and are never read as *inputs* to a decision, nor ever
-written by the loop — a project the operator paused or canceled stays
-exactly where they left it regardless of what its issues do afterward. An
-all-`canceled` issue set does not auto-complete a project either: that is
-abandonment, a judgment call, not a shipped increment.
+operator's call and are never *written* by the loop — a project the operator
+paused or canceled stays exactly where they left it regardless of what its
+issues do afterward. An all-`canceled` issue set does not auto-complete a
+project either: that is abandonment, a judgment call, not a shipped
+increment. `canceled` is, however, read as an input elsewhere: it is
+terminal (§4.2a), so the `plan` worker's bare-project gate now skips a
+canceled project the same as a completed one — there's nothing left to plan
+for. `paused` is not terminal, but it is read as a decision input in
+exactly one place: refinement withholds new commitments from a paused
+project (§4.2b). Nowhere else does it change behavior.
 
 **Bare-project exclusion.** A project with zero issues never transitions —
 that is `foreman-plan`'s own trigger condition (§7.6), not this worker's; the
 two never compete for the same project at the same time. The standing
 `Maintenance` project (§3.11) is excluded entirely, the same guard `plan`
 uses — it never closes, so it is never a `completed` candidate.
+
+### 7.7 `foreman-roadmap`
+
+```yaml
+tools: [read, search, lsp, foreman_linear_read]
+spawns: false
+blocking: true
+model: "@plan"
+advisor: on
+prewalk: false
+autoload-skills: [foreman-plan-roadmap, foreman-block-protocol]
+output: schemas/roadmap-result.json
+schemaMode: strict
+```
+
+| | |
+|---|---|
+| **Transition** | none — creates one or more new projects under an initiative; touches no existing project or issue |
+| **Trigger** | `/foreman:roadmap`, operator-invoked only. Never a loop worker, never called mid-flow by another agent — the same standing as `foreman-triage`'s intake pass. |
+| **Model role** | `plan` — sequencing a set of projects from a brief is a drafting task, the initiative-level analog of `foreman-plan`'s issue decomposition (§7.6), not a lookup |
+
+`foreman-plan` turns one bare project into its issues; nothing before this
+section turned an initiative's brief into the *projects* that will
+eventually go bare. An operator who already has a roadmap in their head —
+"ship the schema, then the API, then the UI, landing by end of quarter" —
+had no way to get that structure into Linear except creating each project
+by hand and wiring relations one at a time.
+
+**Per invocation:** read the initiative's brief and any existing sibling
+projects (for naming and dependency context), and draft each new increment
+as a `ProposedProject` — `key`, `name`, `description`, and a `brief` in the
+same §4.7 shape `foreman-plan` later decomposes. `blockedBy` names sibling
+`key`s in this same result; `blockedByExisting` names already-created
+projects a new one depends on. Both are the project-level dependency graph
+(§4.10a), validated the same way as `foreman-plan`'s (§6). `startDate` and
+`targetDate` are proposed `TimelessDate`s reasoned from the brief and from
+existing projects' own dates (`latestTargetDate`) — informational scheduling
+input, never a gate (§4.10a already gates on the relation, not the date).
+
+**Output:** a `RoadmapResult`. The extension applies it deterministically,
+the same authority class as `/foreman:apply` (§7.1) and project status
+(§7.6a) — the agent proposes, the extension is the sole writer (principle
+9):
+
+1. Create each `proposedProjects[]` entry as a Linear project and attach it
+   to `initiativeId` (`initiativeToProjectCreate`, two mutations — the
+   window between them is the same one §4.0's ensure pass already tolerates).
+2. Set `startDate`/`targetDate` from the proposal, as `TimelessDate`s.
+3. Create a native `dependency` `ProjectRelation` (`end` -> `start`, §4.10a)
+   for every `blockedBy` and `blockedByExisting` edge, resolving `blockedBy`
+   keys against the projects just created in step 1.
+4. Clamp a dependent project's `startDate` forward when it precedes a
+   blocker's `targetDate`, shifting `targetDate` by the same amount so the
+   proposed duration survives the clamp — a brief drafted before every
+   sibling's dates were final should not silently schedule a project to
+   start before its own prerequisite finishes.
+
+`foreman-roadmap` never sets `agent:ready` and never decomposes a project
+into issues itself — that is still `foreman-plan`'s job, run automatically
+the moment a created project goes bare (§7.6), the same funnel any other
+bare project falls into.
 
 ---
 
@@ -1319,11 +1486,12 @@ uses — it never closes, so it is never a `completed` candidate.
 |---|---|---|---|
 | `foreman-triage-inbox` | triage | `TriageProposal` | Propose only |
 | `foreman-plan-project` | plan | `PlanResult` | Creates issues under one bare project |
+| `foreman-plan-roadmap` | roadmap (operator-invoked) | `RoadmapResult` | Creates one or more projects under one initiative |
 | `foreman-refine-issue` | refine | `RefineResult` | Applies to one prioritized issue |
 | `foreman-spike` | refine, operator | Findings + follow-up issues | Investigation only; no production code |
 | `foreman-implement-issue` | implement | `ImplementResult` | Full within acceptance criteria |
 | `foreman-review-diff` | review | `ReviewResult` | Advisory only |
-| `foreman-block-protocol` | all five | `BlockRecord` | — |
+| `foreman-block-protocol` | all six | `BlockRecord` | — |
 
 Each skill defines: preconditions (the gate it enforces), required reads,
 ordered procedure, the output schema it fills, **stop conditions** (the
@@ -1335,7 +1503,7 @@ path, not an afterthought: detect existing worktree → read prior
 This is the path both `/foreman:unblock` fresh-spawn fallback (§9) and the
 review fix cycle (§7.4) depend on.
 
-`foreman-block-protocol` bound to all five via `autoload-skills` is what makes
+`foreman-block-protocol` bound to all six via `autoload-skills` is what makes
 the interrupt contract guaranteed rather than discretionary — it is in context
 before the agent's first assignment, so there is no path where an agent
 improvises its blocking behavior because it didn't think to load the skill.
@@ -1416,14 +1584,27 @@ Validator functions in the extension, consumed by agents, commands, and hooks.
 Never reimplemented in prose. `legacy` never bypasses a gate — legacy issues
 route through the refine worker instead (§4.9, §17.5).
 
-**Refinement gate** (`Backlog → Todo`): belongs to a project with exactly one
-initiative (§4.0); `type:` present; Priority ≠ `None`; description has
-`## Acceptance Criteria`; ≥1 criterion; estimate set and ≤3; no `blocked:*`
-label.
+**Refinement gate** (`Backlog → Todo`): issue state not terminal (§4.2a,
+checked first — finished work is never refined or implemented, regardless of
+what else is wrong with it); belongs to a project with exactly one initiative
+(§4.0); `type:` present; Priority ≠ `None`; description has `## Acceptance
+Criteria`; ≥1 criterion; estimate set and ≤3; no `blocked:*` label.
 
 **Implementation gate** (`Todo → In Progress`): refinement gate satisfied;
 `agent:ready` present; `agent:running` absent; `agent:hands-off` absent; no
 incomplete `blocked by` relations.
+
+**Terminal project, paused project.** The gates above are pure functions
+over the issue alone and read no network — a project's status is a
+separate fetch, so both project-status refusals are layered on top by the
+caller (`task-guard.ts`'s `evaluateGate`), not part of `refinementGate` or
+`implementationGate` themselves. This is the path the saved views' and
+stage workers' server-side filters (§4.2a, §4.2b) cannot reach: an operator
+typing `/foreman:refine ENG-1` or `/foreman:implement ENG-1` never goes
+through a saved view. The two refusals differ in reach: `terminal-project`
+closes out both refine and implement, but `paused-project` applies only
+when `stage === "refine"` — a pause withholds new commitments, not work
+already in flight, so implement is never refused on it.
 
 **Review gate** (`In Review → Done`): a `ReviewResult` exists for the
 **current head SHA**; CI green; zero `blocking` findings outstanding; every
@@ -1435,11 +1616,17 @@ is the review target.
 
 ## 11. Locks and crash recovery
 
-`agent:running` is a lock and every lock needs a reaper. omp's own registry
-(`running | idle | parked | aborted`) is **process-global and dies with the
-process**, while the Linear label outlives it — so the reaper is still required,
-but it can cross-reference the registry to decide whether a lock is genuinely
-orphaned or just held by a live agent.
+`agent:running` is a lock and every lock needs a reaper. **Two reapers exist,
+not one**, because they run on different triggers: the loop's
+`packages/loop/src/workers/reaper.ts`, on the loop's 5-minute cadence
+(§17.5), and the extension's `packages/omp-plugin/src/lock/reaper.ts`, on
+`session_start` and its own timer, covering the gap when no loop process is
+running at all. Both read the same lock comment and classify it the same
+way (`lockState`). omp's own registry (`running | idle | parked | aborted`)
+is **process-global and dies with the process**, while the Linear label
+outlives it — so a reaper is still required either way, but it can
+cross-reference the registry to decide whether a lock is genuinely orphaned
+or just held by a live agent.
 
 **`foreman-plan` carries no lock.** `agent:running` is an issue label, and a
 bare project has no issue yet — the loop's own bookkeeping (a project id
@@ -1458,11 +1645,23 @@ from racing the first before its issues land, not this mechanism.
 - TTL derives from the runtime cap: 2× `task.maxRuntimeMs` plus margin — with
   the 2 h cap (§3.6), ~4–5 h. Long implementations are legitimate; a lock
   outliving twice the hard runtime cap is not.
-- Sweep on `session_start` and on a timer: clear expired locks whose dispatch ID
-  is absent from both the registry and the loop's bookkeeping (§17.5), post what
-  was found and when it was taken, flag the worktree.
-- **The reaper never deletes a worktree.** It reports; the operator decides. An
-  automated delete that races a still-live agent loses work.
+- Both reapers sweep on the same TTL rule: clear expired locks whose dispatch
+  ID is absent from both the registry and the loop's bookkeeping (§17.5),
+  post what was found and when it was taken, flag the worktree. The
+  extension's reaper runs at `session_start` and on its own timer so a lock
+  still gets cleared even between loop cadences or when no loop is running;
+  the loop's reaper runs on its 5-minute cadence.
+- **The reaper never deletes a worktree.** It reports; the operator decides.
+  An automated delete that races a still-live agent loses work.
+- **A lock on a terminal issue is released without raising a decision, in
+  either reaper.** Both still strip `agent:running` and still post a comment
+  recording what was found, but skip `blocked:needs-input` and the blocked
+  queue (§4.2a) — there is no decision left to make about a lock on work
+  that already finished or was abandoned. The loop's reaper records this as
+  skip code `lock-orphaned-terminal`, distinct from its ordinary
+  `lock-orphaned` path; the extension's reaper has no `SkipRecord` surface,
+  so it says so in the comment body instead (`Issue is already <state
+  name>; the lock was released without raising a decision.`).
 - Subscribe to `task:subagent:lifecycle` to clear locks promptly on clean abort
   rather than waiting out the TTL.
 
@@ -1907,8 +2106,8 @@ Each worker owns one transition and evaluates only its own predicate:
 
 | Worker | Selects | Condition | Dispatches |
 |---|---|---|---|
-| `plan` | In-scope, non-Maintenance projects | zero issues in any state, no `plan` dispatch already in flight | `foreman-plan` |
-| `refine` | Backlog; plus `legacy` in Backlog or Todo (§4.9) | priority ≠ None, no `agent:*` | `foreman-refine` |
+| `plan` | In-scope, non-Maintenance projects | zero issues in any state, zero incomplete project blockers (§4.10a), project status not terminal (§4.2a), no `plan` dispatch already in flight | `foreman-plan` |
+| `refine` | Backlog; plus `legacy` in Backlog or Todo (§4.9) — both scoped to non-terminal, non-paused projects via `notInTerminalProject()` + `notInPausedProject()` (§4.2a, §4.2b) | priority ≠ None, no `agent:*`, no incomplete `blocked by` relations (§4.4) | `foreman-refine` |
 | `implement` | Todo | implementation gate passes | `foreman-implement` |
 | `review` | In Review | PR open, no `ReviewResult` for head SHA | `foreman-review` |
 
@@ -1917,6 +2116,23 @@ in-flight tracking is loop bookkeeping keyed by project id (below), not the
 `agent:running` label the other three share. `project-status` reads and
 writes projects too, but dispatches no agent — it is a housekeeping pass like
 the reaper, not a `nextActions` stage (§7.6a).
+
+**Refine skips a blocked issue too, not just implement.** Promoting an
+issue straight to Todo with `agent:ready` while it still has an incomplete
+`blocked by` relation just relocates the wait: it parks at the
+implementation gate (`incomplete-blockers`, §10) instead of sitting in
+Backlog, filling the Ready buffer with work that cannot start and starving
+work that can. The refine worker re-runs the same blocker check before
+dispatching and records the skip as `incomplete-blockers` — the identical
+code the gate itself uses, not a second predicate that could disagree with
+it.
+
+**Plan skips a project with an incomplete project blocker before anything
+else**, recorded as `incomplete-project-blockers`: a bare project whose
+prerequisite hasn't shipped is exactly the project whose brief can't be
+decomposed accurately yet — the issues it should produce depend on
+decisions its blocker hasn't settled — and decomposing it early is how a
+roadmap's intended sequence gets lost.
 
 Nothing is dispatched for an issue carrying `blocked:*`, `agent:proposed`,
 `agent:running`, or `agent:hands-off` — every worker checks these first.
@@ -1975,7 +2191,9 @@ to keep the Ready view stocked at N issues (start at 5), not to process
 everything prioritized. Below target, it refines; at target, it idles. This is
 what lets implement run continuously without ever waiting on refinement latency,
 while still honoring the rule that refining far ahead of what you'll build is
-waste (§7.2).
+waste (§7.2). Skipping a candidate for `incomplete-blockers` (§17.5) does not
+count as topping up the buffer — the worker moves to the next Backlog
+candidate in the same pass rather than stalling on one it can't refine yet.
 
 These are all separate from `task.maxConcurrency`, which bounds fan-out inside a
 single omp session. Foreman's agents span sessions and processes, so it needs its
@@ -1988,6 +2206,11 @@ dispatching new work.** Threshold starts at 5, and the count is **team-wide**,
 not per-instance (§3.11): every instance queries `blocked:*` across the whole
 team, so N repos' loops all throttle against the one operator's actual drain
 rate, with Linear as the only coordination point.
+
+The count is terminal-filtered at the query (§4.10 view 2), not read raw off
+every `blocked:*` label — so a label stranded on an issue or project that
+later completed or was canceled can no longer inflate the queue and trip
+backpressure for work nobody needs to act on.
 
 Backpressure is global, never per-stage or per-instance. This matters more now that stages run
 independently: a per-stage rule would let refine keep stocking the Ready buffer

@@ -19,6 +19,12 @@ const STATE_COMPLETED: WorkflowState = {
   type: "completed",
   position: 5,
 };
+const STATE_CANCELED: WorkflowState = {
+  id: "state-canceled",
+  name: "Canceled",
+  type: "canceled",
+  position: 6,
+};
 
 const ACCEPTANCE_CRITERIA = "## Acceptance Criteria\n- [ ] Does the thing\n";
 
@@ -137,6 +143,21 @@ describe("refinementGate", () => {
     expect(codes).not.toContain("missing-initiative");
     expect(codes).not.toContain("ambiguous-initiative");
     expect(codes).toContain("priority-none");
+  });
+
+  // The gate is what catches the operator-invoked path: `/foreman:refine
+  // ENG-1` never passes through a saved view, so the server-side terminal
+  // exclusion cannot help there (SPEC §4.2a).
+  it("fails terminal-state on a completed or canceled issue", () => {
+    for (const state of [STATE_COMPLETED, STATE_CANCELED]) {
+      const result = refinementGate(makeIssue({ state }));
+      expect(result.ok).toBe(false);
+      expect(result.failures.map((f) => f.code)).toContain("terminal-state");
+    }
+  });
+
+  it("passes a non-terminal state that is not Todo", () => {
+    expect(refinementGate(makeIssue({ state: STATE_STARTED })).ok).toBe(true);
   });
 });
 

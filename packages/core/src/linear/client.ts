@@ -17,6 +17,9 @@ import type {
   LinearId,
   Project,
   ProjectRef,
+  ProjectRelation,
+  ProjectRelationAnchor,
+  ProjectRelationType,
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
@@ -49,6 +52,9 @@ import {
   PROJECT_CREATE_MUTATION,
   PROJECT_INITIATIVES_QUERY,
   PROJECT_QUERY_SCALAR_CONTENT,
+  PROJECT_RELATION_CREATE_MUTATION,
+  PROJECT_RELATION_DELETE_MUTATION,
+  PROJECT_RELATIONS_QUERY,
   PROJECT_STATUS_QUERY,
   PROJECT_STATUSES_QUERY,
   PROJECT_UPDATE_MUTATION,
@@ -85,6 +91,31 @@ interface WireRelation {
   type: string;
   issue: WireIssueRef;
   relatedIssue: WireIssueRef;
+}
+interface WireProjectRef {
+  id: string;
+  name: string;
+  startDate: string | null;
+  targetDate: string | null;
+  status: WireStateRef | null;
+}
+/**
+ * `type`, `anchorType`, and `relatedAnchorType` are all `String` on the wire —
+ * Linear declares no enum for any of them (introspected). Only the far side of
+ * each connection is selected, so the row shape differs by direction: an
+ * outgoing row carries `relatedProject`, an incoming row carries `project`.
+ */
+interface WireProjectRelationRow {
+  id: string;
+  type: string;
+  anchorType: string;
+  relatedAnchorType: string;
+}
+interface WireOutgoingProjectRelation extends WireProjectRelationRow {
+  relatedProject: WireProjectRef;
+}
+interface WireIncomingProjectRelation extends WireProjectRelationRow {
+  project: WireProjectRef;
 }
 interface WireUser {
   id: string;
@@ -565,6 +596,9 @@ export class LinearClient implements LinearWriter {
         name: string;
         description: string | null;
         content: string | null;
+        startDate: string | null;
+        targetDate: string | null;
+        status: WireStateRef | null;
         documents: {
           nodes: Array<{
             id: string;
@@ -581,12 +615,74 @@ export class LinearClient implements LinearWriter {
       name: data.project.name,
       description: data.project.description,
       content: data.project.content,
+      startDate: data.project.startDate ?? null,
+      targetDate: data.project.targetDate ?? null,
+      status: this.mapProjectStatus(data.project.status),
       documents: data.project.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
         content: doc.content,
         updatedAt: doc.updatedAt,
       })),
+    };
+  }
+
+  private mapProjectStatus(status: WireStateRef | null | undefined): ProjectStatus | null {
+    if (!status) return null;
+    return { id: status.id, name: status.name, type: status.type as ProjectStatusType };
+  }
+
+  /**
+   * Merges `relations` (outgoing) and `inverseRelations` (incoming),
+   * de-duplicated by relation id, and reorients each row's anchor pair onto
+   * the queried project — on the wire `anchorType` describes the row's own
+   * `project`, which is the *other* side for an incoming edge. Without the
+   * swap a blocker would read as a blockee.
+   */
+  async projectRelations(projectId: string): Promise<ProjectRelation[]> {
+    const data = await this.request<{
+      project: {
+        id: string;
+        relations: { nodes: WireOutgoingProjectRelation[] };
+        inverseRelations: { nodes: WireIncomingProjectRelation[] };
+      } | null;
+    }>(PROJECT_RELATIONS_QUERY, { projectId });
+    if (!data.project) return [];
+
+    const seen = new Set<string>();
+    const merged: ProjectRelation[] = [];
+    for (const row of data.project.relations.nodes) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      merged.push(this.mapProjectRelation(row, row.relatedProject, "outgoing"));
+    }
+    for (const row of data.project.inverseRelations.nodes) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      merged.push(this.mapProjectRelation(row, row.project, "incoming"));
+    }
+    return merged;
+  }
+
+  private mapProjectRelation(
+    row: WireProjectRelationRow,
+    other: WireProjectRef,
+    direction: "outgoing" | "incoming",
+  ): ProjectRelation {
+    const outgoing = direction === "outgoing";
+    return {
+      id: row.id,
+      type: row.type as ProjectRelationType,
+      direction,
+      anchor: (outgoing ? row.anchorType : row.relatedAnchorType) as ProjectRelationAnchor,
+      otherAnchor: (outgoing ? row.relatedAnchorType : row.anchorType) as ProjectRelationAnchor,
+      other: {
+        id: other.id,
+        name: other.name,
+        status: this.mapProjectStatus(other.status),
+        startDate: other.startDate,
+        targetDate: other.targetDate,
+      },
     };
   }
 
@@ -828,6 +924,8 @@ export class LinearClient implements LinearWriter {
     teamIds: LinearId[];
     description?: string;
     content?: string;
+    startDate?: string;
+    targetDate?: string;
   }): Promise<ProjectRef> {
     const data = await this.request<{
       projectCreate: { success: boolean; project: ProjectRef | null };
@@ -900,6 +998,36 @@ export class LinearClient implements LinearWriter {
         null,
         null,
       );
+    }
+  }
+
+  async createProjectRelation(input: {
+    projectId: LinearId;
+    relatedProjectId: LinearId;
+    type: ProjectRelationType;
+    anchorType: ProjectRelationAnchor;
+    relatedAnchorType: ProjectRelationAnchor;
+  }): Promise<void> {
+    const data = await this.request<{ projectRelationCreate: { success: boolean } }>(
+      PROJECT_RELATION_CREATE_MUTATION,
+      { input },
+    );
+    if (!data.projectRelationCreate.success) {
+      throw new LinearApiError(
+        `Failed to create ${input.type} relation from project ${input.projectId} to ${input.relatedProjectId}`,
+        null,
+        null,
+      );
+    }
+  }
+
+  async deleteProjectRelation(relationId: LinearId): Promise<void> {
+    const data = await this.request<{ projectRelationDelete: { success: boolean } }>(
+      PROJECT_RELATION_DELETE_MUTATION,
+      { id: relationId },
+    );
+    if (!data.projectRelationDelete.success) {
+      throw new LinearApiError(`Failed to delete project relation ${relationId}`, null, null);
     }
   }
 

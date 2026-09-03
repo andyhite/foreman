@@ -2,6 +2,7 @@
 export const DISPATCH_COMMAND = {
   triage: "/foreman:triage",
   plan: "/foreman:plan",
+  roadmap: "/foreman:roadmap",
   refine: "/foreman:refine",
   implement: "/foreman:implement",
   review: "/foreman:review",

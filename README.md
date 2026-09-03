@@ -24,7 +24,7 @@ flowchart LR
     V -->|foreman-review| P
 ```
 
-Five workflow agents, each responsible for exactly one edge. None of them can
+Six workflow agents, each responsible for exactly one edge. None of them can
 spawn another agent, and none of them can write to Linear — the `task` tool and
 Linear's mutation API are both withheld, and the loop scrubs the Linear API key
 from every dispatched agent's environment on both dispatch paths (print-mode
@@ -46,9 +46,18 @@ defense-in-depth, not a sandbox — issue content is untrusted input.)
 | --- | --- | --- | --- |
 | `foreman-triage` | Triage → Backlog / Canceled / Duplicate | `@smol` | A priority, a `type:` label, dedupe findings |
 | `foreman-plan` | New project (zero issues) → Backlog | session | A first slate of draft issues from the project brief |
+| `foreman-roadmap` | Initiative brief → sequenced projects | session | Projects with dependency edges and start/target dates |
 | `foreman-refine` | Backlog → Todo | session | Acceptance criteria, a Fibonacci estimate, a split proposal |
 | `foreman-implement` | In Progress → In Review | session | A branch, tests, a PR, per-criterion evidence |
 | `foreman-review` | In Review → Done / In Progress | `@slow` | Findings by severity against the diff |
+
+Sequence is expressed as native Linear relations, not as dates or a reading
+order: `foreman-roadmap` wires `dependency` edges between projects and
+`foreman-plan` wires `blocks` edges between the issues it drafts. The loop
+reads them back as gates — a project with an unshipped prerequisite is not a
+planning candidate, and an issue with an open blocker is neither refined nor
+implemented — so a roadmap laid out in Linear is the order work actually
+happens in.
 
 An agent that cannot proceed does not guess and does not stall. It yields a
 `BlockRecord` naming the question and the options, which becomes a `blocked:`
@@ -285,7 +294,7 @@ Slash commands, inside any omp session:
 
 | Command | Does |
 | --- | --- |
-
+|`/foreman:roadmap`|Decompose an initiative's brief into sequenced projects — dependency edges and start/target dates derived from what already exists. Takes `<INITIATIVE-ID>`.|
 |`/foreman:status`|Foreman operator console: blocked queue, locks, proposals, agents, loop state.|
 |`/foreman:apply`|Apply approved triage proposals, or approve/reject one by issue id. Takes `[--yes]`, or `<ISSUE-ID> --approve`, or `<ISSUE-ID> --reject <reason>`.|
 |`/foreman:merge`|Merge one issue's PR (or branch) once the review gate passes. Takes `<ISSUE-ID>`. Operator-invoked only.|

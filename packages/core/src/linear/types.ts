@@ -62,6 +62,44 @@ export interface ProjectRef {
   name: string;
   /** Present when fetched via `initiativeProjects`, folding a per-project status read into that one query. */
   status?: ProjectStatus | null;
+  /** `TimelessDate` (`YYYY-MM-DD`), not a timestamp. Present on the same reads that carry `status`. */
+  startDate?: string | null;
+  targetDate?: string | null;
+}
+
+/**
+ * `ProjectRelation.type` is a `String` on both read and write — Linear
+ * declares no `ProjectRelationType` enum (introspected against the live API).
+ * `dependency` is the only value the product writes, and the only one Foreman
+ * reads as a scheduling constraint.
+ */
+export type ProjectRelationType = "dependency";
+
+/**
+ * Which end of a project's timeline an edge anchors to. Linear's UI writes a
+ * "blocks" dependency as the blocker's `end` anchored to the blocked
+ * project's `start`; the other combinations express softer alignment
+ * (start-together, finish-together) and are not blockers.
+ */
+export type ProjectRelationAnchor = "start" | "end";
+
+/**
+ * One project dependency edge, oriented from the perspective of the project
+ * that was queried — the same convention `IssueRelation` uses, and for the
+ * same reason: `anchorType`/`relatedAnchorType` on the wire are relative to
+ * the row's own `project`/`relatedProject`, which flips between the
+ * `relations` and `inverseRelations` connections.
+ */
+export interface ProjectRelation {
+  id: LinearId;
+  type: ProjectRelationType;
+  /** `outgoing`: the queried project is the row's `project`. `incoming`: it is the `relatedProject`. */
+  direction: "outgoing" | "incoming";
+  /** The anchor on the queried project's own timeline. */
+  anchor: ProjectRelationAnchor;
+  /** The anchor on `other`'s timeline. */
+  otherAnchor: ProjectRelationAnchor;
+  other: ProjectRef;
 }
 
 /** Enough of a related issue to evaluate a gate against it without a second fetch. */
@@ -143,6 +181,15 @@ export interface Project {
    * while `content` holds the real `## Overview` / `## Context` markdown.
    */
   content: string | null;
+  /**
+   * `TimelessDate` (`YYYY-MM-DD`). Foreman never gates on these — dependency
+   * edges are the machine-readable sequence (SPEC §4.10a) — but the roadmap
+   * surface reads them to place a new project's dates relative to the
+   * projects it depends on.
+   */
+  startDate: string | null;
+  targetDate: string | null;
+  status: ProjectStatus | null;
   documents: LinearDocument[];
 }
 

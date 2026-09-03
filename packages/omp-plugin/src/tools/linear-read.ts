@@ -12,6 +12,8 @@ import {
   INBOX_FILTER,
   IN_FLIGHT_FILTER,
   PROPOSALS_FILTER,
+  blockedByProjectRelations,
+  blockingProjectRelations,
   readyFilter,
 } from "@foreman/core";
 import { getContextDigest, getLinear } from "../runtime.ts";
@@ -25,12 +27,12 @@ const SAVED_VIEWS: Record<string, () => IssueFilter> = {
   "in-flight": () => IN_FLIGHT_FILTER,
 };
 
-const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "view"] as const;
+const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "initiative_roadmap", "view"] as const;
 
 export function registerLinearReadTool(pi: ExtensionAPI): void {
   const shape = {
     op: pi.zod.enum(OPS).describe("Which read to perform."),
-    id: pi.zod.string().optional().describe("Issue identifier, project id, or team id, depending on op."),
+    id: pi.zod.string().optional().describe("Issue identifier, project id, team id, or initiative id, depending on op."),
     view: pi.zod
       .enum(["inbox", "blocked-human", "blocked-deps", "proposals", "ready", "in-flight"])
       .optional()
@@ -94,6 +96,29 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
       }
       if (params.op === "teams") {
         return jsonResult(await linear.teams());
+      }
+      if (params.op === "initiative_roadmap") {
+        if (!params.id) return errorResult("op \"initiative_roadmap\" requires \"id\" (initiative id).");
+        const projects = await linear.initiativeProjects(params.id);
+        // One `projectRelations` call per project: nesting both relation
+        // connections under `initiative.projects(first: 250)` exceeds
+        // Linear's query-complexity ceiling (measured against the live
+        // API), so this is N+1 queries rather than one, by necessity.
+        const roadmap = await Promise.all(
+          projects.map(async (project) => {
+            const relations = await linear.projectRelations(project.id);
+            return {
+              id: project.id,
+              name: project.name,
+              status: project.status ?? null,
+              startDate: project.startDate ?? null,
+              targetDate: project.targetDate ?? null,
+              blockedBy: blockedByProjectRelations(relations).map((relation) => relation.other),
+              blocks: blockingProjectRelations(relations).map((relation) => relation.other),
+            };
+          }),
+        );
+        return jsonResult({ projects: roadmap });
       }
 
       // op === "view"

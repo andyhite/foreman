@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { GlobalConfig, Issue, ProjectRef } from "@foreman/core";
+import type { GlobalConfig, Issue, ProjectRef, ProjectRelation } from "@foreman/core";
 import { AGENT_LABEL, BLOCKED_LABEL, DISPATCH_COMMAND, LEGACY_LABEL, TYPE_LABEL } from "@foreman/core";
 import { Bookkeeping } from "../src/bookkeeping.ts";
 import { confirmationRequired, effectiveMode, nextActions } from "../src/routing.ts";
@@ -123,7 +123,19 @@ function makeProject(overrides: Partial<ProjectRef> = {}): ProjectRef {
 }
 
 function makePlanCandidate(overrides: Partial<PlanCandidate> = {}): PlanCandidate {
-  return { project: makeProject(), ...overrides };
+  return { project: makeProject(), blockedBy: [], ...overrides };
+}
+
+function makeProjectRelation(overrides: Partial<ProjectRelation> = {}): ProjectRelation {
+  return {
+    id: "relation-1",
+    type: "dependency",
+    direction: "incoming",
+    anchor: "start",
+    otherAnchor: "end",
+    other: makeProject({ id: "project-blocker", name: "Search infra" }),
+    ...overrides,
+  };
 }
 
 const NOW = new Date("2026-06-01T12:00:00.000Z");
@@ -165,6 +177,57 @@ describe("nextActions — per-stage selection", () => {
     const { decisions } = nextActions(snapshot, config, freshBookkeeping());
     expect(decisions).toHaveLength(1);
     expect(decisions[0]).toMatchObject({ agent: "foreman-review", issueId: candidate.issue.identifier });
+  });
+});
+
+// ---- refine: issue-level blockers ------------------------------------------
+
+function blockerRelation(overrides: Partial<{ identifier: string; stateType: string }> = {}): Issue["relations"][number] {
+  const identifier = overrides.identifier ?? "ENG-900";
+  return {
+    id: `relation-${identifier}`,
+    type: "blocks",
+    direction: "incoming",
+    other: {
+      id: identifier,
+      identifier,
+      title: `Blocker ${identifier}`,
+      state: { id: "blocker-state", name: "In Progress", type: (overrides.stateType ?? "started") as never },
+    },
+  };
+}
+
+describe("nextActions — refine gates on issue-level blockers", () => {
+  it("skips an issue with an incomplete blocker, and still dispatches a sibling with none", () => {
+    const config = makeConfig();
+    const blocked = makeIssue({ priority: 2, relations: [blockerRelation()] });
+    const clear = makeIssue({ priority: 2 });
+    const snapshot = emptySnapshot({ backlog: [blocked, clear] });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions.filter((d) => d.agent === "foreman-refine").map((d) => d.issueId)).toEqual([clear.identifier]);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ issueId: blocked.identifier, code: "incomplete-blockers" }),
+    );
+  });
+
+  it("dispatches an issue whose only blocker is completed", () => {
+    const config = makeConfig();
+    const issue = makeIssue({ priority: 2, relations: [blockerRelation({ stateType: "completed" })] });
+    const snapshot = emptySnapshot({ backlog: [issue] });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toContainEqual(
+      expect.objectContaining({ agent: "foreman-refine", issueId: issue.identifier }),
+    );
+  });
+
+  it("dispatches an issue whose only blocker is canceled", () => {
+    const config = makeConfig();
+    const issue = makeIssue({ priority: 2, relations: [blockerRelation({ stateType: "canceled" })] });
+    const snapshot = emptySnapshot({ backlog: [issue] });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toContainEqual(
+      expect.objectContaining({ agent: "foreman-refine", issueId: issue.identifier }),
+    );
   });
 });
 
@@ -481,5 +544,29 @@ describe("nextActions — plan", () => {
     const snapshot = emptySnapshot({ planCandidates: [maintenance] });
     const { decisions } = nextActions(snapshot, config, freshBookkeeping());
     expect(decisions).toHaveLength(1);
+  });
+
+  it("skips a project carrying an incomplete project blocker", () => {
+    const config = makeConfig();
+    const blocker = makeProjectRelation({ other: makeProject({ id: "project-blocker", name: "Search infra" }) });
+    const candidate = makePlanCandidate({ blockedBy: [blocker] });
+    const snapshot = emptySnapshot({ planCandidates: [candidate] });
+    const { decisions, skipped } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(0);
+    expect(skipped).toContainEqual(
+      expect.objectContaining({ stage: "plan", projectId: candidate.project.id, code: "incomplete-project-blockers" }),
+    );
+  });
+
+  it("dispatches a project whose blocker's project status is completed (worker already filtered it out of blockedBy)", () => {
+    const config = makeConfig();
+    // `incompleteProjectBlockers` runs in the worker before this snapshot is
+    // built (SPEC contract), so a resolved blocker never reaches `blockedBy`
+    // here — routing only ever sees the incomplete remainder.
+    const candidate = makePlanCandidate({ blockedBy: [] });
+    const snapshot = emptySnapshot({ planCandidates: [candidate] });
+    const { decisions } = nextActions(snapshot, config, freshBookkeeping());
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ agent: "foreman-plan", projectId: candidate.project.id });
   });
 });

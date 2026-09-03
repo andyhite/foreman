@@ -18,8 +18,10 @@ import type {
   IssueLabel,
   IssueQuery,
   LinearWriter,
+  LockRecord,
   Project,
   ProjectRef,
+  ProjectRelation,
   ProjectStatus,
   MergedRecord,
   ResolvedRepoEntry,
@@ -28,13 +30,21 @@ import type {
 } from "@foreman/core";
 import {
   AGENT_LABEL,
+  all,
+  BLOCKED_LABEL,
   branchNameFor,
   DENY_CONFIRMER,
   DISPATCH_COMMAND,
   encodeMarker,
   ensureWorktree,
+  IN_FLIGHT_FILTER,
+  inState,
   MAINTENANCE_PROJECT_NAME,
   MARKER_KIND,
+  notInPausedProject,
+  notInTerminalProject,
+  readyFilter,
+  renderLockComment,
   TYPE_LABEL,
   worktreePathFor,
   YOLO_CONFIRMER,
@@ -46,7 +56,9 @@ import { Bookkeeping } from "../src/bookkeeping.ts";
 import { mergeDetectWorker } from "../src/workers/merge-detect.ts";
 import { planWorker } from "../src/workers/plan.ts";
 import { projectStatusWorker } from "../src/workers/project-status.ts";
+import { reaperWorker } from "../src/workers/reaper.ts";
 import { refineWorker } from "../src/workers/refine.ts";
+import { reviewWorker } from "../src/workers/review.ts";
 import type { WorkerContext } from "../src/workers/types.ts";
 
 // ---- fixtures --------------------------------------------------------------
@@ -179,6 +191,9 @@ class FakeDispatcher implements Dispatcher {
 
 /** Minimal `LinearWriter` stub: only `issues` and the initiative lookups are exercised. */
 class FakeLinear implements LinearWriter {
+  /** Every filter this stub was asked to run, in call order — read by tests that assert on the query shape rather than its result. */
+  queries: IssueQuery[] = [];
+
   constructor(
     private readonly issueList: Issue[],
     private readonly initiativeResolver: (projectId: string) => Promise<InitiativeRef>,
@@ -187,7 +202,8 @@ class FakeLinear implements LinearWriter {
   async issue(): Promise<Issue | null> {
     return null;
   }
-  async issues(_query: IssueQuery): Promise<Issue[]> {
+  async issues(query: IssueQuery): Promise<Issue[]> {
+    this.queries.push(query);
     return this.issueList;
   }
   async comments(): Promise<Comment[]> {
@@ -245,6 +261,11 @@ class FakeLinear implements LinearWriter {
   async addProjectToInitiative(): Promise<void> {}
   async updateProjectStatus(): Promise<void> {}
   async deleteRelation(): Promise<void> {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation(): Promise<void> {}
+  async deleteProjectRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not used in these tests");
   }
@@ -507,6 +528,74 @@ describe("refineWorker — batched dispatch (SPEC §17.4)", () => {
   });
 });
 
+describe("project-status guards on dispatch-feeding queries", () => {
+  it("refine's Backlog and Todo queries carry both the terminal and paused guards", async () => {
+    const linear = new FakeLinear([], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry);
+
+    await refineWorker.run(ctx);
+
+    expect(linear.queries).toContainEqual({
+      filter: all(inState("Backlog"), notInTerminalProject(), notInPausedProject()),
+      limit: 500,
+    });
+    expect(linear.queries).toContainEqual({
+      filter: all(inState("Todo"), notInTerminalProject(), notInPausedProject()),
+      limit: 500,
+    });
+  });
+
+  it("implement's Todo query carries the terminal-project guard", async () => {
+    const linear = new FakeLinear([], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry);
+
+    await implementWorker.run(ctx);
+
+    expect(linear.queries).toContainEqual({ filter: all(inState("Todo"), notInTerminalProject()), limit: 500 });
+  });
+
+  it("review's In Review query carries the terminal-project guard", async () => {
+    const linear = new FakeLinear([], async () => ({ id: "initiative-1", name: "Product" }));
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), entry);
+
+    await reviewWorker.run(ctx);
+
+    expect(linear.queries).toContainEqual({
+      filter: all(inState("In Review"), notInTerminalProject()),
+      limit: 500,
+      includeComments: true,
+    });
+  });
+
+  // A pause withholds the commitment refinement makes; it recalls nothing
+  // already committed (SPEC §4.2b). So the paused guard must appear on
+  // refine's reads and nowhere else — these three assert the *absence*,
+  // which is the half a filter-shape test usually misses.
+  it("leaves implement, review and the ready buffer unguarded against paused", async () => {
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const initiative = async () => ({ id: "initiative-1", name: "Product" });
+
+    const forImplement = new FakeLinear([], initiative);
+    await implementWorker.run(makeContext(forImplement, makeConfig(), new FakeDispatcher(), entry));
+    const forReview = new FakeLinear([], initiative);
+    await reviewWorker.run(makeContext(forReview, makeConfig(), new FakeDispatcher(), entry));
+    const forRefine = new FakeLinear([], initiative);
+    await refineWorker.run(makeContext(forRefine, makeConfig(), new FakeDispatcher(), entry));
+
+    expect(JSON.stringify(forImplement.queries)).not.toContain('"neq":"paused"');
+    expect(JSON.stringify(forReview.queries)).not.toContain('"neq":"paused"');
+    expect(JSON.stringify(forRefine.queries)).toContain('"neq":"paused"');
+
+    // The Ready buffer keeps counting a paused project's ready issues:
+    // implement will still do them, so they are genuine buffer depth.
+    const readyQuery = forRefine.queries.find((q) => JSON.stringify(q.filter) === JSON.stringify(readyFilter()));
+    expect(readyQuery).toBeDefined();
+  });
+});
+
 // ---- plan worker --------------------------------------------------------------
 
 /**
@@ -523,6 +612,7 @@ class PlanFakeLinear implements LinearWriter {
     private readonly projectsByInitiative: Record<string, ProjectRef[]>,
     private readonly issuesByProject: Record<string, Issue[]> = {},
     private readonly statusByProject: Record<string, ProjectStatus> = {},
+    private readonly relationsByProject: Record<string, ProjectRelation[]> = {},
   ) {}
 
   async issue(): Promise<Issue | null> {
@@ -591,6 +681,11 @@ class PlanFakeLinear implements LinearWriter {
     this.updateProjectStatusCalls.push(input);
   }
   async deleteRelation(): Promise<void> {}
+  async projectRelations(projectId: string): Promise<ProjectRelation[]> {
+    return this.relationsByProject[projectId] ?? [];
+  }
+  async createProjectRelation(): Promise<void> {}
+  async deleteProjectRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not used in these tests");
   }
@@ -660,6 +755,113 @@ describe("planWorker — bare-project discovery (SPEC §7.6)", () => {
 
     expect(ctx.bookkeeping.countInFlight("plan")).toBe(1);
     expect(ctx.bookkeeping.inFlightProjectIds("plan").has(bareProject.id)).toBe(true);
+  });
+
+  it("never dispatches a bare project carrying an incomplete project blocker (relation fetch is wired)", async () => {
+    const bareProject: ProjectRef = { id: "project-bare", name: "Search revamp" };
+    const blockerRelation: ProjectRelation = {
+      id: "relation-1",
+      type: "dependency",
+      direction: "incoming",
+      anchor: "start",
+      otherAnchor: "end",
+      other: { id: "project-blocker", name: "Search infra", status: { id: "status-started", name: "Started", type: "started" } },
+    };
+    const linear = new PlanFakeLinear(
+      { "initiative-1": [bareProject] },
+      {},
+      {},
+      { "project-bare": [blockerRelation] },
+    );
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await planWorker.run(ctx);
+
+    expect(report.errors).toEqual([]);
+    expect(dispatcher.calls).toEqual([]);
+  });
+
+  it("skips a bare project whose status is completed, but dispatches an otherwise identical backlog one", async () => {
+    const completedProject: ProjectRef = { id: "project-completed", name: "Backfill: legacy search" };
+    const backlogProject: ProjectRef = { id: "project-backlog", name: "Search revamp" };
+    const linear = new PlanFakeLinear(
+      { "initiative-1": [completedProject, backlogProject] },
+      {},
+      {
+        "project-completed": { id: "status-completed", name: "Completed", type: "completed" },
+        "project-backlog": { id: "status-backlog", name: "Backlog", type: "backlog" },
+      },
+    );
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await planWorker.run(ctx);
+
+    expect(report.errors).toEqual([]);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items[0]?.subject).toBe(backlogProject.id);
+  });
+
+  it("skips a bare project whose status is canceled, same as completed", async () => {
+    const canceledProject: ProjectRef = { id: "project-canceled", name: "Abandoned rewrite" };
+    const backlogProject: ProjectRef = { id: "project-backlog-2", name: "Search revamp" };
+    const linear = new PlanFakeLinear(
+      { "initiative-1": [canceledProject, backlogProject] },
+      {},
+      {
+        "project-canceled": { id: "status-canceled", name: "Canceled", type: "canceled" },
+        "project-backlog-2": { id: "status-backlog", name: "Backlog", type: "backlog" },
+      },
+    );
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await planWorker.run(ctx);
+
+    expect(report.errors).toEqual([]);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items[0]?.subject).toBe(backlogProject.id);
+  });
+
+  it("still dispatches a bare project that is paused — the operator's reversible call, not this gate's", async () => {
+    const pausedProject: ProjectRef = { id: "project-paused", name: "On hold" };
+    const linear = new PlanFakeLinear(
+      { "initiative-1": [pausedProject] },
+      {},
+      { "project-paused": { id: "status-paused", name: "Paused", type: "paused" } },
+    );
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await planWorker.run(ctx);
+
+    expect(report.errors).toEqual([]);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items[0]?.subject).toBe(pausedProject.id);
+  });
+
+  it("still dispatches a bare project with no status at all", async () => {
+    const statuslessProject: ProjectRef = { id: "project-statusless", name: "Never triaged" };
+    const linear = new PlanFakeLinear({ "initiative-1": [statuslessProject] });
+    const entry = makeEntry({ initiativeIds: ["initiative-1"] });
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const ctx = makeContext(linear, config, dispatcher, entry);
+
+    const report = await planWorker.run(ctx);
+
+    expect(report.errors).toEqual([]);
+    expect(dispatcher.calls).toHaveLength(1);
+    expect(dispatcher.calls[0]?.items[0]?.subject).toBe(statuslessProject.id);
   });
 });
 
@@ -798,6 +1000,11 @@ class MergeDetectFakeLinear implements LinearWriter {
   async addProjectToInitiative(): Promise<void> {}
   async updateProjectStatus(): Promise<void> {}
   async deleteRelation(): Promise<void> {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation(): Promise<void> {}
+  async deleteProjectRelation(): Promise<void> {}
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not used in these tests");
   }
@@ -945,5 +1152,157 @@ describe("mergeDetectWorker — worktree/herdr cleanup (SPEC §12)", () => {
 
     expect(existsSync(worktreePath)).toBe(true);
     expect(logs).toEqual([]);
+  });
+});
+
+// ---- reaper worker -----------------------------------------------------------
+
+/** Minimal `LinearWriter` stub for the reaper: a fixed in-flight issue list, and recorded write calls. */
+class ReaperFakeLinear implements LinearWriter {
+  updateIssueCalls: Array<{ id: string; addedLabelIds: string[]; removedLabelIds: string[] }> = [];
+  createCommentCalls: Array<{ issueId: string; body: string }> = [];
+  ensureLabelCalls: string[] = [];
+
+  constructor(private readonly running: Issue[]) {}
+
+  async issue(): Promise<Issue | null> {
+    return null;
+  }
+  async issues(): Promise<Issue[]> {
+    return this.running;
+  }
+  async comments(): Promise<Comment[]> {
+    return [];
+  }
+  async viewerId(): Promise<string> {
+    return "bot-1";
+  }
+  async project(): Promise<Project | null> {
+    return null;
+  }
+  async projectStatus(): Promise<null> {
+    return null;
+  }
+  async projectInitiatives(): Promise<InitiativeRef[]> {
+    return [];
+  }
+  async projectInitiative(): Promise<InitiativeRef> {
+    throw new Error("not used in these tests");
+  }
+  async initiative(): Promise<Initiative | null> {
+    return null;
+  }
+  async initiatives(): Promise<InitiativeRef[]> {
+    return [];
+  }
+  async initiativeProjects(): Promise<never[]> {
+    return [];
+  }
+  async workflowStates(): Promise<WorkflowState[]> {
+    return [];
+  }
+  async labels(): Promise<IssueLabel[]> {
+    return [];
+  }
+  async teams(): Promise<TeamRef[]> {
+    return [];
+  }
+  async projects(): Promise<never[]> {
+    return [];
+  }
+  async updateIssue(id: string, input: { addedLabelIds?: string[]; removedLabelIds?: string[] }): Promise<Issue> {
+    this.updateIssueCalls.push({ id, addedLabelIds: input.addedLabelIds ?? [], removedLabelIds: input.removedLabelIds ?? [] });
+    return makeIssue({ id });
+  }
+  async createIssue(): Promise<Issue> {
+    throw new Error("not used in these tests");
+  }
+  async createComment(input: { issueId: string; body: string }): Promise<Comment> {
+    this.createCommentCalls.push({ issueId: input.issueId, body: input.body });
+    return { id: "comment-reaper", body: input.body, createdAt: "2026-06-01T12:00:00.000Z", user: { id: "bot-1", name: "bot", displayName: "bot" }, parentId: null };
+  }
+  async createRelation(): Promise<void> {}
+  async createProject(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async addProjectToInitiative(): Promise<void> {}
+  async updateProjectStatus(): Promise<void> {}
+  async deleteRelation(): Promise<void> {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation(): Promise<void> {}
+  async deleteProjectRelation(): Promise<void> {}
+  async createLabel(): Promise<IssueLabel> {
+    throw new Error("not used in these tests");
+  }
+  async ensureLabel(name: string): Promise<IssueLabel> {
+    this.ensureLabelCalls.push(name);
+    return { id: `label-${name}`, name, parentId: null };
+  }
+}
+
+/** An orphaned `agent:running` lock: past its TTL and absent from every liveness source, matching what `lockState` needs to classify it orphaned. */
+function orphanedLockIssue(overrides: Partial<Issue> = {}): Issue {
+  const record: LockRecord = {
+    dispatchId: "foreman-implement-eng-1-20260101T000000Z-abcd",
+    agent: "foreman-implement",
+    issueId: "ENG-1",
+    takenAt: "2026-01-01T00:00:00.000Z",
+    ttlMs: 1000,
+    worktree: "/repos/product/.worktrees/eng-1",
+    released: false,
+    releasedAt: null,
+  };
+  const issue = makeIssue({
+    labels: [{ id: `label-${AGENT_LABEL.running}`, name: AGENT_LABEL.running, parentId: null }],
+    ...overrides,
+  });
+  issue.comments = [
+    {
+      id: "comment-lock",
+      body: renderLockComment(record),
+      createdAt: record.takenAt,
+      user: { id: "bot-1", name: "bot", displayName: "bot" },
+      parentId: null,
+    },
+  ];
+  return issue;
+}
+
+describe("reaperWorker — terminal-issue carve-out (SPEC §11)", () => {
+  it("releases the lock without raising a decision on a terminal (completed/canceled) issue", async () => {
+    const issue = orphanedLockIssue({ state: { id: "state-done", name: "Done", type: "completed", position: 1 } });
+    const linear = new ReaperFakeLinear([issue]);
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), makeEntry(), YOLO_CONFIRMER);
+
+    const report = await reaperWorker.run(ctx);
+
+    expect(linear.updateIssueCalls).toEqual([
+      { id: issue.id, addedLabelIds: [], removedLabelIds: [`label-${AGENT_LABEL.running}`] },
+    ]);
+    expect(linear.ensureLabelCalls).toEqual([]);
+    expect(linear.createCommentCalls).toHaveLength(1);
+    expect(report.queues?.blocked ?? []).toEqual([]);
+    const skip = report.skipped.find((s) => s.issueId === issue.identifier);
+    expect(skip?.code).toBe("lock-orphaned-terminal");
+  });
+
+  it("keeps today's behavior on a non-terminal issue: label added, blocked row present", async () => {
+    const issue = orphanedLockIssue({ state: { id: "state-1", name: "Todo", type: "unstarted", position: 1 } });
+    const linear = new ReaperFakeLinear([issue]);
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), makeEntry(), YOLO_CONFIRMER);
+
+    const report = await reaperWorker.run(ctx);
+
+    expect(linear.updateIssueCalls).toEqual([
+      { id: issue.id, addedLabelIds: [`label-${BLOCKED_LABEL.needsInput}`], removedLabelIds: [`label-${AGENT_LABEL.running}`] },
+    ]);
+    expect(linear.ensureLabelCalls).toEqual([BLOCKED_LABEL.needsInput]);
+    const blocked = report.queues?.blocked ?? [];
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.issueId).toBe(issue.identifier);
+    const skip = report.skipped.find((s) => s.issueId === issue.identifier);
+    expect(skip?.code).toBe("lock-orphaned");
   });
 });

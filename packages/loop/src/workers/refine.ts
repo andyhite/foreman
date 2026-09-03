@@ -8,9 +8,12 @@ import {
   BLOCKED_HUMAN_FILTER,
   DISPATCH_COMMAND,
   LEGACY_LABEL,
+  all,
   hasLabel,
   inState,
   newDispatchId,
+  notInPausedProject,
+  notInTerminalProject,
   readyFilter,
   type DispatchItem,
 } from "@foreman/core";
@@ -27,8 +30,20 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
   const dispatched: DispatchDecision[] = [];
 
   const [backlogIssues, todoIssues, blockedHuman, ready] = await Promise.all([
-    ctx.linear.issues({ filter: inState("Backlog"), limit: 500 }),
-    ctx.linear.issues({ filter: inState("Todo"), limit: 500 }),
+    // Two guards, two different reasons. Terminal: the operator canceled or
+    // completed the project out from under these issues. Paused: refinement
+    // is the transition that commits work — it lands an issue in Todo,
+    // `agent:ready`, for implement to pick up unattended — and a pause
+    // withholds exactly that commitment (SPEC §4.2b). Neither guard touches
+    // implement or review: work already committed keeps moving.
+    ctx.linear.issues({
+      filter: all(inState("Backlog"), notInTerminalProject(), notInPausedProject()),
+      limit: 500,
+    }),
+    ctx.linear.issues({
+      filter: all(inState("Todo"), notInTerminalProject(), notInPausedProject()),
+      limit: 500,
+    }),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
     ctx.linear.issues({ filter: readyFilter(), limit: 500 }),
   ]);

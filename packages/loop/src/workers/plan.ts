@@ -10,7 +10,9 @@ import {
   BLOCKED_HUMAN_FILTER,
   DISPATCH_COMMAND,
   MAINTENANCE_PROJECT_NAME,
+  incompleteProjectBlockers,
   inInitiatives,
+  isTerminalProjectStatus,
   newDispatchId,
   type DispatchItem,
 } from "@foreman/core";
@@ -42,16 +44,35 @@ async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> 
     issuesInScope.map((issue) => issue.project?.id).filter((id): id is string => id != null),
   );
 
-  const candidates: PlanCandidate[] = [];
+  const bareProjects: { project: (typeof projectLists)[number][number] }[] = [];
   const seen = new Set<string>();
   for (const projects of projectLists) {
     for (const project of projects) {
       if (seen.has(project.id)) continue;
       seen.add(project.id);
       if (project.name.trim().toLowerCase() === MAINTENANCE_PROJECT_NAME.toLowerCase()) continue;
-      if (!projectsWithIssues.has(project.id)) candidates.push({ project });
+      // `canceled` is terminal too: an abandoned bare project must not be
+      // decomposed into a slate of Backlog issues nobody will work.
+      // `paused` stays unread here deliberately (SPEC §7.6a) — it's the
+      // operator's reversible hold, not something this gate should preempt.
+      if (isTerminalProjectStatus(project.status)) continue;
+      if (!projectsWithIssues.has(project.id)) bareProjects.push({ project });
     }
   }
+
+  // Fetched per bare project rather than folded into the `initiativeProjects`
+  // query above: nesting a relations connection under every project of every
+  // initiative in one request trips Linear's query-complexity ceiling. The
+  // fan-out here is bounded by the number of projects with zero issues —
+  // typically a handful per tick — not by the initiative's full project
+  // count, so the extra round trips are cheap.
+  const relationsByProject = await Promise.all(
+    bareProjects.map((candidate) => ctx.linear.projectRelations(candidate.project.id)),
+  );
+  const candidates: PlanCandidate[] = bareProjects.map((candidate, index) => ({
+    project: candidate.project,
+    blockedBy: incompleteProjectBlockers(relationsByProject[index] ?? []),
+  }));
   return candidates;
 }
 

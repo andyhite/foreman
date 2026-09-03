@@ -21,6 +21,20 @@ const RoughEstimateSchema = Type.Union(
 
 export const ProposedIssue = Type.Object(
   {
+    key: Type.String({
+      minLength: 1,
+      description:
+        "A short identifier for this proposal, unique within this result and referenced by " +
+        "other entries' `blockedBy` (e.g. `schema`, `api`, `ui`). Local to the result only — " +
+        "never written to Linear, which assigns the real identifiers on creation.",
+    }),
+    blockedBy: Type.Array(Type.String(), {
+      description:
+        "`key`s of other entries in this same result that must ship before this one. The " +
+        "extension turns each into a native Linear `blocks` relation, which is what stops the " +
+        "loop from implementing this issue before its prerequisites are done (SPEC §10). " +
+        "Empty for anything that can start immediately. Must not form a cycle.",
+    }),
     title: Type.String({ minLength: 1 }),
     type: TypeLabelSchema,
     description: Type.String({

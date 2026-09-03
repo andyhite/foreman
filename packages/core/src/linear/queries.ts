@@ -84,7 +84,11 @@ export const COMMENTS_QUERY = `
   }
 `;
 
-/** Project overview plus its documents. `content` is a `String` on both (schema-validated). */
+/**
+ * Project overview plus its documents. `content` is a `String` on both
+ * (schema-validated). Dates are `TimelessDate` (`YYYY-MM-DD`) — read for the
+ * roadmap surface, never gated on.
+ */
 export const PROJECT_QUERY_SCALAR_CONTENT = `
   query ProjectDocuments($projectId: String!) {
     project(id: $projectId) {
@@ -92,6 +96,9 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
       name
       description
       content
+      startDate
+      targetDate
+      status { id name type }
       documents {
         nodes { id title content updatedAt }
       }
@@ -183,7 +190,7 @@ export const INITIATIVE_PROJECTS_QUERY = `
   query InitiativeProjects($initiativeId: String!) {
     initiative(id: $initiativeId) {
       projects(first: 250) {
-        nodes { id name status { id name type } }
+        nodes { id name startDate targetDate status { id name type } }
       }
     }
   }
@@ -285,5 +292,59 @@ export const INITIATIVE_TO_PROJECT_CREATE_MUTATION = `
     initiativeToProjectCreate(input: $input) {
       success
     }
+  }
+`;
+
+/**
+ * A project's dependency edges, both directions.
+ *
+ * Split from `INITIATIVE_PROJECTS_QUERY` rather than nested inside it: two
+ * connections under `initiative.projects(first: 250)` puts the document over
+ * Linear's complexity ceiling (measured — the API rejects it outright with
+ * `Query too complex`), and the only caller narrows to bare projects first,
+ * so the fan-out is bounded by however many projects have no issues at all.
+ *
+ * `anchorType`/`relatedAnchorType` are `String` on the wire and relative to
+ * the row's own `project`/`relatedProject`, which is why the client reorients
+ * them per connection instead of trusting the raw pair.
+ */
+export const PROJECT_RELATIONS_QUERY = `
+  query ProjectRelations($projectId: String!) {
+    project(id: $projectId) {
+      id
+      relations(first: 100) {
+        nodes {
+          id
+          type
+          anchorType
+          relatedAnchorType
+          relatedProject { id name startDate targetDate status { id name type } }
+        }
+      }
+      inverseRelations(first: 100) {
+        nodes {
+          id
+          type
+          anchorType
+          relatedAnchorType
+          project { id name startDate targetDate status { id name type } }
+        }
+      }
+    }
+  }
+`;
+
+export const PROJECT_RELATION_CREATE_MUTATION = `
+  mutation ProjectRelationCreate($input: ProjectRelationCreateInput!) {
+    projectRelationCreate(input: $input) {
+      success
+      projectRelation { id }
+    }
+  }
+`;
+
+export const PROJECT_RELATION_DELETE_MUTATION = `
+  mutation ProjectRelationDelete($id: String!) {
+    projectRelationDelete(id: $id) { success }
   }
 `;

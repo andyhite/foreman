@@ -6,7 +6,7 @@
  */
 
 import type { FoundMarker, Issue, LinearWriter, LockRecord } from "@foreman/core";
-import { AGENT_LABEL, BLOCKED_LABEL, IN_FLIGHT_FILTER, encodeMarker, lockState, MARKER_KIND, readLockComment } from "@foreman/core";
+import { AGENT_LABEL, BLOCKED_LABEL, IN_FLIGHT_FILTER, encodeMarker, isTerminal, lockState, MARKER_KIND, readLockComment } from "@foreman/core";
 
 export interface ReapedLock {
   issueId: string;
@@ -24,9 +24,15 @@ async function clearOrphanedLock(
 ): Promise<ReapedLock> {
   const runningLabel = issue.labels.find((label) => label.name === AGENT_LABEL.running);
   const removedLabelIds = runningLabel ? [runningLabel.id] : [];
-  const needsInputLabel = await linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
+  // Releasing the lock is the whole point of the sweep and happens either
+  // way. Raising `blocked:needs-input` does not: a completed or canceled
+  // issue has no decision left to make, and that label's queue is the
+  // loop's backpressure signal (SPEC §17.7) — parking dead work in it
+  // would stop every worker with nothing for the operator to resolve.
+  const terminal = isTerminal(issue.state);
+  const needsInputLabel = terminal ? null : await linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
   await linear.updateIssue(issue.id, {
-    addedLabelIds: [needsInputLabel.id],
+    addedLabelIds: needsInputLabel ? [needsInputLabel.id] : [],
     removedLabelIds,
   });
 
@@ -38,6 +44,9 @@ async function clearOrphanedLock(
       found.data.worktree
         ? `Worktree left in place for inspection: \`${found.data.worktree}\`.`
         : "No worktree was recorded.",
+      ...(terminal
+        ? [`Issue is already ${issue.state.name}; the lock was released without raising a decision.`]
+        : []),
     ].join("\n"),
   );
   await linear.createComment({ issueId: issue.id, body });

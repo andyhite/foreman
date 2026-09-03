@@ -30,6 +30,10 @@ it is created and approved, unless the operator later empties it back out.
    or higher is too big for one issue — split it into more than one
    `proposedIssue` rather than proposing one oversized draft.
 3. For each slice, draft a `ProposedIssue`:
+   - `key`: a short stable identifier, unique within this result (e.g.
+     `schema`, `api`, `ui`). Local to this result only — never written to
+     Linear, which assigns the real identifier on creation. Other entries'
+     `blockedBy` reference it.
    - `title`: short, specific, not a restatement of the brief.
    - `type`: the `type:` label it should carry.
    - `description`: the `## Context` body only — prose, no headings. The
@@ -48,6 +52,16 @@ it is created and approved, unless the operator later empties it back out.
      at `None` sits outside the refine funnel until the operator sets one.
    - `proposedEstimate`: a rough Fibonacci call, or `null` when you cannot
      estimate at all. `foreman-refine` re-estimates against the code.
+   - `blockedBy`: `key`s of sibling entries in this same result that must
+     ship first — a real prerequisite, meaning this slice cannot be built
+     until the other's work exists, never a preference, priority signal, or
+     a preferred reading order. Leave it empty for anything that can start
+     immediately; at least one entry in the result should always be
+     startable. The graph must be a DAG — a cycle, a duplicate `key`, a
+     self-block, or a `blockedBy` naming no sibling `key` fails parsing and
+     drops the whole result. `blockedBy` cannot reference an issue that
+     already exists outside this result; a dependency on prior work belongs
+     in the operator's hands, not this field.
 4. Record explicit non-goals in `outOfScope` — scope the brief describes but
    this pass deliberately does not turn into an issue. This also guards a
    *future* planning pass: a project can only go bare again if every issue is
@@ -66,10 +80,14 @@ it is created and approved, unless the operator later empties it back out.
 ## Output
 
 Fill `PlanResult` (`schemas/plan-result.json`). The extension creates each
-`proposedIssues[]` entry as a new Backlog issue under the project — nothing
-else. None of them carry `agent:ready`; they enter the normal refine funnel
-the moment the operator sets a priority, the same path every other Backlog
-issue takes.
+`proposedIssues[]` entry as a new Backlog issue under the project, then
+wires each `blockedBy` edge into a native Linear `blocks` relation between
+the created issues — nothing else. The relation, not a label or a sentence
+in the description, is what the implement gate reads to hold a dependent
+issue back, so a real prerequisite that never becomes a `blockedBy` entry
+gates nothing. None of them carry `agent:ready`; they enter the normal
+refine funnel the moment the operator sets a priority, the same path every
+other Backlog issue takes.
 
 ## Stop conditions
 

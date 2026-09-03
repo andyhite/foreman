@@ -8,8 +8,10 @@
 import {
   BLOCKED_HUMAN_FILTER,
   branchNameFor,
+  all,
   inState,
   newDispatchId,
+  notInTerminalProject,
   worktreePathFor,
   type DispatchItem,
 } from "@foreman/core";
@@ -26,7 +28,7 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const dispatched: DispatchDecision[] = [];
 
   const [todoIssues, blockedHuman] = await Promise.all([
-    ctx.linear.issues({ filter: inState("Todo"), limit: 500 }),
+    ctx.linear.issues({ filter: all(inState("Todo"), notInTerminalProject()), limit: 500 }),
     ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
   ]);
 

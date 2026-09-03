@@ -9,6 +9,7 @@
 import { hasAcceptanceCriteria } from "../linear/issue.ts";
 import type { Issue } from "../linear/types.ts";
 import { blockedLabel, typeLabel } from "../domain/labels.ts";
+import { isTerminal } from "../domain/states.ts";
 import { PRIORITY } from "../domain/priority.ts";
 import type { GateFailure, GateResult } from "./types.ts";
 
@@ -20,6 +21,18 @@ export function refinementGate(
   membership?: { initiativeCount: number },
 ): GateResult {
   const failures: GateFailure[] = [];
+
+  // Checked before anything else because it is the one failure no amount of
+  // refinement can fix: the work is over. The loop's own queries already
+  // exclude terminal issues (SPEC §4.2a), so this is what catches the
+  // operator-invoked path — `/foreman:refine ENG-1` on an issue somebody
+  // canceled while it sat in the Backlog.
+  if (isTerminal(issue.state)) {
+    failures.push({
+      code: "terminal-state",
+      message: `Issue is ${issue.state.name} (${issue.state.type}); finished work is never refined or implemented.`,
+    });
+  }
 
   if (issue.project === null) {
     failures.push({

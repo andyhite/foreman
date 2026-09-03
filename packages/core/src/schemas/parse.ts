@@ -1,6 +1,19 @@
 import { type Static, type TSchema, type TUnion, Value } from "../typebox.ts";
 import { AGENT_OUTPUT_SCHEMAS, type ForemanAgentName } from "./index.ts";
+import { type DependencyNode, validateDependencyKeys } from "./dependencies.ts";
 import type { BlockRecord } from "./envelope.ts";
+
+/**
+ * Which agents emit a keyed dependency graph, and the field it lives on.
+ * Structural rather than typed against each result: the two shapes agree on
+ * `key`/`blockedBy` by construction (SPEC §6), and keying off the field name
+ * keeps this table from having to import every result type just to name one
+ * array.
+ */
+const DEPENDENCY_GRAPH_FIELD: Partial<Record<ForemanAgentName, string>> = {
+  "foreman-plan": "proposedIssues",
+  "foreman-roadmap": "proposedProjects",
+};
 
 type EnvelopeStatic<N extends ForemanAgentName> = Static<(typeof AGENT_OUTPUT_SCHEMAS)[N]>;
 type ResultOf<N extends ForemanAgentName> = NonNullable<EnvelopeStatic<N>["result"]>;
@@ -141,6 +154,13 @@ export function parseAgentOutput<N extends ForemanAgentName>(
       reviewProblems.push("/result/dodSatisfied: must be false when any dodChecklist entry is not satisfied");
     }
     if (reviewProblems.length > 0) return { kind: "invalid", problems: reviewProblems };
+  }
+
+  const graphField = DEPENDENCY_GRAPH_FIELD[agent];
+  if (graphField !== undefined) {
+    const nodes = (result as unknown as Record<string, readonly DependencyNode[]>)[graphField] ?? [];
+    const graphProblems = validateDependencyKeys(nodes, `/result/${graphField}`);
+    if (graphProblems.length > 0) return { kind: "invalid", problems: graphProblems };
   }
 
   return { kind: "result", result };

@@ -40,6 +40,10 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   } catch {
     viewerId = null;
   }
+  // No `notInTerminalProject` guard here, deliberately: this worker is the
+  // one thing that must keep noticing a merge inside a project the operator
+  // just canceled — otherwise a merged issue is stranded In Review forever
+  // and pollutes every review query behind it.
   const inReviewIssues = await ctx.linear.issues({
     filter: inState("In Review"),
     limit: 500,

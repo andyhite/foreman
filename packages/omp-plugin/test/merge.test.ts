@@ -67,7 +67,7 @@ class FakeLinear implements LinearWriter {
     return "bot-1";
   }
   async project(_projectId: string): Promise<Project | null> {
-    return { id: "project-1", name: "Foreman", description: null, content: null, documents: [] };
+    return { id: "project-1", name: "Foreman", description: null, content: null, startDate: null, targetDate: null, status: null, documents: [] };
   }
   async projectStatus() {
     return null;
@@ -133,6 +133,11 @@ class FakeLinear implements LinearWriter {
   }
   async createRelation() {}
   async deleteRelation() {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation() {}
+  async deleteProjectRelation() {}
   async createLabel(input: {
     name: string;
     teamId?: string;

@@ -20,6 +20,7 @@ import type {
   IssueLabel,
   IssueMutation,
   LinearWriter,
+  ProjectStatus,
   ResolvedRepoEntry,
   WorkflowState,
 } from "@foreman/core";
@@ -32,6 +33,7 @@ import {
   type TaskGuardDeps,
 } from "../src/enforce/task-guard.ts";
 import { extractDispatchInfo } from "../src/results/sink.ts";
+import { sweep } from "../src/lock/reaper.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = {
@@ -99,8 +101,9 @@ class FakeLinear implements LinearWriter {
   async project() {
     return null;
   }
-  async projectStatus() {
-    return null;
+  statusByProject = new Map<string, ProjectStatus | null>();
+  async projectStatus(projectId: string): Promise<ProjectStatus | null> {
+    return this.statusByProject.get(projectId) ?? null;
   }
   async projectInitiatives(projectId: string) {
     return this.initiativesByProject.get(projectId) ?? [{ id: "initiative-1", name: "Foreman" }];
@@ -164,6 +167,11 @@ class FakeLinear implements LinearWriter {
   }
   async createRelation() {}
   async deleteRelation() {}
+  async projectRelations() {
+    return [];
+  }
+  async createProjectRelation() {}
+  async deleteProjectRelation() {}
   async createLabel(input: { name: string; teamId?: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);
@@ -273,6 +281,18 @@ function implementTask(issueId = "ENG-1"): TaskCallInput {
       {
         agent: "foreman-implement",
         task: `Implement the thing.\n\nFOREMAN-ISSUE: ${issueId}\n`,
+      },
+    ],
+  };
+}
+
+function refineTask(issueId = "ENG-1"): TaskCallInput {
+  return {
+    context: "shared context",
+    tasks: [
+      {
+        agent: "foreman-refine",
+        task: `Refine the thing.\n\nFOREMAN-ISSUE: ${issueId}\n`,
       },
     ],
   };
@@ -435,6 +455,50 @@ describe("prepareTaskCall — refusals", () => {
     expect(decision.reason).toContain("initiative-2");
     expect(decision.reason).toContain("not bound");
   });
+
+  // The server-side terminal filters cannot reach this path: an operator
+  // typing the command never goes through a saved view (SPEC §4.2a).
+  it("refuses an issue whose project has been completed or canceled", async () => {
+    for (const status of [
+      { id: "ps-done", name: "Shipped", type: "completed" },
+      { id: "ps-dead", name: "Abandoned", type: "canceled" },
+    ] satisfies ProjectStatus[]) {
+      const linear = new FakeLinear([makeIssue()]);
+      linear.statusByProject.set("project-1", status);
+      const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
+      expect(decision.block).toBe(true);
+      expect(decision.reason).toContain("closed out");
+    }
+  });
+
+  // Mirrors the loop's `notInPausedProject()` guard on refine's two reads
+  // (SPEC §4.2b). Without this the manual command is the one path that can
+  // still commit new work to a project the operator put on hold, and the
+  // gate and the loop would disagree — exactly the split §10 forbids.
+  it("refuses refinement inside a paused project, and only refinement", async () => {
+    const paused = { id: "ps-hold", name: "On hold", type: "paused" } satisfies ProjectStatus;
+
+    const forRefine = new FakeLinear([makeIssue()]);
+    forRefine.statusByProject.set("project-1", paused);
+    const refine = await prepareTaskCall(refineTask(), makeDeps(forRefine));
+    expect(refine.block).toBe(true);
+    expect(refine.reason).toContain("paused");
+    expect(refine.reason).toContain("Un-pause");
+
+    // Same fully-refined issue, same command, project merely started: the
+    // refusal is the pause and nothing else about this issue.
+    const control = new FakeLinear([makeIssue()]);
+    control.statusByProject.set("project-1", { id: "ps-go", name: "In progress", type: "started" });
+    const allowed = await prepareTaskCall(refineTask(), makeDeps(control));
+    expect(allowed.block).toBeUndefined();
+
+    // Implement is deliberately out of reach: a pause withholds new
+    // commitment, it does not recall what is already in Todo.
+    const forImplement = new FakeLinear([makeIssue()]);
+    forImplement.statusByProject.set("project-1", paused);
+    const implement = await prepareTaskCall(implementTask(), makeDeps(forImplement));
+    expect(implement.block).toBeUndefined();
+  });
 });
 
 describe("prepareTaskCall — lock claim and markers", () => {
@@ -580,6 +644,64 @@ describe("prepareTaskCall — lock provenance", () => {
     } finally {
       __setInheritedDispatchIdForTest(null);
     }
+  });
+});
+
+describe("reaper sweep — terminal issues", () => {
+  const STATE_CANCELED: WorkflowState = { id: "state-canceled", name: "Canceled", type: "canceled", position: 6 };
+
+  /** An issue holding a lock taken long enough ago to be past TTL, authored by the fake's own viewer. */
+  function lockedIssue(state: WorkflowState): Issue {
+    return makeIssue({
+      state,
+      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
+      comments: [
+        {
+          id: "c1",
+          body: renderLockComment({
+            dispatchId: "foreman-implement-ENG-1-20260101T000000Z-abc123",
+            agent: "foreman-implement",
+            issueId: "ENG-1",
+            takenAt: "2026-01-01T00:00:00.000Z",
+            ttlMs: 1000,
+            worktree: "../foreman-ENG-1",
+            released: false,
+            releasedAt: null,
+          }),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          user: { id: "bot-1", name: "Foreman Bot", displayName: "Foreman Bot" },
+          parentId: null,
+        },
+      ],
+    });
+  }
+
+  const LATER = new Date("2026-01-02T00:00:00.000Z");
+
+  // The lock must come off either way — that is what the sweep is for.
+  // Raising `blocked:needs-input` on abandoned work is what must not
+  // happen: that queue's count is the loop's backpressure signal, so a
+  // canceled issue parked in it stops every worker for good (SPEC §17.7).
+  it("releases the lock without raising a decision on a canceled issue", async () => {
+    const linear = new FakeLinear([lockedIssue(STATE_CANCELED)]);
+    const reaped = await sweep(linear, LATER);
+
+    expect(reaped).toHaveLength(1);
+    const call = linear.updateCalls[0];
+    expect(call?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
+    expect(call?.input.addedLabelIds).toEqual([]);
+    expect(linear.createCommentCalls[0]?.body).toContain("released without raising a decision");
+  });
+
+  it("still raises a decision on a live issue, which is the case an operator must answer", async () => {
+    const linear = new FakeLinear([lockedIssue(STATE_IN_PROGRESS)]);
+    const reaped = await sweep(linear, LATER);
+
+    expect(reaped).toHaveLength(1);
+    const call = linear.updateCalls[0];
+    expect(call?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
+    expect(call?.input.addedLabelIds).toHaveLength(1);
+    expect(linear.createCommentCalls[0]?.body).not.toContain("released without raising a decision");
   });
 });
 

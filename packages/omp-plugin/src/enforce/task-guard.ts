@@ -23,6 +23,8 @@ import {
   gateSummary,
   hasLabel,
   implementationGate,
+  isPausedProjectStatus,
+  isTerminalProjectStatus,
   labelsInGroup,
   lockState,
   lockTtlMs,
@@ -128,23 +130,67 @@ export function __setReservationsPathForTest(path: string | null): void {
   reservationsPath = path;
 }
 
-type Stage = "triage" | "plan" | "refine" | "implement" | "review";
+type Stage = "triage" | "plan" | "roadmap" | "refine" | "implement" | "review";
 
 export function stageFor(agent: string): Stage | null {
   if (agent === "foreman-triage") return "triage";
   if (agent === "foreman-plan") return "plan";
+  if (agent === "foreman-roadmap") return "roadmap";
   if (agent === "foreman-refine") return "refine";
   if (agent === "foreman-implement") return "implement";
   if (agent === "foreman-review") return "review";
   return null;
 }
 
+/**
+ * The pure gates read terminal *issue* state off the issue itself, but a
+ * project's status is a separate fetch — so both project-status refusals
+ * live here, alongside the other check that needs the network. This is the
+ * path the loop's server-side filters cannot cover: an operator typing
+ * `/foreman:implement ENG-1` never goes through a saved view.
+ *
+ * The two refusals differ in reach, mirroring the queries they backstop.
+ * Terminal closes both stages out. Paused holds refinement only (SPEC
+ * §4.2b) — implement and review keep running, so a pause never strands
+ * work already committed to Todo.
+ */
 async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps): Promise<GateResult | null> {
   if (stage !== "refine" && stage !== "implement") return null;
-  const membership = issue.project
-    ? { initiativeCount: (await deps.linear.projectInitiatives(issue.project.id)).length }
-    : undefined;
-  return stage === "refine" ? refinementGate(issue, membership) : implementationGate(issue, membership);
+  const [initiatives, projectStatus] = issue.project
+    ? await Promise.all([
+        deps.linear.projectInitiatives(issue.project.id),
+        deps.linear.projectStatus(issue.project.id),
+      ])
+    : [null, null];
+  const membership = initiatives ? { initiativeCount: initiatives.length } : undefined;
+  const result = stage === "refine" ? refinementGate(issue, membership) : implementationGate(issue, membership);
+  if (isTerminalProjectStatus(projectStatus)) {
+    return {
+      ok: false,
+      failures: [
+        ...result.failures,
+        {
+          code: "terminal-project",
+          message: `Project "${issue.project?.name}" is ${projectStatus?.name} (${projectStatus?.type}); its work is closed out.`,
+        },
+      ],
+    };
+  }
+  if (stage === "refine" && isPausedProjectStatus(projectStatus)) {
+    return {
+      ok: false,
+      failures: [
+        ...result.failures,
+        {
+          code: "paused-project",
+          message:
+            `Project "${issue.project?.name}" is ${projectStatus?.name} (paused); refinement would commit new work to it. ` +
+            `Un-pause the project, or implement what it already has in Todo.`,
+        },
+      ],
+    };
+  }
+  return result;
 }
 
 async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Issue> {
@@ -294,27 +340,42 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     throw new Error(`Unknown Foreman agent "${agent}".`);
   }
 
-  // Plan and triage claim no lock — plan operates on a project, triage on a
-  // batch — but the result sink keys every capture on the `FOREMAN-DISPATCH`
-  // marker it recovers from the task text (`results/sink.ts`), so both
-  // stages need one anyway. Without it their `PlanResult`/`TriageProposal`
-  // is dropped on the floor: the agent yields, the extension sees a
-  // structured output it cannot attribute to a dispatch, and nothing is ever
-  // written to Linear.
-  if (stage === "triage" || stage === "plan") {
+  // Plan, roadmap, and triage claim no lock — plan operates on a project,
+  // roadmap on an initiative, triage on a batch — but the result sink keys
+  // every capture on the `FOREMAN-DISPATCH` marker it recovers from the task
+  // text (`results/sink.ts`), so all three stages need one anyway. Without
+  // it their `PlanResult`/`RoadmapResult`/`TriageProposal` is dropped on the
+  // floor: the agent yields, the extension sees a structured output it
+  // cannot attribute to a dispatch, and nothing is ever written to Linear.
+  if (stage === "triage" || stage === "plan" || stage === "roadmap") {
     let projectId: string | null = null;
+    let initiativeId: string | null = null;
     if (stage === "plan") {
       projectId = lastMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task);
       if (!projectId) {
         throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
       }
     }
+    if (stage === "roadmap") {
+      initiativeId = lastMarkerValue(/^FOREMAN-INITIATIVE:\s*(\S+)\s*$/gm, item.task);
+      if (!initiativeId) {
+        throw new Error(`Missing "FOREMAN-INITIATIVE: <INITIATIVE-ID>" line in the task text for agent "${agent}".`);
+      }
+    }
     // "batch" matches the subject the loop's own intake dispatch mints for
     // triage (`packages/loop/src/team.ts`), so an inherited and a minted id
     // read the same way in the log.
-    const dispatchId = takeDispatchId(deps, agent, projectId ?? "batch", deps.now());
-    revised.task = appendMarkers(item.task, { "FOREMAN-DISPATCH": dispatchId, "FOREMAN-PROJECT": projectId ?? undefined });
-    return { item: revised, contextDigest: await deps.contextDigest(projectId) };
+    const dispatchId = takeDispatchId(deps, agent, projectId ?? initiativeId ?? "batch", deps.now());
+    revised.task = appendMarkers(item.task, {
+      "FOREMAN-DISPATCH": dispatchId,
+      "FOREMAN-PROJECT": projectId ?? undefined,
+      "FOREMAN-INITIATIVE": initiativeId ?? undefined,
+    });
+    // Roadmap has no single project to key a Context digest off — its
+    // command assembles the product `Context` doc plus the existing
+    // project roadmap itself (`initiative_roadmap` op) before dispatch, so
+    // there is nothing here for the guard to append.
+    return { item: revised, contextDigest: stage === "roadmap" ? null : await deps.contextDigest(projectId) };
   }
 
   const identifier = lastMarkerValue(ISSUE_MARKER_RE, item.task);

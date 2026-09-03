@@ -551,3 +551,54 @@ see, because every fake answered without ever looking at the query text.
   Measured on team PLT (9 states): Triage, Backlog, Todo, In Progress, In
   Review, Done, Canceled, Duplicate all resolve by name, so none of the
   category fallbacks are load-bearing there.
+
+## Verified writing project relations
+
+Introspected against the live API while building project-dependency
+scheduling (SPEC §4.10a), the same way the issue-relation facts above were
+checked, not assumed from documentation.
+
+- **`ProjectRelation` has no `direction` field on the wire, and there is no
+  `ProjectRelationType` enum.** `type`, `anchorType`, and `relatedAnchorType`
+  are all plain `String` in `ProjectRelationCreateInput`. Orientation instead
+  comes from which connection a row was read through — `Project.relations`
+  for outgoing, `Project.inverseRelations` for incoming — the client
+  reconstructs `direction` from the query shape, the same trick `IssueRelation`
+  does not need because it carries a real `direction` field.
+- **A live workspace write uses `type: "dependency"`, `anchorType: "end"`,
+  `relatedAnchorType: "start"`.** That is the source project's finish gating
+  the target project's start; read from the target, the edge is "blocked by"
+  (§4.10a).
+- **`ProjectRelationCreateInput` requires both anchor fields alongside
+  `projectId`, `relatedProjectId`, and `type`** — there is no default anchor
+  pair, so a caller that omits either one is rejected rather than getting an
+  implicit `end`/`start`.
+- **`Project.startDate`/`targetDate` are `TimelessDate`, not `DateTime`, and
+  the API rejects a full timestamp.** Every write is a plain `YYYY-MM-DD`
+  string; `foreman-roadmap`'s `RoadmapResult` schema enforces the pattern
+  itself rather than discovering the rejection at mutation time (§7.7).
+- **Nesting both relation connections under `initiative.projects(first:
+  250)` is rejected outright — `Query too complex`.** Fetching `relations`
+  and `inverseRelations` on every project inside one initiative-scoped page
+  exceeds Linear's query-complexity ceiling. Project relations are instead
+  fetched per project, one call per candidate, never nested under the
+  initiative's project connection.
+
+## Verified terminal-status filtering
+
+Introspected against the live API while building the terminal-state exclusion
+(§4.2a). Both facts below are what let the filter live server-side instead of
+as an extra per-issue status read.
+
+- **`IssueFilter.project` is a `NullableProjectFilter`, carrying both a real
+  `null` field and a real `status: ProjectStatusFilter`.** A single `project`
+  clause can therefore say "no project" or "project's status is such-and-such"
+  in the same filter object, which is what lets `notInTerminalProject()`
+  express "no project, or a project whose status isn't terminal" as one `or`
+  without a second query — and it preserves the `null` branch deliberately,
+  so a project-less issue still surfaces through the filter as `no-project`
+  out-of-scope (§9) instead of silently vanishing from every saved view.
+- **`ProjectStatusFilter.type` and `WorkflowStateFilter.type` are both
+  `StringComparator`, so both support `nin`.** Excluding terminal issues and
+  terminal-project issues costs a narrower result set at query time, not an
+  extra status lookup per row.
