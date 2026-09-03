@@ -2,18 +2,15 @@ import { describe, expect, it } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
 import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
 import {
-  BLOCKED_DEPS_FILTER,
-  BLOCKED_HUMAN_FILTER,
+  BLOCKED_FILTER,
   INBOX_FILTER,
-  IN_FLIGHT_FILTER,
-  PROPOSALS_FILTER,
+  RUNNING_FILTER,
   hasLabelNamed,
   inState,
   inStateType,
   notInPausedProject,
   notInTerminalProject,
   notTerminalState,
-  readyFilter,
 } from "../src/linear/filters.ts";
 import { isPausedProjectStatus, isTerminal, isTerminalProjectStatus } from "../src/domain/states.ts";
 import {
@@ -535,21 +532,15 @@ describe("terminal exclusion", () => {
   // The human queue's *count* is the loop's backpressure signal (SPEC
   // §17.7). A `blocked:` label stranded on a canceled issue used to hold
   // every worker stopped forever, with no operator remedy.
-  it("guards every view whose count or contents drive a decision", () => {
-    for (const view of [BLOCKED_HUMAN_FILTER, BLOCKED_DEPS_FILTER, PROPOSALS_FILTER]) {
-      expect(view.and).toContainEqual(notTerminalState());
-      expect(view.and).toContainEqual(notInTerminalProject());
-    }
-    // `Todo` already pins the state, so `ready` needs the project guard only.
-    expect(readyFilter().and).toContainEqual(notInTerminalProject());
-    expect(readyFilter().and).not.toContainEqual(notTerminalState());
+  it("guards the blocked view whose count or contents drive a decision", () => {
+    expect(BLOCKED_FILTER.and).toContainEqual(notTerminalState());
   });
 
   // A lock still held on an issue completed since it was taken is exactly
   // the stale lock the reaper exists to release (SPEC §11) — filtering it
   // out would strand the lock and hide it from the operator.
-  it("leaves the in-flight and inbox views unguarded on purpose", () => {
-    expect(IN_FLIGHT_FILTER).toEqual(hasLabelNamed("agent:running"));
+  it("leaves the running and inbox views unguarded on purpose", () => {
+    expect(RUNNING_FILTER).toEqual(hasLabelNamed("foreman:running"));
     expect(INBOX_FILTER).toEqual(inStateType("triage"));
   });
 });
@@ -581,10 +572,8 @@ describe("paused hold", () => {
   // is not held by a pause — so a paused project's ready issues stay in the
   // count. Guarding it here would make refine chase a target it can never
   // reach, dispatching against projects it is allowed to touch forever.
-  it("leaves every view unguarded against paused, including the ready buffer", () => {
-    for (const view of [BLOCKED_HUMAN_FILTER, BLOCKED_DEPS_FILTER, PROPOSALS_FILTER, readyFilter()]) {
-      expect(view.and).not.toContainEqual(notInPausedProject());
-    }
+  it("leaves the blocked view unguarded against paused", () => {
+    expect(BLOCKED_FILTER.and).not.toContainEqual(notInPausedProject());
   });
 });
 

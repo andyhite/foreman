@@ -1,42 +1,27 @@
 import { describe, expect, it } from "bun:test";
 import type { DispatchHandle, DispatchItem, GlobalConfig } from "@foreman/core";
-import { OrchestratorBusyError, isOrchestratorBusy } from "../src/dispatch/busy.ts";
-import {
-  HerdrDispatcher,
-  HerdrUnavailableError,
-  herdrAgentName,
-  isHerdrUnavailable,
-  sharedAgentName,
-} from "../src/dispatch/herdr.ts";
+import { HerdrDispatcher, HerdrUnavailableError, herdrAgentName, isHerdrUnavailable } from "../src/dispatch/herdr.ts";
 
-function makeConfig(overrides: { herdrLayout?: "tab" | "pane" } = {}): GlobalConfig {
+function makeConfig(): GlobalConfig {
   return {
     repos: {},
     loop: {
-      wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
-      readyBufferTarget: 5,
-      backpressureThreshold: 5,
-      retryCap: 2,
-      claimGraceMs: 300_000,
-      reviewCycleCap: 2,
-      cadenceMinutes: 5,
       mode: "confirm",
-      workerModes: {},
-      mergeDetection: true,
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
+      concurrency: { plan: 1, build: 3 },
+      pollSeconds: 20,
+      triageBatch: 10,
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
-    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false, operatorUserId: null },
+    githubApp: { appId: null, privateKeyFile: null },
     agent: {
       maxRuntimeMs: 7_200_000,
       lockTtlMarginMs: 1_800_000,
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
-      herdrLayout: overrides.herdrLayout ?? "tab",
-      orchestratorMaxBatches: 20,
+      dispatcher: "auto",
     },
     repoDefaults: {
       baseBranch: "main",
@@ -149,24 +134,14 @@ describe("HerdrDispatcher.cleanup", () => {
   });
 });
 
-describe("sharedAgentName", () => {
-  it("keys the name off alias and stage, fitting herdr's 32-char limit", () => {
-    expect(sharedAgentName("product", "foreman-refine")).toBe("foreman-product-refine");
-    const long = sharedAgentName("a-very-long-repository-alias-name", "foreman-review");
-    expect(long.length).toBeLessThanOrEqual(32);
-    expect(long.endsWith("-review")).toBe(true);
-    expect(long.startsWith("foreman-")).toBe(true);
-  });
-});
-
-function readonlyDispatchRunner(agentGet: { code: number; stdout?: string }) {
+/** A fake runner for the "loop tab + fresh pane" dispatch path. `tabExists` controls whether `tab list` already reports the loop's tab. */
+function loopDispatchRunner(options: { tabExists: boolean } = { tabExists: false }) {
   const calls: string[][] = [];
+  let splitCount = 0;
+  let tabCreated = options.tabExists;
   const runner = {
     run(argv: string[]) {
       calls.push(argv);
-      if (argv.includes("agent") && argv.includes("get")) {
-        return Promise.resolve({ stdout: agentGet.stdout ?? "", stderr: "", code: agentGet.code });
-      }
       if (argv.includes("workspace") && argv.includes("list")) {
         return Promise.resolve({
           stdout: JSON.stringify({ result: { workspaces: [{ workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } }] } }),
@@ -175,11 +150,27 @@ function readonlyDispatchRunner(agentGet: { code: number; stdout?: string }) {
         });
       }
       if (argv.includes("tab") && argv.includes("list")) {
-        return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
+        return Promise.resolve({
+          stdout: JSON.stringify({ result: { tabs: tabCreated ? [{ label: "product-refine", tab_id: "w1:t1" }] : [] } }),
+          stderr: "",
+          code: 0,
+        });
       }
       if (argv.includes("tab") && argv.includes("create")) {
+        tabCreated = true;
         return Promise.resolve({
-          stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" }, root_pane: { pane_id: "w1:p1" } } }),
+          stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" }, root_pane: { pane_id: "w1:p0" } } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (argv.includes("pane") && argv.includes("list")) {
+        return Promise.resolve({ stdout: JSON.stringify({ result: { panes: [{ pane_id: "w1:p0", tab_id: "w1:t1" }] } }), stderr: "", code: 0 });
+      }
+      if (argv.includes("pane") && argv.includes("split")) {
+        splitCount += 1;
+        return Promise.resolve({
+          stdout: JSON.stringify({ result: { pane: { pane_id: `w1:p${splitCount}` } } }),
           stderr: "",
           code: 0,
         });
@@ -202,9 +193,9 @@ function readonlyDispatchRunner(agentGet: { code: number; stdout?: string }) {
   return { calls, runner };
 }
 
-describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
-  it("starts a fresh shared orchestrator and submits every item's subject in one prompt", async () => {
-    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
+describe("HerdrDispatcher.dispatch — one pane per dispatch", () => {
+  it("creates the loop's tab and starts a fresh agent in a pane split off its anchor, submitting every item's subject in one prompt", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
     const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
 
     const handles = await dispatcher.dispatch({
@@ -219,31 +210,35 @@ describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
     });
 
     expect(handles).toHaveLength(2);
-    expect(handles[0]!.batchId).toBe(handles[1]!.batchId);
-    expect(handles[0]!.herdr).toEqual({ paneId: "w1:p1", agentName: "foreman-product-refine" });
-    expect(handles[1]!.herdr).toEqual({ paneId: "w1:p1", agentName: "foreman-product-refine" });
+    expect(handles[0]!.herdr).toEqual({ paneId: "w1:p1", agentName: herdrAgentName("dispatch-1") });
+    expect(handles[1]!.herdr).toEqual({ paneId: "w1:p1", agentName: herdrAgentName("dispatch-1") });
     expect(handles.map((h) => h.issueId)).toEqual(["ENG-1", "ENG-2"]);
 
+    const tabCreateCall = calls.find((call) => call.includes("tab") && call.includes("create"));
+    expect(tabCreateCall).toContain("product-refine");
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall).toContain("w1:p0");
     const startCall = calls.find((call) => call.includes("start"));
-    expect(startCall).toBeDefined();
-    expect(startCall).toContain("foreman-product-refine");
+    expect(startCall).toContain(herdrAgentName("dispatch-1"));
     const promptCall = calls.find((call) => call.includes("prompt"));
     expect(promptCall).toEqual([
       "herdr",
       "agent",
       "prompt",
-      "foreman-product-refine",
+      herdrAgentName("dispatch-1"),
       "/foreman:refine ENG-1 ENG-2",
       "--wait",
       "--until",
       "working",
+      "--until",
+      "done",
       "--timeout",
       "30000",
     ]);
   });
 
   it("prompts the bare command when the only item's subject is null", async () => {
-    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
     const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
 
     await dispatcher.dispatch({
@@ -258,11 +253,37 @@ describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
     expect(promptCall?.[4]).toBe("/foreman:triage");
   });
 
-  it("reuses a live shared orchestrator without starting a second agent", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "idle", pane_id: "w1:p9" } } }),
+  it("gives two independent dispatches to the same loop each their own pane, split off the tab's anchor", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    const first = await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
     });
+    const second = await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-2", subject: "ENG-2", dispatchId: "dispatch-2" })],
+    });
+
+    expect(first[0]!.herdr?.paneId).not.toBe(second[0]!.herdr?.paneId);
+    expect(calls.filter((call) => call.includes("tab") && call.includes("create"))).toHaveLength(1);
+    const splitCalls = calls.filter((call) => call.includes("split"));
+    expect(splitCalls).toHaveLength(2);
+    // Both splits are off the same tab anchor pane — the second dispatch never
+    // reuses the first dispatch's already-settled pane as its split source.
+    expect(splitCalls[0]).toContain("w1:p0");
+    expect(splitCalls[1]).toContain("w1:p0");
+  });
+
+  it("reuses an existing loop tab across dispatches, splitting a fresh pane off its anchor each time", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: true });
     const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
 
     const handles = await dispatcher.dispatch({
@@ -273,152 +294,54 @@ describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
       items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
     });
 
-    expect(handles[0]!.herdr).toEqual({ paneId: "w1:p9", agentName: "foreman-product-refine" });
-    expect(calls.some((call) => call.includes("agent") && call.includes("start"))).toBe(false);
     expect(calls.some((call) => call.includes("tab") && call.includes("create"))).toBe(false);
-    const promptCall = calls.find((call) => call.includes("prompt"));
-    expect(promptCall).toBeDefined();
-  });
-
-  it("reuses a live shared orchestrator that is done, the same as idle", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "done", pane_id: "w1:p9" } } }),
-    });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    const handles = await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
-    });
-
-    expect(handles[0]!.herdr?.paneId).toBe("w1:p9");
-    expect(calls.some((call) => call.includes("agent") && call.includes("start"))).toBe(false);
-  });
-
-  it("throws OrchestratorBusyError when the shared orchestrator is working, without prompting it", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "working", pane_id: "w1:p9" } } }),
-    });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    const dispatchRequest = {
-      agent: "foreman-refine" as const,
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
-    };
-    await expect(dispatcher.dispatch(dispatchRequest)).rejects.toThrow(OrchestratorBusyError);
-    try {
-      await dispatcher.dispatch(dispatchRequest);
-      throw new Error("expected dispatch to reject");
-    } catch (error) {
-      expect(isOrchestratorBusy(error)).toBe(true);
-    }
-    expect(calls.some((call) => call.includes("prompt"))).toBe(false);
-  });
-
-  it("throws a plain error when the shared orchestrator is blocked", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "blocked", pane_id: "w1:p9" } } }),
-    });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    const dispatchRequest = {
-      agent: "foreman-refine" as const,
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
-    };
-    await expect(dispatcher.dispatch(dispatchRequest)).rejects.toThrow(/blocked/);
-    try {
-      await dispatcher.dispatch(dispatchRequest);
-      throw new Error("expected dispatch to reject");
-    } catch (error) {
-      expect(isOrchestratorBusy(error)).toBe(false);
-    }
-    expect(calls.some((call) => call.includes("prompt"))).toBe(false);
-  });
-
-  it("throws a plain error when the shared orchestrator is blocked", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "blocked", pane_id: "w1:p9" } } }),
-    });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    const rejection = dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
-    });
-    await expect(rejection).rejects.toThrow(/blocked/);
-    await expect(rejection).rejects.toSatisfy((error) => !isOrchestratorBusy(error));
-    expect(calls.some((call) => call.includes("prompt"))).toBe(false);
-  });
-
-  it("discards a stale unknown-status agent's pane and starts fresh", async () => {
-    const { calls, runner } = readonlyDispatchRunner({
-      code: 0,
-      stdout: JSON.stringify({ result: { agent: { agent_status: "unknown", pane_id: "w1:p-stale" } } }),
-    });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    const handles = await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-3", subject: "ENG-3", dispatchId: "dispatch-3" })],
-    });
-
     expect(handles[0]!.herdr?.paneId).toBe("w1:p1");
-    const closeCall = calls.find((call) => call.includes("pane") && call.includes("close"));
-    expect(closeCall).toEqual(["herdr", "pane", "close", "w1:p-stale"]);
-    expect(calls.some((call) => call.includes("agent") && call.includes("start"))).toBe(true);
+  });
+
+  it("sets FOREMAN_DISPATCH_ID for a single-item request", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall).toContain("FOREMAN_DISPATCH_ID=dispatch-1");
+  });
+
+  it("omits FOREMAN_DISPATCH_ID for a multi-item batch", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [
+        item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" }),
+        item({ issueId: "ENG-2", subject: "ENG-2", dispatchId: "dispatch-2" }),
+      ],
+    });
+
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall?.some((arg) => arg.startsWith("FOREMAN_DISPATCH_ID="))).toBe(false);
   });
 
   it("closes the freshly created pane and rethrows when omp never reaches interactive readiness", async () => {
-    const calls: string[][] = [];
+    const { calls, runner: baseRunner } = loopDispatchRunner({ tabExists: false });
     const runner = {
       run(argv: string[]) {
-        calls.push(argv);
-        if (argv.includes("agent") && argv.includes("get")) {
-          return Promise.resolve({ stdout: "", stderr: "", code: 1 });
-        }
-        if (argv.includes("workspace") && argv.includes("list")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { workspaces: [{ workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } }] } }),
-            stderr: "",
-            code: 0,
-          });
-        }
-        if (argv.includes("tab") && argv.includes("list")) {
-          return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
-        }
-        if (argv.includes("tab") && argv.includes("create")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t1" }, root_pane: { pane_id: "w1:p1" } } }),
-            stderr: "",
-            code: 0,
-          });
-        }
         if (argv.includes("agent") && argv.includes("start")) {
+          calls.push(argv);
           return Promise.resolve({ stdout: "", stderr: "agent_not_ready", code: 1 });
         }
-        if (argv.includes("pane") && argv.includes("close")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+        return baseRunner.run(argv);
       },
     };
     const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
@@ -432,219 +355,7 @@ describe("HerdrDispatcher.dispatch — shared per-stage orchestrator", () => {
         items: [item({ subject: "project-1", dispatchId: "dispatch-1" })],
       }),
     ).rejects.toThrow(/agent_not_ready/);
-    expect(calls.some((call) => call.includes("pane") && call.includes("close"))).toBe(true);
-  });
-
-  it("never closes a reused shared pane on prompt failure", async () => {
-    const calls: string[][] = [];
-    const runner = {
-      run(argv: string[]) {
-        calls.push(argv);
-        if (argv.includes("agent") && argv.includes("get")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { agent: { agent_status: "idle", pane_id: "w1:p9" } } }),
-            stderr: "",
-            code: 0,
-          });
-        }
-        if (argv.includes("workspace") && argv.includes("list")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { workspaces: [{ workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } }] } }),
-            stderr: "",
-            code: 0,
-          });
-        }
-        if (argv.includes("agent") && argv.includes("prompt")) {
-          return Promise.resolve({ stdout: "", stderr: "agent_prompt_failed", code: 1 });
-        }
-        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
-      },
-    };
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
-
-    await expect(
-      dispatcher.dispatch({
-        agent: "foreman-refine",
-        command: "/foreman:refine",
-        cwd: "/repos/product",
-        alias: "product",
-        items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-      }),
-    ).rejects.toThrow(/agent_prompt_failed/);
-    expect(calls.some((call) => call.includes("pane") && call.includes("close"))).toBe(false);
-  });
-});
-
-describe("HerdrDispatcher.dispatch — agent.herdrLayout: \"pane\"", () => {
-  const CALLER_ENV = { HERDR_WORKSPACE_ID: "w1", HERDR_TAB_ID: "w1:t1", HERDR_PANE_ID: "w1:p1" };
-
-  function paneLayoutRunner(tabPanes: { pane_id: string; tab_id: string; label?: string }[]) {
-    const calls: string[][] = [];
-    const runner = {
-      run(argv: string[]) {
-        calls.push(argv);
-        if (argv.includes("agent") && argv.includes("get")) {
-          return Promise.resolve({ stdout: "", stderr: "", code: 1 });
-        }
-        if (argv.includes("workspace") && argv.includes("list")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { workspaces: [{ workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } }] } }),
-            stderr: "",
-            code: 0,
-          });
-        }
-        if (argv.includes("pane") && argv.includes("list")) {
-          return Promise.resolve({ stdout: JSON.stringify({ result: { panes: tabPanes } }), stderr: "", code: 0 });
-        }
-        if (argv.includes("pane") && argv.includes("split")) {
-          const newPaneId = `w1:p${calls.length}`;
-          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: newPaneId } } }), stderr: "", code: 0 });
-        }
-        if (argv.includes("pane") && argv.includes("rename")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        if (argv.includes("agent") && argv.includes("start")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        if (argv.includes("agent") && argv.includes("prompt")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        if (argv.includes("pane") && argv.includes("report-metadata")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        if (argv.includes("tab") && argv.includes("list")) {
-          return Promise.resolve({ stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "", code: 0 });
-        }
-        if (argv.includes("tab") && argv.includes("create")) {
-          return Promise.resolve({
-            stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }),
-            stderr: "",
-            code: 0,
-          });
-        }
-        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
-      },
-    };
-    return { calls, runner };
-  }
-
-  it("splits the caller's own pane right to open the column's first row", async () => {
-    const { calls, runner } = paneLayoutRunner([{ pane_id: "w1:p1", tab_id: "w1:t1" }]);
-    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: CALLER_ENV });
-
-    const handles = await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-    });
-
-    const splitCall = calls.find((call) => call.includes("split"));
-    expect(splitCall).toEqual([
-      "herdr", "pane", "split", "--pane", "w1:p1", "--direction", "right", "--cwd", "/repos/product",
-      "--env", "FOREMAN_DISPATCH_ID=dispatch-1",
-    ]);
-    const renameCall = calls.find((call) => call.includes("rename"));
-    expect(renameCall?.slice(-1)[0]).toBe("foreman-refine");
-    expect(calls.some((call) => call.includes("tab") && call.includes("create"))).toBe(false);
-    expect(handles[0]!.herdr?.paneId).toBe(renameCall?.[3]);
-  });
-
-  it("stacks a new stage's row below an existing column row instead of opening a second column", async () => {
-    const { calls, runner } = paneLayoutRunner([
-      { pane_id: "w1:p1", tab_id: "w1:t1" },
-      { pane_id: "w1:p5", tab_id: "w1:t1", label: "foreman-plan" },
-    ]);
-    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: CALLER_ENV });
-
-    await dispatcher.dispatch({
-      agent: "foreman-review",
-      command: "/foreman:review",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-    });
-
-    const splitCall = calls.find((call) => call.includes("split"));
-    expect(splitCall).toEqual([
-      "herdr", "pane", "split", "--pane", "w1:p5", "--direction", "down", "--cwd", "/repos/product",
-      "--env", "FOREMAN_DISPATCH_ID=dispatch-1",
-    ]);
-    const renameCall = calls.find((call) => call.includes("rename"));
-    expect(renameCall?.slice(-1)[0]).toBe("foreman-review");
-  });
-
-  it("falls back to the tab strategy when the loop is not running inside a herdr pane", async () => {
-    const { calls, runner } = paneLayoutRunner([]);
-    const dispatcher = new HerdrDispatcher(makeConfig({ herdrLayout: "pane" }), { runner, env: {} });
-
-    const handles = await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-    });
-
-    expect(calls.some((call) => call.includes("tab") && call.includes("create"))).toBe(true);
-    expect(calls.some((call) => call.includes("pane") && call.includes("split"))).toBe(false);
-    expect(handles[0]!.herdr).toEqual({ paneId: "w1:p2", agentName: "foreman-product-refine" });
-  });
-});
-
-describe("HerdrDispatcher.dispatch — env passthrough", () => {
-  it("sets FOREMAN_DISPATCH_ID and FOREMAN_DISPATCH_RESERVATIONS for a single-item request", async () => {
-    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner, reservationsDir: "/state/reservations" });
-
-    await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-    });
-
-    const tabCreateCall = calls.find((call) => call.includes("tab") && call.includes("create"));
-    expect(tabCreateCall).toContain("FOREMAN_DISPATCH_ID=dispatch-1");
-    expect(tabCreateCall).toContain("FOREMAN_DISPATCH_RESERVATIONS=/state/reservations/foreman-refine.json");
-  });
-
-  it("omits FOREMAN_DISPATCH_ID but keeps FOREMAN_DISPATCH_RESERVATIONS for a multi-item batch", async () => {
-    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner, reservationsDir: "/state/reservations" });
-
-    await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [
-        item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" }),
-        item({ issueId: "ENG-2", subject: "ENG-2", dispatchId: "dispatch-2" }),
-      ],
-    });
-
-    const tabCreateCall = calls.find((call) => call.includes("tab") && call.includes("create"));
-    expect(tabCreateCall?.some((arg) => arg.startsWith("FOREMAN_DISPATCH_ID="))).toBe(false);
-    expect(tabCreateCall).toContain("FOREMAN_DISPATCH_RESERVATIONS=/state/reservations/foreman-refine.json");
-  });
-
-  it("sets FOREMAN_LOOP_SOCKET when controlSocket is passed", async () => {
-    const { calls, runner } = readonlyDispatchRunner({ code: 1 });
-    const dispatcher = new HerdrDispatcher(makeConfig(), { runner, controlSocket: "/state/control.sock" });
-
-    await dispatcher.dispatch({
-      agent: "foreman-refine",
-      command: "/foreman:refine",
-      cwd: "/repos/product",
-      alias: "product",
-      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
-    });
-
-    const tabCreateCall = calls.find((call) => call.includes("tab") && call.includes("create"));
-    expect(tabCreateCall).toContain("FOREMAN_LOOP_SOCKET=/state/control.sock");
+    expect(calls.some((call) => call.includes("agent") && call.includes("start"))).toBe(true);
   });
 });
 
@@ -790,6 +501,49 @@ describe("HerdrDispatcher.dispatch — writing stages get a dedicated worktree w
     expect(splitCall).toContain("w2:p1");
   });
 
+  it("refuses to replace a worktree pane still hosting a working agent", async () => {
+    const runner = {
+      run(argv: string[]) {
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              result: {
+                workspaces: [
+                  { workspace_id: "w1", active_tab_id: "w1:t1", worktree: { checkout_path: "/repos/product" } },
+                  { workspace_id: "w2", active_tab_id: "w2:t1", worktree: { checkout_path: worktree.path } },
+                ],
+              },
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("pane") && argv.includes("list")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({ result: { panes: [{ pane_id: "w2:p1", tab_id: "w2:t1" }] } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("pane") && argv.includes("get")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { agent_status: "working" } } }), stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await expect(
+      dispatcher.dispatch({
+        agent: "foreman-implement",
+        command: "/foreman:implement",
+        cwd: "/repos/product",
+        alias: "product",
+        items: [item({ issueId: "ENG-142", subject: "ENG-142", dispatchId: "dispatch-2", worktree })],
+      }),
+    ).rejects.toThrow(/still hosts a working agent/);
+  });
+
   it("falls back to opening an existing-on-disk worktree when create reports worktree_create_failed", async () => {
     const calls: string[][] = [];
     const runner = {
@@ -890,9 +644,8 @@ function makeHandle(overrides: Partial<DispatchHandle>): DispatchHandle {
     agent: "foreman-plan",
     issueId: null,
     startedAt: new Date().toISOString(),
-    batchId: "batch-1",
     pid: null,
-    herdr: { paneId: "w1:p1", agentName: "foreman-product-plan" },
+    herdr: { paneId: "w1:p1", agentName: "foreman-dispatch-1" },
     ...overrides,
   };
 }
@@ -938,8 +691,8 @@ describe("HerdrDispatcher.status", () => {
   });
 });
 
-describe("HerdrDispatcher.settle — pane pruning", () => {
-  it("closes a readonly stage's pane once its agent settles", async () => {
+describe("HerdrDispatcher.settle", () => {
+  it("closes a non-worktree dispatch's pane once its agent settles", async () => {
     const calls: string[][] = [];
     const runner = {
       run(argv: string[]) {
@@ -953,19 +706,28 @@ describe("HerdrDispatcher.settle — pane pruning", () => {
         throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
       },
     };
-    const config = makeConfig();
-    config.agent.orchestratorMaxBatches = 1;
-    const dispatcher = new HerdrDispatcher(config, { runner });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
 
     const outcome = await dispatcher.settle(makeHandle({}));
 
     expect(outcome.status).toBe("settled");
     expect(calls).toContainEqual(["herdr", "pane", "close", "w1:p1"]);
     const waitCall = calls.find((call) => call.includes("wait"));
-    expect(waitCall).toEqual(["herdr", "agent", "wait", "foreman-product-plan", "--until", "idle", "--until", "done", "--timeout", String(9_000_000)]);
+    expect(waitCall).toEqual([
+      "herdr",
+      "agent",
+      "wait",
+      "foreman-dispatch-1",
+      "--until",
+      "idle",
+      "--until",
+      "done",
+      "--timeout",
+      String(9_000_000),
+    ]);
   });
 
-  it("leaves a writing dispatch's pane open once it settles — post-merge cleanup closes it instead", async () => {
+  it("leaves a worktree dispatch's pane open once it settles — post-merge cleanup closes it instead", async () => {
     const calls: string[][] = [];
     const runner = {
       run(argv: string[]) {
@@ -989,7 +751,7 @@ describe("HerdrDispatcher.settle — pane pruning", () => {
     expect(calls.some((call) => call.includes("close"))).toBe(false);
   });
 
-  it("shares one agent wait between two sibling handles of the same batch", async () => {
+  it("shares one agent wait between two sibling handles of the same dispatch", async () => {
     let waitCalls = 0;
     const runner = {
       run(argv: string[]) {
@@ -1008,8 +770,9 @@ describe("HerdrDispatcher.settle — pane pruning", () => {
     };
     const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
 
-    const handleA = makeHandle({ dispatchId: "dispatch-a", issueId: "ENG-1" });
-    const handleB = makeHandle({ dispatchId: "dispatch-b", issueId: "ENG-2" });
+    const herdr = { paneId: "w1:p1", agentName: "foreman-dispatch-1" };
+    const handleA = makeHandle({ dispatchId: "dispatch-a", issueId: "ENG-1", herdr });
+    const handleB = makeHandle({ dispatchId: "dispatch-b", issueId: "ENG-2", herdr });
 
     const [outcomeA, outcomeB] = await Promise.all([dispatcher.settle(handleA), dispatcher.settle(handleB)]);
 
@@ -1018,31 +781,6 @@ describe("HerdrDispatcher.settle — pane pruning", () => {
     expect(outcomeB.handle).toBe(handleB);
     expect(outcomeA.status).toBe("settled");
     expect(outcomeB.status).toBe("settled");
-  });
-
-  it("closes a shared orchestrator's pane exactly at the recycle threshold, not before", async () => {
-    const calls: string[][] = [];
-    const runner = {
-      run(argv: string[]) {
-        calls.push(argv);
-        if (argv.includes("agent") && argv.includes("wait")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        if (argv.includes("pane") && argv.includes("close")) {
-          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-        }
-        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
-      },
-    };
-    const config = makeConfig();
-    config.agent.orchestratorMaxBatches = 2;
-    const dispatcher = new HerdrDispatcher(config, { runner });
-
-    await dispatcher.settle(makeHandle({ batchId: "batch-1" }));
-    expect(calls.some((call) => call.includes("pane") && call.includes("close"))).toBe(false);
-
-    await dispatcher.settle(makeHandle({ batchId: "batch-2" }));
-    expect(calls.some((call) => call.includes("pane") && call.includes("close"))).toBe(true);
   });
 
   it("returns lost when the handle has no herdr pane", async () => {

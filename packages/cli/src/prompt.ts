@@ -119,24 +119,111 @@ export class InteractivePrompter implements Prompter {
     }
   }
 
-  /** Masks input by intercepting the interface's own output writer while the answer is typed. */
+  /**
+   * Masks input while it's typed. Two problems, one fix: line-based
+   * `rl.question` breaks on a multi-line paste (a PEM private key, say) —
+   * readline resolves the question on the *first* embedded newline, and
+   * every subsequent pasted line is left sitting in the TTY's input
+   * buffer, surfacing later as commands typed at the shell once this
+   * process exits. And `readline.Interface` keeps its own `keypress`
+   * listener attached for the life of the interface, which echoes every
+   * byte it sees (including stray focus-report escapes some terminals send
+   * on an app switch) straight back to the terminal regardless of what
+   * this method does — that's both the un-masked characters showing up
+   * mid-paste and the prompt line vanishing on a tab switch.
+   *
+   * Fix: detach that listener for the duration of the prompt (`multiSelect`
+   * already does the same for its own custom keypress loop) and drive
+   * bytes off a private `data` listener instead. Bracketed paste mode
+   * (`\x1b[?2004h`) asks the terminal to wrap a paste in
+   * `\x1b[200~`/`\x1b[201~` markers rather than sending it as ordinary
+   * keystrokes, so embedded newlines inside those markers are read as
+   * literal content and only a real Enter keypress — never a pasted one —
+   * ends the prompt. Every terminal Foreman targets (Ghostty, iTerm2,
+   * Terminal.app, VS Code, most Linux terminals) honors it.
+   *
+   * Nothing is echoed per keystroke: a single fixed-width mask appears
+   * once input starts, rather than growing with (and so revealing) the
+   * secret's length.
+   */
   secret(question: string): Promise<string> {
     const { promise, resolve } = Promise.withResolvers<string>();
-    const rlInternal = this.rl as unknown as {
-      _writeToOutput?: (text: string) => void;
-      output: NodeJS.WritableStream;
+    const stdin = process.stdin;
+    if (!stdin.isTTY) {
+      // Piped stdin: no keypresses to intercept, so the plain line-based path is safe.
+      this.rl.question(`${style("cyan", "?")} ${question}`, (answer) => resolve(answer.trim()));
+      return promise;
+    }
+
+    process.stdout.write(`${style("cyan", "?")} ${question}`);
+    const wasRaw = stdin.isRaw ?? false;
+    const savedListeners = [...stdin.listeners("keypress")] as Array<(...args: unknown[]) => void>;
+    for (const listener of savedListeners) stdin.removeListener("keypress", listener);
+    stdin.setRawMode(true);
+    stdin.resume();
+    process.stdout.write("\x1b[?2004h");
+
+    const MASK = "****";
+    let buffer = "";
+    let inPaste = false;
+    let masked = false;
+
+    const cleanup = (): void => {
+      stdin.removeListener("data", onData);
+      process.stdout.write("\x1b[?2004l");
+      stdin.setRawMode(wasRaw);
+      for (const listener of savedListeners) stdin.on("keypress", listener);
     };
-    const originalWrite = rlInternal._writeToOutput?.bind(rlInternal);
-    let masking = false;
-    rlInternal._writeToOutput = (text: string) => {
-      if (masking && text !== "\r\n" && text !== "\n") rlInternal.output.write("*".repeat(text.length));
-      else originalWrite ? originalWrite(text) : rlInternal.output.write(text);
+    const finish = (): void => {
+      cleanup();
+      process.stdout.write("\n");
+      resolve(buffer.trim());
     };
-    this.rl.question(`${style("cyan", "?")} ${question}`, (answer) => {
-      if (originalWrite) rlInternal._writeToOutput = originalWrite;
-      resolve(answer.trim());
-    });
-    masking = true;
+    const reveal = (): void => {
+      if (masked) return;
+      masked = true;
+      process.stdout.write(style("dim", MASK));
+    };
+
+    const onData = (chunk: Buffer): void => {
+      let text = chunk.toString("utf8");
+      while (text.length > 0) {
+        if (inPaste) {
+          const end = text.indexOf("\x1b[201~");
+          const literal = end === -1 ? text : text.slice(0, end);
+          buffer += literal;
+          if (literal.length > 0) reveal();
+          if (end === -1) return;
+          text = text.slice(end + 6);
+          inPaste = false;
+          continue;
+        }
+        const start = text.indexOf("\x1b[200~");
+        const chars = start === -1 ? text : text.slice(0, start);
+        for (const ch of chars) {
+          if (ch === "\x03") {
+            cleanup();
+            process.stdout.write("\n");
+            process.exit(130);
+          } else if (ch === "\r" || ch === "\n") {
+            finish();
+            return;
+          } else if (ch === "\x7f" || ch === "\b") {
+            if (buffer.length > 0) buffer = buffer.slice(0, -1);
+          } else if (ch >= " ") {
+            buffer += ch;
+            reveal();
+          }
+        }
+        if (start === -1) {
+          text = "";
+        } else {
+          text = text.slice(start + 6);
+          inPaste = true;
+        }
+      }
+    };
+    stdin.on("data", onData);
     return promise;
   }
 

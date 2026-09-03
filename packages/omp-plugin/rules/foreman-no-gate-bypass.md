@@ -1,8 +1,9 @@
 ---
 description: Catches an attempt to reach Linear's API from a shell or eval call, bypassing the extension's validated write path.
-condition: "(?i)(api\\.linear\\.app|linear\\.app/graphql|LINEAR_API_KEY|issueUpdate|issueRelationCreate|issueLabelCreate|commentCreate)"
+condition: "(?i)(api\\.linear\\.app|linear\\.app/graphql|LINEAR_API_KEY|issue(Update|Create|Relation|Label)|comment(Create|Update)|project(Update|Create|Status)|documentUpdate|initiativeUpdate|workflowState)"
 scope: "tool:bash(*), tool:eval(*)"
 interruptMode: tool-only
+agents: foreman-*
 ---
 
 Stop. No agent holds a Linear write tool; a shell call is the one path around

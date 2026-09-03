@@ -57,5 +57,5 @@ Load `foreman-block-protocol`; yield a `BlockRecord` when:
 - Given head SHA does not match the diff (stale dispatch).
 
 Disagreement with the implementer's approach ≠ stop: file a finding. Two
-failed review→fix cycles convert the issue to `blocked:needs-decision`; the
-review worker triggers that, never you mid-review.
+failed review→fix cycles apply `foreman:blocked` with a needs-decision block
+record; the review worker triggers that, never you mid-review.

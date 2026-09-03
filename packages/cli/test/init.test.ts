@@ -1,5 +1,6 @@
 import { loadGlobalConfig, repoPluginLinkPath, repoPluginLockPath } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,13 +10,14 @@ import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 class ScriptedPrompter implements Prompter {
   multiSelectResult: string[] | null = null;
   textAnswers: Record<string, string> = {};
+  confirmAnswers: Record<string, boolean> = {};
 
   text(question: string, defaultValue: string): Promise<string> {
     return Promise.resolve(this.textAnswers[question] ?? defaultValue);
   }
 
-  confirm(_question: string, defaultValue: boolean): Promise<boolean> {
-    return Promise.resolve(defaultValue);
+  confirm(question: string, defaultValue: boolean): Promise<boolean> {
+    return Promise.resolve(this.confirmAnswers[question] ?? defaultValue);
   }
 
   select<T extends string>(_question: string, _choices: Array<Choice<T>>, defaultValue: T): Promise<T> {
@@ -613,6 +615,237 @@ describe("runInit — omp plugin activation (project scope)", () => {
       rmSync(home, { recursive: true, force: true });
       rmSync(pluginDir, { recursive: true, force: true });
       rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runInit — GitHub App installation check", () => {
+  function seedGithubApp(home: string): void {
+    mkdirSync(join(home, ".foreman"), { recursive: true });
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const keyPath = join(home, ".foreman", "github-app-private-key.pem");
+    writeFileSync(keyPath, privateKey.export({ type: "pkcs1", format: "pem" }).toString());
+    writeFileSync(
+      join(home, ".foreman", "config.json"),
+      JSON.stringify({ githubApp: { appId: "999", privateKeyFile: keyPath } }),
+    );
+  }
+
+  it("is silent when no GitHub App is configured", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
+
+      expect(logs.some((line) => line.includes("GitHub App"))).toBe(false);
+      expect(git.calls.some((call) => call.argv.join(" ").startsWith("gh repo view"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("confirms an existing installation", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response(JSON.stringify({ id: 1 }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
+
+      expect(logs.some((line) => line.includes("installed on acme/plotroom"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("opens the install page when the operator confirms (default yes) and openUrl is wired in", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (String(url).endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 999, name: "Foreman Review", slug: "foreman-review" }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const opened: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), {
+        prompter,
+        git,
+        log: () => {},
+        openUrl: (url) => opened.push(url),
+      });
+
+      expect(opened).toEqual(["https://github.com/apps/foreman-review/installations/new"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("never calls openUrl when the operator declines the confirm", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (String(url).endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 999, name: "Foreman Review", slug: "foreman-review" }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.confirmAnswers["Open that install page in your browser now?"] = false;
+      const opened: string[] = [];
+      const logs: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), {
+        prompter,
+        git,
+        log: (m) => logs.push(m),
+        openUrl: (url) => opened.push(url),
+      });
+
+      expect(opened).toEqual([]);
+      // The install URL itself is still printed — declining the auto-open
+      // never costs the operator the link to click by hand later.
+      expect(logs.some((line) => line.includes("https://github.com/apps/foreman-review/installations/new"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("never calls openUrl when the App is already installed", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response(JSON.stringify({ id: 1 }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const opened: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), {
+        prompter,
+        git,
+        log: () => {},
+        openUrl: (url) => opened.push(url),
+      });
+
+      expect(opened).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("never calls openUrl when it isn't wired in (non-interactive runs)", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (String(url).endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 999, name: "Foreman Review", slug: "foreman-review" }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+
+      // No `openUrl` in deps at all — mirrors `main.ts` omitting it for `--yes`/piped runs.
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
+
+      expect(logs.some((line) => line.includes("opening that link"))).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("points at the install page when the App is not installed on this repo", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/repos/acme/plotroom/installation")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (String(url).endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 999, name: "Foreman Review", slug: "foreman-review" }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedGithubApp(home);
+      const git = new FakeGit({
+        ...defaultGitResponses("/repos/plotroom"),
+        "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+      });
+      const prompter = new ScriptedPrompter();
+      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      const logs: string[] = [];
+
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
+
+      expect(logs.some((line) => line.includes("https://github.com/apps/foreman-review/installations/new"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

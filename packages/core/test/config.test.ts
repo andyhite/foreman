@@ -31,8 +31,8 @@ describe("loadGlobalConfig", () => {
     const home = makeHome();
     try {
       const { config, sources, warnings } = loadGlobalConfig({ home });
-      expect(config.loop.wipGlobal).toBe(3);
-      expect(config.loop.backpressureThreshold).toBe(5);
+      expect(config.loop.concurrency.build).toBe(3);
+      expect(config.loop.pollSeconds).toBe(20);
       expect(sources).toEqual([]);
       expect(warnings.some((w) => w.includes(join(home, ".foreman", "config.json")))).toBe(true);
     } finally {
@@ -75,36 +75,37 @@ describe("loadGlobalConfig", () => {
     }
   });
 
-  it("accepts backpressureThreshold: 0 and keeps it 0 (strictest, not off)", () => {
+  it("accepts triageBatch: 1 and keeps it 1 (strictest, not off)", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { loop: { backpressureThreshold: 0 } });
+      writeGlobalConfig(home, { loop: { triageBatch: 1 } });
       const { config } = loadGlobalConfig({ home });
-      expect(config.loop.backpressureThreshold).toBe(0);
+      expect(config.loop.triageBatch).toBe(1);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("rejects a negative wipGlobal", () => {
+  it("rejects a negative concurrency.build", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { loop: { wipGlobal: -1 } });
+      writeGlobalConfig(home, { loop: { concurrency: { build: -1 } } });
       expect(() => loadGlobalConfig({ home })).toThrow(ConfigError);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("rejects a non-integer wipGlobal", () => {
+  it("rejects a non-integer concurrency.build", () => {
     const home = makeHome();
     try {
-      writeGlobalConfig(home, { loop: { wipGlobal: 1.5 } });
+      writeGlobalConfig(home, { loop: { concurrency: { build: 1.5 } } });
       expect(() => loadGlobalConfig({ home })).toThrow(ConfigError);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
 
   it("warns but does not throw when repos is empty", () => {
     const home = makeHome();
@@ -152,20 +153,14 @@ describe("defaultAndValidateGlobalConfig", () => {
     }
   });
 
-  it("defaults loop.mode to confirm and workerModes to an empty map", () => {
+  it("defaults loop.mode to confirm", () => {
     const config = defaultAndValidateGlobalConfig({}, "test");
     expect(config.loop.mode).toBe("confirm");
-    expect(config.loop.workerModes).toEqual({});
   });
 
-  it("accepts individual worker mode overrides and rejects unknown workers or modes", () => {
-    const config = defaultAndValidateGlobalConfig(
-      { loop: { workerModes: { plan: "yolo", implement: "confirm" } } },
-      "test",
-    );
-    expect(config.loop.workerModes).toEqual({ plan: "yolo", implement: "confirm" });
-    expect(() => defaultAndValidateGlobalConfig({ loop: { workerModes: { reaper: "yolo" } } }, "test")).toThrow(ConfigError);
-    expect(() => defaultAndValidateGlobalConfig({ loop: { workerModes: { review: "unsafe" } } }, "test")).toThrow(ConfigError);
+  it("accepts a loop.mode override", () => {
+    const config = defaultAndValidateGlobalConfig({ loop: { mode: "yolo" } }, "test");
+    expect(config.loop.mode).toBe("yolo");
   });
 
   it("rejects a bogus loop.mode value", () => {
@@ -192,25 +187,25 @@ describe("defaultAndValidateGlobalConfig", () => {
     }
   });
 
-  it("rejects mergeDetection: false combined with pr.required: false on any repo", () => {
-    expect(() =>
-      defaultAndValidateGlobalConfig(
-        {
-          loop: { mergeDetection: false },
-          repos: { x: { path: "~/code/x", initiatives: [], pr: { required: false } } },
-        },
-        "test",
-      ),
-    ).toThrow(ConfigError);
+  it("accepts cleanupMergedWorktrees: false", () => {
+    const config = defaultAndValidateGlobalConfig({ loop: { cleanupMergedWorktrees: false } }, "test");
+    expect(config.loop.cleanupMergedWorktrees).toBe(false);
   });
 
-  it("allows mergeDetection: false when every repo keeps pr.required: true", () => {
-    const config = defaultAndValidateGlobalConfig(
-      { loop: { mergeDetection: false }, repos: { x: { path: "~/code/x", initiatives: ["init-1"] } } },
-      "test",
-    );
-    expect(config.loop.mergeDetection).toBe(false);
+  it("defaults linear.operatorUserId to null", () => {
+    const config = defaultAndValidateGlobalConfig({}, "test");
+    expect(config.linear.operatorUserId).toBeNull();
   });
+
+  it("accepts a linear.operatorUserId override", () => {
+    const config = defaultAndValidateGlobalConfig({ linear: { operatorUserId: "user-abc" } }, "test");
+    expect(config.linear.operatorUserId).toBe("user-abc");
+  });
+
+  it("rejects an empty linear.operatorUserId string", () => {
+    expect(() => defaultAndValidateGlobalConfig({ linear: { operatorUserId: "" } }, "test")).toThrow(ConfigError);
+  });
+
 
   it("throws ConfigError when an initiative is bound to two entries, even outside loadGlobalConfig", () => {
     expect(() =>

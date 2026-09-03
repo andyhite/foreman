@@ -6,7 +6,7 @@ description: Use when foreman-triage processes the Linear Triage inbox — class
 # Foreman Triage Inbox
 
 <critical>
-- NEVER apply anything: no issues, sub-issues, spikes, comments, labels, or state changes. You return a `TriageProposal`; nothing else reaches Linear.
+- NEVER apply anything yourself: no issues, sub-issues, spikes, comments, labels, or state changes. You return a `TriageResult`; the extension applies it to Linear.
 - Repro by reading only. You hold no exec tool.
 - Uncertainty is a finding (`reproConfidence`, `missingInfo`), NEVER a `BlockRecord`.
 - `destination` = workflow state; `destinationProject` / `destinationProjectId` = project. NEVER conflate.
@@ -33,33 +33,36 @@ Per item, in order:
 1. **Classify.** `type:` label: `bug`, `feature`, `chore`, `spike`, `docs`.
 2. **Dedupe** against the backlog for semantic duplicates per `dedupe.md`.
 3. **Attempt repro** by reading the relevant code paths.
-4. **Propose a Priority** with `severityReasoning`. Un-actioned `Low` older
-   than the dispatch's `--stale-low-days` (operator's `intake.staleLowDays`,
-   default 90) → recommend `Canceled` by default.
+4. **Propose a Priority** (1 Urgent – 4 Low) with `severityReasoning`.
+   Un-actioned, clearly low-severity items → recommend `cancel` by default.
 5. **`missingInfo`** when repro or scoping is incomplete.
 6. **`proposedBlockedBy`** where a dependency is evident.
-7. **`destination`**: `Backlog` | `Canceled` | `Duplicate`.
+7. **`destination`**: `backlog` | `new-project` | `cancel` | `duplicate`.
 8. **Project**: `destinationProjectId` (real Linear id, read via
-   `foreman_linear_read`) when resolvable, else `destinationProject` (a name,
-   never a UUID): a milestone project or the product's standing
-   `Maintenance` project. `null` only when you genuinely cannot tell.
+   `foreman_linear_read`) when `destination` is `backlog`; `newProject`
+   (`name`, `description`, `initiativeId` — pick from the initiative ids
+   the dispatch passed via `--initiatives`) when `destination` is
+   `new-project`; `duplicateOf` (the human identifier it duplicates) when
+   `destination` is `duplicate`. Leave the other two null.
 9. No usable description → `draftDescription` + `proposedEstimate`; both
    `null` when the existing ones are adequate.
 
 ## Output
 
-`TriageProposal` (`schemas/triage-proposal.json`): `items[]` + `summary`. The
-extension writes one comment per item (human rendering + embedded
-machine-readable copy) and applies `agent:proposed`. Operator approves by
-removing that label, rejects by replying `reject: <reason>`; `/foreman:apply`
-performs the mutation later, deterministically, from the approved comment.
+`TriageResult` (`schemas/triage-result.json`): `items[]` + `summary`. The
+extension applies it directly, per item: `backlog` sets priority and
+project and moves the issue to Backlog; `new-project` creates a new
+Backlog-status project and moves the issue into it; `cancel` and
+`duplicate` leave the issue in Triage, apply `foreman:blocked`, and write a
+`block` marker asking the operator to confirm. No proposal, no approval
+step, no `/foreman:apply`.
 
 ## Stop conditions
 
 Essentially none. An item that cannot be classified, reproduced, or deduped
-confidently → low `reproConfidence` + populated `missingInfo`, inside the
-proposal. Triage exists to surface uncertainty as a reviewable proposal, not
-to stall on it.
+confidently → populated `missingInfo`, inside the result. Triage exists to
+surface uncertainty for the operator to resolve at the `cancel`/`duplicate`
+block, not to stall on it.
 
 ## Non-goals
 

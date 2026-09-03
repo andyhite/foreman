@@ -19,7 +19,7 @@ import type {
   DispatchStatus,
   GlobalConfig,
 } from "@foreman/core";
-import { reservationsPath, RESERVATIONS_ENV, LOOP_SOCKET_ENV, ensureWorktree } from "@foreman/core";
+import { ensureWorktree } from "@foreman/core";
 
 /** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
@@ -36,26 +36,22 @@ export class PrintDispatcher implements Dispatcher {
 
   readonly #config: GlobalConfig;
   readonly #scrubEnv: readonly string[];
-  readonly #reservationsDir: string | undefined;
-  readonly #controlSocket: string | undefined;
   readonly #running = new Map<string, RunningProcess>();
+  readonly #keyByDispatchId = new Map<string, string>();
 
-  constructor(config: GlobalConfig, options?: { scrubEnv?: string[]; reservationsDir?: string; controlSocket?: string }) {
+  constructor(config: GlobalConfig, options?: { scrubEnv?: string[] }) {
     this.#config = config;
     this.#scrubEnv = options?.scrubEnv ?? [];
-    this.#reservationsDir = options?.reservationsDir;
-    this.#controlSocket = options?.controlSocket;
   }
 
   async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
-    const batchId = randomUUID();
+    const key = request.items[0]?.dispatchId ?? randomUUID();
     const startedAt = new Date().toISOString();
     const handles: DispatchHandle[] = request.items.map((item) => ({
       dispatchId: item.dispatchId,
       agent: request.agent,
       issueId: item.issueId,
       startedAt,
-      batchId,
       pid: null,
       herdr: null,
     }));
@@ -106,20 +102,8 @@ export class PrintDispatcher implements Dispatcher {
     for (const name of this.#scrubEnv) {
       delete env[name];
     }
-    // Only a single-item request gets the legacy per-item id: a batch has no
-    // one dispatch id to hand the child, and its items resolve theirs from
-    // the reservations file instead (see below).
     if (request.items.length === 1) {
       env.FOREMAN_DISPATCH_ID = handles[0]?.dispatchId;
-    }
-    if (this.#reservationsDir) {
-      env[RESERVATIONS_ENV] = reservationsPath(this.#reservationsDir, request.agent);
-    }
-    // The dispatched session's Foreman extension reports its applied result
-    // back over this socket (`report` op). Absent when the loop was started
-    // with `--once`/`--no-control` — exactly when no server is listening.
-    if (this.#controlSocket) {
-      env[LOOP_SOCKET_ENV] = this.#controlSocket;
     }
 
     const child = spawn(this.#config.agent.ompBin, argv, {
@@ -173,7 +157,8 @@ export class PrintDispatcher implements Dispatcher {
       settled: false,
       outcome: outcomeReady,
     };
-    this.#running.set(batchId, entry);
+    this.#running.set(key, entry);
+    for (const item of request.items) this.#keyByDispatchId.set(item.dispatchId, key);
 
     child.on("spawn", () => {
       entry.status = "running";
@@ -216,25 +201,28 @@ export class PrintDispatcher implements Dispatcher {
     return handles;
   }
 
-  // A `batchId` absent from `#running` is overwhelmingly a batch whose
+  // A dispatch absent from `#running` is overwhelmingly a dispatch whose
   // `settle()` already pruned the entry, not a lost dispatch — defaulting to
   // "settled" here is deliberate, not a fallback for a bug.
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
-    const entry = this.#running.get(handle.batchId);
+    const key = this.#keyByDispatchId.get(handle.dispatchId);
+    const entry = key ? this.#running.get(key) : undefined;
     return entry ? entry.status : "settled";
   }
 
-  /** Awaits and prunes the tracked entry once the batch's outcome resolves. */
+  /** Awaits and prunes the tracked entry once the dispatch's outcome resolves. */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
-    const entry = this.#running.get(handle.batchId);
-    if (!entry) {
+    const key = this.#keyByDispatchId.get(handle.dispatchId);
+    const entry = key ? this.#running.get(key) : undefined;
+    if (!entry || !key) {
       // Never tracked (e.g. a handle from another process, or a sibling
-      // handle whose batch entry a prior settle() already pruned); nothing
-      // to report.
+      // handle whose entry a prior settle() already pruned); nothing to
+      // report.
       return { handle, status: "settled", exitCode: null, log: "" };
     }
     const outcome = await entry.outcome;
-    this.#running.delete(handle.batchId);
+    this.#running.delete(key);
+    for (const item of entry.handles) this.#keyByDispatchId.delete(item.dispatchId);
     return { ...outcome, handle };
   }
 

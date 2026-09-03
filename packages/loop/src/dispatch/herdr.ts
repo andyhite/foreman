@@ -1,27 +1,23 @@
 /**
- * `HerdrDispatcher` (SPEC §17.2, §17.3, §17.4).
+ * `HerdrDispatcher` (SPEC §17.2, §17.3).
  *
- * A real terminal pane per agent, live state, and the ability to attach and
- * take over. Layout: one workspace per repo (the instance and its bound
- * initiatives from the registry, §3.11), one tab per readonly stage
- * (triage/plan/refine/review) named for the stage and held open across
- * batches by that stage's shared orchestrator, one pane per writing dispatch
- * with `--cwd` set to the issue's worktree, and a `foreman` workspace holding
- * the board and `foreman team` panes — each repo workspace holds its own
- * `foreman repo` pane.
+ * A real terminal pane per dispatch, live state, and the ability to attach
+ * and take over. Layout: one workspace per repo (the instance and its bound
+ * initiatives from the registry, §3.11), one tab per loop (readonly
+ * stage or writing loop) holding every dispatch that loop has fired, one
+ * pane per dispatch — split fresh off that tab's anchor pane every time, so
+ * a new dispatch never reuses a pane a prior dispatch already settled — and
+ * with `--cwd` set to the issue's worktree for a writing dispatch.
  *
  * Everything herdr returns is read from its own JSON output — ids are never
  * predicted, because `pane move` changes a pane's qualified id and only the
  * returned JSON carries the new one.
  *
  * Agent state (`working`/`idle`/`blocked`/…) is never read here as a routing
- * input (SPEC §17.3) — this class only starts and locates panes/tabs/agents,
- * and uses that state solely to decide whether a shared orchestrator's pane
- * can be reused or must be recycled. `nextAction` decisions come from Linear
- * alone, in `packages/loop`.
+ * input (SPEC §17.3) — this class only starts and locates panes/tabs/agents.
+ * `nextAction` decisions come from Linear alone, in `packages/loop`.
  */
 
-import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import type {
   DispatchHandle,
@@ -29,11 +25,9 @@ import type {
   Dispatcher,
   DispatchRequest,
   DispatchStatus,
-  ForemanAgentName,
   GlobalConfig,
 } from "@foreman/core";
-import { BATCH_SUBJECT, RESERVATIONS_ENV, reservationsPath, LOOP_SOCKET_ENV } from "@foreman/core";
-import { OrchestratorBusyError } from "./busy.ts";
+import { BATCH_SUBJECT } from "@foreman/core";
 
 /** Every herdr subprocess gets this ceiling — a hung CLI must not wedge dispatch or settle. */
 export const HERDR_EXEC_TIMEOUT_MS = 30_000;
@@ -115,10 +109,7 @@ interface HerdrPaneListResult {
 interface HerdrPaneResult {
   result: { root_pane?: { pane_id: string }; pane?: { pane_id: string } };
 }
-interface HerdrMoveResult {
-  result: { move_result: { pane: { pane_id: string }; previous_pane_id: string } };
-}
-/** `herdr pane get` shape — `agent_status` is the only field this class inspects when checking whether a reused workspace's pane still hosts a live agent. */
+/** `herdr pane get` shape — `agent_status` is the only field this class inspects when checking whether a reused worktree workspace's pane still hosts a live agent. */
 interface HerdrPaneGetResult {
   result: { pane?: { agent_status?: string } };
 }
@@ -135,33 +126,17 @@ interface HerdrErrorResponse {
  * Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live
  * agents — and herdr keeps a `done` agent's name reserved until its pane is
  * closed (verified live: `agent_name_taken`, even against a finished agent),
- * which for an issue-scoped dispatch doesn't happen until post-merge
- * `cleanup()`. Keying this off `issueId` would collide on every redispatch to
- * the same issue before merge, so it always takes the dispatch id instead —
- * a fresh one is minted per attempt. Keep the tail when truncating: the
- * trailing random suffix is what's actually distinguishing, while the common
- * timestamp-heavy prefix is not.
+ * which for a dispatch doesn't happen until `settle()` closes its pane (or,
+ * for a worktree dispatch, until post-merge `cleanup()`). Keying this off
+ * `issueId` would collide on every redispatch to the same issue before
+ * merge, so it always takes the dispatch id instead — a fresh one is minted
+ * per attempt. Keep the tail when truncating: the trailing random suffix is
+ * what's actually distinguishing, while the common timestamp-heavy prefix is
+ * not.
  */
 export function herdrAgentName(dispatchId: string): string {
   const suffix = dispatchId.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
   return `foreman-${suffix.slice(-(32 - "foreman-".length))}`;
-}
-
-/**
- * The shared per-stage orchestrator's name (SPEC §17.4). Two loops on one
- * machine (two repo aliases, or a repo alongside the `intake` loop) must not
- * derive the same name for their refine orchestrators, so the alias is
- * folded in — and truncated, not the stage suffix, because the stage is what
- * a human scanning `herdr agent list` needs intact to tell triage from
- * refine from review.
- */
-export function sharedAgentName(alias: string, agent: ForemanAgentName): string {
-  const stage = agent.replace(/^foreman-/, "").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  const normalizedAlias = alias.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  const prefix = "foreman-";
-  const suffix = `-${stage}`;
-  const aliasBudget = Math.max(1, 32 - prefix.length - suffix.length);
-  return `${prefix}${normalizedAlias.slice(0, aliasBudget)}${suffix}`;
 }
 
 let seqCounter = 0;
@@ -172,31 +147,16 @@ export class HerdrDispatcher implements Dispatcher {
   readonly #config: GlobalConfig;
   readonly #runner: HerdrRunner;
   readonly #scrubEnv: readonly string[];
-  readonly #reservationsDir: string | undefined;
-  readonly #controlSocket: string | undefined;
-  /**
-   * `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID`/`HERDR_PANE_ID` — injected by herdr
-   * into every pane it manages — locate *this process's own* pane when it
-   * is itself running inside herdr. `agent.herdrLayout: "pane"` anchors its
-   * column there; defaults to `process.env` and is overridable so tests
-   * don't depend on the real process environment.
-   */
-  readonly #env: NodeJS.ProcessEnv;
-  /** One pending `agent wait` per batch, so sibling handles share it rather than waiting N times. */
+  /** One pending `agent wait` per dispatch (keyed by its pane's agent name), so sibling handles of one dispatch share it rather than waiting N times. */
   readonly #pendingSettles = new Map<string, Promise<DispatchOutcome>>();
-  /** Settled batches served by each shared orchestrator, since its last (re)start — SPEC §17.4 recycling. */
-  readonly #batchCounts = new Map<string, number>();
 
   constructor(
     config: GlobalConfig,
-    options?: { runner?: HerdrRunner; scrubEnv?: string[]; reservationsDir?: string; env?: NodeJS.ProcessEnv; controlSocket?: string },
+    options?: { runner?: HerdrRunner; scrubEnv?: string[] },
   ) {
     this.#config = config;
     this.#runner = options?.runner ?? nodeHerdrRunner;
     this.#scrubEnv = options?.scrubEnv ?? [];
-    this.#reservationsDir = options?.reservationsDir;
-    this.#env = options?.env ?? process.env;
-    this.#controlSocket = options?.controlSocket;
   }
 
   /** Runs an herdr command and throws with its stderr when it exits non-zero. */
@@ -216,16 +176,13 @@ export class HerdrDispatcher implements Dispatcher {
       return false;
     }
   }
+
   /** Herdr's own workspace list, matched by the worktree it was opened on — `null` when no workspace exists yet. */
   async #findWorkspaceId(repoPath: string): Promise<string | null> {
     // Maps save a little parsing within one process, but are insufficient for
     // a loop restarted around existing Herdr state. Re-read Herdr's own list
     // first so "one workspace per repo" holds across process lifetimes.
-    const { stdout } = await this.#runChecked([
-      this.#config.agent.herdrBin,
-      "workspace",
-      "list",
-    ]);
+    const { stdout } = await this.#runChecked([this.#config.agent.herdrBin, "workspace", "list"]);
     const listed = JSON.parse(stdout) as HerdrWorkspaceListResult;
     return (
       listed.result.workspaces.find((workspace) => workspace.worktree?.checkout_path === repoPath)
@@ -252,8 +209,7 @@ export class HerdrDispatcher implements Dispatcher {
       "--no-focus",
     ]);
     const parsed = JSON.parse(created.stdout) as { result: { workspace_id: string } };
-    const workspaceId = parsed.result.workspace_id;
-    return workspaceId;
+    return parsed.result.workspace_id;
   }
 
   /** Herdr's own tab list within `workspaceId`, matched by label — `null` when no tab exists yet. */
@@ -291,74 +247,7 @@ export class HerdrDispatcher implements Dispatcher {
     return anchor.pane_id;
   }
 
-  async #ensureTab(
-    workspaceId: string,
-    label: string,
-    cwd: string,
-    envArgs: string[],
-  ): Promise<{ tabId: string; paneId: string }> {
-    // Like workspaces, tabs outlive this dispatcher instance. A process restart
-    // must locate the prior tab by its stable stage label rather than create a
-    // duplicate for every resumed dispatch.
-    const existing = await this.#findTabId(workspaceId, label);
-    if (existing) {
-      // A reused tab's anchor pane already hosts a prior agent at its own
-      // idle prompt, not a plain shell — herdr refuses `agent start` there
-      // (`agent_pane_busy`, verified live). Split off a fresh shell instead
-      // of touching it.
-      const anchor = await this.#findAnchorPaneId(workspaceId, existing);
-      const split = await this.#runChecked([
-        this.#config.agent.herdrBin,
-        "pane",
-        "split",
-        "--pane",
-        anchor,
-        "--direction",
-        "down",
-        "--cwd",
-        cwd,
-        ...envArgs,
-      ]);
-      const paneId = this.#splitPaneId(split.stdout);
-      return { tabId: existing, paneId };
-    }
-
-    // A freshly created tab's root pane is already a plain shell at `cwd` —
-    // splitting it would only abandon that pane forever, doubling every
-    // single-shot issue's pane count for nothing (verified live: the root
-    // pane accepts `agent start` directly, no split needed).
-    const created = await this.#runChecked([
-      this.#config.agent.herdrBin,
-      "tab",
-      "create",
-      "--workspace",
-      workspaceId,
-      "--cwd",
-      cwd,
-      "--label",
-      label,
-      "--no-focus",
-      ...envArgs,
-    ]);
-    const parsed = JSON.parse(created.stdout) as HerdrTabResult;
-    return { tabId: parsed.result.tab.tab_id, paneId: parsed.result.root_pane.pane_id };
-  }
-
-  /**
-   * The herdr pane/tab/workspace hosting *this* process, when it is itself
-   * running inside a managed pane — `null` when it isn't (e.g. a
-   * cron/launchd-run loop, SPEC §3.12), which is the signal
-   * `#ensureStagePane` uses to fall back to the tab strategy.
-   */
-  #callerPaneContext(): { workspaceId: string; tabId: string; paneId: string } | null {
-    const workspaceId = this.#env.HERDR_WORKSPACE_ID;
-    const tabId = this.#env.HERDR_TAB_ID;
-    const paneId = this.#env.HERDR_PANE_ID;
-    if (!workspaceId || !tabId || !paneId) return null;
-    return { workspaceId, tabId, paneId };
-  }
-
-  /** Shared by `#ensureTab`'s split call and `#ensurePaneColumn`'s — both hand back either `result.pane` or `result.root_pane`. */
+  /** Shared by every `pane split` call — hands back either `result.pane` or `result.root_pane`. */
   #splitPaneId(stdout: string): string {
     const parsed = JSON.parse(stdout) as HerdrPaneResult;
     const paneId = parsed.result.pane?.pane_id ?? parsed.result.root_pane?.pane_id;
@@ -369,89 +258,54 @@ export class HerdrDispatcher implements Dispatcher {
   }
 
   /**
-   * `agent.herdrLayout: "pane"`'s pane for a stage's shared orchestrator: a
-   * right-hand column split off the caller's own pane in its current tab,
-   * further split downward into one row per stage — instead of `#ensureTab`'s
-   * one tab per stage. Rows are found across process restarts by a
-   * `foreman-<stage>` pane label, the pane-scoped equivalent of `#ensureTab`'s
-   * tab label.
-   *
-   * The column only spans the whole tab's height when the caller's pane was
-   * the tab's sole occupant at the moment the first row split off it — herdr's
-   * pane tree has no operation to retroactively wrap panes that already sit
-   * beside it (`docs/VERIFIED.md`). Once created, later splits on either side
-   * (the operator's own panes, or more stage rows) never shrink the column,
-   * because each split only ever divides its own pane.
+   * A loop's tab (one per readonly stage or writing loop) — found across
+   * process restarts by a stable label, the same way `#ensureWorkspace`
+   * locates its workspace. Tabs outlive this dispatcher instance, so a
+   * process restart must locate the prior tab rather than create a
+   * duplicate for every resumed loop.
    */
-  async #ensurePaneColumn(
-    caller: { workspaceId: string; tabId: string; paneId: string },
-    label: string,
-    cwd: string,
-    envArgs: string[],
-  ): Promise<{ tabId: string; paneId: string }> {
-    const paneLabel = `foreman-${label}`;
-    const { stdout } = await this.#runChecked([this.#config.agent.herdrBin, "pane", "list", "--workspace", caller.workspaceId]);
-    const listed = JSON.parse(stdout) as HerdrPaneListResult;
-    const tabPanes = listed.result.panes.filter((pane) => pane.tab_id === caller.tabId);
-
-    const existingRow = tabPanes.find((pane) => pane.label === paneLabel);
-    if (existingRow) {
-      // Same story as a reused tab in `#ensureTab`: the row already hosts a
-      // prior agent at its own idle prompt, not a plain shell.
-      const split = await this.#runChecked([
-        this.#config.agent.herdrBin,
-        "pane",
-        "split",
-        "--pane",
-        existingRow.pane_id,
-        "--direction",
-        "down",
-        "--cwd",
-        cwd,
-        ...envArgs,
-      ]);
-      const paneId = this.#splitPaneId(split.stdout);
-      await this.#runChecked([this.#config.agent.herdrBin, "pane", "rename", paneId, paneLabel]);
-      return { tabId: caller.tabId, paneId };
+  async #ensureLoopTab(workspaceId: string, loopName: string, cwd: string): Promise<string> {
+    const existing = await this.#findTabId(workspaceId, loopName);
+    if (existing) {
+      return existing;
     }
+    const created = await this.#runChecked([
+      this.#config.agent.herdrBin,
+      "tab",
+      "create",
+      "--workspace",
+      workspaceId,
+      "--cwd",
+      cwd,
+      "--label",
+      loopName,
+      "--no-focus",
+    ]);
+    const parsed = JSON.parse(created.stdout) as HerdrTabResult;
+    return parsed.result.tab.tab_id;
+  }
 
-    // Another stage's row already anchors the column — stack this stage
-    // below it rather than opening a second column. Otherwise this is the
-    // column's first row: split the caller's own pane to the right.
-    const anyColumnPane = tabPanes.find((pane) => (pane.label ?? "").startsWith("foreman-"));
-    const splitFrom = anyColumnPane?.pane_id ?? caller.paneId;
-    const direction = anyColumnPane ? "down" : "right";
+  /**
+   * A fresh pane for one dispatch, split off the loop tab's anchor pane —
+   * never a prior dispatch's pane, which may already be closed by the time
+   * this one starts. Every dispatch to a loop gets its own pane, appended
+   * downward in that loop's tab (SPEC §17.2).
+   */
+  async #newLoopPane(workspaceId: string, tabId: string, cwd: string, envArgs: string[]): Promise<string> {
+    const anchor = await this.#findAnchorPaneId(workspaceId, tabId);
     const split = await this.#runChecked([
       this.#config.agent.herdrBin,
       "pane",
       "split",
       "--pane",
-      splitFrom,
+      anchor,
       "--direction",
-      direction,
+      "down",
       "--cwd",
       cwd,
       ...envArgs,
     ]);
-    const paneId = this.#splitPaneId(split.stdout);
-    await this.#runChecked([this.#config.agent.herdrBin, "pane", "rename", paneId, paneLabel]);
-    return { tabId: caller.tabId, paneId };
-  }
-
-  /** Routes a stage's shared orchestrator to `#ensureTab` or `#ensurePaneColumn` per `agent.herdrLayout`. */
-  async #ensureStagePane(
-    workspaceId: string,
-    label: string,
-    cwd: string,
-    envArgs: string[],
-  ): Promise<{ tabId: string; paneId: string }> {
-    if (this.#config.agent.herdrLayout === "pane") {
-      const caller = this.#callerPaneContext();
-      if (caller) {
-        return this.#ensurePaneColumn(caller, label, cwd, envArgs);
-      }
-    }
-    return this.#ensureTab(workspaceId, label, cwd, envArgs);
+    return this.#splitPaneId(split.stdout);
   }
 
   /**
@@ -497,25 +351,23 @@ export class HerdrDispatcher implements Dispatcher {
       (workspace) => workspace.worktree?.checkout_path === worktree.path,
     );
     if (existing) {
-      // Same story as a reused tab: the workspace's own pane already hosts a
-      // prior agent at its idle prompt, not a plain shell.
+      // Same story as a reused loop tab: the workspace's own pane already
+      // hosts a prior agent at its idle prompt, not a plain shell.
       const anchor = await this.#findAnchorPaneId(existing.workspace_id, existing.active_tab_id);
       // `#replacePane` closes the anchor. A workspace whose pane still hosts a
       // working agent is a live implement session, not a finished one at an
-      // idle prompt — refuse rather than kill it, the same rule
-      // `#resolveSharedAgentPane` applies to a shared orchestrator.
+      // idle prompt — refuse rather than kill it.
       const { stdout, code } = await this.#runner.run([this.#config.agent.herdrBin, "pane", "get", anchor]);
       if (code === 0) {
         try {
           const parsed = JSON.parse(stdout) as HerdrPaneGetResult;
           const status = parsed.result.pane?.agent_status;
           if (status === "working" || status === "blocked") {
-            throw new OrchestratorBusyError(anchor, `worktree pane ${anchor} still hosts a ${status} agent`);
+            throw new Error(`worktree pane ${anchor} still hosts a ${status} agent`);
           }
         } catch (error) {
-          if (error instanceof OrchestratorBusyError) throw error;
-          // Unparsable pane payload: fall through and reuse, matching how
-          // `#resolveSharedAgentPane` treats an unreadable `agent get`.
+          if (error instanceof Error && error.message.includes("still hosts a")) throw error;
+          // Unparsable pane payload: fall through and reuse.
         }
       }
       return this.#replacePane(anchor, worktree.path, envArgs);
@@ -572,57 +424,6 @@ export class HerdrDispatcher implements Dispatcher {
     return this.#replacePane(parsedOpen.result.root_pane.pane_id, worktree.path, envArgs);
   }
 
-  /**
-   * Locates or starts a stage's shared orchestrator (SPEC §17.4). herdr state
-   * decides only whether the existing pane can be reused — never a routing
-   * input, per the class doc — so a stale `unknown` agent is discarded rather
-   * than trusted, and `working`/`blocked` refuse the dispatch outright
-   * instead of silently queuing behind an in-flight turn.
-   */
-  async #resolveSharedAgentPane(
-    workspaceId: string,
-    request: DispatchRequest,
-    agentName: string,
-    envArgs: string[],
-  ): Promise<{ paneId: string; startedFresh: boolean }> {
-    const { stdout, code } = await this.#runner.run([this.#config.agent.herdrBin, "agent", "get", agentName]);
-    let status: string | undefined;
-    let existingPaneId: string | undefined;
-    if (code === 0) {
-      try {
-        const parsed = JSON.parse(stdout) as HerdrAgentResult;
-        status = parsed.result.agent.agent_status;
-        existingPaneId = parsed.result.agent.pane_id;
-      } catch {
-        status = undefined;
-      }
-    }
-
-    if (status === "idle" || status === "done") {
-      if (!existingPaneId) {
-        throw new Error(`herdr agent get ${agentName} returned no pane id`);
-      }
-      return { paneId: existingPaneId, startedFresh: false };
-    }
-    if (status === "working") {
-      throw new OrchestratorBusyError(agentName, `shared orchestrator ${agentName} is mid-turn`);
-    }
-    if (status === "blocked") {
-      // SPEC §17.3: a herdr `blocked` agent is a Foreman bug, never a routine
-      // busy signal — surface it as a plain error rather than a skip.
-      throw new Error(`herdr agent ${agentName} is blocked`);
-    }
-
-    // `unknown` or absent (no such agent yet): discard any stale pane and
-    // start a fresh shared orchestrator.
-    if (existingPaneId) {
-      await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", existingPaneId]);
-    }
-    const stageLabel = request.agent.replace(/^foreman-/, "");
-    const { paneId } = await this.#ensureStagePane(workspaceId, stageLabel, request.cwd, envArgs);
-    return { paneId, startedFresh: true };
-  }
-
   async dispatch(request: DispatchRequest): Promise<DispatchHandle[]> {
     const worktreeItems = request.items.filter((item) => item.worktree);
     if (worktreeItems.length > 0 && request.items.length > 1) {
@@ -635,140 +436,59 @@ export class HerdrDispatcher implements Dispatcher {
     for (const name of this.#scrubEnv) {
       envArgs.push("--env", `${name}=`);
     }
-    if (this.#reservationsDir) {
-      envArgs.push("--env", `${RESERVATIONS_ENV}=${reservationsPath(this.#reservationsDir, request.agent)}`);
-    }
-    if (this.#controlSocket) {
-      envArgs.push("--env", `${LOOP_SOCKET_ENV}=${this.#controlSocket}`);
-    }
-    // A shared orchestrator serves many items across many turns, so it can
-    // never carry one item's id in its environment — the loop hands it
-    // reservations instead (SPEC §17.4). Only a single-item request (the
-    // per-issue implement path, or an operator dispatch) gets one.
+
+    // A single-item request (the per-issue implement path, an operator
+    // dispatch, or a lone readonly item) gets its dispatch id in the
+    // environment. A multi-item batch (e.g. triage) shares one pane and one
+    // prompt across every item, so no single id belongs there.
     if (request.items.length === 1) {
       envArgs.push("--env", `FOREMAN_DISPATCH_ID=${request.items[0]!.dispatchId}`);
     }
 
-    // A dispatch that writes code gets its own worktree-backed workspace and
-    // its own per-attempt agent (SPEC §12); every readonly stage
-    // (triage/plan/refine/review) instead reuses one shared orchestrator per
-    // stage, prompted with every item's subject in one turn (SPEC §17.4).
+    let paneId: string;
     if (worktreeItems.length === 1) {
       const item = request.items[0]!;
-      const paneId = await this.#ensureWorktreeWorkspace(
+      paneId = await this.#ensureWorktreeWorkspace(
         workspaceId,
         item.worktree!,
         item.issueId ?? item.dispatchId,
         envArgs,
       );
-      const agentName = herdrAgentName(item.dispatchId);
-      const promptText = item.subject ? `${request.command} ${item.subject}` : request.command;
-      try {
-        // `agent start` only recognizes an agent that reaches Herdr's own
-        // interactive-readiness state; omp's `-p`/`--print` mode processes a
-        // prompt and exits immediately, which Herdr never observes as
-        // "ready for input" (SPEC §17.2). Start omp interactively — no
-        // prompt, no `-p` — then hand it the actual command through
-        // `agent prompt` once Herdr confirms it is idle.
-        await this.#runChecked([
-          this.#config.agent.herdrBin,
-          "agent",
-          "start",
-          agentName,
-          "--kind",
-          "omp",
-          "--pane",
-          paneId,
-          "--timeout",
-          "30000",
-          "--",
-          "--approval-mode",
-          this.#config.agent.approvalMode,
-          "--cwd",
-          request.cwd,
-        ]);
-        await this.#runChecked([
-          this.#config.agent.herdrBin,
-          "agent",
-          "prompt",
-          agentName,
-          promptText,
-          "--wait",
-          "--until",
-          "working",
-          "--until",
-          "done",
-          "--timeout",
-          "30000",
-        ]);
-      } catch (error) {
-        await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
-        throw error;
-      }
-
-      seqCounter += 1;
-      await this.#runChecked([
-        this.#config.agent.herdrBin,
-        "pane",
-        "report-metadata",
-        paneId,
-        "--source",
-        "foreman",
-        "--token",
-        `issue=${item.issueId ?? BATCH_SUBJECT}`,
-        "--token",
-        `agent=${request.agent}`,
-        "--seq",
-        String(seqCounter),
-        "--ttl-ms",
-        String(this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs),
-      ]);
-
-      const batchId = randomUUID().slice(0, 8);
-      return [
-        {
-          dispatchId: item.dispatchId,
-          agent: request.agent,
-          issueId: item.issueId,
-          startedAt: new Date().toISOString(),
-          batchId,
-          pid: null,
-          herdr: { paneId, agentName },
-        },
-      ];
+    } else {
+      const loopName = `${request.alias}-${request.agent.replace(/^foreman-/, "")}`;
+      const tabId = await this.#ensureLoopTab(workspaceId, loopName, request.cwd);
+      paneId = await this.#newLoopPane(workspaceId, tabId, request.cwd, envArgs);
     }
 
-    const agentName = sharedAgentName(request.alias, request.agent);
-    const { paneId, startedFresh } = await this.#resolveSharedAgentPane(
-      workspaceId,
-      request,
-      agentName,
-      envArgs,
-    );
+    const agentName = herdrAgentName(request.items[0]!.dispatchId);
     const promptText = [
       request.command,
       ...request.items.map((item) => item.subject).filter((subject): subject is string => subject !== null),
     ].join(" ");
     try {
-      if (startedFresh) {
-        await this.#runChecked([
-          this.#config.agent.herdrBin,
-          "agent",
-          "start",
-          agentName,
-          "--kind",
-          "omp",
-          "--pane",
-          paneId,
-          "--timeout",
-          "30000",
-          "--",
-          "--approval-mode",
-          this.#config.agent.approvalMode,
-          "--cwd",
-          request.cwd,
-        ]);
-      }
+      // `agent start` only recognizes an agent that reaches Herdr's own
+      // interactive-readiness state; omp's `-p`/`--print` mode processes a
+      // prompt and exits immediately, which Herdr never observes as
+      // "ready for input" (SPEC §17.2). Start omp interactively — no
+      // prompt, no `-p` — then hand it the actual command through
+      // `agent prompt` once Herdr confirms it is idle.
+      await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        "omp",
+        "--pane",
+        paneId,
+        "--timeout",
+        "30000",
+        "--",
+        "--approval-mode",
+        this.#config.agent.approvalMode,
+        "--cwd",
+        request.cwd,
+      ]);
       await this.#runChecked([
         this.#config.agent.herdrBin,
         "agent",
@@ -778,16 +498,13 @@ export class HerdrDispatcher implements Dispatcher {
         "--wait",
         "--until",
         "working",
+        "--until",
+        "done",
         "--timeout",
         "30000",
       ]);
     } catch (error) {
-      // A reused orchestrator's pane already hosted a live session before
-      // this call — closing it on failure would kill work this dispatch
-      // never started. Only a freshly created pane is this call's to undo.
-      if (startedFresh) {
-        await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
-      }
+      await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
       throw error;
     }
 
@@ -814,14 +531,12 @@ export class HerdrDispatcher implements Dispatcher {
       String(this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs),
     ]);
 
-    const batchId = randomUUID().slice(0, 8);
     const startedAt = new Date().toISOString();
     return request.items.map((item) => ({
       dispatchId: item.dispatchId,
       agent: request.agent,
       issueId: item.issueId,
       startedAt,
-      batchId,
       pid: null,
       herdr: { paneId, agentName },
     }));
@@ -856,16 +571,16 @@ export class HerdrDispatcher implements Dispatcher {
     }
   }
 
-  /** The actual `agent wait` for one batch — shared by every handle in it via `#pendingSettles`. */
-  async #waitForBatch(handle: DispatchHandle): Promise<DispatchOutcome> {
+  /** The actual `agent wait` for one dispatch — shared by every sibling handle in it via `#pendingSettles`. */
+  async #waitForDispatch(handle: DispatchHandle): Promise<DispatchOutcome> {
     if (!handle.herdr) {
       return { handle, status: "lost", exitCode: null, log: "" };
     }
     const timeoutMs = this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs;
     try {
       // An interactive omp session never exits when its turn ends — it goes
-      // to `idle` — so `--until done` alone would never match a live shared
-      // orchestrator; `idle` is the normal "turn finished" signal for it.
+      // to `idle` — so `--until done` alone would never match a live agent;
+      // `idle` is the normal "turn finished" signal for it.
       const { code } = await this.#runner.run([
         this.#config.agent.herdrBin,
         "agent",
@@ -878,21 +593,12 @@ export class HerdrDispatcher implements Dispatcher {
         "--timeout",
         String(timeoutMs),
       ]);
-      if (handle.agent === "foreman-implement") {
-        // A writing dispatch's worktree pane stays open until post-merge
-        // `cleanup()` — the operator may still need to attach and inspect
-        // the code it wrote.
-        return { handle, status: code === 0 ? "settled" : "lost", exitCode: code, log: "" };
-      }
-
-      // A shared orchestrator carries no state between batches, so nothing
-      // is lost recycling it — this only bounds context growth (SPEC §17.4).
-      const servedBatches = (this.#batchCounts.get(handle.herdr.agentName) ?? 0) + 1;
-      if (servedBatches >= this.#config.agent.orchestratorMaxBatches) {
+      if (handle.agent !== "foreman-implement") {
+        // Every dispatch now gets its own pane, so nothing is lost closing
+        // it once settled. A writing dispatch's worktree pane stays open
+        // instead — the operator may still need to attach and inspect the
+        // code it wrote — and is closed later by post-merge `cleanup()`.
         await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", handle.herdr.paneId]);
-        this.#batchCounts.delete(handle.herdr.agentName);
-      } else {
-        this.#batchCounts.set(handle.herdr.agentName, servedBatches);
       }
       return { handle, status: code === 0 ? "settled" : "lost", exitCode: code, log: "" };
     } catch {
@@ -903,61 +609,37 @@ export class HerdrDispatcher implements Dispatcher {
   /**
    * Herdr is not the results channel (SPEC §17.3): the loop reads Linear, not
    * panes. `settle` exists to satisfy the interface uniformly with
-   * `PrintDispatcher`; it waits for the batch's agent to leave `working` and
-   * returns an empty log, never scraping pane content. Every handle sharing a
-   * `batchId` shares one `agent wait` rather than starting N.
+   * `PrintDispatcher`; it waits for the dispatch's agent to leave `working`
+   * and returns an empty log, never scraping pane content. Every sibling
+   * handle from the same `dispatch()` call shares one `agent wait` — they
+   * carry the same pane and agent name — rather than starting N.
    */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
     if (!handle.herdr) {
       return { handle, status: "lost", exitCode: null, log: "" };
     }
-    let pending = this.#pendingSettles.get(handle.batchId);
+    const key = handle.herdr.agentName;
+    let pending = this.#pendingSettles.get(key);
     if (!pending) {
-      pending = this.#waitForBatch(handle).finally(() => {
-        this.#pendingSettles.delete(handle.batchId);
+      pending = this.#waitForDispatch(handle).finally(() => {
+        this.#pendingSettles.delete(key);
       });
-      this.#pendingSettles.set(handle.batchId, pending);
+      this.#pendingSettles.set(key, pending);
     }
     const outcome = await pending;
     return { ...outcome, handle };
   }
 
-  async attach(handle: DispatchHandle): Promise<void> {
-    if (!handle.herdr) return;
-    await this.#runner.run([this.#config.agent.herdrBin, "agent", "focus", handle.herdr.agentName]);
-  }
-
   /**
    * Post-merge housekeeping (SPEC §12): closes the issue's worktree
-   * workspace, if it had one. Readonly dispatches never get a per-issue
-   * pane — they share a stage's orchestrator, which `settle()` recycles on
-   * its own batch-count schedule — so there is nothing else to close here. A
-   * no-op when the issue had no worktree or its workspace is already gone.
+   * workspace, if it had one. A readonly dispatch's pane is already closed
+   * by `settle()`, so there is nothing else to close here. A no-op when the
+   * issue had no worktree or its workspace is already gone.
    */
   async cleanup(issueId: string, repoPath: string, worktreePath: string | null): Promise<void> {
     if (!worktreePath) return;
     const workspaceId = await this.#findWorkspaceId(worktreePath);
     if (!workspaceId) return;
     await this.#runChecked([this.#config.agent.herdrBin, "workspace", "close", workspaceId]);
-  }
-
-  /**
-   * Re-reads a pane id after a move, per SPEC §17.3: moving a pane between
-   * workspaces or tabs changes its qualified id, and the caller must never
-   * predict the new one.
-   */
-  async movePane(paneId: string, targetTabId: string): Promise<string> {
-    const { stdout } = await this.#runner.run([
-      this.#config.agent.herdrBin,
-      "pane",
-      "move",
-      paneId,
-      "--tab",
-      targetTabId,
-      "--split",
-      "down",
-    ]);
-    const parsed = JSON.parse(stdout) as HerdrMoveResult;
-    return parsed.result.move_result.pane.pane_id;
   }
 }

@@ -255,3 +255,67 @@ describe("GitHubClient.mergeBranchLocally", () => {
     expect(lastCall?.argv).toEqual(["git", "checkout", "feature-branch"]);
   });
 });
+
+describe("GitHubClient.repoSlug", () => {
+  it("parses owner/name from gh repo view --json output", async () => {
+    const { runner, calls } = stubRunner(() => ({
+      stdout: JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
+    }));
+    const client = new GitHubClient({ runner });
+    expect(await client.repoSlug("/repo")).toEqual({ owner: "acme", repo: "plotroom" });
+    expect(calls[0]?.argv).toEqual(["gh", "repo", "view", "--json", "owner,name"]);
+  });
+});
+
+describe("GitHubClient.createReview", () => {
+  it("without an appAuth, posts through gh api using whatever gh is authenticated as", async () => {
+    const { runner, calls } = stubRunner(() => ({ stdout: "" }));
+    const client = new GitHubClient({ runner });
+    await client.createReview("/repo", 7, { event: "COMMENT", body: "Looks fine." });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.argv).toEqual([
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/pulls/7/reviews",
+      "-X",
+      "POST",
+      "-f",
+      "event=COMMENT",
+      "-f",
+      "body=Looks fine.",
+    ]);
+    expect(calls[0]?.cwd).toBe("/repo");
+  });
+
+  it("with an appAuth configured, resolves repoSlug and overrides GH_TOKEN with the installation token", async () => {
+    const calls: Array<{ argv: string[]; env?: Record<string, string> }> = [];
+    const runner: CommandRunner = {
+      run(argv, options) {
+        calls.push({ argv, env: options.env });
+        if (argv[0] === "gh" && argv[1] === "repo" && argv[2] === "view") {
+          return Promise.resolve({ stdout: JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }), stderr: "", code: 0 });
+        }
+        return Promise.resolve({ stdout: "", stderr: "", code: 0 });
+      },
+    };
+    const appAuth = { installationToken: async (owner: string, repo: string) => `token-for-${owner}-${repo}` };
+    const client = new GitHubClient({ runner, appAuth: appAuth as never });
+    await client.createReview("/repo", 7, { event: "APPROVE", body: "Ship it." });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.argv).toEqual(["gh", "repo", "view", "--json", "owner,name"]);
+    const reviewCall = calls[1];
+    expect(reviewCall?.argv).toEqual([
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/pulls/7/reviews",
+      "-X",
+      "POST",
+      "-f",
+      "event=APPROVE",
+      "-f",
+      "body=Ship it.",
+    ]);
+    expect(reviewCall?.env?.GH_TOKEN).toBe("token-for-acme-plotroom");
+  });
+});

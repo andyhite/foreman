@@ -1,9 +1,8 @@
 /**
- * Foreman's omp extension factory (SPEC §3.5). Wires the two tools, the four
- * commands, and every event the extension owns: `session_start` (config
- * validation, skill guard, reaper sweep + timer), `tool_call` (the task
- * guard), `tool_result` and the three `task:subagent:*` events (result
- * capture), and `session_shutdown` (clear timers).
+ * Foreman's omp extension factory (SPEC §3.5). Wires the two tools, the
+ * three commands, and every event the extension owns: `session_start`
+ * (config validation, skill guard), `tool_call` (the task guard),
+ * `tool_result` and the three `task:subagent:*` events (result capture).
  */
 
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -11,34 +10,27 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallDecision, ToolCallEvent, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
-import type { AgentReport, BlockRecord, LinearWriter } from "@foreman/core";
+import type { BlockRecord, LinearWriter } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   ConfigError,
-  findMarkers,
-  ensureMaintenanceProjects,
+  FOREMAN_LABEL,
   ensureWorktree,
   isBudgetTruncation,
   issueIdFromDispatchId,
-  MARKER_KIND,
   newDispatchId,
   parseAgentOutput,
-  resolveTeamKey,
-  sendLoopReport,
-  YOLO_CONFIRMER,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
 import { prepareTaskCall, type TaskCallInput, type TaskGuardDeps } from "./enforce/task-guard.ts";
-import { sweep } from "./lock/reaper.ts";
-import { runApplyCommand } from "./commands/apply.ts";
 import { runMerge } from "./commands/merge.ts";
 import { runUnblock } from "./commands/unblock.ts";
 import { renderStatus } from "./commands/status.ts";
 import { COMMAND_NAMES } from "./commands/names.ts";
 import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
-import { applyOutcome, markApplied, type ApplyDeps, type AgentOutcome, type AppliedFacts } from "./results/apply.ts";
+import { applyOutcome, type ApplyDeps, type AgentOutcome, type AppliedFacts } from "./results/apply.ts";
 import { extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
 import {
   getConfig,
@@ -46,7 +38,6 @@ import {
   getGitHub,
   getLinear,
   getContextDigest,
-  getLoopSocket,
   initRuntime,
   isRepoRegistered,
   liveDispatchIds,
@@ -55,7 +46,6 @@ import {
   resetRuntime,
 } from "./runtime.ts";
 
-const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 const appliedDispatchIds = new Set<string>();
 const inFlightCaptures = new Map<string, Promise<void>>();
 const reviewDiffDirs = new Map<string, string>();
@@ -71,7 +61,7 @@ export function __resetInFlightCapturesForTest(): void {
 }
 
 function toApplyDeps(): ApplyDeps {
-  return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry() };
+  return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry(), operatorUserId: getConfig().linear.operatorUserId };
 }
 
 function toGuardDeps(): TaskGuardDeps {
@@ -110,36 +100,10 @@ export function isProjectScopedAgent(agent: string): boolean {
   return agent === "foreman-plan" || agent === "foreman-roadmap" || agent === "foreman-triage";
 }
 
+/** In-memory only (no durable Linear marker): tracks dispatch ids this process has already applied. */
 function markerAppliedTracker(): AppliedTracker {
   return {
-    wasApplied: async (dispatchId: string, agent: string) => {
-      // A project-scoped dispatch id's "subject" is never an issue id —
-      // querying Linear's issue-by-id endpoint with one throws
-      // `LinearApiError: Entity not found: Issue` before `apply()` ever
-      // runs, discarding the whole result with nothing created. There is no
-      // durable dedup for these agents (SPEC: duplicate risk is bounded
-      // upstream by routing/operator-only dispatch), so "not applied yet" is
-      // the only safe answer.
-      if (isProjectScopedAgent(agent)) return false;
-      const issueId = issueIdFromDispatchId(dispatchId);
-      if (!issueId) return false;
-      const issue = await getLinear().issue(issueId, { includeComments: true });
-      if (!issue) return false;
-      // Fail closed on unverifiable authorship: a forged `dispatch-applied`
-      // marker from another user must never mask a genuine unapplied
-      // dispatch, so an unresolved viewer id means "not applied yet"
-      // (worst case: a redundant apply attempt, never a bypassed dedup).
-      let viewerId: string | null;
-      try {
-        viewerId = await getLinear().viewerId();
-      } catch {
-        viewerId = null;
-      }
-      if (viewerId === null) return false;
-      return findMarkers<{ dispatchId?: unknown }>(MARKER_KIND.dispatchApplied, issue.comments, {
-        authoredBy: viewerId,
-      }).some((marker) => marker.data.dispatchId === dispatchId);
-    },
+    wasApplied: async (dispatchId: string) => appliedDispatchIds.has(dispatchId),
   };
 }
 
@@ -149,40 +113,8 @@ export function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord, 
 }
 
 
-/**
- * The marker-tracking issue for an outcome. Triage yields one proposal per
- * item across many issues rather than one issue per dispatch, so its
- * applied-marker anchor is the batch's first item — the one dispatch id
- * still resolves to at least one issue `wasApplied` can check.
- */
-function issueIdOf(outcome: AgentOutcome): string {
-  if (outcome.kind === "blocked") return outcome.issueId;
-  if (outcome.agent === "foreman-triage") return outcome.result.items[0]?.issueId ?? "";
-  // Plan and roadmap results create Linear entities rather than referencing
-  // one — there is no pre-existing anchor for the applied-marker dedup, so it
-  // is skipped (`handleCaptured` no-ops `markApplied` on an empty string).
-  // Duplicate application risk is bounded upstream: routing only ever
-  // dispatches `foreman-plan` at a bare (zero-issue) project, and a project
-  // stops being a candidate the moment its first issue lands; `foreman-roadmap`
-  // is operator-invoked and never dispatched by the loop at all.
-  if (outcome.agent === "foreman-plan" || outcome.agent === "foreman-roadmap") return "";
-  return outcome.result.issueId;
-}
-
 function isForemanAgentName(agent: string): agent is ForemanAgentName {
   return agent in AGENT_OUTPUT_SCHEMAS;
-}
-
-/**
- * Ships an `AgentReport` to the loop that dispatched this session, when one
- * did. Awaited rather than fired and forgotten: `omp -p` exits the moment the
- * turn ends, and an unawaited socket write would die with the process.
- * `sendLoopReport` swallows every transport failure, so this never throws.
- */
-async function defaultReportSink(report: AgentReport): Promise<void> {
-  const socketPath = getLoopSocket();
-  if (!socketPath) return;
-  await sendLoopReport(socketPath, report);
 }
 
 /**
@@ -199,10 +131,9 @@ export async function applyBoundResult(
   agent: string,
   outcome: AgentOutcome,
   target: string | null,
-  dispatchId: string,
   previousStateId: string | null,
   notify: (message: string, level: "warn" | "error") => void,
-): Promise<AgentReport> {
+): Promise<AppliedFacts> {
   if (
     outcome.kind === "result" &&
     target &&
@@ -219,11 +150,11 @@ export async function applyBoundResult(
     });
     const lockedIssue = await deps.linear.issue(target);
     if (lockedIssue) {
-      const running = lockedIssue.labels.find((label) => label.name === "agent:running");
+      const running = lockedIssue.labels.find((label) => label.name === FOREMAN_LABEL.running);
       const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
       if (running) mutation.removedLabelIds = [running.id];
       // The guard already moved this issue Todo → In Progress (implement
-      // only); removing `agent:running` alone would strand it there with no
+      // only); removing `foreman:running` alone would strand it there with no
       // live agent and no retry, since `routeImplement` only selects Todo.
       // Restore the dispatch's recorded pre-claim state in the same
       // mutation, mirroring the invalid-result branch below.
@@ -232,20 +163,15 @@ export async function applyBoundResult(
     }
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
     return {
-      dispatchId,
-      agent,
-      status: "rejected",
       subject: target,
       summary: `reported issue ${reported}, but this dispatch locked ${target}`,
       created: [],
       movedTo: null,
     };
   }
-  const facts = await applyOutcome(deps, outcome, notify);
-  const issueId = issueIdOf(outcome);
-  if (issueId) await markApplied(deps, issueId, dispatchId);
-  return { dispatchId, agent, status: outcome.kind === "blocked" ? "blocked" : "applied", ...facts };
+  return applyOutcome(deps, outcome, notify);
 }
+
 
 /**
  * Applies one captured dispatch result. Exported (with an injectable `deps`
@@ -264,7 +190,6 @@ export async function handleCaptured(
   notify: (message: string, level: "warn" | "error") => void,
   deps: ApplyDeps = toApplyDeps(),
   tracker: AppliedTracker = markerAppliedTracker(),
-  sendReport: (report: AgentReport) => Promise<void> = defaultReportSink,
 ): Promise<void> {
   if (!isForemanAgentName(agent)) return;
   if (appliedDispatchIds.has(dispatchId)) return;
@@ -291,27 +216,24 @@ export async function handleCaptured(
         const truncated = isBudgetTruncation({ aborted, problems: parsed.problems });
         if (truncated) {
           if (target) {
-            const facts = await applyOutcome(deps, blockedOutcome(agent, {
+            await applyOutcome(deps, blockedOutcome(agent, {
               blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
               whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
               options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
               costOfWrongGuess: "Applying an incomplete result could corrupt the issue state.", blockedByIssues: [target],
             }, target));
-            await sendReport({ dispatchId, agent, status: "blocked", ...facts });
           } else {
             notify(`Foreman dropped a budget-truncated ${agent} result: no issue was locked for this dispatch, so there is nothing to mark blocked.`, "error");
-            await sendReport({ dispatchId, agent, status: "rejected", subject: null,
-              summary: "budget-truncated result with no locked issue", created: [], movedTo: null });
           }
         } else {
           const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
           if (issue) {
             await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
-            const running = issue.labels.find((label) => label.name === "agent:running");
+            const running = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
             const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
             if (running) mutation.removedLabelIds = [running.id];
             // The guard already moved this issue Todo → In Progress (implement
-            // only); removing `agent:running` alone would strand it there with
+            // only); removing `foreman:running` alone would strand it there with
             // no live agent and no retry, since `routeImplement` only selects
             // Todo. Restore the dispatch's recorded pre-claim state — a no-op
             // for refine/review, which never move state (Step 5 item 1).
@@ -319,31 +241,25 @@ export async function handleCaptured(
             if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
           }
           notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
-          await sendReport({ dispatchId, agent, status: "rejected", subject: target,
-            summary: `invalid result: ${parsed.problems.join("; ")}`, created: [], movedTo: null });
         }
         appliedDispatchIds.add(dispatchId);
         return;
       }
       if (parsed.kind === "blocked" && target === null) {
         notify(`Foreman received a block from ${agent} with no locked issue: ${parsed.block.whatINeed}`, "warn");
-        await sendReport({ dispatchId, agent, status: "rejected", subject: null,
-          summary: `block with no locked issue: ${parsed.block.whatINeed}`, created: [], movedTo: null });
         appliedDispatchIds.add(dispatchId);
         return;
       }
-      const applied: { report: AgentReport | null } = { report: null };
       await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
         const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-        applied.report = await applyBoundResult(deps, agent, outcome, target, captured.dispatchId, previousStateId, notify);
+        await applyBoundResult(deps, agent, outcome, target, previousStateId, notify);
+        void captured;
       });
-      const report = applied.report;
-      if (report) await sendReport(report);
-      // Recorded only after the sink callback (applyOutcome + markApplied)
-      // resolves: if either throws, the id must not stay poisoned in the set,
-      // or a redelivery of the same result through the other subscribed
-      // channel is dropped with no durable marker ever written (Step 5 item
-      // 2). The Linear-backed `markerAppliedTracker` remains the durable dedup.
+      // Recorded only after the sink callback (`applyOutcome`) resolves: if
+      // it throws, the id must not stay poisoned in the set, or a
+      // redelivery of the same result through the other subscribed channel
+      // is dropped for good. `markerAppliedTracker` is in-memory only, so
+      // this is the sole dedup for the lifetime of the process.
       appliedDispatchIds.add(dispatchId);
     } catch (error) {
       appliedDispatchIds.delete(dispatchId);
@@ -412,23 +328,9 @@ export default function createForemanExtension(pi: ExtensionAPI) {
 
 
   pi.registerCommand(commandName("status"), {
-    description: "Foreman operator console: blocked queue, locks, proposals, agents, loop state.",
+    description: "Foreman operator console: blocked queue and in-flight locks.",
     handler: async () =>
       runCommand("foreman.status", async (linear) => renderStatus(linear)),
-  });
-
-  pi.registerCommand(commandName("apply"), {
-    description: "Apply approved triage proposals, or approve/reject one by issue id.",
-    handler: async (args: string) =>
-      runCommand("foreman.apply", async (linear) => {
-        const argv = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
-        const result = await runApplyCommand(linear, argv, getEntry());
-        const lines = [result.message];
-        if (result.plan) {
-          for (const entry of result.plan) lines.push(`- ${entry.issueId}: ${entry.item.type} → ${entry.item.destination}`);
-        }
-        return lines.join("\n");
-      }),
   });
 
   pi.registerCommand(commandName("merge"), {
@@ -451,7 +353,6 @@ export default function createForemanExtension(pi: ExtensionAPI) {
       }),
   });
 
-  let reaperTimer: unknown = null;
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     resetRuntime();
@@ -477,78 +378,8 @@ export default function createForemanExtension(pi: ExtensionAPI) {
       const problems = checkSkillAutoload({ pluginRoot: PLUGIN_ROOT, cwd: ctx.cwd });
       for (const problem of problems) ctx.ui.notify(formatSkillGuardProblem(problem), "error");
     }
-
-    // Ensure pass (SPEC §3.11): every initiative bound to this instance must
-    // exist and have its standing Maintenance project. Runs alongside the
-    // config/scope validation above, not inside `initRuntime` — that function
-    // is documented never to throw, so a failure here is surfaced the same
-    // way the config-validation block above surfaces its `ConfigError`: a
-    // `session_start` notification, never a thrown error. Skipped entirely
-    // when this cwd is not a registered repo — that is the normal state for
-    // most repos, not a failure to report (SPEC §3.11).
-    if (!init.missingApiKey && isRepoRegistered()) {
-      try {
-        const entry = getEntry();
-        const linear = getLinear();
-        const teams = await linear.teams();
-        const teamKey = await resolveTeamKey({ linear: { teams: async () => teams }, entryTeam: entry.team });
-        const teamRef = teams.find((candidate) => candidate.key === teamKey);
-        if (!teamRef) {
-          throw new ConfigError(`Team "${teamKey}" was not found for the ensure pass`, [
-            "the resolved team key no longer matches a team the credential can reach",
-          ]);
-        }
-        /*
-         * `YOLO_CONFIRMER`: `loop.mode` governs the supervisor's own terminal
-         * (SPEC §17.9), and this ensure pass runs at `session_start` inside an
-         * omp session with no operator to ask. The gate that applies here is
-         * the agent session's own `approvalMode`, not the loop's.
-         */
-        const reports = await ensureMaintenanceProjects(linear, {
-          initiativeIds: entry.initiativeIds,
-          teamId: teamRef.id,
-          confirmer: YOLO_CONFIRMER,
-        });
-        for (const report of reports) {
-          if (report.created) {
-            ctx.ui.notify(
-              `Foreman: created the Maintenance project for initiative "${report.initiativeName}".`,
-              "info",
-            );
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Foreman ensure pass failed: ${message}`, "error");
-      }
-    }
-
-    if (!init.missingApiKey) {
-      try {
-        await sweep(getLinear(), new Date(), liveDispatchIds());
-      } catch (error) {
-        // Reaper sweep is best-effort at session start; a transient Linear
-        // failure here must not block the session from starting.
-        console.error(`[foreman] reaper sweep failed: ${String(error)}`);
-      }
-    }
-
-    reaperTimer = ctx.setInterval(async () => {
-      try {
-        await sweep(getLinear(), new Date(), liveDispatchIds());
-      } catch (error) {
-        // Same rationale as above — the interval callback must never throw.
-        console.error(`[foreman] reaper sweep failed: ${String(error)}`);
-      }
-    }, REAPER_INTERVAL_MS);
   });
 
-  pi.on("session_shutdown", (_event, ctx: ExtensionContext) => {
-    if (reaperTimer !== null) {
-      ctx.clearTimer(reaperTimer);
-      reaperTimer = null;
-    }
-  });
 
   pi.on("tool_call", async (event: ToolCallEvent, _ctx: ExtensionContext): Promise<ToolCallDecision | void> => {
     if (event.toolName !== "task") return;

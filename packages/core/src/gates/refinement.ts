@@ -8,7 +8,6 @@
 
 import { hasAcceptanceCriteria } from "../linear/issue.ts";
 import type { Issue } from "../linear/types.ts";
-import { blockedLabel, typeLabel } from "../domain/labels.ts";
 import { isTerminal } from "../domain/states.ts";
 import { PRIORITY } from "../domain/priority.ts";
 import type { GateFailure, GateResult } from "./types.ts";
@@ -16,10 +15,7 @@ import type { GateFailure, GateResult } from "./types.ts";
 /** SPEC §4.6: 5 means "split it", so refinement caps the estimate at 3. */
 const MAX_REFINED_ESTIMATE = 3;
 
-export function refinementGate(
-  issue: Issue,
-  membership?: { initiativeCount: number },
-): GateResult {
+export function refinementGate(issue: Issue): GateResult {
   const failures: GateFailure[] = [];
 
   // Checked before anything else because it is the one failure no amount of
@@ -38,27 +34,6 @@ export function refinementGate(
     failures.push({
       code: "missing-project",
       message: "Issue has no project.",
-    });
-  }
-
-  if (membership !== undefined) {
-    if (membership.initiativeCount === 0) {
-      failures.push({
-        code: "missing-initiative",
-        message: "Project belongs to no initiative (SPEC §4.0).",
-      });
-    } else if (membership.initiativeCount > 1) {
-      failures.push({
-        code: "ambiguous-initiative",
-        message: `Project belongs to ${membership.initiativeCount} initiatives; exactly one is required (SPEC §4.0).`,
-      });
-    }
-  }
-
-  if (typeLabel(issue) === null) {
-    failures.push({
-      code: "missing-type-label",
-      message: "No `type:` label.",
     });
   }
 
@@ -85,14 +60,6 @@ export function refinementGate(
     failures.push({
       code: "estimate-too-large",
       message: `Estimate ${issue.estimate} exceeds ${MAX_REFINED_ESTIMATE}; split the issue (SPEC §4.6).`,
-    });
-  }
-
-  const blocked = blockedLabel(issue);
-  if (blocked !== null) {
-    failures.push({
-      code: "blocked-label-present",
-      message: `Has \`${blocked}\` label.`,
     });
   }
 

@@ -30,6 +30,6 @@ the issue's current state, and that issue's two-layer `Context` digest
 
 ## After
 
-`RefineResult` → extension writes the description, sub-issues or spike,
-`agent:ready`, the Todo move, and strips `legacy`. Nothing else changes
+`RefineResult` → extension writes the description, sub-issues or spike, and
+moves the issue to Todo when ready for implementation. Nothing else changes
 state.

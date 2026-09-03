@@ -1,5 +1,6 @@
 import { globalPluginLinkPath, PLUGIN_PACKAGE_NAME } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -297,6 +298,179 @@ describe("runWizard", () => {
     } finally {
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the operator's Linear user id from an email and writes it to operatorUserId", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query UserByEmail")) {
+        return new Response(
+          JSON.stringify({ data: { users: { nodes: [{ id: "user-1", name: "Andy", displayName: "Andy Hite", email: "andy@example.com" }] } } }),
+        );
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_test";
+    try {
+      const prompter = new ScriptedPrompter([true]);
+      prompter.textAnswers["Your Linear account email"] = "andy@example.com";
+      const logs: string[] = [];
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.linear.operatorUserId).toBe("user-1");
+      expect(logs.some((line) => line.includes("Andy Hite"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and leaves operatorUserId unset when no Linear user matches the email", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ data: { users: { nodes: [] } } }))) as unknown as typeof fetch;
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_test";
+    try {
+      const prompter = new ScriptedPrompter([true]);
+      prompter.textAnswers["Your Linear account email"] = "nobody@example.com";
+      const logs: string[] = [];
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.linear?.operatorUserId).toBeUndefined();
+      expect(logs.some((line) => line.includes("no Linear user found"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the operator email prompt entirely with no Linear API key configured", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_KEY;
+    try {
+      const prompter = new ScriptedPrompter([false]);
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: () => {},
+      });
+
+      expect(prompter.confirmCalls).not.toContain(
+        "Configure your Linear account email so blocked issues get assigned to you instead of left unowned?",
+      );
+    } finally {
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the GitHub App prompt without writing githubApp when declined", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    try {
+      const prompter = new ScriptedPrompter([false]);
+      await runWizard(baseOptions({}, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: () => {},
+      });
+
+      expect(prompter.confirmCalls).toContain(
+        "Configure a GitHub App so foreman-review can submit real PR reviews (approve/request changes), instead of Linear-comment-only advisory notes?",
+      );
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.githubApp).toBeUndefined();
+      expect(existsSync(join(home, ".foreman", "github-app-private-key.pem"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and writes nothing when the GitHub App credentials fail to verify", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch;
+    try {
+      const prompter = new ScriptedPrompter([true]);
+      prompter.textAnswers["GitHub App ID"] = "12345";
+      prompter.secretAnswer = "not-a-real-key";
+      const logs: string[] = [];
+      await runWizard(baseOptions({}, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      expect(logs.some((line) => line.includes("couldn't verify the App credentials"))).toBe(true);
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.githubApp).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies and writes the GitHub App id and private key file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 999, name: "Foreman Review", slug: "foreman-review" }));
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    try {
+      const prompter = new ScriptedPrompter([true]);
+      prompter.textAnswers["GitHub App ID"] = "999";
+      prompter.secretAnswer = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+      const logs: string[] = [];
+      await runWizard(baseOptions({}, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      expect(logs.some((line) => line.includes("Foreman Review"))).toBe(true);
+      const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
+      expect(config.githubApp.appId).toBe("999");
+      const keyPath = join(home, ".foreman", "github-app-private-key.pem");
+      expect(config.githubApp.privateKeyFile).toBe(keyPath);
+      expect(readFileSync(keyPath, "utf8")).toContain("BEGIN RSA PRIVATE KEY");
+    } finally {
+      globalThis.fetch = originalFetch;
       rmSync(home, { recursive: true, force: true });
       rmSync(checkoutRoot, { recursive: true, force: true });
     }

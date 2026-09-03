@@ -27,18 +27,17 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { nodeRunner } from "@foreman/core";
-import { runRepo, runTeam } from "@foreman/loop";
+import { runBuild, runPlan, runReconcile } from "@foreman/loop";
 import { resolveCheckoutRoot } from "./checkout.ts";
 import { runDeinit } from "./deinit.ts";
-import { runDoctor } from "./doctor.ts";
-import { processRunner } from "./exec.ts";
+import { openUrl, processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
 import { runUpdate } from "./update.ts";
+import { runVerify } from "./verify.ts";
 import { runWizard } from "./wizard.ts";
 
-type Command = "setup" | "init" | "deinit" | "doctor" | "update";
-
+type Command = "setup" | "init" | "deinit" | "verify" | "update";
 interface ParsedArgs {
   command: Command | null;
   yes: boolean;
@@ -70,13 +69,14 @@ Commands:
   setup                    Per-machine install: tool preflight, Linear credential, the global plugin link.
   init                     Per-repo: register this directory and activate the omp plugin for it.
   deinit                   Per-repo: deactivate the omp plugin here and drop the registry entry.
-  doctor                   Verify the install — machine, plugin link, and every registered repo.
+  verify                   Verify the install — machine, plugin link, and every registered repo.
   update                   Pull Foreman's source, rebuild, and repair any drift.
-  repo                     Run the per-repo supervisor; \`foreman repo --help\` for its flags.
-  team                     Run the team-level triage process; \`foreman team --help\` for its flags.
+  plan                     Run the plan loop (triage/plan/refine); \`foreman plan --help\` for its flags.
+  build                    Run the build loop (implement/review/merge); \`foreman build --help\` for its flags.
+  reconcile                Repair Linear drift from the invariant table; \`foreman reconcile --help\` for its flags.
 
-Run \`setup\` once per machine, \`init\` once per repo, then \`repo\` per repo.
-The plugin is active only in repos that ran \`init\`; \`doctor\` proves it.
+Run \`setup\` once per machine, \`init\` once per repo, then \`plan\`/\`build\` per repo.
+The plugin is active only in repos that ran \`init\`; \`verify\` proves it.
 
 Options for setup:
   --link                     Dev mode: run the foreman CLI from this checkout's source (no rebuild to see changes).
@@ -95,7 +95,7 @@ Options for deinit:
   --path <dir>               Directory to deactivate (default: the current directory).
   --keep-registry            Deactivate the plugin but leave the \`repos\` entry in place.
 
-Options for doctor:
+Options for verify:
   --fix                      Repair what can be repaired instead of only reporting it.
   --checkout <path>          Path to the foreman checkout, for repairing the global link.
 
@@ -123,7 +123,7 @@ function validateCommandFlags(parsed: ParsedArgs): void {
 
   const flags: { flag: string; supplied: boolean; commands: readonly Command[] }[] = [
     { flag: "--link", supplied: parsed.link, commands: ["setup"] },
-    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "doctor", "update"] },
+    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "verify", "update"] },
     { flag: "--path", supplied: parsed.path !== null, commands: ["init", "deinit"] },
     { flag: "--initiative", supplied: parsed.initiatives.length > 0, commands: ["init"] },
     { flag: "--alias", supplied: parsed.alias !== null, commands: ["init"] },
@@ -132,7 +132,7 @@ function validateCommandFlags(parsed: ParsedArgs): void {
     { flag: "--skip-plugin", supplied: parsed.skipPlugin, commands: ["init", "update"] },
     { flag: "--skip-pull", supplied: parsed.skipPull, commands: ["update"] },
     { flag: "--keep-registry", supplied: parsed.keepRegistry, commands: ["deinit"] },
-    { flag: "--fix", supplied: parsed.fix, commands: ["doctor"] },
+    { flag: "--fix", supplied: parsed.fix, commands: ["verify"] },
   ];
 
   for (const entry of flags) {
@@ -177,7 +177,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "setup":
       case "init":
       case "deinit":
-      case "doctor":
+      case "verify":
       case "update":
         setCommand(arg);
         break;
@@ -253,16 +253,21 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
   /*
-   * `repo` and `team` each own every argument after them. Delegating before
-   * this CLI's own parser runs is what lets those processes keep their own
-   * flags (`--mode`, `--once`, `--verbose`) without this parser knowing any.
+   * `plan`, `build`, and `reconcile` each own every argument after them.
+   * Delegating before this CLI's own parser runs is what lets those
+   * processes keep their own flags (`--mode`, `--once`, `--dry-run`)
+   * without this parser knowing any.
    */
-  if (argv[0] === "repo") {
-    await runRepo(argv.slice(1));
+  if (argv[0] === "plan") {
+    await runPlan(argv.slice(1));
     return;
   }
-  if (argv[0] === "team") {
-    await runTeam(argv.slice(1));
+  if (argv[0] === "build") {
+    await runBuild(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "reconcile") {
+    await runReconcile(argv.slice(1));
     return;
   }
 
@@ -297,7 +302,7 @@ async function main(): Promise<void> {
           alias: args.alias ?? undefined,
           team: args.team ?? undefined,
         },
-        { prompter, log, git: nodeRunner },
+        { prompter, log, git: nodeRunner, openUrl: nonInteractive ? undefined : openUrl },
       );
       return;
     }
@@ -311,12 +316,12 @@ async function main(): Promise<void> {
     }
 
     /*
-     * `doctor` takes the checkout path unresolved: a machine whose checkout
+     * `verify` takes the checkout path unresolved: a machine whose checkout
      * has moved is precisely the drift it exists to diagnose, so failing to
      * resolve it here would turn the diagnosis into a crash.
      */
-    if (args.command === "doctor") {
-      process.exitCode = await runDoctor(
+    if (args.command === "verify") {
+      process.exitCode = await runVerify(
         { home, checkoutRoot: args.checkoutPath, fix: args.fix },
         { runner: processRunner, log },
       );

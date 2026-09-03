@@ -86,103 +86,40 @@ export const LoopModeSchema = Type.Union([Type.Literal("confirm"), Type.Literal(
   default: "confirm",
 });
 
-const LoopModeValueSchema = Type.Union([Type.Literal("confirm"), Type.Literal("yolo")]);
-
-/** Optional per-worker overrides; omitted workers inherit `loop.mode`. */
-export const WorkerModesSchema = Type.Partial(
-  Type.Object(
-    {
-      plan: LoopModeValueSchema,
-      refine: LoopModeValueSchema,
-      implement: LoopModeValueSchema,
-      review: LoopModeValueSchema,
-    },
-    { additionalProperties: false },
-  ),
-  { additionalProperties: false, default: {} },
-);
-
 export const LoopSettingsSchema = Type.Object(
   {
-    /** Global cap on concurrent agents. This is the one that protects you (SPEC §17.6). */
-    wipGlobal: Type.Integer({ default: 3, minimum: 1 }),
-    wip: Type.Object(
-      {
-        refine: Type.Integer({ default: 2, minimum: 1 }),
-        implement: Type.Integer({ default: 3, minimum: 1 }),
-        review: Type.Integer({ default: 2, minimum: 1 }),
-        /** Planning is coarser and rarer than the other three stages — one project decomposition at a time by default. */
-        plan: Type.Integer({ default: 1, minimum: 1 }),
-      },
-      { additionalProperties: false, default: {} },
-    ),
-    /** Refine targets a buffer depth in the Ready view, not a WIP count (SPEC §17.6). */
-    readyBufferTarget: Type.Integer({ default: 5, minimum: 1 }),
-    /**
-     * Blocked-queue depth at which every worker stops dispatching (SPEC §17.7).
-     * `0` means "no new dispatches while anything is blocked" — never "off".
-     */
-    backpressureThreshold: Type.Integer({ default: 5, minimum: 0 }),
-    retryCap: Type.Integer({ default: 2, minimum: 1 }),
-    /**
-     * How long a just-dispatched record is kept by `reconcile` before its
-     * issue is required to carry `agent:running`. The dispatched session's
-     * task guard claims the lock, not the loop, so there is a real window between
-     * dispatch and the label appearing (SPEC §11).
-     */
-    claimGraceMs: Type.Integer({ default: 300_000, minimum: 0 }),
-    reviewCycleCap: Type.Integer({ default: 2, minimum: 1 }),
-    cadenceMinutes: Type.Integer({ default: 5, minimum: 1 }),
     /**
      * How much this loop may do unattended (SPEC §17.9). Defaults to
      * `confirm`, so a loop started before its operator is ready asks before
      * it acts rather than acting.
      */
     mode: LoopModeSchema,
-    /**
-     * Per-worker overrides. A missing key inherits `loop.mode`, so a single
-     * worker can be trusted ahead of the others — `{ "review": "yolo" }`
-     * lets reviews flow while everything else still asks.
-     */
-    workerModes: WorkerModesSchema,
-    /**
-     * Poll merged PRs and move issues to Done. Required when `pr.required` is
-     * false, and on by default regardless: Linear's GitHub integration only
-     * auto-transitions when a team workflow automation has been configured for it.
-     */
-    mergeDetection: Type.Boolean({ default: true }),
-    /**
-     * Remove a merged issue's worktree and close its herdr tab once
-     * merge-detect moves it to Done (SPEC §12). Skipped when the worktree
-     * still has uncommitted changes, so this never discards work.
-     */
-    cleanupMergedWorktrees: Type.Boolean({ default: true }),
+    /** Full-snapshot poll interval for `foreman plan`/`foreman build`. */
+    pollSeconds: Type.Integer({ default: 20, minimum: 5 }),
+    /** Per-loop concurrency caps for `foreman plan`/`foreman build`. */
+    concurrency: Type.Object(
+      {
+        plan: Type.Integer({ default: 1, minimum: 1 }),
+        build: Type.Integer({ default: 3, minimum: 1 }),
+      },
+      { additionalProperties: false, default: {} },
+    ),
+    /** Max inbox issues the plan loop batches into one triage dispatch. */
+    triageBatch: Type.Integer({ default: 10, minimum: 1 }),
     /** Loop lockfile and bookkeeping. `~` expands. */
     stateDir: Type.String({ default: "~/.foreman/state", minLength: 1 }),
+    /**
+     * Remove a merged issue's worktree and close its herdr tab once a
+     * `merged-not-done` reconcile fix moves it to Done (SPEC §12). Skipped
+     * when the worktree still has uncommitted changes, so this never
+     * discards work.
+     */
+    cleanupMergedWorktrees: Type.Boolean({ default: true }),
   },
   { additionalProperties: false, default: {} },
 );
 
 export type LoopSettings = Static<typeof LoopSettingsSchema>;
-
-/** The team-level intake process (SPEC §3.12). */
-export const IntakeSettingsSchema = Type.Object(
-  {
-    /** Local time-of-day window in which the daily intake batch may start. */
-    window: Type.String({ default: "06:00", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }),
-    /** Un-actioned `Low` items older than this are proposed for cancellation. */
-    staleLowDays: Type.Integer({ default: 90, minimum: 1 }),
-    /** Inbox items handed to one triage batch. */
-    batchSize: Type.Integer({ default: 20, minimum: 1 }),
-    /** Triage batches dispatched per calendar day. Raise to drain a large inbox faster. */
-    batchesPerDay: Type.Integer({ default: 1, minimum: 1 }),
-    /** IANA zone name `pastIntakeWindow` compares `window` against. Defaults to the host zone at load time. */
-    timezone: Type.String({ default: Intl.DateTimeFormat().resolvedOptions().timeZone, minLength: 1 }),
-  },
-  { additionalProperties: false, default: {} },
-);
-
-export type IntakeSettings = Static<typeof IntakeSettingsSchema>;
 
 export const LinearSettingsSchema = Type.Object(
   {
@@ -202,6 +139,19 @@ export const LinearSettingsSchema = Type.Object(
      * credential leak unless the operator said so explicitly.
      */
     allowCustomEndpoint: Type.Boolean({ default: false }),
+    /**
+     * Linear user id to assign an issue to when an agent block needs a human
+     * (SPEC §9 Case B) — puts it straight into the operator's own "My
+     * Issues" view instead of requiring a `/foreman:status` check. `null`
+     * skips assignee-based routing entirely; `foreman:blocked` and the
+     * comment still land either way. Distinct from the credential's own
+     * identity (`viewerId()`) — when Foreman authenticates as its own
+     * dedicated Linear account, this is the human account to hand blocked
+     * work back to.
+     */
+    operatorUserId: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      default: null,
+    }),
   },
   { additionalProperties: false, default: {} },
 );
@@ -229,35 +179,35 @@ export const AgentSettingsSchema = Type.Object(
       { default: "yolo" },
     ),
     herdrBin: Type.String({ default: "herdr", minLength: 1 }),
-    /**
-     * How a stage's shared orchestrator (SPEC §17.4) gets its herdr pane.
-     * `"tab"` (default) opens one tab per stage, growing sideways as more
-     * stages dispatch (SPEC §17.3's layout table). `"pane"` instead anchors
-     * everything to the tab hosting *this* process (`HERDR_TAB_ID`/
-     * `HERDR_PANE_ID`, only set when the loop itself runs inside a herdr
-     * pane): the first stage orchestrator splits that pane into a
-     * right-hand column, and every later stage splits an existing column
-     * pane downward into another row, instead of opening a new tab. The
-     * column spans the whole tab's height only when the loop's own pane is
-     * still the tab's sole occupant at that first split — herdr's pane tree
-     * has no operation to retroactively wrap panes that already exist
-     * beside it (verified in `docs/VERIFIED.md`). With no current herdr
-     * pane (e.g. a cron/launchd-run loop), `"pane"` falls back to `"tab"`.
-     */
-    herdrLayout: Type.Union([Type.Literal("tab"), Type.Literal("pane")], { default: "tab" }),
-    /**
-     * Batches a stage's shared orchestrator serves before the loop recycles
-     * its session (SPEC §17.4). The orchestrator carries no state between
-     * batches, so this only bounds context growth — and even at 20 it still
-     * avoids all but a twentieth of the session boots the one-agent-per-
-     * dispatch model paid for.
-     */
-    orchestratorMaxBatches: Type.Integer({ default: 20, minimum: 1 }),
+    /** Which dispatcher `foreman plan`/`foreman build` use. `"auto"` prefers herdr when reachable, else print. */
+    dispatcher: Type.Union(
+      [Type.Literal("auto"), Type.Literal("print"), Type.Literal("herdr")],
+      { default: "auto" },
+    ),
   },
   { additionalProperties: false, default: {} },
 );
 
 export type AgentSettings = Static<typeof AgentSettingsSchema>;
+
+/**
+ * Credentials for the GitHub App `foreman-review` submits real PR reviews
+ * under (SPEC §7.4). `null`/`null` (the default) leaves reviews
+ * Linear-comment-only, exactly as before this existed — both fields must be
+ * set together, checked by `resolveGitHubAppCredentials`, since a `gh`-only
+ * setup has no App identity to distinguish from whoever opens the PR.
+ */
+export const GitHubAppSettingsSchema = Type.Object(
+  {
+    /** The App's numeric id, as a string (SPEC §7.4's `iss` claim). */
+    appId: Type.Union([Type.String({ minLength: 1 }), Type.Null()], { default: null }),
+    /** File holding the App's PEM private key, used to sign the JWT that mints installation tokens. */
+    privateKeyFile: Type.Union([Type.String({ minLength: 1 }), Type.Null()], { default: null }),
+  },
+  { additionalProperties: false, default: {} },
+);
+
+export type GitHubAppSettings = Static<typeof GitHubAppSettingsSchema>;
 
 /**
  * One initiative bound to a repo: a bare initiative ID, or an ID plus the
@@ -318,15 +268,14 @@ export type RepoEntry = Static<typeof RepoEntrySchema>;
 export const GlobalConfigSchema = Type.Object(
   {
     loop: LoopSettingsSchema,
-    intake: IntakeSettingsSchema,
     linear: LinearSettingsSchema,
+    githubApp: GitHubAppSettingsSchema,
     agent: AgentSettingsSchema,
     /** Inherited by every `repos` entry. */
     repoDefaults: RepoSettingsSchema,
     /**
-     * Alias → entry. The single table binding repos to teams and initiatives:
-     * instances resolve their own scope from it by cwd, intake inverts it in
-     * memory for initiative→repo (SPEC §3.10, §3.11, §3.12).
+     * Alias → entry. The single table binding repos to teams and initiatives —
+     * instances resolve their own scope from it by cwd (SPEC §3.10, §3.11).
      */
     repos: Type.Record(Type.String({ minLength: 1 }), RepoEntrySchema, {
       default: {},

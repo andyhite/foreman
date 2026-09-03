@@ -16,9 +16,7 @@ description: Use when foreman-refine turns one prioritized Backlog or Todo issue
 
 ## Preconditions
 
-Priority ≠ `None`. A `legacy` issue is in scope in either Backlog or Todo;
-the label means "unrefined," and refining it re-enters the funnel. The
-extension strips `legacy` when applying your result.
+Priority ≠ `None`. Issue is in scope in either Backlog or Todo.
 
 ## Required reads
 
@@ -36,7 +34,7 @@ extension strips `legacy` when applying your result.
 5. Affected files and modules via `lsp`, not guesswork.
 6. Estimate on the scale in `description-template.md`. 5 → decompose:
    `subIssues[]` with per-sub-issue estimates; parent becomes a tracking
-   issue without `agent:ready`. 8 → not an issue: recommend a project or a
+   issue and stays unlabeled. 8 → not an issue: recommend a project or a
    spike instead of estimating.
 7. Genuine unknown blocks estimation → `spikeCreated` (`type:spike`, native
    `blocks` relation to this issue) per `foreman-spike`.
@@ -45,8 +43,8 @@ extension strips `legacy` when applying your result.
 ## Output
 
 `RefineResult` (`schemas/refine-result.json`). The extension writes the
-description, creates sub-issues and the spike, applies `agent:ready`, moves
-the issue to Todo, strips `legacy`.
+description, creates sub-issues and the spike, and moves the issue to Todo
+when ready for implementation.
 
 ## Stop conditions
 

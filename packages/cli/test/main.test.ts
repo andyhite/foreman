@@ -14,7 +14,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["setup"]).command).toBe("setup");
     expect(parseArgs(["init"]).command).toBe("init");
     expect(parseArgs(["deinit"]).command).toBe("deinit");
-    expect(parseArgs(["doctor"]).command).toBe("doctor");
+    expect(parseArgs(["verify"]).command).toBe("verify");
     expect(parseArgs(["update"]).command).toBe("update");
     expect(parseArgs([]).command).toBeNull();
   });
@@ -44,7 +44,7 @@ describe("parseArgs", () => {
 
   it("rejects setup-only flags on other commands", () => {
     expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
-    expect(() => parseArgs(["doctor", "--link"])).toThrow(/--link applies to `foreman setup`/);
+    expect(() => parseArgs(["verify", "--link"])).toThrow(/--link applies to `foreman setup`/);
   });
 
   it("rejects init-only flags on setup", () => {
@@ -58,12 +58,12 @@ describe("parseArgs", () => {
    * The flags several commands share are the ones most likely to be misaimed,
    * so the error has to name every owner rather than just the first.
    */
-  it("accepts --checkout on setup, doctor, and update, and rejects it elsewhere", () => {
+  it("accepts --checkout on setup, verify, and update, and rejects it elsewhere", () => {
     expect(parseArgs(["setup", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
-    expect(parseArgs(["doctor", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
+    expect(parseArgs(["verify", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
     expect(parseArgs(["update", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
     expect(() => parseArgs(["init", "--checkout", "/tmp/c"])).toThrow(
-      /--checkout applies to `foreman setup` or `foreman doctor` or `foreman update`/,
+      /--checkout applies to `foreman setup` or `foreman verify` or `foreman update`/,
     );
   });
 
@@ -82,10 +82,10 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["init", "--keep-registry"])).toThrow(/--keep-registry applies to `foreman deinit`/);
   });
 
-  it("parses --fix for doctor only", () => {
-    expect(parseArgs(["doctor"]).fix).toBe(false);
-    expect(parseArgs(["doctor", "--fix"]).fix).toBe(true);
-    expect(() => parseArgs(["update", "--fix"])).toThrow(/--fix applies to `foreman doctor`/);
+  it("parses --fix for verify only", () => {
+    expect(parseArgs(["verify"]).fix).toBe(false);
+    expect(parseArgs(["verify", "--fix"]).fix).toBe(true);
+    expect(() => parseArgs(["update", "--fix"])).toThrow(/--fix applies to `foreman verify`/);
   });
 
   it("parses --skip-pull for update only", () => {
@@ -145,29 +145,30 @@ describe("parseArgs", () => {
   });
 });
 
-describe("foreman repo delegation", () => {
+describe("foreman plan/build stubs and reconcile delegation", () => {
   /*
-   * The reason `main` hands `repo` its argv before calling `parseArgs`: this
-   * parser knows neither the subcommand nor the supervisor's flags, and
-   * teaching it both vocabularies would put every supervisor flag in two places.
+   * The reason `main` hands `reconcile` its argv before calling `parseArgs`:
+   * this parser knows neither the subcommand nor the loop's own flags, and
+   * teaching it both vocabularies would put every loop flag in two places.
    */
-  it("cannot parse the subcommand or the supervisor's flags", () => {
-    expect(() => parseArgs(["repo"])).toThrow(/Unknown command "repo"/);
-    expect(() => parseArgs(["--once"])).toThrow(/Unrecognized argument: --once/);
+  it("cannot parse the subcommand or the reconcile loop's flags", () => {
+    expect(() => parseArgs(["reconcile"])).toThrow(/Unknown command "reconcile"/);
+    expect(() => parseArgs(["--dry-run"])).toThrow(/Unrecognized argument: --dry-run/);
     expect(() => parseArgs(["--mode", "yolo"])).toThrow(/Unrecognized argument: --mode/);
   });
 
-  it("routes `repo --help` to the supervisor's help, not the CLI's", async () => {
-    const proc = Bun.spawn(["bun", "run", entrypoint(), "repo", "--help"], {
-      cwd: checkoutRoot(),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stdout = await new Response(proc.stdout).text();
-    expect(await proc.exited).toBe(0);
-    expect(stdout).toContain("foreman repo — Foreman per-repo supervisor");
-    expect(stdout).toContain("--mode <m>");
-    expect(stdout).not.toContain("Interactive installer");
+  it("`plan` and `build` delegate to the loop entrypoints — their own `--help` proves the real loop parser ran, not this CLI's", async () => {
+    for (const command of ["plan", "build"]) {
+      const proc = Bun.spawn(["bun", "run", entrypoint(), command, "--help"], {
+        cwd: checkoutRoot(),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = await new Response(proc.stdout).text();
+      expect(await proc.exited).toBe(0);
+      expect(stdout).toContain(`foreman ${command}`);
+      expect(stdout).toContain("--once");
+    }
   });
 
   it("still prints the CLI's own help with no arguments", async () => {
@@ -180,6 +181,6 @@ describe("foreman repo delegation", () => {
     expect(await proc.exited).toBe(0);
     expect(stdout).toContain("Usage: foreman <command>");
     expect(stdout).toContain("deinit");
-    expect(stdout).toContain("doctor");
+    expect(stdout).toContain("verify");
   });
 });

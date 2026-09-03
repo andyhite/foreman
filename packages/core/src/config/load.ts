@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import type { GitHubAppCredentials } from "../github/app-auth.ts";
 import { Value } from "../typebox.ts";
 import {
   type GlobalConfig,
@@ -109,46 +110,6 @@ function assertRepoAliasesValid(config: GlobalConfig, describeFor: string): void
   }
 }
 
-/** Rejects `loop.mergeDetection: false` when any resolved repo entry has `pr.required: false` (SPEC §3.10): with no PR and no merge detection there is no path to Done at all. */
-function assertMergeDetectionReachable(config: GlobalConfig, describeFor: string): void {
-  if (config.loop.mergeDetection) return;
-  const problems: string[] = [];
-  for (const alias of Object.keys(config.repos)) {
-    const entry = config.repos[alias]!;
-    const merged = mergeRepoSettings(config.repoDefaults, entry);
-    if (!merged.pr.required) {
-      problems.push(
-        `repos.${alias} has pr.required=false with loop.mergeDetection=false; there would be no path to Done`,
-      );
-    }
-  }
-  if (problems.length > 0) {
-    throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
-  }
-}
-
-/** Rejects an `intake.timezone` that is not a valid IANA time zone name — otherwise the failure surfaces as `RangeError: Invalid time zone` inside every intake tick instead of at load time. */
-function assertIntakeTimezoneValid(config: GlobalConfig, describeFor: string): void {
-  try {
-    new Intl.DateTimeFormat("en-CA", { timeZone: config.intake.timezone });
-  } catch {
-    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, [
-      `intake.timezone "${config.intake.timezone}" is not an IANA time zone name`,
-    ]);
-  }
-}
-
-/** Rejects an `intake.window` that is not `HH:MM` — otherwise `pastIntakeWindow` compares NaN and skips intake forever, silently. */
-function assertIntakeWindowValid(config: GlobalConfig, describeFor: string): void {
-  const match = /^(\d{2}):(\d{2})$/.exec(config.intake.window);
-  const hour = match ? Number(match[1]) : NaN;
-  const minute = match ? Number(match[2]) : NaN;
-  if (!match || hour > 23 || minute > 59) {
-    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, [
-      `intake.window must be "HH:MM" (00:00–23:59), got ${JSON.stringify(config.intake.window)}`,
-    ]);
-  }
-}
 
 /** `~` expands to `home` (default `os.homedir()`); any other path is returned unchanged. */
 export function expandHome(p: string, home: string = homedir()): string {
@@ -201,9 +162,6 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
   const config = defaulted as GlobalConfig;
   assertRepoAliasesValid(config, describeFor);
   assertInitiativesUnique(config, describeFor);
-  assertMergeDetectionReachable(config, describeFor);
-  assertIntakeTimezoneValid(config, describeFor);
-  assertIntakeWindowValid(config, describeFor);
   return config;
 }
 
@@ -256,8 +214,7 @@ function mergeRepoSettings(base: RepoSettings, override: RepoSettingsOverride): 
 
 /**
  * Every initiative ID bound to `entry`, discarding the optional path hints.
- * Exported because it is the instance's scope set (SPEC §3.11) and intake's
- * index key (SPEC §3.12), and both must read bindings the same way.
+ * Exported because it is the instance's scope set (SPEC §3.11).
  */
 export function boundInitiativeIds(entry: RepoEntry): string[] {
   return entry.initiatives.map((binding) => (typeof binding === "string" ? binding : binding.id));
@@ -316,9 +273,9 @@ export function entryForCwd(config: GlobalConfig, cwd: string, home?: string): R
 }
 
 /**
- * Inverts the registry into initiative ID → alias (SPEC §3.12). Intake is
- * team-level and needs repos for repro and context reads; this is the whole of
- * that lookup — no filesystem scanning, no refresh interval.
+ * Inverts the registry into initiative ID → alias: the reverse lookup a
+ * consumer needs to find which repo owns a given initiative, with no
+ * filesystem scanning and no refresh interval.
  */
 export function initiativeIndex(config: GlobalConfig): Record<string, string> {
   const index: Record<string, string> = {};
@@ -377,4 +334,31 @@ export function linearEnvNames(
 /** Lock TTL is `2 × maxRuntimeMs + lockTtlMarginMs` (SPEC §11). */
 export function lockTtlMs(config: GlobalConfig): number {
   return 2 * config.agent.maxRuntimeMs + config.agent.lockTtlMarginMs;
+}
+
+/**
+ * Resolves configured GitHub App credentials (SPEC §7.4): `githubApp.appId`
+ * and `githubApp.privateKeyFile` must be set together, or `null` is
+ * returned — the unconfigured default, which leaves `foreman-review`
+ * PR reviews Linear-comment-only exactly as before this existed. Setting
+ * one without the other, or pointing at an unreadable key file, is a
+ * mistake worth surfacing rather than silently ignoring.
+ */
+export function resolveGitHubAppCredentials(config: GlobalConfig, home?: string): GitHubAppCredentials | null {
+  const { appId, privateKeyFile } = config.githubApp;
+  if (appId === null && privateKeyFile === null) return null;
+  if (appId === null || privateKeyFile === null) {
+    throw new ConfigError("Incomplete githubApp config", [
+      `githubApp.appId is ${appId ?? "unset"}`,
+      `githubApp.privateKeyFile is ${privateKeyFile ?? "unset"}`,
+      "both must be set together, or both left unset to disable App-authenticated reviews",
+    ]);
+  }
+  const path = expandHome(privateKeyFile, home);
+  if (!existsSync(path)) {
+    throw new ConfigError(`GitHub App private key not found at ${path}`, [
+      `githubApp.privateKeyFile is ${privateKeyFile}`,
+    ]);
+  }
+  return { appId, privateKey: readFileSync(path, "utf8") };
 }

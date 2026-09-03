@@ -54,11 +54,8 @@ export function renderLockComment(record: LockRecord): string {
   return encodeMarker(MARKER_KIND.lock, record, human);
 }
 
-export function readLockComment(
-  comments: readonly MarkerSource[],
-  authoredBy?: string,
-): FoundMarker<LockRecord> | null {
-  return latestMarker<LockRecord>(MARKER_KIND.lock, comments, authoredBy !== undefined ? { authoredBy } : undefined);
+export function readLockComment(comments: readonly MarkerSource[]): FoundMarker<LockRecord> | null {
+  return latestMarker<LockRecord>(MARKER_KIND.lock, comments);
 }
 
 export interface LockState {

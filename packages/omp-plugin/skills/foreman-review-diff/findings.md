@@ -4,9 +4,10 @@
 
 MUST change before merge. Any outstanding `blocking` fails the review gate;
 zero must remain. Each costs one of the two review→fix cycles before the
-issue converts to `blocked:needs-decision`. Reserve for: a failed acceptance
-criterion, a Definition of Done violation, a correctness bug, a test that
-would not catch the regression it claims to cover.
+issue gains `foreman:blocked` with a needs-decision block record. Reserve
+for: a failed acceptance criterion, a Definition of Done violation, a
+correctness bug, a test that would not catch the regression it claims to
+cover.
 
 ## `should-fix`
 

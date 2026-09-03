@@ -1,5 +1,5 @@
 /**
- * `/foreman-status` operator console (SPEC §3.4, §17.4). Not a Linear
+ * `/foreman:status` operator console (SPEC §3.4, §17.4). Not a Linear
  * artifact — this renders in-chat, so it stays terminal-readable rather than
  * matching the Markdown conventions of the other renderers.
  */
@@ -8,11 +8,10 @@ import { stripControlChars } from "@foreman/core";
 
 export interface BlockedEntry {
   issueId: string;
-  type: string;
-  question: string;
+  excerpt: string;
 }
 
-export interface LockEntry {
+export interface RunningEntry {
   issueId: string;
   agent: string;
   dispatchId: string;
@@ -20,40 +19,9 @@ export interface LockEntry {
   pastTtl: boolean;
 }
 
-export interface ProposalsAwaiting {
-  count: number;
-  issueIds: string[];
-}
-
-export interface AgentRegistryEntry {
-  agent: string;
-  state: "running" | "idle" | "parked" | "aborted";
-  issueId: string | null;
-}
-
-export interface WorkerLoopState {
-  worker: string;
-  lastRunAt: string | null;
-  dispatchCount: number;
-}
-
-export interface LoopState {
-  mode: string;
-  workers: WorkerLoopState[];
-}
-
-export interface BackpressureState {
-  tripped: boolean;
-  reason: string | null;
-}
-
 export interface StatusState {
   blocked: BlockedEntry[];
-  locks: LockEntry[];
-  proposalsAwaiting: ProposalsAwaiting;
-  agents: AgentRegistryEntry[];
-  loop: LoopState;
-  backpressure: BackpressureState;
+  running: RunningEntry[];
 }
 
 function formatAge(ageMs: number): string {
@@ -64,76 +32,34 @@ function formatAge(ageMs: number): string {
 }
 
 /**
- * SPEC §3.4: blocked queue, in-flight locks, proposals awaiting approval,
- * live agent registry, loop state. Blocked queue is first — SPEC §9 makes it
- * where the operator's attention goes, drained once or twice daily.
+ * Two sections only, per the `foreman:` vocabulary: Blocked (`foreman:blocked`,
+ * with the latest `block` marker excerpt) and Running (`foreman:running`,
+ * with `lockState`).
  */
 export function renderStatusConsole(state: StatusState): string {
   const sections: string[] = [];
 
-  const pastTtlCount = state.locks.filter((lock) => lock.pastTtl).length;
-  sections.push(
-    `**${state.blocked.length} blocked · ${state.proposalsAwaiting.count} proposals awaiting · ` +
-      `${state.locks.length} locks (${pastTtlCount} past TTL) · mode ${state.loop.mode}**`,
-  );
+  const pastTtlCount = state.running.filter((entry) => entry.pastTtl).length;
+  sections.push(`**${state.blocked.length} blocked · ${state.running.length} running (${pastTtlCount} past TTL)**`);
 
-  sections.push("## Blocked (human)");
+  sections.push("## Blocked");
   sections.push(
     state.blocked.length > 0
-      ? state.blocked
-          .map((entry) => `- ${entry.issueId} [${entry.type}] ${stripControlChars(entry.question)}`)
-          .join("\n")
+      ? state.blocked.map((entry) => `- ${entry.issueId}: ${stripControlChars(entry.excerpt)}`).join("\n")
       : "_none — nothing waiting on the operator_",
   );
 
-  sections.push("## Locks");
+  sections.push("## Running");
   sections.push(
-    state.locks.length > 0
-      ? state.locks
+    state.running.length > 0
+      ? state.running
           .map(
-            (lock) =>
-              `- ${lock.pastTtl ? "⚠ " : ""}${lock.issueId} held by ${lock.agent} (dispatch ${lock.dispatchId}, ` +
-              `age ${formatAge(lock.ageMs)}${lock.pastTtl ? ", **PAST TTL**" : ""})`,
+            (entry) =>
+              `- ${entry.pastTtl ? "⚠ " : ""}${entry.issueId} held by ${entry.agent} (dispatch ${entry.dispatchId}, ` +
+              `age ${formatAge(entry.ageMs)}${entry.pastTtl ? ", **PAST TTL**" : ""})`,
           )
           .join("\n")
       : "_none_",
-  );
-
-  sections.push("## Proposals awaiting approval");
-  sections.push(
-    state.proposalsAwaiting.count > 0
-      ? `${state.proposalsAwaiting.count} pending: ${state.proposalsAwaiting.issueIds.join(", ")}`
-      : "_none_",
-  );
-
-  sections.push("## Agent registry");
-  sections.push(
-    state.agents.length > 0
-      ? state.agents
-          .map((entry) => `- ${entry.agent}: ${entry.state}${entry.issueId ? ` (${entry.issueId})` : ""}`)
-          .join("\n")
-      : "_none_",
-  );
-
-  sections.push("## Loop");
-  const workerLines =
-    state.loop.workers.length > 0
-      ? state.loop.workers
-          .map(
-            (worker) =>
-              `- ${worker.worker}: last run ${worker.lastRunAt ?? "never"}, ` +
-              `${worker.dispatchCount} dispatched`,
-          )
-          .join("\n")
-      : "_none_";
-  const modeLine = `Mode: ${state.loop.mode}${state.loop.mode === "confirm" ? " _(every write needs approval)_" : ""}`;
-  sections.push(`${modeLine}\n${workerLines}`);
-
-  sections.push("## Backpressure");
-  sections.push(
-    state.backpressure.tripped
-      ? `**TRIPPED** — ${state.backpressure.reason ?? "no reason recorded"}`
-      : "clear",
   );
 
   return sections.join("\n\n");

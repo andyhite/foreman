@@ -41,7 +41,7 @@ describe("writeGlobalConfig", () => {
         join(dir, "config.json"),
         JSON.stringify({
           repos: { existing: { path: "/repo", initiatives: ["initiative-existing"] } },
-          loop: { wipGlobal: 7 },
+          loop: { pollSeconds: 7 },
         }),
         "utf8",
       );
@@ -58,7 +58,7 @@ describe("writeGlobalConfig", () => {
         existing: { path: "/repo", initiatives: ["initiative-existing"] },
         added: { path: "/repo2", initiatives: ["initiative-added"] },
       });
-      expect(written.loop.wipGlobal).toBe(7);
+      expect(written.loop.pollSeconds).toBe(7);
       expect(written.linear).toBeUndefined();
     } finally {
       rmSync(home, { recursive: true, force: true });

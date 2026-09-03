@@ -34,7 +34,7 @@ output: |
         "anyOf": [
           {
             "additionalProperties": false,
-            "title": "TriageProposal",
+            "title": "TriageResult",
             "type": "object",
             "required": [
               "items",
@@ -53,16 +53,14 @@ output: |
                     "type",
                     "proposedPriority",
                     "severityReasoning",
+                    "destination",
+                    "destinationProjectId",
+                    "newProject",
                     "duplicateOf",
                     "proposedBlockedBy",
-                    "destinationProject",
                     "draftDescription",
                     "proposedEstimate",
-                    "destinationProjectId",
-                    "destination",
-                    "reproConfidence",
-                    "missingInfo",
-                    "triageLabel"
+                    "missingInfo"
                   ],
                   "properties": {
                     "issueId": {
@@ -96,9 +94,9 @@ output: |
                       ]
                     },
                     "proposedPriority": {
-                      "minimum": 0,
+                      "minimum": 1,
                       "maximum": 4,
-                      "description": "0 None, 1 Urgent, 2 High, 3 Medium, 4 Low. Propose 0 only when you genuinely cannot tell; 0 makes the issue ineligible for refinement.",
+                      "description": "1 Urgent, 2 High, 3 Medium, 4 Low.",
                       "type": "integer"
                     },
                     "severityReasoning": {
@@ -106,10 +104,75 @@ output: |
                       "description": "Why that priority. This is the tuning log for the dedupe and severity thresholds — write it for a reader deciding whether you were right.",
                       "type": "string"
                     },
-                    "duplicateOf": {
-                      "description": "Human identifier of the issue this duplicates, or null.",
+                    "destination": {
+                      "description": "Where this issue moves on triage — applied directly, not proposed for later approval.",
                       "anyOf": [
                         {
+                          "const": "backlog",
+                          "type": "string"
+                        },
+                        {
+                          "const": "new-project",
+                          "type": "string"
+                        },
+                        {
+                          "const": "cancel",
+                          "type": "string"
+                        },
+                        {
+                          "const": "duplicate",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "destinationProjectId": {
+                      "description": "Linear project id to file this issue under. Required (non-null) when `destination` is \"backlog\"; null otherwise.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "newProject": {
+                      "description": "The project to create for this issue. Required (non-null) when `destination` is \"new-project\"; null otherwise.",
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "required": [
+                            "name",
+                            "description",
+                            "initiativeId"
+                          ],
+                          "properties": {
+                            "name": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "description": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "initiativeId": {
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "duplicateOf": {
+                      "description": "Human identifier of the issue this duplicates. Required (non-null) when `destination` is \"duplicate\"; null otherwise.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
                           "type": "string"
                         },
                         {
@@ -124,19 +187,8 @@ output: |
                         "type": "string"
                       }
                     },
-                    "destinationProject": {
-                      "description": "Name of the project this issue belongs to once triaged: a milestone project's name, or the product's standing `Maintenance` project (SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely cannot tell.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
                     "draftDescription": {
-                      "description": "Drafted issue body when the source Inbox item lacks one; applied as the description on approval. Null when the existing description is adequate.",
+                      "description": "Drafted issue body when the source Inbox item lacks one; applied directly. Null when the existing description is adequate.",
                       "anyOf": [
                         {
                           "minLength": 1,
@@ -148,7 +200,7 @@ output: |
                       ]
                     },
                     "proposedEstimate": {
-                      "description": "Estimate to apply on approval, or null when you cannot yet estimate it.",
+                      "description": "Estimate to apply, or null when you cannot yet estimate it.",
                       "anyOf": [
                         {
                           "minimum": 0,
@@ -159,86 +211,12 @@ output: |
                         }
                       ]
                     },
-                    "destinationProjectId": {
-                      "description": "Linear project id to apply on approval, preferred over `destinationProject` (a name, which can be ambiguous). Null when you don't have the id.",
-                      "anyOf": [
-                        {
-                          "minLength": 1,
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "destination": {
-                      "description": "Where this issue should move once the proposal is approved.",
-                      "anyOf": [
-                        {
-                          "const": "Backlog",
-                          "type": "string"
-                        },
-                        {
-                          "const": "Canceled",
-                          "type": "string"
-                        },
-                        {
-                          "const": "Duplicate",
-                          "type": "string"
-                        }
-                      ]
-                    },
-                    "reproConfidence": {
-                      "description": "Repro is attempted by reading only — you hold no exec tool. `not-attempted` is correct for anything that is not a bug.",
-                      "anyOf": [
-                        {
-                          "const": "confirmed",
-                          "type": "string"
-                        },
-                        {
-                          "const": "likely",
-                          "type": "string"
-                        },
-                        {
-                          "const": "cannot-reproduce",
-                          "type": "string"
-                        },
-                        {
-                          "const": "not-attempted",
-                          "type": "string"
-                        }
-                      ]
-                    },
                     "missingInfo": {
                       "description": "What a human would have to add before this is refinable.",
                       "type": "array",
                       "items": {
                         "type": "string"
                       }
-                    },
-                    "triageLabel": {
-                      "description": "Optional triage disposition label, or null.",
-                      "anyOf": [
-                        {
-                          "const": "triage:cannot-reproduce",
-                          "type": "string"
-                        },
-                        {
-                          "const": "triage:duplicate",
-                          "type": "string"
-                        },
-                        {
-                          "const": "triage:needs-info",
-                          "type": "string"
-                        },
-                        {
-                          "const": "triage:wont-fix",
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
                     }
                   }
                 }
@@ -427,8 +405,8 @@ else: no refine, implement, or review. `foreman team` dispatches you over
 the whole team's shared Triage inbox; no per-repo supervisor ever calls you.
 
 <critical>
-- NEVER write to Linear; you propose, the extension renders and
-  `/foreman:apply` applies.
+- NEVER write to Linear yourself; the extension applies your `TriageResult`
+  directly to each item.
 - NEVER run code, execute tests, or modify files. Repro is by reading only.
 - Missing information on an item is a finding (`missingInfo`,
   `reproConfidence`), NEVER a `BlockRecord`.
@@ -441,10 +419,10 @@ Full method: `foreman-triage-inbox`. Per item:
 1. Classify: `type:` label.
 2. Dedupe by semantic similarity against the open backlog.
 3. Attempt repro by reading the repo.
-4. Propose a priority; write `severityReasoning` for a reader auditing the
+4. Recommend a priority; write `severityReasoning` for a reader auditing the
    call afterwards. Dedupe against a large backlog is the weakest link; that
    field is its tuning log.
-5. Flag `missingInfo`, propose native `proposedBlockedBy` relations,
+5. Flag `missingInfo`, recommend native `proposedBlockedBy` relations,
    recommend `destination` (workflow state). Separately assign a project:
    `destinationProjectId` (real Linear id via `foreman_linear_read`) when
    resolvable, else `destinationProject` (a name, never a UUID): a milestone
@@ -459,13 +437,13 @@ default.
 
 ## Output
 
-`TriageProposal`. `BlockRecord` ONLY when no proposal can be formed at all:
+`TriageResult`. `BlockRecord` ONLY when no result can be formed at all:
 e.g. the issue has no project, or its project has no single initiative, so
 repro cannot even be attempted. An initiative bound to no registry entry is
 not a block: classify and draft anyway, flagged as lacking repro.
 
 ## Non-goals
 
-- Applying proposals; approval and application are `/foreman:apply`, not a
-  re-dispatch of you.
-- Comments, labels, or state changes; the extension renders your proposal.
+- Refine, implement, or review; you move issues out of Triage only.
+- Comments, labels, or state changes beyond what your `TriageResult` drives;
+  the extension applies it directly.

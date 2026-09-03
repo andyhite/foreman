@@ -15,11 +15,9 @@ export const TriageItem = Type.Object(
     }),
     type: TypeLabelSchema,
     proposedPriority: Type.Integer({
-      minimum: 0,
+      minimum: 1,
       maximum: 4,
-      description:
-        "0 None, 1 Urgent, 2 High, 3 Medium, 4 Low. Propose 0 only when you " +
-        "genuinely cannot tell; 0 makes the issue ineligible for refinement.",
+      description: "1 Urgent, 2 High, 3 Medium, 4 Low.",
     }),
     severityReasoning: Type.String({
       minLength: 1,
@@ -27,71 +25,58 @@ export const TriageItem = Type.Object(
         "Why that priority. This is the tuning log for the dedupe and severity " +
         "thresholds — write it for a reader deciding whether you were right.",
     }),
-    duplicateOf: Type.Union([Type.String(), Type.Null()], {
-      description: "Human identifier of the issue this duplicates, or null.",
+    destination: Type.Union(
+      [
+        Type.Literal("backlog"),
+        Type.Literal("new-project"),
+        Type.Literal("cancel"),
+        Type.Literal("duplicate"),
+      ],
+      { description: "Where this issue moves on triage — applied directly, not proposed for later approval." },
+    ),
+    destinationProjectId: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "Linear project id to file this issue under. Required (non-null) when `destination` is \"backlog\"; null otherwise.",
+    }),
+    newProject: Type.Union(
+      [
+        Type.Object(
+          {
+            name: Type.String({ minLength: 1 }),
+            description: Type.String({ minLength: 1 }),
+            initiativeId: Type.String({ minLength: 1 }),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Null(),
+      ],
+      {
+        description: "The project to create for this issue. Required (non-null) when `destination` is \"new-project\"; null otherwise.",
+      },
+    ),
+    duplicateOf: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "Human identifier of the issue this duplicates. Required (non-null) when `destination` is \"duplicate\"; null otherwise.",
     }),
     proposedBlockedBy: Type.Array(Type.String(), {
       description:
         "Human identifiers of issues that block this one. Native Linear relations, " +
         "never labels.",
     }),
-    destinationProject: Type.Union([Type.String(), Type.Null()], {
-      description:
-        "Name of the project this issue belongs to once triaged: a milestone " +
-        "project's name, or the product's standing `Maintenance` project " +
-        "(SPEC §4.0, §7.1). A name, never a UUID. Null only when you genuinely " +
-        "cannot tell.",
-    }),
     draftDescription: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
-      description: "Drafted issue body when the source Inbox item lacks one; applied as the description on approval. Null when the existing description is adequate.",
+      description: "Drafted issue body when the source Inbox item lacks one; applied directly. Null when the existing description is adequate.",
     }),
     proposedEstimate: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()], {
-      description: "Estimate to apply on approval, or null when you cannot yet estimate it.",
+      description: "Estimate to apply, or null when you cannot yet estimate it.",
     }),
-    destinationProjectId: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
-      description: "Linear project id to apply on approval, preferred over `destinationProject` (a name, which can be ambiguous). Null when you don't have the id.",
-    }),
-    destination: Type.Union(
-      [
-        Type.Literal("Backlog"),
-        Type.Literal("Canceled"),
-        Type.Literal("Duplicate"),
-      ],
-      { description: "Where this issue should move once the proposal is approved." },
-    ),
-    reproConfidence: Type.Union(
-      [
-        Type.Literal("confirmed"),
-        Type.Literal("likely"),
-        Type.Literal("cannot-reproduce"),
-        Type.Literal("not-attempted"),
-      ],
-      {
-        description:
-          "Repro is attempted by reading only — you hold no exec tool. " +
-          "`not-attempted` is correct for anything that is not a bug.",
-      },
-    ),
     missingInfo: Type.Array(Type.String(), {
       description: "What a human would have to add before this is refinable.",
     }),
-    triageLabel: Type.Union(
-      [
-        Type.Literal("triage:cannot-reproduce"),
-        Type.Literal("triage:duplicate"),
-        Type.Literal("triage:needs-info"),
-        Type.Literal("triage:wont-fix"),
-        Type.Null(),
-      ],
-      { description: "Optional triage disposition label, or null." },
-    ),
   },
   { additionalProperties: false, title: "TriageItem" },
 );
 
 export type TriageItem = Static<typeof TriageItem>;
 
-export const TriageProposal = Type.Object(
+export const TriageResult = Type.Object(
   {
     items: Type.Array(TriageItem, {
       description: "One entry per issue in the Inbox batch you processed.",
@@ -101,10 +86,10 @@ export const TriageProposal = Type.Object(
       description: "One paragraph on the batch as a whole: patterns, surprises, dedupe calls.",
     }),
   },
-  { additionalProperties: false, title: "TriageProposal" },
+  { additionalProperties: false, title: "TriageResult" },
 );
 
-export type TriageProposal = Static<typeof TriageProposal>;
+export type TriageResult = Static<typeof TriageResult>;
 
-export const TriageOutput = envelope(TriageProposal, "foreman/triage-output");
+export const TriageOutput = envelope(TriageResult, "foreman/triage-output");
 export type TriageOutput = Static<typeof TriageOutput>;

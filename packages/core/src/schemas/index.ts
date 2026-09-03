@@ -35,7 +35,7 @@ export type ForemanAgentName = keyof typeof AGENT_OUTPUT_SCHEMAS;
  * (SPEC §7 frontmatter `output:` paths).
  */
 export const SCHEMA_FILENAMES: Record<ForemanAgentName, string> = {
-  "foreman-triage": "triage-proposal.json",
+  "foreman-triage": "triage-result.json",
   "foreman-plan": "plan-result.json",
   "foreman-roadmap": "roadmap-result.json",
   "foreman-refine": "refine-result.json",

@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { AGENT_LABEL, BLOCKED_LABEL, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions } from "@foreman/core";
+import { FOREMAN_LABEL, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions } from "@foreman/core";
 import type {
-  AgentReport,
   BlockRecord,
   CreateIssueInput,
   Issue,
@@ -45,7 +44,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: STATE_TODO,
-    labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
+    labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -90,6 +89,9 @@ class FakeLinear implements LinearWriter {
   }
   async viewerId(): Promise<string> {
     return "bot-1";
+  }
+  async userByEmail(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async project() {
     return this.projectRecord;
@@ -231,24 +233,24 @@ describe("blockedOutcome — human block targets the locked issue", () => {
     if (outcome.kind !== "blocked") throw new Error("unreachable");
     expect(outcome.issueId).toBe("ENG-1");
 
-    await applyBoundResult(deps, "foreman-implement", outcome, "ENG-1", "foreman-implement-ENG-1-20260101T000000Z-abc123", null, () => {});
+    await applyBoundResult(deps, "foreman-implement", outcome, "ENG-1", null, () => {});
 
     const updatedIssue = await linear.issue("ENG-1");
-    expect(updatedIssue?.labels.some((entry) => entry.name === BLOCKED_LABEL.needsInput)).toBe(true);
-    // One comment for the block itself, one for the applied-dispatch marker.
-    expect(linear.commentCalls.length).toBe(2);
+    expect(updatedIssue?.labels.some((entry) => entry.name === FOREMAN_LABEL.blocked)).toBe(true);
+    // One comment for the block itself; no dispatch-applied marker anymore.
+    expect(linear.commentCalls.length).toBe(1);
     // The lock is released as part of the human-block path.
-    expect(updatedIssue?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+    expect(updatedIssue?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
   });
 });
 
 describe("applyBoundResult — cross-issue rejection restores previousStateId", () => {
-  it("removes agent:running and restores previousStateId in the same updateIssue call", async () => {
+  it("removes foreman:running and restores previousStateId in the same updateIssue call", async () => {
     const lockedIssue = makeIssue({
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_IN_PROGRESS,
-      labels: [label(AGENT_LABEL.running)],
+      labels: [label(FOREMAN_LABEL.running)],
     });
     const otherIssue = makeIssue({ id: "issue-2", identifier: "ENG-9", title: "Someone else's issue", labels: [] });
     const linear = new FakeLinear([lockedIssue, otherIssue]);
@@ -257,30 +259,22 @@ describe("applyBoundResult — cross-issue rejection restores previousStateId", 
     const result = makeRefineResult({ issueId: "ENG-9" });
     const outcome: AgentOutcome = { kind: "result", agent: "foreman-refine", result };
 
-    await applyBoundResult(
-      deps,
-      "foreman-refine",
-      outcome,
-      "ENG-1",
-      "foreman-refine-ENG-1-20260101T000000Z-abc123",
-      STATE_TODO.id,
-      () => {},
-    );
+    await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", STATE_TODO.id, () => {});
 
     const lockedUpdateCalls = linear.updateCalls.filter((call) => call.id === lockedIssue.id);
     expect(lockedUpdateCalls).toHaveLength(1);
-    expect(lockedUpdateCalls[0]?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
+    expect(lockedUpdateCalls[0]?.input.removedLabelIds).toContain(label(FOREMAN_LABEL.running).id);
     expect(lockedUpdateCalls[0]?.input.stateId).toBe(STATE_TODO.id);
 
     const updatedLocked = await linear.issue("ENG-1");
     expect(updatedLocked?.state.id).toBe(STATE_TODO.id);
-    expect(updatedLocked?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+    expect(updatedLocked?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
   });
 });
 
 describe("applyBoundResult — rejects a result naming a different issue than the dispatch locked", () => {
   it("does not mutate either issue, comments on the locked issue, and releases its lock", async () => {
-    const lockedIssue = makeIssue({ id: "issue-1", identifier: "ENG-1", labels: [label(AGENT_LABEL.running)] });
+    const lockedIssue = makeIssue({ id: "issue-1", identifier: "ENG-1", labels: [label(FOREMAN_LABEL.running)] });
     const otherIssue = makeIssue({ id: "issue-2", identifier: "ENG-9", title: "Someone else's issue", labels: [] });
     const linear = new FakeLinear([lockedIssue, otherIssue]);
     const deps = makeDeps(linear);
@@ -294,7 +288,6 @@ describe("applyBoundResult — rejects a result naming a different issue than th
       "foreman-refine",
       outcome,
       "ENG-1",
-      "foreman-refine-ENG-1-20260101T000000Z-abc123",
       null,
       (message: string, level: string) => notifications.push({ message, level }),
     );
@@ -308,7 +301,7 @@ describe("applyBoundResult — rejects a result naming a different issue than th
     // The locked issue's `agent:running` label was removed (lock released)
     // and it received the rejection comment; nothing else changed.
     const updatedLocked = await linear.issue("ENG-1");
-    expect(updatedLocked?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+    expect(updatedLocked?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
     expect(linear.commentCalls).toEqual([
       {
         issueId: "ENG-1",
@@ -331,13 +324,13 @@ describe("applyBoundResult — rejects a result naming a different issue than th
     const result = makeRefineResult({ issueId: "ENG-1", readyForImplementation: false });
     const outcome: AgentOutcome = { kind: "result", agent: "foreman-refine", result };
 
-    await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", "foreman-refine-ENG-1-20260101T000000Z-abc123", null, () => {});
+    await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", null, () => {});
 
     const updated = await linear.issue("ENG-1");
-    expect(updated?.labels.some((entry) => entry.name === "agent:running")).toBe(false);
+    expect(updated?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
     expect(linear.updateCalls[0]?.input.description).toContain("Body.");
-    // `markApplied` writes the dispatch-applied marker comment.
-    expect(linear.commentCalls.length).toBe(1);
+    // No dispatch-applied marker comment anymore.
+    expect(linear.commentCalls.length).toBe(0);
   });
 });
 
@@ -347,7 +340,7 @@ describe("handleCaptured — an invalid result restores the issue's pre-dispatch
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_IN_PROGRESS,
-      labels: [label(AGENT_LABEL.running)],
+      labels: [label(FOREMAN_LABEL.running)],
     });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
@@ -369,14 +362,14 @@ describe("handleCaptured — an invalid result restores the issue's pre-dispatch
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.state.id).toBe(STATE_TODO.id);
-    expect(updated?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+    expect(updated?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
     expect(notifications).toEqual([
       { message: expect.stringContaining("Foreman rejected foreman-implement's invalid result"), level: "error" },
     ]);
   });
 
   it("leaves state untouched for a refine dispatch, which never moves state (previousStateId null is a no-op)", async () => {
-    const issue = makeIssue({ id: "issue-1", identifier: "ENG-1", state: STATE_TODO, labels: [label(AGENT_LABEL.running)] });
+    const issue = makeIssue({ id: "issue-1", identifier: "ENG-1", state: STATE_TODO, labels: [label(FOREMAN_LABEL.running)] });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
 
@@ -393,7 +386,7 @@ describe("handleCaptured — an invalid result restores the issue's pre-dispatch
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.state.id).toBe(STATE_TODO.id);
-    expect(updated?.labels.some((entry) => entry.name === AGENT_LABEL.running)).toBe(false);
+    expect(updated?.labels.some((entry) => entry.name === FOREMAN_LABEL.running)).toBe(false);
   });
 });
 
@@ -403,7 +396,7 @@ describe("handleCaptured — appliedDispatchIds is not poisoned by a throwing ap
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_IN_PROGRESS,
-      labels: [label(AGENT_LABEL.running)],
+      labels: [label(FOREMAN_LABEL.running)],
     });
     const linear = new FakeLinear([issue]);
     let commentCallCount = 0;
@@ -445,7 +438,7 @@ describe("handleCaptured — concurrent deliveries dedupe in-process", () => {
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_TODO,
-      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
+      labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)],
     });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
@@ -552,7 +545,6 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     expect(captured[0]?.dispatchId).toBe(DISPATCH_ID);
 
     const notices: string[] = [];
-    const reports: AgentReport[] = [];
     await handleCaptured(
       captured[0]!.dispatchId,
       captured[0]!.agent,
@@ -561,11 +553,8 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.issueId,
       captured[0]!.previousStateId,
       (message, level) => notices.push(`${level}: ${message}`),
-      makeDeps(linear, { entry: { team: "ENG" } }),
+      makeDeps(linear, { entry: { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" } }),
       { wasApplied: async () => false },
-      async (report) => {
-        reports.push(report);
-      },
     );
 
     expect(notices).toEqual([]);
@@ -576,11 +565,6 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     // Eight planned issues landed there once, which is what this asserts away.
     expect(linear.createIssueCalls.map((call) => call.stateId)).toEqual(TITLES.map(() => STATE_BACKLOG.id));
     expect(linear.projectStatusCalls).toEqual([{ projectId: PROJECT_ID, type: "planned" }]);
-
-    expect(reports).toHaveLength(1);
-    expect(reports[0]?.status).toBe("applied");
-    expect(reports[0]?.subject).toBe("App settings");
-    expect(reports[0]?.created.map((entity) => entity.title)).toEqual(TITLES);
   });
 
   it("stores a description the parser can read back — one template, not one nested in another", async () => {
@@ -597,7 +581,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.issueId,
       captured[0]!.previousStateId,
       () => {},
-      makeDeps(linear, { entry: { team: "ENG" } }),
+      makeDeps(linear, { entry: { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" } }),
       { wasApplied: async () => false },
     );
 

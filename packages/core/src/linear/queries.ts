@@ -166,6 +166,15 @@ export const TEAMS_QUERY = `
   }
 `;
 
+/** Resolves the setup wizard's operator email prompt to a Linear user id (`UserFilter.email` is a `StringComparator`, same shape `assignee: { email: { eq } }` uses on issue filters). */
+export const USER_BY_EMAIL_QUERY = `
+  query UserByEmail($email: String!) {
+    users(filter: { email: { eq: $email } }, first: 1) {
+      nodes { id name displayName email }
+    }
+  }
+`;
+
 export const PROJECTS_QUERY = `
   query Projects($after: String) {
     projects(first: 250, after: $after) {

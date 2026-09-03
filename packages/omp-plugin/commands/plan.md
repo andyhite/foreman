@@ -33,5 +33,6 @@ itself.
 `PlanResult` → extension creates each `proposedIssues[]` entry as a Backlog
 issue under the project and wires every `blockedBy` edge into a native
 Linear `blocks` relation; that relation gates a dependent issue in the
-implement loop. No new issue carries `agent:ready` or leaves Backlog until
-the operator sets a priority and `foreman-refine` picks it up.
+implement loop. Every new issue enters Backlog with no `foreman:*` label and
+becomes refinable once the operator sets a priority and `foreman-refine`
+picks it up.

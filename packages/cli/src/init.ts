@@ -24,6 +24,8 @@ import {
   activateRepoPlugin,
   type CommandRunner,
   ensureGitExclude,
+  GitHubAppAuth,
+  GitHubClient,
   type InitiativeBinding,
   type InitiativeRef,
   LinearApiError,
@@ -32,6 +34,7 @@ import {
   boundInitiativeIds,
   expandHome,
   loadGlobalConfig,
+  resolveGitHubAppCredentials,
   resolveLinearApiKey,
   type RepoEntry,
   type TeamRef,
@@ -62,6 +65,8 @@ export interface InitDeps {
   log: (message: string) => void;
   /** `nodeRunner` from `@foreman/core`; captures stdout, unlike cli's own `Runner`. */
   git: CommandRunner;
+  /** Best-effort browser opener for the GitHub App install link; omitted in non-interactive runs. */
+  openUrl?: (url: string) => void;
 }
 
 /** Parses `--initiative <uuid>` or `--initiative <uuid>:<subdir>`. */
@@ -288,6 +293,57 @@ function activateProjectPlugin(deps: InitDeps, options: InitOptions, repoRoot: s
   }
 }
 
+/**
+ * Non-blocking check that the configured GitHub App (if any) is installed
+ * on this repo — installing an App only ever happens through GitHub's own
+ * UI, never the API, so this can only check and point at the install page,
+ * never automate the install itself (SPEC §7.4). Auto-opening that page is
+ * itself asked for: an operator may run `foreman init` for a repo it
+ * deliberately doesn't want `foreman-review` posting real GitHub reviews
+ * on, and a browser tab popping open unasked would be the tool assuming
+ * that decision for them.
+ */
+async function checkGitHubAppInstall(deps: InitDeps, options: InitOptions, repoRoot: string): Promise<void> {
+  let credentials;
+  try {
+    const { config } = loadGlobalConfig({ home: options.home });
+    credentials = resolveGitHubAppCredentials(config, options.home);
+  } catch {
+    return;
+  }
+  if (!credentials) return;
+
+  printSection(deps.log, "GitHub App");
+  const github = new GitHubClient({ runner: deps.git });
+  let slug: { owner: string; repo: string };
+  try {
+    slug = await github.repoSlug(repoRoot);
+  } catch {
+    deps.log(`  ${style("yellow", "!")} couldn't resolve this repo's GitHub owner/name (is \`gh\` authenticated here?) — skipping the install check.`);
+    return;
+  }
+
+  const auth = new GitHubAppAuth(credentials);
+  try {
+    if (await auth.installationExists(slug.owner, slug.repo)) {
+      deps.log(`  ${style("green", "✓")} installed on ${slug.owner}/${slug.repo} — foreman-review can submit real PR reviews here.`);
+      return;
+    }
+    const app = await auth.app();
+    const installUrl = `https://github.com/apps/${app.slug}/installations/new`;
+    deps.log(`  ${style("yellow", "!")} not installed on ${slug.owner}/${slug.repo} — install it: ${installUrl}`);
+    if (deps.openUrl) {
+      const shouldOpen = await deps.prompter.confirm(`Open that install page in your browser now?`, true);
+      if (shouldOpen) {
+        deps.log(`  ${style("cyan", "i")} opening that link in your browser…`);
+        deps.openUrl(installUrl);
+      }
+    }
+  } catch (error) {
+    deps.log(`  ${style("yellow", "!")} couldn't verify the GitHub App installation (${error instanceof Error ? error.message : String(error)}).`);
+  }
+}
+
 export async function runInit(options: InitOptions, deps: InitDeps): Promise<void> {
   printSection(deps.log, "Register this repo (config.repos)");
 
@@ -400,6 +456,8 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
 
   activateProjectPlugin(deps, options, repoRoot);
+
+  await checkGitHubAppInstall(deps, options, repoRoot);
 
   printSection(deps.log, "Next step");
   deps.log("  foreman repo --once");

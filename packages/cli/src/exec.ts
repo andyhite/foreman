@@ -59,3 +59,29 @@ export const processRunner: Runner = {
     return promise;
   },
 };
+
+/**
+ * Best-effort "open this in the operator's browser". `foreman init`'s GitHub
+ * App install check is the one place a next step can't be done from the CLI
+ * at all — installing an App only ever happens on GitHub's own web UI — so
+ * this saves the click rather than just printing a URL to copy. Fire and
+ * forget: a headless/CI box with no browser to open is not an error, the
+ * printed URL the caller already logs still covers it, so failures here are
+ * swallowed rather than surfaced.
+ */
+export function openUrl(url: string): void {
+  const platform = process.platform;
+  const [bin, args] =
+    platform === "darwin"
+      ? ["open", [url]]
+      : platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  try {
+    const child = spawn(bin, args, { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // No browser to open here — the caller's printed URL is the fallback.
+  }
+}

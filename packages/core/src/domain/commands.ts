@@ -6,6 +6,7 @@ export const DISPATCH_COMMAND = {
   refine: "/foreman:refine",
   implement: "/foreman:implement",
   review: "/foreman:review",
+  merge: "/foreman:merge",
 } as const;
 
 export type DispatchCommandKey = keyof typeof DISPATCH_COMMAND;

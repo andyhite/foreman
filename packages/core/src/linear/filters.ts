@@ -5,7 +5,7 @@
  */
 
 import type { IssueFilter } from "./api.ts";
-import { AGENT_LABEL, groupDisplayName, labelDisplayName, LABEL_GROUP } from "../domain/labels.ts";
+import { FOREMAN_LABEL, groupDisplayName, labelDisplayName, LABEL_GROUP } from "../domain/labels.ts";
 import { PRIORITY } from "../domain/priority.ts";
 import { TERMINAL_PROJECT_STATUS_TYPES, TERMINAL_STATE_TYPES } from "../domain/states.ts";
 
@@ -39,13 +39,7 @@ export function lacksLabelNamed(id: string): IssueFilter {
   return { labels: { none: labelMatch(id) } };
 }
 
-export function lacksLabelPrefixed(prefix: string): IssueFilter {
-  return { labels: { none: { parent: { name: { eq: groupDisplayName(prefix) } } } } };
-}
 
-export function hasAnyLabelPrefixed(prefix: string): IssueFilter {
-  return { labels: { some: { parent: { name: { eq: groupDisplayName(prefix) } } } } };
-}
 
 export function prioritized(): IssueFilter {
   return { priority: { neq: PRIORITY.None } };
@@ -146,76 +140,13 @@ export function any(...filters: IssueFilter[]): IssueFilter {
 /** SPEC §4.10.1: state = Triage. */
 export const INBOX_FILTER: IssueFilter = inStateType("triage");
 
-/**
- * SPEC §4.10.2: any `blocked:*` label — the human interrupt queue.
- *
- * Terminal issues and terminal projects are excluded, and that exclusion is
- * load-bearing rather than cosmetic: this view's *count* is the loop's
- * backpressure signal (SPEC §17.7). A `blocked:` label left behind on a
- * canceled issue would otherwise hold the whole loop stopped forever, with
- * nothing an operator could do about it except hunt down a label on work
- * nobody will ever return to.
- */
-export const BLOCKED_HUMAN_FILTER: IssueFilter = all(
-  hasAnyLabelPrefixed(LABEL_GROUP.blocked),
-  notTerminalState(),
-  notInTerminalProject(),
-);
+/** SPEC §4.10.2: `foreman:blocked` — the human interrupt queue. */
+export const BLOCKED_FILTER: IssueFilter = all(hasLabelNamed(FOREMAN_LABEL.blocked), notTerminalState());
 
-/**
- * SPEC §4.10.3: incomplete `blocked by` relation.
- *
- * `IssueFilter` can only express "has *any* blocked-by relation" — Linear has
- * no comparator for relation *state*, so this narrows the server-side result
- * to issues with at least one blocker and leaves the incompleteness check to
- * `incompleteBlockers` in `issue.ts` (SPEC §16 assumption 5). Callers must
- * post-filter the fetched issues with `incompleteBlockers(issue).length > 0`.
- */
-export const BLOCKED_DEPS_FILTER: IssueFilter = all(
-  hasBlockedByRelations(true),
-  notTerminalState(),
-  notInTerminalProject(),
-);
+/** SPEC §4.10.6: `foreman:running`. */
+export const RUNNING_FILTER: IssueFilter = hasLabelNamed(FOREMAN_LABEL.running);
 
-/**
- * SPEC §4.10.4: `agent:proposed`.
- *
- * Terminal-excluded for the same reason as the blocked queue: the team
- * loop's backpressure reads this count (`packages/loop/src/team.ts`), and
- * `applyTriage` moves an issue to Canceled *and* strips the label — so a
- * canceled issue still carrying `agent:proposed` is a half-applied
- * proposal, not a queue item waiting on the operator.
- */
-export const PROPOSALS_FILTER: IssueFilter = all(
-  hasLabelNamed(AGENT_LABEL.proposed),
-  notTerminalState(),
-  notInTerminalProject(),
-);
-
-/**
- * SPEC §4.10.5: Todo AND `agent:ready` AND estimate set AND priority ≠ None.
- *
- * `notTerminalState()` is absent by construction — `Todo` already pins the
- * state. The project guard is not: a Todo issue inside a canceled project
- * would otherwise count toward `readyBufferTarget` and stop the refine
- * worker from stocking the buffer with work that can actually start.
- */
-export function readyFilter(): IssueFilter {
-  return all(
-    inState("Todo"),
-    hasLabelNamed(AGENT_LABEL.ready),
-    estimateSet(),
-    prioritized(),
-    notInTerminalProject(),
-  );
+/** No label in the `foreman:` group. */
+export function unlabeled(): IssueFilter {
+  return { labels: { none: { parent: { name: { eq: groupDisplayName(LABEL_GROUP.foreman) } } } } };
 }
-
-/**
- * SPEC §4.10.6: `agent:running`.
- *
- * Deliberately *not* terminal-filtered, and the one view where that is the
- * point: a lock still held on an issue that has since been completed or
- * canceled is exactly the stale lock the reaper (§11) exists to release.
- * Filtering it out would strand the lock and hide it from the operator.
- */
-export const IN_FLIGHT_FILTER: IssueFilter = hasLabelNamed(AGENT_LABEL.running);

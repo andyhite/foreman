@@ -14,14 +14,12 @@ const validTriageResult = {
       severityReasoning: "Breaks login for all users.",
       duplicateOf: null,
       proposedBlockedBy: [],
-      destinationProject: "Maintenance",
-      destination: "Backlog",
-      reproConfidence: "confirmed",
+      destination: "backlog",
+      destinationProjectId: "project-1",
+      newProject: null,
       missingInfo: [],
-      triageLabel: null,
       draftDescription: null,
       proposedEstimate: null,
-      destinationProjectId: null,
     },
   ],
   summary: "One bug moved to Backlog.",
@@ -293,12 +291,11 @@ describe("parseAgentOutput", () => {
     }
   });
 
-  it("rejects a triage item missing destinationProject", () => {
-    const { destinationProject: _destinationProject, ...itemWithoutDestinationProject } =
-      validTriageResult.items[0]!;
+  it("rejects a backlog triage item missing destinationProjectId", () => {
+    const itemWithoutProjectId = { ...validTriageResult.items[0]!, destinationProjectId: null };
     const parsed = parseAgentOutput("foreman-triage", {
       blocked: false,
-      result: { ...validTriageResult, items: [itemWithoutDestinationProject] },
+      result: { ...validTriageResult, items: [itemWithoutProjectId] },
       block: null,
     });
     expect(parsed.kind).toBe("invalid");

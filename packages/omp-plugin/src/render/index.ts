@@ -8,18 +8,8 @@ export { renderSpikeIssue } from "./spike.ts";
 
 export { renderReviewComment } from "./review-comment.ts";
 
-export { renderProposalComment } from "./proposal-comment.ts";
 
 export { renderBlockComment } from "./block-comment.ts";
 
 export { renderStatusConsole } from "./status.ts";
-export type {
-  AgentRegistryEntry,
-  BackpressureState,
-  BlockedEntry,
-  LockEntry,
-  LoopState,
-  ProposalsAwaiting,
-  StatusState,
-  WorkerLoopState,
-} from "./status.ts";
+export type { BlockedEntry, RunningEntry, StatusState } from "./status.ts";

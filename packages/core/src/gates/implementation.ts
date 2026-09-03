@@ -8,34 +8,25 @@
 
 import { incompleteBlockers } from "../linear/issue.ts";
 import type { Issue } from "../linear/types.ts";
-import { AGENT_LABEL, hasLabel } from "../domain/labels.ts";
+import { foremanLabel } from "../domain/labels.ts";
 import { refinementGate } from "./refinement.ts";
 import type { GateFailure, GateResult } from "./types.ts";
 
-export function implementationGate(
-  issue: Issue,
-  membership?: { initiativeCount: number },
-): GateResult {
-  const failures: GateFailure[] = [...refinementGate(issue, membership).failures];
+export function implementationGate(issue: Issue): GateResult {
+  const failures: GateFailure[] = [...refinementGate(issue).failures];
 
-  if (!hasLabel(issue, AGENT_LABEL.ready)) {
+  if (issue.state.type !== "unstarted") {
     failures.push({
-      code: "missing-agent-ready",
-      message: `Missing \`${AGENT_LABEL.ready}\` label.`,
+      code: "not-in-todo",
+      message: `Issue is ${issue.state.name} (${issue.state.type}); implementation requires Todo.`,
     });
   }
 
-  if (hasLabel(issue, AGENT_LABEL.running)) {
+  const held = foremanLabel(issue);
+  if (held !== null) {
     failures.push({
-      code: "agent-running",
-      message: `Has \`${AGENT_LABEL.running}\` label — already dispatched.`,
-    });
-  }
-
-  if (hasLabel(issue, AGENT_LABEL.handsOff)) {
-    failures.push({
-      code: "agent-hands-off",
-      message: `Has \`${AGENT_LABEL.handsOff}\` label.`,
+      code: "foreman-label",
+      message: `Carries \`${held}\`.`,
     });
   }
 

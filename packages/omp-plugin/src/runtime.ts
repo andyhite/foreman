@@ -13,7 +13,17 @@
 
 import type { GlobalConfig, Initiative, LinearWriter, Project, WorkflowState } from "@foreman/core";
 import type { ResolvedRepoEntry } from "@foreman/core";
-import { ConfigError, entryForCwd, GitHubClient, LinearClient, loadGlobalConfig, lockTtlMs, LOOP_SOCKET_ENV, resolveLinearApiKey } from "@foreman/core";
+import {
+  ConfigError,
+  entryForCwd,
+  GitHubAppAuth,
+  GitHubClient,
+  LinearClient,
+  loadGlobalConfig,
+  lockTtlMs,
+  resolveGitHubAppCredentials,
+  resolveLinearApiKey,
+} from "@foreman/core";
 
 /** Thrown by any accessor called before `initRuntime` has run at least once. */
 export class ExtensionRuntimeNotInitializedError extends Error {
@@ -39,7 +49,6 @@ interface Runtime {
   contextDigestCache: Map<string, string>;
   /** Memoized by `getEntry()` on first access — `entryForCwd` throws `ConfigError` on an unregistered cwd, so it must not run eagerly in `initRuntime` (SPEC §3.5 item 6, mirroring the Linear client's lazy construction above). */
   entry: ResolvedRepoEntry | null;
-  loopSocket: string | null;
 }
 
 const activeDispatchIds = new Set<string>();
@@ -107,15 +116,27 @@ export function initRuntime(options?: { home?: string; env?: Record<string, stri
     missingApiKey = true;
   }
 
+  // App-authenticated review posting is entirely optional (SPEC §7.4) — a
+  // misconfigured or unreadable key must degrade to the unconfigured
+  // default (Linear-comment-only reviews), not break every session the way
+  // a missing Linear key would if left uncaught above.
+  let github: GitHubClient;
+  try {
+    const credentials = resolveGitHubAppCredentials(config, options?.home);
+    github = new GitHubClient({ appAuth: credentials ? new GitHubAppAuth(credentials) : undefined });
+  } catch (error) {
+    warnings.push(`GitHub App not configured: ${error instanceof Error ? error.message : String(error)}`);
+    github = new GitHubClient();
+  }
+
   runtime = {
     config,
     linear,
-    github: new GitHubClient(),
+    github,
     lockTtlMs: lockTtlMs(config),
     stateCache: new Map(),
     contextDigestCache: new Map(),
     entry: null,
-    loopSocket: (options?.env ?? process.env)[LOOP_SOCKET_ENV] ?? null,
   };
 
   return { ok: true, missingApiKey, warnings };
@@ -128,16 +149,6 @@ function requireRuntime(): Runtime {
 
 export function getConfig(): GlobalConfig {
   return requireRuntime().config;
-}
-
-/**
- * The dispatching loop's control socket, or null when this session was not
- * dispatched by a loop — an operator's own omp session, or a loop started
- * with `--no-control`. Deliberately skips `requireRuntime()`: absence is the
- * normal case here, not an initialization error.
- */
-export function getLoopSocket(): string | null {
-  return runtime?.loopSocket ?? null;
 }
 
 /**

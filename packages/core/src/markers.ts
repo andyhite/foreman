@@ -17,10 +17,6 @@ import { sanitizeAgentText } from "./sanitize.ts";
 export const MARKER_KIND = {
   /** Lock ownership: dispatch id, timestamp, release state. */
   lock: "lock",
-  /** One triage proposal item, awaiting approval. */
-  proposal: "proposal",
-  /** Written after an approved proposal is applied, so it is never applied twice. */
-  applied: "applied",
   /** A BlockRecord the operator has to answer. */
   block: "block",
   /** The operator's reply that clears a block. */
@@ -29,10 +25,6 @@ export const MARKER_KIND = {
   review: "review",
   /** A rendered ImplementResult. */
   implement: "implement",
-  /** A dispatch failed twice and was converted to a decision (SPEC §17.8). */
-  failure: "failure",
-  /** Written by the plugin's dispatch-applied marker (distinct from `applied`, which is the proposal-apply marker). */
-  dispatchApplied: "dispatch-applied",
   /** A branch or PR merge recorded by `/foreman:merge`, authoritative for direct-branch merge detection. */
   merged: "merged",
 } as const;

@@ -17,10 +17,9 @@ labels, relations.
 
 ## Gate
 
-Implementation gate MUST hold: refinement gate satisfied, `agent:ready`
-present, `agent:running` absent, `agent:hands-off` absent, no incomplete
-`blocked by` relation. Fails → do not dispatch; tell the operator which
-predicate failed.
+Implementation gate MUST hold: refinement gate satisfied, issue in Todo,
+no `foreman:*` label, no incomplete `blocked by` relation. Fails → do not
+dispatch; tell the operator which predicate failed.
 
 ## Dispatch
 
@@ -29,7 +28,7 @@ One `task` call, one `tasks[]` entry, `agent: foreman-implement`. Task text:
 and the two-layer `Context` digest (product `Context` doc + project brief,
 Definition of Done included).
 
-Before the spawn the extension claims the `agent:running` lock, creates or
+Before the spawn the extension claims the `foreman:running` lock, creates or
 reuses the worktree, moves the issue to In Progress, and appends
 `FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and `FOREMAN-BASE`
 lines to the task text. You add none of these yourself.

@@ -6,7 +6,7 @@ it. A fresh spawn landing in resume mode is the normal continuation path.
 Two paths land here:
 
 - **Operator unblock.** `/foreman:unblock <ISSUE-ID>` recorded the reply and
-  cleared the `blocked:*` label; the next loop pass re-dispatched implement.
+  cleared the `foreman:blocked` label; the next loop pass re-dispatched implement.
 - **Review fix cycle.** A `ReviewResult` carried blocking findings; the
   extension wrote them to the issue and re-dispatched implement against the
   same worktree.

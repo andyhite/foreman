@@ -1,18 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { renderLockComment, type LockRecord } from "@foreman/core";
-import {
-  AGENT_LABEL,
-  AGENT_OUTPUT_SCHEMAS,
-  BLOCKED_LABEL,
-  lockTtlMs,
-  PRIORITY,
-  reserveDispatches,
-  reservationsPath,
-  TYPE_LABEL,
-} from "@foreman/core";
+import { FOREMAN_LABEL, PRIORITY, TYPE_LABEL } from "@foreman/core";
 import type {
   CreateIssueInput,
   GlobalConfig,
@@ -25,15 +13,8 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
-import {
-  prepareTaskCall,
-  __setInheritedDispatchIdForTest,
-  __setReservationsPathForTest,
-  type TaskCallInput,
-  type TaskGuardDeps,
-} from "../src/enforce/task-guard.ts";
+import { prepareTaskCall, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
 import { extractDispatchInfo } from "../src/results/sink.ts";
-import { sweep } from "../src/lock/reaper.ts";
 
 const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
 const STATE_IN_PROGRESS: WorkflowState = {
@@ -62,7 +43,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: STATE_TODO,
-    labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)],
+    labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -97,6 +78,9 @@ class FakeLinear implements LinearWriter {
   }
   async viewerId(): Promise<string> {
     return "bot-1";
+  }
+  async userByEmail(): Promise<never> {
+    throw new Error("not implemented");
   }
   async project() {
     return null;
@@ -194,36 +178,28 @@ function makeConfig(): GlobalConfig {
       },
     },
     loop: {
-      wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
-      readyBufferTarget: 5,
-      backpressureThreshold: 5,
-      retryCap: 2,
-      claimGraceMs: 300_000,
-      reviewCycleCap: 2,
-      cadenceMinutes: 5,
       mode: "confirm",
-      dispatcher: "print",
-      workerModes: {},
-      mergeDetection: true,
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
+      concurrency: { plan: 1, build: 3 },
+      pollSeconds: 20,
+      triageBatch: 10,
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
       endpoint: "https://api.linear.app/graphql",
       allowCustomEndpoint: false,
+      operatorUserId: null,
     },
+    githubApp: { appId: null, privateKeyFile: null },
     agent: {
       maxRuntimeMs: 7_200_000,
       lockTtlMarginMs: 1_800_000,
       ompBin: "omp",
       approvalMode: "yolo",
       herdrBin: "herdr",
-      herdrLayout: "tab",
-      orchestratorMaxBatches: 20,
+      dispatcher: "print",
     },
     repoDefaults: {
       baseBranch: "main",
@@ -358,7 +334,6 @@ describe("prepareTaskCall — project and batch stages", () => {
   }
 
   it("appends FOREMAN-DISPATCH to a plan item so the sink can attribute its PlanResult", async () => {
-    __setInheritedDispatchIdForTest(null);
     const linear = new FakeLinear([]);
     const decision = await prepareTaskCall(planTask(), makeDeps(linear));
     expect(decision.block).toBeUndefined();
@@ -369,7 +344,6 @@ describe("prepareTaskCall — project and batch stages", () => {
   });
 
   it("claims no lock for a plan item — plan operates on a project, not an issue", async () => {
-    __setInheritedDispatchIdForTest(null);
     const linear = new FakeLinear([]);
     await prepareTaskCall(planTask(), makeDeps(linear));
     expect(linear.updateCalls).toEqual([]);
@@ -377,7 +351,6 @@ describe("prepareTaskCall — project and batch stages", () => {
   });
 
   it("appends FOREMAN-DISPATCH to a triage item under the batch subject", async () => {
-    __setInheritedDispatchIdForTest(null);
     const linear = new FakeLinear([]);
     const input: TaskCallInput = {
       context: "shared context",
@@ -389,16 +362,7 @@ describe("prepareTaskCall — project and batch stages", () => {
     expect(extractDispatchInfo(task).dispatchId).toBe("foreman-triage-batch-dispatch-1");
   });
 
-  it("prefers the inherited dispatch id so the loop's bookkeeping and the marker agree", async () => {
-    __setInheritedDispatchIdForTest("foreman-plan-project-1-20260902T053606Z-abc123");
-    const linear = new FakeLinear([]);
-    const decision = await prepareTaskCall(planTask(), makeDeps(linear));
-    const task = decision.input?.tasks?.[0]?.task ?? "";
-    expect(extractDispatchInfo(task).dispatchId).toBe("foreman-plan-project-1-20260902T053606Z-abc123");
-  });
-
   it("still blocks a plan item with no FOREMAN-PROJECT marker", async () => {
-    __setInheritedDispatchIdForTest(null);
     const linear = new FakeLinear([]);
     const input: TaskCallInput = { context: "c", tasks: [{ agent: "foreman-plan", task: "Decompose something." }] };
     const decision = await prepareTaskCall(input, makeDeps(linear));
@@ -408,31 +372,31 @@ describe("prepareTaskCall — project and batch stages", () => {
 });
 
 describe("prepareTaskCall — refusals", () => {
-  it("blocks on agent:hands-off", async () => {
-    const issue = makeIssue({ labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.handsOff)] });
+  it("blocks on foreman:hands-off", async () => {
+    const issue = makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.handsOff)] });
     const linear = new FakeLinear([issue]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
-    expect(decision.reason).toContain(AGENT_LABEL.handsOff);
+    expect(decision.reason).toContain(FOREMAN_LABEL.handsOff);
   });
 
-  it("blocks on a blocked:* label", async () => {
+  it("blocks on foreman:blocked", async () => {
     const issue = makeIssue({
-      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready), label(BLOCKED_LABEL.needsInput)],
+      labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.blocked)],
     });
     const linear = new FakeLinear([issue]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
-    expect(decision.reason).toContain(BLOCKED_LABEL.needsInput);
+    expect(decision.reason).toContain(FOREMAN_LABEL.blocked);
   });
 
   it("blocks on a failing gate, naming the gate's reason", async () => {
-    const issue = makeIssue({ labels: [label(TYPE_LABEL.feature)] }); // missing agent:ready
+    const issue = makeIssue({ estimate: null });
     const linear = new FakeLinear([issue]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
     expect(decision.reason).toContain("gate");
-    expect(decision.reason).toContain(AGENT_LABEL.ready);
+    expect(decision.reason).toContain("Estimate is unset");
   });
 
   it("blocks on ambiguous-initiative when the project belongs to more than one initiative", async () => {
@@ -444,7 +408,7 @@ describe("prepareTaskCall — refusals", () => {
     ]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
-    expect(decision.reason).toContain("belongs to 2 initiatives");
+    expect(decision.reason).toContain("belongs to more than one initiative");
   });
 
   it("refuses an out-of-scope issue instead of guessing (SPEC §3.11)", async () => {
@@ -510,9 +474,13 @@ describe("prepareTaskCall — lock claim and markers", () => {
     expect(decision.block).toBeUndefined();
 
     const runningAdds = linear.updateCalls.filter((call) =>
-      call.input.addedLabelIds?.some((id) => id === label(AGENT_LABEL.running).id),
+      call.input.addedLabelIds?.some((id) => id === label(FOREMAN_LABEL.running).id),
     );
     expect(runningAdds.length).toBe(1);
+    // The claim assigns the issue to the credential's own Linear identity
+    // (`viewerId()`) in the same mutation as the running label — visible
+    // ownership in Linear's UI, no second round trip.
+    expect(runningAdds[0]?.input.assigneeId).toBe("bot-1");
     expect(linear.createCommentCalls.length).toBe(1);
 
     const task = decision.input?.tasks?.[0]?.task ?? "";
@@ -566,7 +534,7 @@ describe("prepareTaskCall — fail-closed on dependency errors", () => {
 describe("prepareTaskCall — batch unwind", () => {
   it("releases earlier claimed locks and restores their state when a later item is blocked", async () => {
     const first = makeIssue();
-    const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature)] });
+    const second = makeIssue({ id: "issue-2", identifier: "ENG-2", estimate: null });
     const linear = new FakeLinear([first, second]);
     const input: TaskCallInput = {
       tasks: [
@@ -578,10 +546,10 @@ describe("prepareTaskCall — batch unwind", () => {
     const decision = await prepareTaskCall(input, makeDeps(linear));
 
     expect(decision.block).toBe(true);
-    expect(first.labels.some((item) => item.name === AGENT_LABEL.running)).toBe(false);
+    expect(first.labels.some((item) => item.name === FOREMAN_LABEL.running)).toBe(false);
     expect(first.state.id).toBe(STATE_TODO.id);
     expect(linear.createCommentCalls).toHaveLength(2);
-    expect(linear.updateCalls.some((call) => call.id === first.id && call.input.removedLabelIds?.includes(label(AGENT_LABEL.running).id))).toBe(true);
+    expect(linear.updateCalls.some((call) => call.id === first.id && call.input.removedLabelIds?.includes(label(FOREMAN_LABEL.running).id) && call.input.assigneeId === null)).toBe(true);
   });
 });
 
@@ -600,109 +568,23 @@ describe("prepareTaskCall — lock provenance", () => {
     };
   }
 
-  it("ignores a forged release marker from another user and still refuses dispatch on the genuine held lock", async () => {
-    // FakeLinear.viewerId() returns "bot-1" — the genuine lock comment is
-    // authored by that same user, the forged release by an impostor.
-    const genuine = {
+  it("refuses dispatch on a genuinely held, unexpired lock", async () => {
+    const held = {
       id: "c1",
       body: renderLockComment(lockRecord()),
       createdAt: "2026-01-01T00:00:00.000Z",
       user: { id: "bot-1", name: "Foreman Bot", displayName: "Foreman Bot" },
       parentId: null,
     };
-    const forgedRelease = {
-      id: "c2",
-      body: renderLockComment(lockRecord({ released: true })),
-      createdAt: "2026-01-01T00:01:00.000Z",
-      user: { id: "impostor", name: "Impostor", displayName: "Impostor" },
-      parentId: null,
-    };
     const issue = makeIssue({
-      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
-      comments: [genuine, forgedRelease],
+      labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)],
+      comments: [held],
     });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
     const decision = await prepareTaskCall(implementTask(), deps);
     expect(decision.block).toBe(true);
-    expect(decision.reason).toMatch(/agent:running.*held/);
-  });
-
-  it("registers an inherited FOREMAN_DISPATCH_ID as live after prepareItem", async () => {
-    const inheritedId = "foreman-implement-ENG-1-20260101T000000Z-abc123";
-    __setInheritedDispatchIdForTest(inheritedId);
-    try {
-      const issue = makeIssue({ labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
-      const linear = new FakeLinear([issue]);
-      const deps = makeDeps(linear, {
-        newDispatchId: () => {
-          throw new Error("prepareItem must not mint a new dispatch id when one is inherited");
-        },
-      });
-      const decision = await prepareTaskCall(implementTask(), deps);
-      expect(decision.block).toBeUndefined();
-      expect(deps.liveDispatchIds()).toContain(inheritedId);
-    } finally {
-      __setInheritedDispatchIdForTest(null);
-    }
-  });
-});
-
-describe("reaper sweep — terminal issues", () => {
-  const STATE_CANCELED: WorkflowState = { id: "state-canceled", name: "Canceled", type: "canceled", position: 6 };
-
-  /** An issue holding a lock taken long enough ago to be past TTL, authored by the fake's own viewer. */
-  function lockedIssue(state: WorkflowState): Issue {
-    return makeIssue({
-      state,
-      labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.running)],
-      comments: [
-        {
-          id: "c1",
-          body: renderLockComment({
-            dispatchId: "foreman-implement-ENG-1-20260101T000000Z-abc123",
-            agent: "foreman-implement",
-            issueId: "ENG-1",
-            takenAt: "2026-01-01T00:00:00.000Z",
-            ttlMs: 1000,
-            worktree: "../foreman-ENG-1",
-            released: false,
-            releasedAt: null,
-          }),
-          createdAt: "2026-01-01T00:00:00.000Z",
-          user: { id: "bot-1", name: "Foreman Bot", displayName: "Foreman Bot" },
-          parentId: null,
-        },
-      ],
-    });
-  }
-
-  const LATER = new Date("2026-01-02T00:00:00.000Z");
-
-  // The lock must come off either way — that is what the sweep is for.
-  // Raising `blocked:needs-input` on abandoned work is what must not
-  // happen: that queue's count is the loop's backpressure signal, so a
-  // canceled issue parked in it stops every worker for good (SPEC §17.7).
-  it("releases the lock without raising a decision on a canceled issue", async () => {
-    const linear = new FakeLinear([lockedIssue(STATE_CANCELED)]);
-    const reaped = await sweep(linear, LATER);
-
-    expect(reaped).toHaveLength(1);
-    const call = linear.updateCalls[0];
-    expect(call?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
-    expect(call?.input.addedLabelIds).toEqual([]);
-    expect(linear.createCommentCalls[0]?.body).toContain("released without raising a decision");
-  });
-
-  it("still raises a decision on a live issue, which is the case an operator must answer", async () => {
-    const linear = new FakeLinear([lockedIssue(STATE_IN_PROGRESS)]);
-    const reaped = await sweep(linear, LATER);
-
-    expect(reaped).toHaveLength(1);
-    const call = linear.updateCalls[0];
-    expect(call?.input.removedLabelIds).toContain(label(AGENT_LABEL.running).id);
-    expect(call?.input.addedLabelIds).toHaveLength(1);
-    expect(linear.createCommentCalls[0]?.body).not.toContain("released without raising a decision");
+    expect(decision.reason).toMatch(/foreman:running.*held/);
   });
 });
 
@@ -751,152 +633,4 @@ describe("prepareTaskCall — unwindPrepared releases the live-dispatch registra
     // reaper sweep, not this in-process registry, is what recovers it.
     expect(released).toEqual(["foreman-implement-ENG-1-dispatch-1"]);
   });
-});
-
-describe("prepareTaskCall — reservation-based dispatch ids", () => {
-  function withReservationsDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
-    const dir = mkdtempSync(join(tmpdir(), "foreman-reservations-"));
-    return run(dir).finally(() => {
-      __setReservationsPathForTest(null);
-      rmSync(dir, { recursive: true, force: true });
-    });
-  }
-
-  it("prefers a fresh reservation over both the inherited env id and a freshly minted one", async () =>
-    withReservationsDir(async (dir) => {
-      const path = reservationsPath(dir, "foreman-implement");
-      const now = new Date("2026-01-01T00:00:00.000Z");
-      const config = makeConfig();
-      reserveDispatches(
-        path,
-        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-eng-1", reservedAt: now.toISOString() }],
-        now,
-        lockTtlMs(config),
-      );
-      __setReservationsPathForTest(path);
-      __setInheritedDispatchIdForTest("inherited-id-nobody-should-use");
-      try {
-        const issue = makeIssue();
-        const linear = new FakeLinear([issue]);
-        const deps = makeDeps(linear, {
-          config,
-          newDispatchId: () => {
-            throw new Error("must not mint when a reservation matches");
-          },
-        });
-        const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
-        expect(decision.block).toBeUndefined();
-        const task = decision.input?.tasks?.[0]?.task ?? "";
-        expect(extractDispatchInfo(task).dispatchId).toBe("reserved-eng-1");
-      } finally {
-        __setInheritedDispatchIdForTest(null);
-      }
-    }));
-
-  it("resolves three different reserved ids by subject in one batch", async () =>
-    withReservationsDir(async (dir) => {
-      const path = reservationsPath(dir, "foreman-implement");
-      const now = new Date("2026-01-01T00:00:00.000Z");
-      const config = makeConfig();
-      reserveDispatches(
-        path,
-        [
-          { agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-eng-1", reservedAt: now.toISOString() },
-          { agent: "foreman-implement", subject: "ENG-2", dispatchId: "reserved-eng-2", reservedAt: now.toISOString() },
-          { agent: "foreman-implement", subject: "ENG-3", dispatchId: "reserved-eng-3", reservedAt: now.toISOString() },
-        ],
-        now,
-        lockTtlMs(config),
-      );
-      __setReservationsPathForTest(path);
-      const first = makeIssue();
-      const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
-      const third = makeIssue({ id: "issue-3", identifier: "ENG-3", labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)] });
-      const linear = new FakeLinear([first, second, third]);
-      const deps = makeDeps(linear, { config });
-      const input: TaskCallInput = {
-        tasks: [
-          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-1\n" },
-          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-2\n" },
-          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-3\n" },
-        ],
-      };
-      const decision = await prepareTaskCall(input, deps);
-      expect(decision.block).toBeUndefined();
-      const tasks = decision.input?.tasks ?? [];
-      expect(extractDispatchInfo(tasks[0]?.task ?? "").dispatchId).toBe("reserved-eng-1");
-      expect(extractDispatchInfo(tasks[1]?.task ?? "").dispatchId).toBe("reserved-eng-2");
-      expect(extractDispatchInfo(tasks[2]?.task ?? "").dispatchId).toBe("reserved-eng-3");
-    }));
-
-  it("falls back to minting when the reservations file has no entry for this subject", async () =>
-    withReservationsDir(async (dir) => {
-      const path = reservationsPath(dir, "foreman-implement");
-      const now = new Date("2026-01-01T00:00:00.000Z");
-      const config = makeConfig();
-      reserveDispatches(
-        path,
-        [{ agent: "foreman-implement", subject: "ENG-999", dispatchId: "reserved-eng-999", reservedAt: now.toISOString() }],
-        now,
-        lockTtlMs(config),
-      );
-      __setReservationsPathForTest(path);
-      const issue = makeIssue();
-      const linear = new FakeLinear([issue]);
-      const deps = makeDeps(linear, { config });
-      const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
-      expect(decision.block).toBeUndefined();
-      const task = decision.input?.tasks?.[0]?.task ?? "";
-      expect(extractDispatchInfo(task).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
-    }));
-
-  it("ignores an expired reservation and mints instead", async () =>
-    withReservationsDir(async (dir) => {
-      const path = reservationsPath(dir, "foreman-implement");
-      const config = makeConfig();
-      const ttlMs = lockTtlMs(config);
-      const reservedAt = new Date(new Date("2026-01-01T00:00:00.000Z").getTime() - ttlMs - 1000);
-      reserveDispatches(
-        path,
-        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "stale-reservation", reservedAt: reservedAt.toISOString() }],
-        reservedAt,
-        ttlMs,
-      );
-      __setReservationsPathForTest(path);
-      const issue = makeIssue();
-      const linear = new FakeLinear([issue]);
-      const deps = makeDeps(linear, { config });
-      const decision = await prepareTaskCall(implementTask("ENG-1"), deps);
-      expect(decision.block).toBeUndefined();
-      const task = decision.input?.tasks?.[0]?.task ?? "";
-      expect(extractDispatchInfo(task).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
-    }));
-
-  it("consumes a reservation so a second identical call does not reuse it", async () =>
-    withReservationsDir(async (dir) => {
-      const path = reservationsPath(dir, "foreman-implement");
-      const now = new Date("2026-01-01T00:00:00.000Z");
-      const config = makeConfig();
-      reserveDispatches(
-        path,
-        [{ agent: "foreman-implement", subject: "ENG-1", dispatchId: "reserved-once", reservedAt: now.toISOString() }],
-        now,
-        lockTtlMs(config),
-      );
-      __setReservationsPathForTest(path);
-
-      const firstIssue = makeIssue();
-      const firstLinear = new FakeLinear([firstIssue]);
-      const firstDeps = makeDeps(firstLinear, { config });
-      const firstDecision = await prepareTaskCall(implementTask("ENG-1"), firstDeps);
-      expect(extractDispatchInfo(firstDecision.input?.tasks?.[0]?.task ?? "").dispatchId).toBe("reserved-once");
-
-      const secondIssue = makeIssue();
-      const secondLinear = new FakeLinear([secondIssue]);
-      const secondDeps = makeDeps(secondLinear, { config });
-      const secondDecision = await prepareTaskCall(implementTask("ENG-1"), secondDeps);
-      const secondTask = secondDecision.input?.tasks?.[0]?.task ?? "";
-      expect(extractDispatchInfo(secondTask).dispatchId).toBe("foreman-implement-ENG-1-dispatch-1");
-      expect(extractDispatchInfo(secondTask).dispatchId).not.toBe("reserved-once");
-    }));
 });

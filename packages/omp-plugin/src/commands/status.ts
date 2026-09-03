@@ -1,108 +1,32 @@
 /**
- * `/foreman:status` — the in-chat operator console (SPEC §3.4, §17.4):
- * blocked queue, in-flight locks, proposals awaiting approval, live agent
- * registry, loop state. Blocked queue first (SPEC §9).
+ * `/foreman:status` — the in-chat operator console (SPEC §3.4, §17.4): the
+ * blocked queue and the in-flight lock table. Two sections only, matching
+ * the `foreman:` label vocabulary.
  */
 
-import type { AgentStatus, Issue, LinearWriter } from "@foreman/core";
-import {
-  BLOCKED_HUMAN_FILTER,
-  IN_FLIGHT_FILTER,
-  LABEL_GROUP,
-  labelsInGroup,
-  PROPOSALS_FILTER,
-  decodeMarker,
-  loopPaths,
-  lockState,
-  MARKER_KIND,
-  readLockComment,
-  readStatusFile,
-  statusStaleThresholdMs,
-} from "@foreman/core";
-import type {
-  AgentRegistryEntry,
-  BackpressureState,
-  LoopState,
-  StatusState,
-  WorkerLoopState,
-} from "../render/index.ts";
+import type { Issue, LinearWriter } from "@foreman/core";
+import { BLOCKED_FILTER, RUNNING_FILTER, latestMarker, lockState, MARKER_KIND, readLockComment } from "@foreman/core";
+import type { BlockedEntry, RunningEntry, StatusState } from "../render/index.ts";
 import { renderStatusConsole } from "../render/index.ts";
-import { getConfig, getEntry, liveDispatchIds } from "../runtime.ts";
+import { liveDispatchIds } from "../runtime.ts";
 
-/** `AgentStatus` (contract §J) has no `"idle"`/`"parked"`/`"aborted"` distinction; this is the closest honest mapping onto the older registry vocabulary `/foreman:status` already renders. */
-const AGENT_REGISTRY_STATE: Record<AgentStatus, AgentRegistryEntry["state"]> = {
-  starting: "idle",
-  running: "running",
-  settled: "parked",
-  lost: "aborted",
-  unknown: "idle",
-};
-
-export function readLoopState(
-  statusPath: string,
-  now: Date,
-  cadenceMinutes = 5,
-): { loop: LoopState; backpressure: BackpressureState; agents: AgentRegistryEntry[] } {
-  const status = readStatusFile(statusPath);
-  if (!status) {
-    return { loop: { mode: "unknown (no running loop)", workers: [] }, backpressure: { tripped: false, reason: null }, agents: [] };
-  }
-  const staleAfterMs = statusStaleThresholdMs(cadenceMinutes);
-  const ageMs = now.getTime() - new Date(status.writtenAt).getTime();
-  if (ageMs > staleAfterMs) {
-    if (status.snapshot.runtime.state === "paused") {
-      return {
-        loop: { mode: "paused", workers: status.snapshot.workers.map((worker) => ({ worker: worker.name, lastRunAt: worker.lastRunAt, dispatchCount: worker.dispatched })) },
-        backpressure: { tripped: status.snapshot.backpressure.tripped, reason: status.snapshot.backpressure.reason },
-        agents: status.snapshot.agents.map((agent) => ({ agent: agent.agent, state: AGENT_REGISTRY_STATE[agent.status], issueId: agent.issueId })),
-      };
-    }
-    return {
-      loop: { mode: "stopped/stale", workers: [] },
-      backpressure: { tripped: false, reason: `Last loop status is older than ${Math.round(staleAfterMs / 1000)} seconds.` },
-      agents: [],
-    };
-  }
-  const { snapshot } = status;
-  const workers: WorkerLoopState[] = snapshot.workers.map((worker) => ({
-    worker: worker.name,
-    lastRunAt: worker.lastRunAt,
-    dispatchCount: worker.dispatched,
-  }));
-  const agents: AgentRegistryEntry[] = snapshot.agents.map((agent) => ({
-    agent: agent.agent,
-    state: AGENT_REGISTRY_STATE[agent.status],
-    issueId: agent.issueId,
-  }));
-  return {
-    loop: { mode: snapshot.runtime.mode, workers },
-    backpressure: { tripped: snapshot.backpressure.tripped, reason: snapshot.backpressure.reason },
-    agents,
-  };
+function excerptFor(issue: Issue): string {
+  const found = latestMarker<{ whatINeed: string }>(MARKER_KIND.block, issue.comments);
+  return found?.data.whatINeed ?? "(no block marker found on this issue)";
 }
 
-function questionFor(issue: Issue): string {
-  const latestBlockComment = [...issue.comments]
-    .reverse()
-    .map((comment) => decodeMarker<{ whatINeed: string }>(MARKER_KIND.block, comment.body))
-    .find((data) => data !== null);
-  return latestBlockComment?.whatINeed ?? "(no BlockRecord found on this issue)";
-}
-
-export async function buildStatusState(linear: LinearWriter, stateDir: string, now: Date = new Date(), cadenceMinutes = 5): Promise<StatusState> {
-  const [blockedIssues, inFlightIssues, proposalIssues] = await Promise.all([
-    linear.issues({ filter: BLOCKED_HUMAN_FILTER, includeComments: true }),
-    linear.issues({ filter: IN_FLIGHT_FILTER, includeComments: true }),
-    linear.issues({ filter: PROPOSALS_FILTER }),
+export async function buildStatusState(linear: LinearWriter, now: Date = new Date()): Promise<StatusState> {
+  const [blockedIssues, runningIssues] = await Promise.all([
+    linear.issues({ filter: BLOCKED_FILTER, includeComments: true }),
+    linear.issues({ filter: RUNNING_FILTER, includeComments: true }),
   ]);
 
-  const blocked = blockedIssues.map((issue) => ({
+  const blocked: BlockedEntry[] = blockedIssues.map((issue) => ({
     issueId: issue.identifier,
-    type: labelsInGroup(issue, LABEL_GROUP.blocked)[0] ?? "unknown",
-    question: questionFor(issue),
+    excerpt: excerptFor(issue),
   }));
 
-  const locks = inFlightIssues
+  const running: RunningEntry[] = runningIssues
     .map((issue) => {
       const found = readLockComment(issue.comments);
       if (!found) return null;
@@ -117,20 +41,10 @@ export async function buildStatusState(linear: LinearWriter, stateDir: string, n
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const { loop, backpressure, agents } = readLoopState(stateDir, now, cadenceMinutes);
-
-  return {
-    blocked,
-    locks,
-    proposalsAwaiting: { count: proposalIssues.length, issueIds: proposalIssues.map((issue) => issue.identifier) },
-    agents,
-    loop,
-    backpressure,
-  };
+  return { blocked, running };
 }
 
 export async function renderStatus(linear: LinearWriter): Promise<string> {
-  const config = getConfig();
-  const state = await buildStatusState(linear, loopPaths(config, getEntry().alias).status, new Date(), config.loop.cadenceMinutes);
+  const state = await buildStatusState(linear, new Date());
   return renderStatusConsole(state);
 }

@@ -63,32 +63,13 @@ describe("renderLockComment / readLockComment", () => {
     expect(readLockComment([])).toBeNull();
   });
 
-  it("ignores a lock marker authored by a user other than the credential's own", () => {
-    const record = makeRecord();
-    const body = renderLockComment(record);
-    const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "impostor" } }];
-    expect(readLockComment(comments, "bot-1")).toBeNull();
-  });
-
-  it("still finds the genuine lock authored by the credential's own user", () => {
+  it("finds the lock among comments from any author", () => {
     const record = makeRecord();
     const body = renderLockComment(record);
     const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "bot-1" } }];
-    const found = readLockComment(comments, "bot-1");
+    const found = readLockComment(comments);
     expect(found).not.toBeNull();
     expect(found?.data).toEqual(record);
-  });
-
-  it("a forged release authored by another user cannot mask the genuine held lock", () => {
-    const record = makeRecord();
-    const genuineBody = renderLockComment(record);
-    const forgedRelease = renderLockComment({ ...record, released: true });
-    const comments: MarkerSource[] = [
-      { id: "c1", body: genuineBody, createdAt: record.takenAt, user: { id: "bot-1" } },
-      { id: "c2", body: forgedRelease, createdAt: "2026-08-29T00:01:00.000Z", user: { id: "impostor" } },
-    ];
-    const found = readLockComment(comments, "bot-1");
-    expect(found?.data.released).toBe(false);
   });
 });
 

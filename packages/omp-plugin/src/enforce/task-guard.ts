@@ -12,26 +12,22 @@
 import type { GateResult, GlobalConfig, Issue, LinearWriter } from "@foreman/core";
 import type { GitHubClient, EnsureWorktreeResult, ResolvedRepoEntry } from "@foreman/core";
 import {
-  AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
+  FOREMAN_LABEL,
   assertIssueInScope,
-  LABEL_GROUP,
-  RESERVATIONS_ENV,
   branchNameFor,
   diffRange,
+  foremanLabel,
   gateSummary,
-  hasLabel,
   implementationGate,
   isPausedProjectStatus,
   isTerminalProjectStatus,
-  labelsInGroup,
   lockState,
   lockTtlMs,
   readLockComment,
   refinementGate,
   renderLockComment,
   resolveState,
-  takeReservation,
   worktreePathFor,
 } from "@foreman/core";
 
@@ -104,30 +100,7 @@ export function lastMarkerValue(re: RegExp, text: string): string | null {
   return value;
 }
 
-// The extension mints a dispatch id and hands it to the child via
-// `FOREMAN_DISPATCH_ID` (print) or `--env` (herdr) so the guard's claim uses
-// the same id the caller is already tracking (SPEC §11, Step 6 item 3) —
-// otherwise the guard mints a second id and the reaper's liveness
-// cross-reference can never match. Taken once per process and cleared: a
-// session that prepares several items must not reuse one inherited id.
-let inheritedDispatchId: string | null = process.env.FOREMAN_DISPATCH_ID ?? null;
 
-/** Test seam: inject or clear the one-shot inherited dispatch id without reloading the module. */
-export function __setInheritedDispatchIdForTest(id: string | null): void {
-  inheritedDispatchId = id;
-}
-
-// A shared orchestrator (SPEC §17.4) serves many items across many turns, so
-// it cannot carry a single inherited id in its environment — the loop writes
-// this file instead, one reservation per agent+subject, and the guard
-// resolves each item's id by subject as it prepares it. Read once at module
-// scope, mirroring the inherited id above.
-let reservationsPath: string | null = process.env[RESERVATIONS_ENV] ?? null;
-
-/** Test seam: point the guard at a temp reservations file, or clear it, without reloading the module. */
-export function __setReservationsPathForTest(path: string | null): void {
-  reservationsPath = path;
-}
 
 type Stage = "triage" | "plan" | "roadmap" | "refine" | "implement" | "review";
 
@@ -155,14 +128,8 @@ export function stageFor(agent: string): Stage | null {
  */
 async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps): Promise<GateResult | null> {
   if (stage !== "refine" && stage !== "implement") return null;
-  const [initiatives, projectStatus] = issue.project
-    ? await Promise.all([
-        deps.linear.projectInitiatives(issue.project.id),
-        deps.linear.projectStatus(issue.project.id),
-      ])
-    : [null, null];
-  const membership = initiatives ? { initiativeCount: initiatives.length } : undefined;
-  const result = stage === "refine" ? refinementGate(issue, membership) : implementationGate(issue, membership);
+  const projectStatus = issue.project ? await deps.linear.projectStatus(issue.project.id) : null;
+  const result = stage === "refine" ? refinementGate(issue) : implementationGate(issue);
   if (isTerminalProjectStatus(projectStatus)) {
     return {
       ok: false,
@@ -199,25 +166,8 @@ async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Iss
 }
 
 async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateResult> {
-  if (!hasLabel(issue, AGENT_LABEL.running)) return { ok: true, failures: [] };
-  let viewerId: string | null;
-  try {
-    viewerId = await deps.linear.viewerId();
-  } catch {
-    viewerId = null;
-  }
-  if (viewerId === null) {
-    return {
-      ok: false,
-      failures: [
-        {
-          code: "agent-running",
-          message: `\`${AGENT_LABEL.running}\` held and lock authorship could not be verified (viewer id unavailable); refusing to dispatch.`,
-        },
-      ],
-    };
-  }
-  const found = readLockComment(issue.comments, viewerId);
+  if (foremanLabel(issue) !== FOREMAN_LABEL.running) return { ok: true, failures: [] };
+  const found = readLockComment(issue.comments);
   const state = lockState(found?.data ?? null, {
     now: deps.now(),
     liveDispatchIds: deps.liveDispatchIds(),
@@ -225,16 +175,18 @@ async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateRes
   if (state.held && !state.orphaned) {
     return {
       ok: false,
-      failures: [{ code: "agent-running", message: `\`${AGENT_LABEL.running}\` held: ${state.reason}` }],
+      failures: [{ code: "agent-running", message: `\`${FOREMAN_LABEL.running}\` held: ${state.reason}` }],
     };
   }
   return { ok: true, failures: [] };
 }
 
 /**
- * Claims the lock: applies `agent:running` and writes the `foreman:lock`
- * comment in the same operation (SPEC §11 — the dispatcher claims, agents
- * never do).
+ * Claims the lock: applies `agent:running`, assigns the issue to the
+ * credential's own Linear identity, and writes the `foreman:lock` comment
+ * in the same operation (SPEC §11 — the dispatcher claims, agents never
+ * do). Assignee makes ownership visible in Linear's UI without a second
+ * mutation; harmless when Foreman shares the operator's own account.
  */
 async function claimLock(
   linear: LinearWriter,
@@ -245,8 +197,11 @@ async function claimLock(
   now: Date,
   ttlMs: number,
 ): Promise<void> {
-  const runningLabel = await linear.ensureLabel(AGENT_LABEL.running, issue.team.id);
-  await linear.updateIssue(issue.id, { addedLabelIds: [runningLabel.id] });
+  const [runningLabel, assigneeId] = await Promise.all([
+    linear.ensureLabel(FOREMAN_LABEL.running, issue.team.id),
+    linear.viewerId(),
+  ]);
+  await linear.updateIssue(issue.id, { addedLabelIds: [runningLabel.id], assigneeId });
   const comment = renderLockComment({
     dispatchId,
     agent,
@@ -276,22 +231,8 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
   return `${stripped}\n\n${lines.join("\n")}\n`;
 }
 
-/**
- * Resolves the dispatch id for one prepared item, in precedence order: (a) a
- * fresh reservation the loop wrote for this exact agent+subject — the shared
- * orchestrator's own env cannot carry a per-item id, so this is how it stays
- * attributable per SPEC §17.4; (b) the inherited one when the caller (a
- * single-item loop dispatch or an operator dispatch) already minted it;
- * (c) a freshly minted one. Consumes both the reservation and the inherited
- * id so a call preparing several items never reuses either, and registers
- * the result as live in this process.
- */
 function takeDispatchId(deps: TaskGuardDeps, agent: string, subject: string, now: Date): string {
-  const reserved = reservationsPath
-    ? takeReservation(reservationsPath, agent, subject, now, lockTtlMs(deps.config))
-    : null;
-  const dispatchId = reserved ?? inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
-  inheritedDispatchId = null;
+  const dispatchId = deps.newDispatchId(agent, subject, now);
   deps.registerLiveDispatch(dispatchId);
   return dispatchId;
 }
@@ -385,12 +326,9 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   }
   const issue = await fetchIssue(deps.linear, identifier);
 
-  if (hasLabel(issue, AGENT_LABEL.handsOff)) {
-    throw new Error(`${identifier} carries \`${AGENT_LABEL.handsOff}\`; dispatch refused.`);
-  }
-  const blockedLabels = labelsInGroup(issue, LABEL_GROUP.blocked);
-  if (blockedLabels.length > 0) {
-    throw new Error(`${identifier} carries \`${blockedLabels.join("`, `")}\`; dispatch refused.`);
+  const held = foremanLabel(issue);
+  if (held && held !== FOREMAN_LABEL.running) {
+    throw new Error(`${identifier} carries \`${held}\`; dispatch refused.`);
   }
   const lockFree = await checkLockFree(deps, issue);
   if (!lockFree.ok) {
@@ -478,9 +416,10 @@ async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGu
   await Promise.all(
     cleanups.map(async (cleanup) => {
       try {
-        const running = await deps.linear.ensureLabel(AGENT_LABEL.running, cleanup.issue.team.id);
+        const running = await deps.linear.ensureLabel(FOREMAN_LABEL.running, cleanup.issue.team.id);
         await deps.linear.updateIssue(cleanup.issue.id, {
           removedLabelIds: [running.id],
+          assigneeId: null,
           ...(cleanup.previousStateId ? { stateId: cleanup.previousStateId } : {}),
         });
         await deps.linear.createComment({

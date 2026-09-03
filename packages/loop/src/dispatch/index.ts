@@ -3,6 +3,5 @@
  * consumer and live here, in `@foreman/loop` (SPEC §3.1.1). The `Dispatcher`
  * interface itself stays in `@foreman/core`.
  */
-export * from "./busy.ts";
 export * from "./herdr.ts";
 export * from "./print.ts";

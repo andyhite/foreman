@@ -156,6 +156,32 @@ export function parseAgentOutput<N extends ForemanAgentName>(
     if (reviewProblems.length > 0) return { kind: "invalid", problems: reviewProblems };
   }
 
+  if (agent === "foreman-triage") {
+    const triageResult = result as unknown as {
+      items: ReadonlyArray<{
+        issueId: string;
+        destination: string;
+        destinationProjectId: string | null;
+        newProject: unknown;
+        duplicateOf: string | null;
+      }>;
+    };
+    const triageProblems: string[] = [];
+    triageResult.items.forEach((item, index) => {
+      const prefix = `/result/items/${index}`;
+      if (item.destination === "backlog" && item.destinationProjectId === null) {
+        triageProblems.push(`${prefix}/destinationProjectId: required and non-null when destination is "backlog"`);
+      }
+      if (item.destination === "new-project" && item.newProject === null) {
+        triageProblems.push(`${prefix}/newProject: required and non-null when destination is "new-project"`);
+      }
+      if (item.destination === "duplicate" && item.duplicateOf === null) {
+        triageProblems.push(`${prefix}/duplicateOf: required and non-null when destination is "duplicate"`);
+      }
+    });
+    if (triageProblems.length > 0) return { kind: "invalid", problems: triageProblems };
+  }
+
   const graphField = DEPENDENCY_GRAPH_FIELD[agent];
   if (graphField !== undefined) {
     const nodes = (result as unknown as Record<string, readonly DependencyNode[]>)[graphField] ?? [];

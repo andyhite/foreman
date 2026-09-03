@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { implementationGate, refinementGate, reviewGate } from "../src/gates/index.ts";
 import type { ReviewGateInput } from "../src/gates/review.ts";
-import { AGENT_LABEL, BLOCKED_LABEL, LEGACY_LABEL, TYPE_LABEL } from "../src/domain/labels.ts";
+import { FOREMAN_LABEL, TYPE_LABEL } from "../src/domain/labels.ts";
 import { PRIORITY } from "../src/domain/priority.ts";
 import type { Issue, IssueLabel, IssueRelation, WorkflowState } from "../src/linear/types.ts";
 import type { ReviewResult } from "../src/schemas/review.ts";
@@ -25,6 +25,12 @@ const STATE_CANCELED: WorkflowState = {
   type: "canceled",
   position: 6,
 };
+const STATE_BACKLOG: WorkflowState = {
+  id: "state-backlog",
+  name: "Backlog",
+  type: "backlog",
+  position: 1,
+};
 
 const ACCEPTANCE_CRITERIA = "## Acceptance Criteria\n- [ ] Does the thing\n";
 
@@ -46,7 +52,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: STATE_TODO,
-    labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)],
+    labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Milestone" },
     parent: null,
@@ -79,12 +85,6 @@ describe("refinementGate", () => {
     expect(result.failures).toEqual([]);
   });
 
-  it("fails missing-type-label", () => {
-    const result = refinementGate(makeIssue({ labels: [] }));
-    expect(result.ok).toBe(false);
-    expect(result.failures.map((f) => f.code)).toContain("missing-type-label");
-  });
-
   it("fails priority-none", () => {
     const result = refinementGate(makeIssue({ priority: PRIORITY.None }));
     expect(result.failures.map((f) => f.code)).toContain("priority-none");
@@ -110,39 +110,9 @@ describe("refinementGate", () => {
     expect(result.failures.map((f) => f.code)).toContain("estimate-too-large");
   });
 
-  it("fails blocked-label-present", () => {
-    const result = refinementGate(
-      makeIssue({ labels: [label(TYPE_LABEL.feature), label(BLOCKED_LABEL.needsInput)] }),
-    );
-    expect(result.failures.map((f) => f.code)).toContain("blocked-label-present");
-  });
-
   it("fails missing-project when the issue has no project", () => {
     const result = refinementGate(makeIssue({ project: null }));
     expect(result.failures.map((f) => f.code)).toContain("missing-project");
-  });
-
-  it("fails missing-initiative when the project has no initiative", () => {
-    const result = refinementGate(makeIssue(), { initiativeCount: 0 });
-    expect(result.failures.map((f) => f.code)).toContain("missing-initiative");
-  });
-
-  it("fails ambiguous-initiative when the project has more than one initiative", () => {
-    const result = refinementGate(makeIssue(), { initiativeCount: 2 });
-    expect(result.failures.map((f) => f.code)).toContain("ambiguous-initiative");
-  });
-
-  it("passes with exactly one initiative", () => {
-    const result = refinementGate(makeIssue(), { initiativeCount: 1 });
-    expect(result.ok).toBe(true);
-  });
-
-  it("reports neither initiative code when membership is omitted", () => {
-    const result = refinementGate(makeIssue({ priority: PRIORITY.None }));
-    const codes = result.failures.map((f) => f.code);
-    expect(codes).not.toContain("missing-initiative");
-    expect(codes).not.toContain("ambiguous-initiative");
-    expect(codes).toContain("priority-none");
   });
 
   // The gate is what catches the operator-invoked path: `/foreman:refine
@@ -172,31 +142,35 @@ describe("implementationGate", () => {
     expect(result.failures.map((f) => f.code)).toContain("missing-estimate");
   });
 
-  it("fails missing-agent-ready", () => {
+  it("passes a Todo issue with no foreman:* label", () => {
     const result = implementationGate(makeIssue({ labels: [label(TYPE_LABEL.feature)] }));
-    expect(result.failures.map((f) => f.code)).toContain("missing-agent-ready");
+    expect(result.ok).toBe(true);
   });
 
-  it("fails agent-running", () => {
+  it("fails foreman-label when the issue carries foreman:blocked", () => {
     const result = implementationGate(
-      makeIssue({
-        labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready), label(AGENT_LABEL.running)],
-      }),
+      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.blocked)] }),
     );
-    expect(result.failures.map((f) => f.code)).toContain("agent-running");
+    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
   });
 
-  it("fails agent-hands-off", () => {
+  it("fails foreman-label when the issue carries foreman:running", () => {
     const result = implementationGate(
-      makeIssue({
-        labels: [
-          label(TYPE_LABEL.feature),
-          label(AGENT_LABEL.ready),
-          label(AGENT_LABEL.handsOff),
-        ],
-      }),
+      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)] }),
     );
-    expect(result.failures.map((f) => f.code)).toContain("agent-hands-off");
+    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
+  });
+
+  it("fails foreman-label when the issue carries foreman:hands-off", () => {
+    const result = implementationGate(
+      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.handsOff)] }),
+    );
+    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
+  });
+
+  it("fails not-in-todo for a Backlog issue", () => {
+    const result = implementationGate(makeIssue({ state: STATE_BACKLOG }));
+    expect(result.failures.map((f) => f.code)).toContain("not-in-todo");
   });
 
   it("fails incomplete-blockers for a blocker still in progress", () => {
@@ -207,20 +181,6 @@ describe("implementationGate", () => {
   it("passes when the blocker is completed", () => {
     const result = implementationGate(makeIssue({ relations: [blockingRelation("completed")] }));
     expect(result.ok).toBe(true);
-  });
-
-  it("never bypasses the gate for a legacy issue sitting in Todo (SPEC §4.9)", () => {
-    const legacyIssue = makeIssue({
-      description: null,
-      priority: PRIORITY.None,
-      estimate: null,
-      labels: [label(LEGACY_LABEL)],
-      state: STATE_TODO,
-    });
-    const result = implementationGate(legacyIssue);
-    expect(result.ok).toBe(false);
-    expect(result.failures.map((f) => f.code)).toContain("missing-agent-ready");
-    expect(result.failures.map((f) => f.code)).toContain("missing-type-label");
   });
 });
 

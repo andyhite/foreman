@@ -4,12 +4,11 @@ import {
   renderBlockComment,
   renderIssueDescription,
   renderPrBody,
-  renderProposalComment,
   renderReviewComment,
   renderSpikeIssue,
   renderStatusConsole,
 } from "../src/render/index.ts";
-import type { BlockRecord, ImplementResult, SpikeSpec, ReviewResult, TriageItem } from "@foreman/core";
+import type { BlockRecord, ImplementResult, SpikeSpec, ReviewResult } from "@foreman/core";
 import type { StatusState } from "../src/render/status.ts";
 
 describe("renderIssueDescription", () => {
@@ -200,54 +199,6 @@ describe("renderReviewComment", () => {
   });
 });
 
-describe("renderProposalComment", () => {
-  const item: TriageItem = {
-    issueId: "ENG-7",
-    type: "type:bug",
-    proposedPriority: 2,
-    severityReasoning: "Affects login for all users.",
-    duplicateOf: null,
-    proposedBlockedBy: ["ENG-3"],
-    destination: "Backlog",
-    reproConfidence: "confirmed",
-    missingInfo: [],
-    triageLabel: null,
-    draftDescription: null,
-    proposedEstimate: null,
-    destinationProjectId: null,
-    destinationProject: "Maintenance",
-  };
-
-  it("contains both the approve and reject instructions", () => {
-    const output = renderProposalComment(item);
-    expect(output).toContain("agent:proposed");
-    expect(output).toContain("remove");
-    expect(output).toContain("reject: <reason>");
-  });
-
-  it("includes priority, severity reasoning, and proposed blockers", () => {
-    const output = renderProposalComment(item);
-    expect(output).toContain("High");
-    expect(output).toContain("Affects login for all users.");
-    expect(output).toContain("ENG-3");
-  });
-
-  it("renders the type label once and names the proposed project", () => {
-    /*
-     * `type` already carries the `type:` prefix, so the renderer must not add a
-     * second one — this pins the exact string an operator reads.
-     */
-    const output = renderProposalComment(item);
-    expect(output).toContain("`type:bug`");
-    expect(output).not.toContain("type:type:");
-    expect(output).toContain("**Project:** Maintenance");
-  });
-
-  it("says why an unassigned project matters rather than printing nothing", () => {
-    const output = renderProposalComment({ ...item, destinationProject: null });
-    expect(output).toContain("refinement gate");
-  });
-});
 
 describe("renderBlockComment", () => {
   it("names the blockers and states no label was applied for a dependency block", () => {
@@ -303,24 +254,15 @@ describe("renderBlockComment", () => {
 
 describe("renderStatusConsole", () => {
   const state: StatusState = {
-    blocked: [{ issueId: "ENG-7", type: "needs-decision", question: "Which cache backend?" }],
-    locks: [
+    blocked: [{ issueId: "ENG-7", excerpt: "Which cache backend?" }],
+    running: [
       { issueId: "ENG-9", agent: "foreman-implement", dispatchId: "d-1", ageMs: 3 * 60 * 60 * 1000, pastTtl: true },
     ],
-    proposalsAwaiting: { count: 2, issueIds: ["ENG-10", "ENG-11"] },
-    agents: [{ agent: "foreman-implement", state: "running", issueId: "ENG-9" }],
-    loop: {
-      mode: "confirm",
-      workers: [{ worker: "implement", lastRunAt: "2026-08-28T00:00:00Z", dispatchCount: 3 }],
-    },
-    backpressure: { tripped: true, reason: "Blocked (human) queue exceeds threshold of 5" },
   };
 
   it("leads with a bold summary line before every section", () => {
     const output = renderStatusConsole(state);
-    expect(output.startsWith("**1 blocked · 2 proposals awaiting · 1 locks (1 past TTL) · mode confirm**")).toBe(
-      true,
-    );
+    expect(output.startsWith("**1 blocked · 1 running (1 past TTL)**")).toBe(true);
   });
 
   it("puts the blocked queue first among the ## sections", () => {
@@ -332,23 +274,9 @@ describe("renderStatusConsole", () => {
     expect(nextSectionIndex).toBeGreaterThan(blockedIndex);
   });
 
-  it("shows a tripped backpressure reason", () => {
-    const output = renderStatusConsole(state);
-    expect(output).toContain("TRIPPED");
-    expect(output).toContain("Blocked (human) queue exceeds threshold of 5");
-  });
-
   it("collapses empty sections to one line", () => {
-    const empty: StatusState = {
-      blocked: [],
-      locks: [],
-      proposalsAwaiting: { count: 0, issueIds: [] },
-      agents: [],
-      loop: { mode: "yolo", workers: [] },
-      backpressure: { tripped: false, reason: null },
-    };
+    const empty: StatusState = { blocked: [], running: [] };
     const output = renderStatusConsole(empty);
-    expect(output).toContain("clear");
     expect(output.split("\n").filter((line) => line.includes("_none_")).length).toBeGreaterThan(0);
   });
 });

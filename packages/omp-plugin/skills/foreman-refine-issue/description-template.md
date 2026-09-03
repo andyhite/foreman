@@ -49,10 +49,10 @@ signals".
 
 `acceptanceCriteria`:
 
-- Two Triage items whose descriptions describe the same defect are proposed as
-  `duplicateOf` in the same `TriageProposal` run.
+- Two Triage items whose descriptions describe the same defect are marked as
+  `duplicateOf` in the same triage pass.
 - A near-duplicate with materially different reproduction scope (e.g. a
-  narrower query-length trigger) is proposed as `blocked by`, not
+  narrower query-length trigger) is marked as `blocked by`, not
   `duplicateOf`.
 - `severityReasoning` for a proposed duplicate names the specific matched
   issue ID, not a general description.

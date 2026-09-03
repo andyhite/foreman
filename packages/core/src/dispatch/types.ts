@@ -20,7 +20,6 @@
  * consumers need is not written twice.
  */
 
-import type { ForemanAgentName } from "../schemas/index.ts";
 
 export type DispatchStatus = "starting" | "running" | "settled" | "lost";
 
@@ -51,7 +50,7 @@ export interface DispatchItem {
 }
 
 export interface DispatchRequest {
-  agent: ForemanAgentName;
+  agent: string;
   /**
    * The slash command with no arguments, e.g. `/foreman:refine`. The
    * dispatcher appends the items' subjects, so this is the one place the
@@ -73,20 +72,15 @@ export interface DispatchRequest {
 
 export interface DispatchHandle {
   dispatchId: string;
-  agent: ForemanAgentName;
+  agent: string;
   issueId: string | null;
   startedAt: string;
-  /**
-   * Items dispatched in the same request settle together, since one prompt
-   * produces one turn. `settle()` waits once per batch and hands the same
-   * outcome to every handle in it, rather than starting N waits on one agent.
-   */
-  batchId: string;
   /** Set by the print dispatcher. */
   pid: number | null;
   /** Set by the herdr dispatcher: `<workspace>:<tab>:<pane>` plus the agent alias. */
   herdr: { paneId: string; agentName: string } | null;
 }
+
 
 export interface DispatchOutcome {
   handle: DispatchHandle;
@@ -98,13 +92,11 @@ export interface DispatchOutcome {
 
 export interface Dispatcher {
   readonly kind: "print" | "herdr";
-  /** One handle per item, in request order, all sharing a `batchId`. */
+  /** One handle per item, in request order. */
   dispatch(request: DispatchRequest): Promise<DispatchHandle[]>;
   status(handle: DispatchHandle): Promise<DispatchStatus>;
   /** Resolves when the batch's turn finishes. */
   settle(handle: DispatchHandle): Promise<DispatchOutcome>;
-  /** herdr only: bring the operator to the pane. */
-  attach?(handle: DispatchHandle): Promise<void>;
   /**
    * Post-merge housekeeping (SPEC §12): release whatever terminal state this
    * dispatcher holds for the issue — herdr closes the issue's worktree

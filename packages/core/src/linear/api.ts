@@ -24,6 +24,7 @@ import type {
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
+  UserRef,
   WorkflowState,
 } from "./types.ts";
 
@@ -90,6 +91,8 @@ export interface LinearReader {
   projects(): Promise<ProjectRef[]>;
   /** The Linear user id the API key belongs to. Used to bind marker trust to the credential's own authorship. */
   viewerId(): Promise<string>;
+  /** Resolves an operator's account by email — the setup wizard's `linear.operatorUserId` lookup. Null when no user has that email. */
+  userByEmail(email: string): Promise<UserRef | null>;
 }
 
 export interface IssueMutation {
@@ -103,6 +106,8 @@ export interface IssueMutation {
   /** Incremental, so two workers touching different label groups cannot clobber. */
   addedLabelIds?: LinearId[];
   removedLabelIds?: LinearId[];
+  /** Reassigns the issue; `null` clears the assignee. Foreman uses this to make ownership visible in Linear's UI (SPEC §11, §9 Case B). */
+  assigneeId?: LinearId | null;
 }
 
 export interface CreateIssueInput {

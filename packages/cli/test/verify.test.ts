@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "../src/global-config.ts";
-import { runDoctor, type DoctorOptions } from "../src/doctor.ts";
+import { runVerify, type DoctorOptions } from "../src/verify.ts";
 
 /** Always reports every probed binary as present, so tool checks never fail a test by accident. */
 class FakeRunner implements Runner {
@@ -35,7 +35,7 @@ function makeTempDir(prefix: string): string {
 /**
  * A temp home that already has a Linear credential configured.
  *
- * Every case below is about plugin activation, but `runDoctor` also reports a
+ * Every case below is about plugin activation, but `runVerify` also reports a
  * missing credential as a problem — so a home without one can never return 0
  * and the activation assertions would be measuring the wrong thing. Seeding it
  * here keeps each test's exit code attributable to what that test changed.
@@ -47,7 +47,7 @@ function makeHome(): string {
 }
 
 /*
- * `runDoctor` reads `$LINEAR_API_KEY`, so an ambient key in the developer's
+ * `runVerify` reads `$LINEAR_API_KEY`, so an ambient key in the developer's
  * shell would satisfy the credential check and hide a regression that CI —
  * where the variable is unset — would catch. Drop it for this file and put it
  * back afterwards, so the suite does not leak the change into other files.
@@ -84,14 +84,14 @@ function cleanup(...dirs: string[]): void {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 }
 
-describe("runDoctor", () => {
+describe("runVerify", () => {
   it("returns 0 when the machine is fully healthy and nothing is registered", async () => {
     const home = makeHome();
     const checkoutRoot = makeFixtureCheckout();
     writeGlobalPluginLink(checkoutRoot, home);
     const log: string[] = [];
 
-    const code = await runDoctor(baseOptions(home, { checkoutRoot }), { runner: new FakeRunner(), log: (m) => log.push(m) });
+    const code = await runVerify(baseOptions(home, { checkoutRoot }), { runner: new FakeRunner(), log: (m) => log.push(m) });
 
     expect(code).toBe(0);
     cleanup(home, checkoutRoot);
@@ -102,10 +102,10 @@ describe("runDoctor", () => {
     const checkoutRoot = makeFixtureCheckout();
     const deps = { runner: new FakeRunner(), log: () => {} };
 
-    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot);
@@ -128,10 +128,10 @@ describe("runDoctor", () => {
     );
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot);
@@ -148,10 +148,10 @@ describe("runDoctor", () => {
     unlinkSync(repoPluginLinkPath(repoRoot));
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot, repoRoot);
@@ -165,7 +165,7 @@ describe("runDoctor", () => {
     writeGlobalConfig({ repos: { gone: { path: goneRoot, initiatives: ["INIT-1"] } } }, home);
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const code = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
+    const code = await runVerify(baseOptions(home, { checkoutRoot }), deps);
 
     expect(code).toBe(1);
     cleanup(home, checkoutRoot);
@@ -176,7 +176,7 @@ describe("runDoctor", () => {
     const checkoutRoot = makeFixtureCheckout();
     writeGlobalPluginLink(checkoutRoot, home);
 
-    const code = await runDoctor(baseOptions(home, { checkoutRoot }), {
+    const code = await runVerify(baseOptions(home, { checkoutRoot }), {
       runner: new FakeRunner(),
       log: () => {},
     });

@@ -34,7 +34,7 @@ Budget exhaustion = Case B, `type: "budget"`; never a silent stall.
 
 Yield through the `yield` tool with the envelope's `blocked: true`,
 `result: null`. A run that stops any other way delivers nothing; lock and
-worktree sit until the reaper notices.
+worktree sit until `foreman reconcile` notices.
 
 ## Output schema
 

@@ -23,6 +23,7 @@ import type {
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
+  UserRef,
   WorkflowState,
 } from "./types.ts";
 import type {
@@ -60,6 +61,7 @@ import {
   PROJECT_UPDATE_MUTATION,
   PROJECTS_QUERY,
   TEAMS_QUERY,
+  USER_BY_EMAIL_QUERY,
   WORKFLOW_STATES_QUERY,
   WORKSPACE_LABELS_QUERY,
 } from "./queries.ts";
@@ -814,6 +816,15 @@ export class LinearClient implements LinearWriter {
     const data = await this.request<{ viewer: { id: string } }>("query { viewer { id } }", {});
     this.viewerIdCache = { value: data.viewer.id, at: Date.now() };
     return data.viewer.id;
+  }
+
+  /** Resolves an operator's account by email for `foreman setup`'s `linear.operatorUserId` prompt. Null when no workspace user has that email. */
+  async userByEmail(email: string): Promise<UserRef | null> {
+    const data = await this.request<{ users: { nodes: Array<UserRef & { email: string }> } }>(USER_BY_EMAIL_QUERY, {
+      email,
+    });
+    const user = data.users.nodes[0];
+    return user ? { id: user.id, name: user.name, displayName: user.displayName } : null;
   }
 
   /** Same as `project()`: `Document.content` is a `String`, so there is one valid shape. */

@@ -404,9 +404,9 @@ Full method: `foreman-review-diff`. Outline:
    placement). Standing field: no concerns → say so explicitly.
 6. Note scope creep beyond the stated criteria.
 7. Classify findings by severity. `blocking` routes back to implement and
-   burns one of two review→fix cycles before the issue converts to
-   `blocked:needs-decision`: reserve it for a criterion or Definition of Done
-   that genuinely fails, never as a hedge.
+   burns one of two review→fix cycles before the issue gains `foreman:blocked`
+   with a needs-decision block record: reserve it for a criterion or
+   Definition of Done that genuinely fails, never as a hedge.
 
 ## Output
 

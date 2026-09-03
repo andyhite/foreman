@@ -3,6 +3,7 @@ description: Catches an agent about to fix or touch something outside the issue'
 condition: "(?i)(while I['’]m here|while I am here|also fixed|while we['’]re (here|in here)|took the opportunity to|might as well|since I was in there|drive-by fix)"
 scope: "text"
 interruptMode: always
+agents: foreman-implement
 ---
 
 Stop. The acceptance criteria are the contract for this pass, not a floor.

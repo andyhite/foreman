@@ -26,6 +26,13 @@ export interface ConfigPatch {
   removeRepos?: string[];
   linear?: {
     apiKeyFile?: string | null;
+    /** The operator's own Linear user id — resolved from their email by `foreman setup` (SPEC: assignee-based ownership). `null` clears it. */
+    operatorUserId?: string | null;
+  };
+  /** The GitHub App `foreman-review` submits real PR reviews under (SPEC §7.4). Both fields set together, or both `null` to disable. */
+  githubApp?: {
+    appId?: string | null;
+    privateKeyFile?: string | null;
   };
 }
 
@@ -48,6 +55,10 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
 export interface ExistingConfig {
   repos: Record<string, RepoEntry>;
   apiKeyFile: string | null;
+  /** Already-configured operator account, shown back as the wizard's re-run default. */
+  operatorUserId: string | null;
+  /** Already-configured GitHub App id, shown back as the wizard's re-run default (SPEC §7.4). */
+  githubAppId: string | null;
   /**
    * `repoDefaults.baseBranch` as it would be seen after schema defaulting —
    * the value a `repos` entry actually inherits when it omits its own
@@ -68,10 +79,13 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
   const configPath = join(home, ".foreman", "config.json");
   const existing = readExistingConfig(configPath);
   const linear = (existing.linear as Record<string, unknown> | undefined) ?? {};
+  const githubApp = (existing.githubApp as Record<string, unknown> | undefined) ?? {};
   const defaulted = defaultAndValidateGlobalConfig({ repoDefaults: existing.repoDefaults ?? {} }, configPath);
   return {
     repos: (existing.repos as Record<string, RepoEntry> | undefined) ?? {},
     apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
+    operatorUserId: typeof linear.operatorUserId === "string" ? linear.operatorUserId : null,
+    githubAppId: typeof githubApp.appId === "string" ? githubApp.appId : null,
     effectiveBaseBranch: defaulted.repoDefaults.baseBranch,
   };
 }
@@ -90,10 +104,18 @@ function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Reco
   const existingLinear = (existing.linear as Record<string, unknown> | undefined) ?? {};
   const linearPatch: Record<string, unknown> = { ...existingLinear };
   if (patch.linear?.apiKeyFile) linearPatch.apiKeyFile = patch.linear.apiKeyFile;
+  if (patch.linear && "operatorUserId" in patch.linear) linearPatch.operatorUserId = patch.linear.operatorUserId;
   if (Object.keys(linearPatch).length > 0) merged.linear = linearPatch;
+
+  const existingGithubApp = (existing.githubApp as Record<string, unknown> | undefined) ?? {};
+  const githubAppPatch: Record<string, unknown> = { ...existingGithubApp };
+  if (patch.githubApp && "appId" in patch.githubApp) githubAppPatch.appId = patch.githubApp.appId;
+  if (patch.githubApp && "privateKeyFile" in patch.githubApp) githubAppPatch.privateKeyFile = patch.githubApp.privateKeyFile;
+  if (Object.keys(githubAppPatch).length > 0) merged.githubApp = githubAppPatch;
 
   return merged;
 }
+
 
 /**
  * Writes the merged config to `<home>/.foreman/config.json`, validating the
@@ -136,6 +158,28 @@ export function writeLinearApiKeyFile(apiKey: string, home: string = homedir()):
     throw new Error(`${keyPath} is a symlink; refusing to write the Linear API key through it. Remove it and re-run.`);
   }
   writeFileSync(keyPath, `${apiKey.trim()}\n`, { mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+  return keyPath;
+}
+
+/** Writes the GitHub App's PEM private key to `<home>/.foreman/github-app-private-key.pem`, mode 0600, and returns the path (SPEC §7.4). */
+export function writeGitHubAppPrivateKeyFile(privateKey: string, home: string = homedir()): string {
+  const dir = join(home, ".foreman");
+  const keyPath = join(dir, "github-app-private-key.pem");
+  mkdirSync(dirname(keyPath), { recursive: true });
+  // A pre-planted symlink here would redirect both the write and the chmod to
+  // whatever it points at. Refuse rather than follow.
+  let existing;
+  try {
+    existing = lstatSync(keyPath);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+  }
+  if (existing?.isSymbolicLink()) {
+    throw new Error(`${keyPath} is a symlink; refusing to write the GitHub App private key through it. Remove it and re-run.`);
+  }
+  const trimmed = privateKey.trim();
+  writeFileSync(keyPath, trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`, { mode: 0o600 });
   chmodSync(keyPath, 0o600);
   return keyPath;
 }

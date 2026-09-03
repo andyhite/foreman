@@ -7,24 +7,22 @@
 import type { ExtensionAPI, ExtensionToolConfig, InferShape, ZodRawShape } from "@oh-my-pi/pi-coding-agent";
 import type { IssueFilter } from "@foreman/core";
 import {
-  BLOCKED_DEPS_FILTER,
-  BLOCKED_HUMAN_FILTER,
+  BLOCKED_FILTER,
   INBOX_FILTER,
-  IN_FLIGHT_FILTER,
-  PROPOSALS_FILTER,
+  RUNNING_FILTER,
   blockedByProjectRelations,
   blockingProjectRelations,
-  readyFilter,
+  inState,
+  inStateType,
 } from "@foreman/core";
 import { getContextDigest, getLinear } from "../runtime.ts";
 
 const SAVED_VIEWS: Record<string, () => IssueFilter> = {
   inbox: () => INBOX_FILTER,
-  "blocked-human": () => BLOCKED_HUMAN_FILTER,
-  "blocked-deps": () => BLOCKED_DEPS_FILTER,
-  proposals: () => PROPOSALS_FILTER,
-  ready: () => readyFilter(),
-  "in-flight": () => IN_FLIGHT_FILTER,
+  blocked: () => BLOCKED_FILTER,
+  running: () => RUNNING_FILTER,
+  todo: () => inStateType("unstarted"),
+  "in-review": () => inState("In Review"),
 };
 
 const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "initiative_roadmap", "view"] as const;
@@ -34,7 +32,7 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
     op: pi.zod.enum(OPS).describe("Which read to perform."),
     id: pi.zod.string().optional().describe("Issue identifier, project id, team id, or initiative id, depending on op."),
     view: pi.zod
-      .enum(["inbox", "blocked-human", "blocked-deps", "proposals", "ready", "in-flight"])
+      .enum(["inbox", "blocked", "running", "todo", "in-review"])
       .optional()
       .describe("Saved view name, required when op is \"view\"."),
     includeComments: pi.zod.boolean().optional().describe("Include comments on the returned issue(s)."),

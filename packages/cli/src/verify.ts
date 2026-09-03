@@ -1,5 +1,5 @@
 /**
- * `foreman doctor` — verifies the activation surface plugin-activation.ts
+ * `foreman verify` — verifies the activation surface plugin-activation.ts
  * writes, rather than trusting it stayed intact.
  *
  * That surface is deliberately small (one global symlink, one lock entry and
@@ -10,7 +10,7 @@
  * `omp plugin link`, or a repo whose `.omp/plugins` got deleted by a clean-up
  * script all produce the same symptom: an agent that quietly lacks Foreman's
  * tools, discovered only when a skill or command mysteriously isn't there.
- * `doctor` turns that silence into a report, and `--fix` turns the report
+ * `verify` turns that silence into a report, and `--fix` turns the report
  * into a repair using the same primitives `setup`/`init` use, so there is
  * exactly one code path that knows how to make the surface healthy.
  */
@@ -118,7 +118,7 @@ function checkUserScopeInstall(options: DoctorOptions, deps: DoctorDeps, problem
     deps,
     problems,
     `${install.root} has a machine-wide Foreman install — it will fire in every repo on this machine, not just ` +
-      "the ones registered with `foreman init`. Run `foreman doctor --fix` to remove it.",
+      "the ones registered with `foreman init`. Run `foreman verify --fix` to remove it.",
   );
 }
 
@@ -195,11 +195,11 @@ function checkRepos(options: DoctorOptions, deps: DoctorDeps, problems: string[]
 
 /**
  * Runs every check in order, prints a section per surface, and returns the
- * process exit code the `doctor` command should use: 0 once nothing is
+ * process exit code the `verify` command should use: 0 once nothing is
  * wrong (either it started healthy, or `--fix` repaired everything), 1
  * otherwise.
  */
-export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promise<number> {
+export async function runVerify(options: DoctorOptions, deps: DoctorDeps): Promise<number> {
   const problems: string[] = [];
 
   await checkTools(options, deps, problems);
@@ -218,7 +218,7 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
   deps.log(statusLine(false, `${problems.length} problem(s) ${verb}:`));
   for (const problemText of problems) deps.log(`    ${style("yellow", "-")} ${problemText}`);
   if (!options.fix) deps.log("");
-  if (!options.fix) deps.log(statusLine(false, "run `foreman doctor --fix` to attempt repairs"));
+  if (!options.fix) deps.log(statusLine(false, "run `foreman verify --fix` to attempt repairs"));
 
   return 1;
 }

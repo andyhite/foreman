@@ -6,7 +6,7 @@ description: Use when foreman-plan turns a bare project's brief into its first s
 # Foreman Plan Project
 
 <critical>
-- NEVER write `proposedIssues` to Linear or set `agent:ready`; the extension creates them, `foreman-refine` readies them.
+- NEVER write `proposedIssues` to Linear directly; the extension creates them, `foreman-refine` readies them.
 - `blockedBy` = real prerequisite only. Graph MUST be a DAG: a cycle, duplicate `key`, self-block, or `blockedBy` naming no sibling `key` drops the whole result.
 - NEVER put `##` headings in `description`; the extension renders the template.
 - NEVER edit the project brief or the product `Context` doc; propose edits as a comment.
@@ -65,8 +65,8 @@ unless the operator later empties it.
 `blockedBy` edge into a native Linear `blocks` relation; nothing else. The
 relation, not a label or prose, is what the implement gate reads, so a
 prerequisite that never becomes a `blockedBy` entry gates nothing. No issue
-gets `agent:ready`; each enters the refine funnel when the operator sets a
-priority.
+carries a `foreman:*` label; each enters the refine funnel when the operator
+sets a priority.
 
 ## Stop conditions
 

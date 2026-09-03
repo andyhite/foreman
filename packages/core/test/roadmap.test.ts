@@ -75,6 +75,7 @@ class FakeLinear implements LinearWriter {
   async teams(): Promise<never> { throw new Error("not implemented in fake"); }
   async projects(): Promise<never> { throw new Error("not implemented in fake"); }
   async viewerId(): Promise<string> { throw new Error("not implemented in fake"); }
+  async userByEmail(): Promise<never> { throw new Error("not implemented in fake"); }
   async updateIssue(_id: string, _input: IssueMutation): Promise<Issue> { throw new Error("not implemented in fake"); }
   async createIssue(_input: CreateIssueInput): Promise<Issue> { throw new Error("not implemented in fake"); }
   async updateProjectStatus(_input: { projectId: LinearId; type: ProjectStatusType }): Promise<void> { throw new Error("not implemented in fake"); }

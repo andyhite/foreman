@@ -24,10 +24,10 @@
  * finishes with a usable config.
  */
 
-import { findUserScopeInstall, removeUserScopeInstall, writeGlobalPluginLink } from "@foreman/core";
+import { findUserScopeInstall, GitHubAppAuth, GitHubAppError, LinearApiError, LinearClient, removeUserScopeInstall, writeGlobalPluginLink } from "@foreman/core";
 import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
-import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
+import { readGlobalConfig, writeGitHubAppPrivateKeyFile, writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import type { Prompter } from "./prompt.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 
@@ -127,6 +127,103 @@ async function resolveLinearApiKey(
   return { apiKey, apiKeyFile };
 }
 
+/**
+ * Resolves the operator's Linear user id from an email address, for
+ * `linear.operatorUserId` — the account a blocked issue gets assigned to
+ * (SPEC §9 Case B) instead of just clearing its assignee. `undefined` means
+ * "leave whatever's on disk alone" (declined, no key, lookup failed); only
+ * an explicit `null`/id return should be written.
+ */
+async function resolveOperatorUserId(
+  prompter: Prompter,
+  log: (message: string) => void,
+  home: string,
+  apiKey: string | null,
+): Promise<string | null | undefined> {
+  if (!apiKey) {
+    log("  skipping — no Linear API key configured, so there's no credential to look up an account with.");
+    return undefined;
+  }
+  const existing = readGlobalConfig(home).operatorUserId;
+  if (existing) log(`  ${style("cyan", "i")} currently set to ${existing}.`);
+  const question = existing
+    ? "Look up a different Linear account by email to replace it?"
+    : "Configure your Linear account email so blocked issues get assigned to you instead of left unowned?";
+  if (!(await prompter.confirm(question, !existing))) {
+    log("  skipping — set linear.operatorUserId by hand in ~/.foreman/config.json later if you want this.");
+    return undefined;
+  }
+  const email = (await prompter.text("Your Linear account email", "")).trim();
+  if (email.length === 0) {
+    log("  no email entered; skipping.");
+    return undefined;
+  }
+  const client = new LinearClient({ apiKey });
+  try {
+    const user = await client.userByEmail(email);
+    if (!user) {
+      log(`  ${style("yellow", "!")} no Linear user found with email ${email}; set linear.operatorUserId by hand if you want this.`);
+      return undefined;
+    }
+    log(`  ${style("green", "✓")} resolved ${email} → ${user.displayName ?? user.name} (${user.id})`);
+    return user.id;
+  } catch (error) {
+    const message = error instanceof LinearApiError ? error.message : String(error);
+    log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}); set linear.operatorUserId by hand if you want this.`);
+    return undefined;
+  }
+}
+
+interface ResolvedGitHubApp {
+  appId: string;
+  privateKeyFile: string;
+}
+
+/**
+ * Configures `githubApp` — the App identity `foreman-review` submits real
+ * GitHub PR reviews under (SPEC §7.4), distinct from whoever `gh` opens PRs
+ * as: GitHub refuses an `APPROVE` review from a PR's own author, so review
+ * needs a separate bot identity to ever approve anything `foreman-implement`
+ * opened. `undefined` means "leave whatever's on disk alone".
+ */
+async function resolveGitHubApp(
+  prompter: Prompter,
+  log: (message: string) => void,
+  home: string,
+): Promise<ResolvedGitHubApp | undefined> {
+  const existing = readGlobalConfig(home).githubAppId;
+  if (existing) log(`  ${style("cyan", "i")} currently configured: App ID ${existing}.`);
+  const question = existing
+    ? "Replace the configured GitHub App?"
+    : "Configure a GitHub App so foreman-review can submit real PR reviews (approve/request changes), instead of Linear-comment-only advisory notes?";
+  if (!(await prompter.confirm(question, !existing))) {
+    log("  skipping — set githubApp.appId and githubApp.privateKeyFile by hand in ~/.foreman/config.json later if you want this.");
+    return undefined;
+  }
+  const appId = (await prompter.text("GitHub App ID", existing ?? "")).trim();
+  if (appId.length === 0) {
+    log("  no App ID entered; skipping.");
+    return undefined;
+  }
+  const privateKey = (await prompter.secret("Paste the App's private key (.pem, input hidden): ")).trim();
+  if (privateKey.length === 0) {
+    log("  no private key entered; skipping.");
+    return undefined;
+  }
+  try {
+    const auth = new GitHubAppAuth({ appId, privateKey });
+    const app = await auth.app();
+    log(`  ${style("green", "✓")} resolved App ID ${appId} → "${app.name}"`);
+  } catch (error) {
+    const message = error instanceof GitHubAppError ? error.message : String(error);
+    log(`  ${style("yellow", "!")} couldn't verify the App credentials (${message}); double-check the App ID and key and try again later.`);
+    return undefined;
+  }
+  const privateKeyFile = writeGitHubAppPrivateKeyFile(privateKey, home);
+  log(`  wrote ${privateKeyFile} (mode 0600)`);
+  return { appId, privateKeyFile };
+}
+
 async function configureGlobalConfig(
   prompter: Prompter,
   log: (message: string) => void,
@@ -135,9 +232,23 @@ async function configureGlobalConfig(
 ): Promise<void> {
   printSection(log, "Linear API key (~/.foreman/config.json)");
 
-  const { apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
+  const { apiKey, apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
 
-  const configPath = writeGlobalConfig({ linear: { apiKeyFile } }, home);
+  printSection(log, "Linear operator account (~/.foreman/config.json)");
+
+  const operatorUserId = await resolveOperatorUserId(prompter, log, home, apiKey);
+
+  printSection(log, "GitHub App (~/.foreman/config.json)");
+
+  const githubApp = await resolveGitHubApp(prompter, log, home);
+
+  const configPath = writeGlobalConfig(
+    {
+      linear: { apiKeyFile, ...(operatorUserId !== undefined ? { operatorUserId } : {}) },
+      ...(githubApp !== undefined ? { githubApp } : {}),
+    },
+    home,
+  );
   log(`  wrote ${configPath}`);
 }
 

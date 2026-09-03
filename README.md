@@ -44,7 +44,7 @@ the extension performs the mutation. That split is the design:
   is stored that way. This is defense in depth, not a sandbox; issue content
   is untrusted input.
 - A loop-dispatched deployment therefore requires `linear.apiKeyFile`. Both
-  dispatch paths (`packages/loop/src/repo.ts`, `packages/loop/src/team.ts`)
+  dispatch paths (`packages/loop/src/dispatch/print.ts`, `packages/loop/src/dispatch/herdr.ts`)
   scrub `apiKeyEnv`, and the dispatched session's own extension still needs
   a write-capable client to claim locks and apply results. An env-var-only
   deployment cannot support loop dispatch.
@@ -164,12 +164,12 @@ one entry. An issue whose project has no initiative, or whose initiative is
 bound to no entry, is skipped rather than guessed at. The key resolves from
 `$LINEAR_API_KEY`, else `linear.apiKeyFile`.
 
-### `foreman deinit`, `foreman doctor`, `foreman update`
+### `foreman deinit`, `foreman verify`, `foreman update`
 
 - `foreman deinit` (inside a repo) removes the plugin lock and symlink under
   `.omp/plugins/` and, unless `--keep-registry`, drops the repo's registry
   entry. `--path <dir>` targets another directory.
-- `foreman doctor` checks the global plugin link and every registered repo's
+- `foreman verify` checks the global plugin link and every registered repo's
   activation; a broken symlink or stale lock entry is a problem. `--fix`
   repairs what it can (re-runs the equivalent of `activateRepoPlugin` per
   affected repo); `--checkout <path>` overrides the expected checkout. Exits
@@ -182,66 +182,30 @@ bound to no entry, is skipped rather than guessed at. The key resolves from
 
 **Old machine-wide install?** Earlier `foreman setup` registered an omp
 marketplace and installed the plugin user-scoped, so it loaded in every omp
-session. `foreman doctor` detects the leftover; `foreman doctor --fix`
+session. `foreman verify` detects the leftover; `foreman verify --fix`
 removes it. Then `foreman init` in each repo that should have Foreman.
 
 ## Running the loop
 
 Order of operations: `setup` once per machine, `init` once per repo,
-`update` when Foreman changes upstream. Then one `foreman repo` process per
-managed repo, and one team-level `foreman team` process consuming the shared
-Triage inbox.
+`update` when Foreman changes upstream. `foreman plan` and `foreman build`
+(the per-repo planning and build loops) are not available yet — the CLI
+accepts both names and exits `2` with "not yet available" until they land.
+`foreman reconcile` is available now and repairs Linear drift a stopped or
+crashed loop can leave behind — an orphaned `foreman:running` lock, an
+abandoned in-progress issue, a merged PR whose issue never moved to Done, an
+`In Review` issue with no PR and an unpushed branch, or a `foreman:blocked`
+issue the operator already answered:
 
 ```bash
-foreman repo [alias] [--team <KEY>]   # inside the repo; alias overrides cwd matching
-foreman repo --once                   # one tick, asking before each action
-foreman repo --mode yolo              # unattended
-foreman team [key]                    # triage intake for the team
+foreman reconcile [alias] [--mode confirm|yolo] [--dry-run]
 ```
 
-The supervisor polls Linear and dispatches whatever the gates allow.
+`--dry-run` logs every invariant's fix without applying it or prompting.
+`loop.mode` (overridable with `--mode`) defaults to `confirm`: reconcile asks
+before every Linear mutation; `confirm` needs a TTY, and a run with no
+terminal attached refuses to start rather than declining silently.
 
-`loop.mode` defaults to `confirm`: the loop asks before every agent dispatch
-and every Linear mutation. Reads are never gated, and every worker's
-predicate is still evaluated and logged, so declining everything is a dry
-run. `loop.workerModes` overrides one worker: `{ "review": "yolo" }` lets
-review dispatch unattended while the rest ask. `confirm` needs a TTY; a loop
-whose effective mode resolves to `confirm` with no terminal attached refuses
-to start rather than declining silently.
-
-Every tick logs a per-worker summary, each dispatch intent, and every
-routing skip. `--verbose` adds per-item skip reasons, timings, and dispatch
-handles (`foreman repo`) or the skip reason per triaged issue (`foreman
-team`).
-
-```
-[foreman-repo:plotroom] confirm: dispatch foreman-plan for project Plotroom
-[foreman-repo:plotroom]   command: /foreman:plan 8f2c1d90
-[foreman-repo:plotroom]   cwd: /Users/you/Code/plotroom
-Proceed? [y/N] y
-[foreman-repo:plotroom] plan [mode: confirm]: 1 dispatched, 0 would dispatch, 43 skipped
-[foreman-repo:plotroom]   ✓ dispatched plan [mode: confirm] 8f2c1d90: "Plotroom" has no issues yet.
-```
-
-`foreman-repo` names the long-lived process (the same spelling herdr uses
-for its pane). The loop is a singleton; a second refuses to start while the
-first holds the lock.
-
-### Control plane
-
-Each loop process serves a unix socket at
-`<loop.stateDir>/<loop>/control.sock` (newline-delimited JSON) and publishes
-`<loop.stateDir>/<loop>/status.json` after `reconcile()` and after every
-tick. Ops: `hello`, `snapshot`, `subscribe`, `pause`, `resume`, `stop`,
-`tick`, `setMode`, `patchConfig`, `reload`, `attachAgent`, `killAgent`,
-`report`, `logs`.
-
-`stop` takes `mode: "graceful" | "now"`. Both transition to `draining` and
-release the lock on completion; `graceful` lets the in-flight tick finish
-every worker, `now` cuts between workers, wakes the poll wait, and leaves
-in-flight dispatches to expire at lock TTL. The socket is live control; the
-file is what a client reads when nothing is listening, so a stopped loop's
-last state still renders. `foreman repo --no-control` skips the socket.
 
 ## Operator surface
 

@@ -3,7 +3,6 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GlobalConfig } from "@foreman/core";
-import { RESERVATIONS_ENV } from "@foreman/core";
 import { herdrAgentName } from "../src/dispatch/herdr.ts";
 import { PrintDispatcher } from "../src/dispatch/print.ts";
 
@@ -34,23 +33,16 @@ function makeConfig(ompBin: string): GlobalConfig {
   return {
     repos: {},
     loop: {
-      wipGlobal: 3,
-      wip: { refine: 2, implement: 3, review: 2, plan: 1 },
-      readyBufferTarget: 5,
-      backpressureThreshold: 5,
-      retryCap: 2,
-      claimGraceMs: 300_000,
-      reviewCycleCap: 2,
-      cadenceMinutes: 5,
       mode: "yolo",
-      workerModes: {},
-      mergeDetection: true,
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
+      concurrency: { plan: 1, build: 3 },
+      pollSeconds: 20,
+      triageBatch: 10,
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
-    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false },
-    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin, approvalMode: "yolo", herdrBin: "herdr", herdrLayout: "tab", orchestratorMaxBatches: 20 },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false, operatorUserId: null },
+    githubApp: { appId: null, privateKeyFile: null },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin, approvalMode: "yolo", herdrBin: "herdr", dispatcher: "auto" },
     repoDefaults: {
       baseBranch: "main",
       pr: { required: true, draft: false, ciRequired: true },
@@ -114,17 +106,13 @@ describe("PrintDispatcher", () => {
     expect(argv[argv.length - 1]).toBe("/foreman:refine ENG-1 ENG-2");
   });
 
-  it("sets FOREMAN_DISPATCH_ID only for a single-item request, and reservations for both", async () => {
+  it("sets FOREMAN_DISPATCH_ID only for a single-item request", async () => {
     const singleDir = mkdtempSync(join(tmpdir(), "foreman-print-env-"));
     const singleScript = join(singleDir, "print-env");
-    writeFileSync(
-      singleScript,
-      "#!/bin/sh\nprintf '%s|%s' \"${FOREMAN_DISPATCH_ID-unset}\" \"${FOREMAN_DISPATCH_RESERVATIONS-unset}\"\n",
-    );
+    writeFileSync(singleScript, "#!/bin/sh\nprintf '%s' \"${FOREMAN_DISPATCH_ID-unset}\"\n");
     chmodSync(singleScript, 0o755);
-    const reservationsDir = mkdtempSync(join(tmpdir(), "foreman-reservations-"));
     try {
-      const dispatcher = new PrintDispatcher(makeConfig(singleScript), { reservationsDir });
+      const dispatcher = new PrintDispatcher(makeConfig(singleScript));
 
       const singleHandles = await dispatcher.dispatch({
         agent: "foreman-implement",
@@ -134,9 +122,7 @@ describe("PrintDispatcher", () => {
         items: [{ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1", worktree: null }],
       });
       const singleOutcome = await dispatcher.settle(singleHandles[0] as never);
-      const [singleDispatchId, singleReservations] = singleOutcome.log.split("|");
-      expect(singleDispatchId).toBe("dispatch-1");
-      expect(singleReservations).toBe(join(reservationsDir, "foreman-implement.json"));
+      expect(singleOutcome.log).toBe("dispatch-1");
 
       const batchHandles = await dispatcher.dispatch({
         agent: "foreman-refine",
@@ -149,44 +135,9 @@ describe("PrintDispatcher", () => {
         ],
       });
       const batchOutcome = await dispatcher.settle(batchHandles[0] as never);
-      const [batchDispatchId, batchReservations] = batchOutcome.log.split("|");
-      expect(batchDispatchId).toBe("unset");
-      expect(batchReservations).toBe(join(reservationsDir, "foreman-refine.json"));
+      expect(batchOutcome.log).toBe("unset");
     } finally {
       rmSync(singleDir, { recursive: true, force: true });
-      rmSync(reservationsDir, { recursive: true, force: true });
-    }
-  });
-
-  it("sets FOREMAN_LOOP_SOCKET only when controlSocket is passed", async () => {
-    const scriptDir = mkdtempSync(join(tmpdir(), "foreman-print-socket-"));
-    const scriptPath = join(scriptDir, "print-env");
-    writeFileSync(scriptPath, "#!/bin/sh\nprintf '%s' \"${FOREMAN_LOOP_SOCKET-unset}\"\n");
-    chmodSync(scriptPath, 0o755);
-    try {
-      const withSocket = new PrintDispatcher(makeConfig(scriptPath), { controlSocket: "/state/control.sock" });
-      const withHandles = await withSocket.dispatch({
-        agent: "foreman-implement",
-        command: "/foreman:implement",
-        cwd: scriptDir,
-        alias: "acme",
-        items: [{ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1", worktree: null }],
-      });
-      const withOutcome = await withSocket.settle(withHandles[0] as never);
-      expect(withOutcome.log).toBe("/state/control.sock");
-
-      const withoutSocket = new PrintDispatcher(makeConfig(scriptPath));
-      const withoutHandles = await withoutSocket.dispatch({
-        agent: "foreman-implement",
-        command: "/foreman:implement",
-        cwd: scriptDir,
-        alias: "acme",
-        items: [{ issueId: "ENG-2", subject: "ENG-2", dispatchId: "dispatch-2", worktree: null }],
-      });
-      const withoutOutcome = await withoutSocket.settle(withoutHandles[0] as never);
-      expect(withoutOutcome.log).toBe("unset");
-    } finally {
-      rmSync(scriptDir, { recursive: true, force: true });
     }
   });
 

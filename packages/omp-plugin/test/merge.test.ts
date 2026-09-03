@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENT_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker, ensureWorktree, worktreePathFor } from "@foreman/core";
+import { MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker, ensureWorktree, worktreePathFor } from "@foreman/core";
 import type { Comment, CommandRunner, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { runMerge } from "../src/commands/merge.ts";
@@ -33,7 +33,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: STATE_IN_REVIEW,
-    labels: [label(TYPE_LABEL.feature), label(AGENT_LABEL.ready)],
+    labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -65,6 +65,9 @@ class FakeLinear implements LinearWriter {
   }
   async viewerId(): Promise<string> {
     return "bot-1";
+  }
+  async userByEmail(): Promise<never> {
+    throw new Error("not implemented");
   }
   async project(_projectId: string): Promise<Project | null> {
     return { id: "project-1", name: "Foreman", description: null, content: null, startDate: null, targetDate: null, status: null, documents: [] };
