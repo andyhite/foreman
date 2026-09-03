@@ -90,8 +90,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       args.pollSeconds = value;
     } else if (arg === "--home") {
       args.homePath = argv[(i += 1)] ?? null;
-    } else if (arg && !arg.startsWith("-") && args.repo === null) {
+    } else if (arg !== undefined && !arg.startsWith("-") && args.repo === null) {
       args.repo = arg;
+    } else if (arg !== undefined) {
+      throw new ConfigError(`Unrecognized argument: ${arg}`, ["Run `foreman build --help` for the flag list."]);
     }
   }
   return args;
@@ -167,10 +169,15 @@ export async function runBuild(argv: readonly string[]): Promise<void> {
     }
     throw error;
   }
-  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
+  const linear = new LinearClient({
+    apiKey,
+    endpoint: config.linear.endpoint,
+    team,
+    onRequest: args.verbose ? traceLinearRequest : undefined,
+  });
 
   const confirmationRequired = config.loop.mode === "confirm";
-  if (confirmationRequired && !args.once && !process.stdin.isTTY) {
+  if (confirmationRequired && !process.stdin.isTTY) {
     console.error(
       style(
         "red",
@@ -187,9 +194,6 @@ export async function runBuild(argv: readonly string[]): Promise<void> {
   const github = new GitHubClient();
   const dispatcher = await resolveDispatcher(config);
 
-  const inflightPath = `${stateDir}/${entry.alias}/build.json`;
-  const state = await InflightStore.load(inflightPath, dispatcher);
-
   const lock = new ProcessLock(`${stateDir}/${entry.alias}/build.lock`);
   try {
     lock.acquire(process.pid, new Date());
@@ -201,6 +205,9 @@ export async function runBuild(argv: readonly string[]): Promise<void> {
     }
     throw error;
   }
+
+  const inflightPath = `${stateDir}/${entry.alias}/build.json`;
+  const state = await InflightStore.load(inflightPath, dispatcher);
 
   try {
     const ctx: LoopContext = { linear, github, entry, config, now: () => new Date() };

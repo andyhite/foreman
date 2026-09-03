@@ -5,10 +5,10 @@
  * configured. Refuses with the gate failures when it does not pass.
  */
 
-import type { GitHubClient, LinearWriter, MergedRecord, ResolvedRepoEntry } from "@foreman/core";
+import type { GitHubClient, GlobalConfig, LinearWriter, MergedRecord, ResolvedRepoEntry } from "@foreman/core";
 import { assertIssueInScope, cleanupMergedWork, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
-import { getEntry } from "../runtime.ts";
+import { getConfig, getEntry } from "../runtime.ts";
 
 export interface MergeCommandResult {
   merged: boolean;
@@ -34,6 +34,7 @@ export async function runMerge(
   github: GitHubClient,
   issueId: string,
   entry: ResolvedRepoEntry = getEntry(),
+  config: GlobalConfig = getConfig(),
 ): Promise<MergeCommandResult> {
   const issue = await linear.issue(issueId, { includeComments: true });
   if (!issue) return { merged: false, message: `Unknown issue "${issueId}".` };
@@ -144,12 +145,14 @@ export async function runMerge(
     };
   }
 
-  const cleanupNotes = await cleanupMergedWork({
-    repoPath,
-    worktreePattern: repoSettings.worktreePattern,
-    baseBranch: repoSettings.baseBranch,
-    issue,
-  });
+  const cleanupNotes = config.loop.cleanupMergedWorktrees
+    ? await cleanupMergedWork({
+        repoPath,
+        worktreePattern: repoSettings.worktreePattern,
+        baseBranch: repoSettings.baseBranch,
+        issue,
+      })
+    : [];
   const cleanupSuffix = cleanupNotes.length > 0 ? ` (${cleanupNotes.join("; ")})` : "";
 
   if (gitMergeComplete) {

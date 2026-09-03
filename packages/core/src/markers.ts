@@ -63,7 +63,8 @@ const TRAILING_FENCE = /```json\s*\n([\s\S]*?)\n```\s*$/;
  * Render a comment body: human prose, then the machine copy.
  *
  * The human half is what the operator reads in Linear; the JSON half is what
- * `/foreman:apply`, the reaper, and the review worker read back.
+ * the extension's result-application layer, `foreman reconcile`, and the
+ * loop's `review` rule read back.
  */
 export function encodeMarker<T>(kind: MarkerKind, data: T, human: string): string {
   const envelope: MarkerEnvelope<T> = {
@@ -109,7 +110,7 @@ export interface MarkerReadOptions {
   /**
    * When set, comments not authored by this user id are skipped entirely —
    * a forged marker from another Linear user cannot be read back as truth
-   * by control-plane logic (lock ownership, review/merge gating, etc).
+   * by any downstream decision (lock ownership, review/merge gating, etc).
    */
   authoredBy?: string;
 }

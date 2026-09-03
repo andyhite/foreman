@@ -566,7 +566,7 @@ export interface ActivationState {
 
 /**
  * Reports whether omp will load Foreman in `repoRoot`, and why not if it will
- * not. Read-only: this is what `foreman doctor` reports and what `--fix`
+ * not. Read-only: this is what `foreman verify` reports and what `--fix`
  * decides from.
  *
  * `omp plugin list` is deliberately not consulted. It reads the user plugin

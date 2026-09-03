@@ -68,7 +68,7 @@ export const PlanResult = Type.Object(
     proposedIssues: Type.Array(ProposedIssue, {
       description:
         "New Backlog issues that decompose the project brief into agent-sized units. " +
-        "The extension creates each one directly; none of them get `agent:ready` — they enter " +
+        "The extension creates each one directly, unlabeled and unprioritized — they enter " +
         "the normal refine funnel once the operator sets a priority.",
     }),
     outOfScope: Type.Array(Type.String(), {

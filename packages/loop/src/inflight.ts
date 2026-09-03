@@ -32,8 +32,10 @@ function emptyFile(): InflightFile {
 /**
  * Tracks which `Rule` candidates are currently dispatched and how many times
  * each has failed, across process restarts. `load` drops any `inFlight`
- * entry whose dispatcher reports it `"lost"` — a crash between writing the
- * record and the dispatch actually settling must not wedge that key forever.
+ * entry whose dispatcher reports a terminal status (`"lost"` or `"settled"`)
+ * — a crash between writing the record and the dispatch actually settling,
+ * or a restart after settling raced the final `remove()`, must not wedge
+ * that key forever.
  */
 export class InflightStore {
   readonly #path: string;
@@ -58,7 +60,7 @@ export class InflightStore {
 
     for (const [key, entry] of Object.entries(state.inFlight)) {
       const status = await dispatcher.status(entry.handle);
-      if (status === "lost") delete state.inFlight[key];
+      if (status === "lost" || status === "settled") delete state.inFlight[key];
     }
 
     const store = new InflightStore(path, state);

@@ -1,5 +1,5 @@
 ---
-description: Triage the Linear Inbox and propose classification, priority, and destination for each item
+description: Triage the Linear Inbox and apply classification, priority, and destination for each item
 argument-hint: "[--initiatives <id,id,...>] <ISSUE-ID...>"
 ---
 

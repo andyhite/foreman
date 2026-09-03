@@ -63,13 +63,30 @@ describe("renderLockComment / readLockComment", () => {
     expect(readLockComment([])).toBeNull();
   });
 
-  it("finds the lock among comments from any author", () => {
+  it("finds the lock among comments from any author when authoredBy is omitted", () => {
     const record = makeRecord();
     const body = renderLockComment(record);
     const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "bot-1" } }];
     const found = readLockComment(comments);
     expect(found).not.toBeNull();
     expect(found?.data).toEqual(record);
+  });
+
+  it("finds the lock when authoredBy matches the comment's user id", () => {
+    const record = makeRecord();
+    const body = renderLockComment(record);
+    const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "bot-1" } }];
+    const found = readLockComment(comments, "bot-1");
+    expect(found).not.toBeNull();
+    expect(found?.data).toEqual(record);
+  });
+
+  it("ignores a lock-shaped comment from a different author when authoredBy is set", () => {
+    const record = makeRecord();
+    const body = renderLockComment(record);
+    const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "impostor" } }];
+    const found = readLockComment(comments, "bot-1");
+    expect(found).toBeNull();
   });
 });
 

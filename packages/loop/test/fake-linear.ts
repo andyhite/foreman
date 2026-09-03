@@ -103,16 +103,17 @@ export class FakeLinear implements LinearWriter {
     throw new Error("not implemented");
   }
 
-  async initiative(): Promise<Initiative | null> {
-    return null;
+  async initiative(id: string): Promise<Initiative | null> {
+    return { id, name: "Initiative", documents: [] };
   }
 
   async initiatives(): Promise<InitiativeRef[]> {
     return [];
   }
 
+  /** Defaults to an already-existing `Maintenance` project so `ensureMaintenanceProjects` (SPEC §3.11) is a no-op unless a test overrides this. */
   async initiativeProjects(_initiativeId?: string): Promise<ProjectRef[]> {
-    return [];
+    return [{ id: "maintenance-project", name: "Maintenance", status: null }];
   }
 
   async projectStatus(_projectId?: string): Promise<ProjectStatus | null> {
@@ -131,8 +132,9 @@ export class FakeLinear implements LinearWriter {
     return [];
   }
 
+  /** Defaults to one team keyed "ENG" so `reconcile`'s maintenance pass (SPEC §7.6a/§3.11) can resolve `entry.team` without every call site wiring a team fixture. */
   async teams(): Promise<TeamRef[]> {
-    return [];
+    return [{ id: "team-1", key: "ENG", name: "Engineering" }];
   }
 
   async projects(): Promise<ProjectRef[]> {

@@ -38,7 +38,10 @@ asks zero.
 5. **Enforce in frontmatter and code, not in prose.** Tool allowlists, `spawns`,
    and output schemas are enforced by the harness. A constraint that exists only
    as a sentence in a system prompt is a suggestion.
-6. **Propose before apply** for bulk mutation.
+6. **Bulk mutation is still gated.** `foreman-triage`'s output is applied
+   directly by the extension (§7.1) — there is no separate operator-approved
+   proposal step — but every write still goes through gate validators and a
+   `Confirmer` (§17.9), so nothing lands unchecked.
 7. **Review runs in a cold context.** Child sessions do not inherit conversation
    history — structurally guaranteed. Don't defeat it by passing implementation
    rationale through `context`.
@@ -65,7 +68,7 @@ foreman/
   packages/
     core/                       # Linear client, schemas, gate validators
     omp-plugin/                 # below — installed project-scoped per repo, never user-wide
-    loop/                       # `foreman repo` + `foreman team` CLIs (§3.11, §3.12)
+    loop/                       # `foreman build` / `plan` / `reconcile` CLIs (§17)
 ```
 
 The omp plugin is a Claude/OMP-compatible plugin directory. It is **activated
@@ -157,7 +160,7 @@ independently mutable things:
 | `foreman setup` | per-machine: tool preflight, the Linear credential, the one global plugin link at `~/.foreman/plugin` | `--link` (dev mode: run from this checkout's source, no rebuild to see changes), `--checkout <path>`, `--skip-linear` |
 | `foreman init` | per-repo: one `repos` entry, plus the two files that activate the plugin in that repo | `--path <dir>`, `--initiative <id>` (repeatable), `--alias <name>`, `--team <KEY>`, `--skip-plugin`, `--skip-linear` |
 | `foreman deinit` | per-repo: the exact inverse of `init` | `--path <dir>`, `--keep-registry` (deactivate the plugin but leave the `repos` entry in place) |
-| `foreman doctor` | verification and repair for both layers | `--fix`, `--checkout <path>` |
+| `foreman verify` | verification and repair for both layers | `--fix`, `--checkout <path>` |
 | `foreman update` | pull, rebuild, then repair drift | `--checkout <path>`, `--skip-pull`, `--skip-plugin` |
 
 All five also accept `-y`/`--yes` (accept defaults for every prompt,
@@ -176,28 +179,28 @@ module has to be declared.
 packages/omp-plugin/
   package.json                  # omp.extensions declaration — the ONLY declared path
   agents/                       # auto-discovered (§3.2)
-    foreman-triage.md  foreman-refine.md  foreman-plan.md
+    foreman-triage.md  foreman-refine.md  foreman-plan.md  foreman-roadmap.md
     foreman-implement.md  foreman-review.md
   skills/                       # auto-discovered (§3.3); dir name is the skill name
     foreman-triage-inbox/SKILL.md   foreman-refine-issue/SKILL.md
-    foreman-plan-project/SKILL.md   foreman-implement-issue/SKILL.md
+    foreman-plan-project/SKILL.md   foreman-plan-roadmap/SKILL.md
+    foreman-implement-issue/SKILL.md
     foreman-review-diff/SKILL.md    foreman-spike/SKILL.md
     foreman-block-protocol/SKILL.md
   commands/                     # auto-discovered; one per agent dispatch, `$1`-substituted
-    triage.md  refine.md  plan.md  implement.md  review.md
+    triage.md  refine.md  plan.md  roadmap.md  implement.md  review.md
   rules/                        # auto-discovered (§15)
     foreman-no-interactive-questions.md
     foreman-no-scope-expansion.md
     foreman-no-gate-bypass.md
+    foreman-no-merge.md
   schemas/                      # JSON Schema for each agent's output (§6)
   scripts/check-contract.ts     # the enforcement-surface guard (§3.13)
   src/
     extension.ts                # the declared entrypoint's source
     tools/                      # foreman_linear_read, foreman_github_pr
     render/                     # Linear comment and issue-body rendering (§3.1.1)
-    enforce/  lock/  results/  commands/
-  dist/
-    extension.js                # UNTRACKED — built by `bun run build`, see below
+    enforce/  results/  commands/  runtime.ts
 ```
 
 `@foreman/core` carries the matching guard for the other fabricable surface:
@@ -209,7 +212,7 @@ a field name Linear does not have: a fake answers whatever shape it is asked
 for, so `Team.workflowStates` passed the whole suite while failing every real
 call (§16). Run it after touching a query.
 
-`/foreman:status`, `/foreman:apply`, `/foreman:merge`, and `/foreman:unblock`
+`/foreman:status`, `/foreman:merge`, and `/foreman:unblock`
 are `pi.registerCommand` calls in `src/`, not files in `commands/` — they run
 code rather than expanding a prompt. Both tools are likewise registered by the
 extension rather than dropped in `tools/`, because each one closes over the
@@ -225,8 +228,8 @@ nothing warns you. There is a public bug trail on exactly this.
 **The plugin has no build step and no artifact.** `omp.extensions` names
 `./src/extension.ts` directly, and omp loads TypeScript straight from the
 checkout rather than a built `dist/`. Verified against omp 18.1.4: loading
-the plugin over ACP from a repo with `dist/` deleted, all four extension
-commands (`foreman:status|apply|merge|unblock`) and all seven skills loaded,
+the plugin over ACP from a repo with `dist/` deleted, all three extension
+commands (`foreman:status|merge|unblock`) and all eight skills loaded,
 and end-to-end session startup was indistinguishable from the old bundled
 entrypoint (medians 6.53s source vs 6.75s bundled, run-to-run variance
 5.0–7.0s). This retires the whole failure class rather than guarding it:
@@ -280,10 +283,10 @@ alphanumeric, ≤64 chars. `foreman` is valid; underscores and capitals are not.
 #### 3.1.1 What `@foreman/core` is for
 
 Core exists because two independent writers mutate the same Linear workspace:
-the omp plugin (operator commands and agent dispatches) and the loop supervisor
-(autonomous). A duplicated filter or label constant means the two disagree
-about whether an issue is Ready, and both claim it. Core is that shared state
-contract, not a general utility bin.
+the omp plugin (operator commands and agent dispatches) and the loop CLIs
+(autonomous, §17). A duplicated filter or label constant means the two
+disagree about whether an issue is Ready, and both claim it. Core is that
+shared state contract, not a general utility bin.
 
 Measured against the actual import graph — 103 distinct core identifiers
 imported by `omp-plugin`, 100 by `loop`, 15 by `cli`, with 45 used by both the
@@ -297,10 +300,11 @@ plugin and the loop:
 | `markers/` | 4 | comment-marker encoding for lock/dispatch/merge records |
 | `schemas/` `apply/` `lock/` | 9 | agent output contracts and the lock protocol |
 
-`control/` looks lopsided (21 loop identifiers against 4 from the plugin) but
-belongs here for the same reason: it *is* the wire protocol, with the loop
-calling `writeStatusFile` and the plugin calling `readStatusFile`. One writer,
-one reader, one definition.
+A `control/` directory used to sit here too, backing a unix-socket wire
+protocol between the loop and the plugin. It has no replacement and no
+successor module: the loop simplification deleted the control plane outright
+(there is no live-process introspection surface; `/foreman:status` reads
+Linear directly) rather than moving it anywhere.
 
 Two directories used to sit in core without a shared consumer and have been
 moved out. Neither belongs back:
@@ -360,13 +364,14 @@ which is the explicit kickoff surface for every step.
 
 | Command | Dispatches | Argument |
 |---|---|---|
-| `/foreman:triage` | `foreman-triage` over the Inbox view | none |
+| `/foreman:triage` | `foreman-triage` over the Inbox view, batched up to `loop.triageBatch` (§3.10) | none |
 | `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
+| `/foreman:plan` | `foreman-plan` — turns a bare project's brief into its first slate of issues | `<PROJECT-ID>` |
+| `/foreman:roadmap` | `foreman-roadmap` — decomposes an initiative's brief into its next slate of projects | `<INITIATIVE-ID>` |
 | `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` | `<ISSUE-ID>` or PR |
-| `/foreman:apply` | no agent — the extension applies approved proposals directly (§7.1) | none |
-| `/foreman:merge` | no agent — the extension merges via the configured strategy once the review gate passes (§3.10) | `<ISSUE-ID>` |
-| `/foreman:unblock` | no agent — records the operator's reply and clears the block; the loop dispatches the resume (§9) | `<ISSUE-ID>` |
+| `/foreman:merge` | no agent — the extension merges via the configured strategy once the review gate passes (§10) | `<ISSUE-ID>` |
+| `/foreman:unblock` | no agent — records the operator's reply, clears `foreman:blocked`, and returns the issue to Todo (§9) | `<ISSUE-ID>` |
 | `/foreman:status` | no agent — renders the operator console | none |
 
 Each dispatch command body must: resolve the target issue, assemble the shared
@@ -403,10 +408,11 @@ that must be real code:
 2. **Gate validators.** Pure functions over a Linear issue returning
    pass/fail + reason, consumed by agents, commands, and pre-hooks alike. One
    implementation, never reimplemented in prose inside a skill.
-3. **Lock manager.** Writes `agent:running` + dispatch ID + timestamp before
+3. **Lock manager.** Writes `foreman:running` + dispatch ID + timestamp before
    every spawn and releases it after the yield is consumed. Agents never touch
    the lock (§11).
-4. **Lock reaper** (§11).
+4. **Orphan-lock recovery** on `session_start` — the reconcile pass's
+   successor to a background reaper (§11, §17.6).
 5. **Structured-output consumers.** Read `structuredOutput.data` off each
    `SingleResult` and drive every Linear mutation from validated objects —
    descriptions, labels, state moves, sub-issue and spike creation, discovered
@@ -448,8 +454,7 @@ rather than reimplement:
 | Setting | Default | Foreman use |
 |---|---|---|
 | `task.softRequestBudget` | 200 requests | Per-agent ceiling. Crossing it injects a wrap-up notice; at 1.5× the run is force-stopped and yields partial findings. |
-| `task.maxRuntimeMs` | 0 (off) | **Set it — 2 h.** An implement agent that runs six hours is stuck, not thorough. The lock reaper TTL derives from this (§11). |
-| `task.maxConcurrency` | — | Bounds fan-out across parallel spawns; resized live. |
+| `task.maxRuntimeMs` | 0 (off) | **Set it — 2 h.** An implement agent that runs six hours is stuck, not thorough. The lock TTL derives from this (§11). |
 | `task.agentIdleTtlMs` | 420 000 (7 min) | Idle agents park after this; `hub` messaging revives them (§9). |
 | `task.maxRecursionDepth` | — | Irrelevant once `spawns: false` (§5). |
 
@@ -481,9 +486,10 @@ the PAL resolve with fallback.
 
 ### 3.8 Scheduling
 
-omp has no built-in scheduler. Run the daily triage pass with cron or launchd
-invoking print mode (`omp -p`) against `/foreman:triage` — superseded by
-`foreman team` once §3.12 exists. Do not run both.
+omp has no built-in scheduler and Foreman needs none: `foreman plan` and
+`foreman build` are long-running loop processes (§17), not periodic jobs. Run
+each as a `launchd`/`systemd` unit, or in a `herdr` pane (§17.2), with
+`restart: always`; there is no cron-triggered one-shot mode to reach for.
 
 ### 3.9 Hindsight memory — decide explicitly
 
@@ -501,61 +507,58 @@ global config file**, loaded and schema-validated by `core` (TypeBox — the
 same machinery as the output schemas) and consumed by all three consumers. No
 per-repo config files: the `repos` registry inside the global file is the
 single table binding repos to teams and initiatives, which gives both
-consumers the same lookup — instances resolve their scope from it by cwd, and
-intake inverts it in memory for initiative→repo without any filesystem
-scanning. Per-repo settings deep-merge over `repoDefaults`, entry wins. The
-trade-off is accepted deliberately: repo settings no longer travel with a
-clone, which matters for teams and not for one operator — and the file itself
-can live in the dotfiles repo like any other machine config. `foreman init`,
-run once per repo inside that repo, is the command that produces one `repos`
-entry **and** installs the omp plugin project-scoped into that repo (§3.1);
-`foreman setup` never runs global setup and never touches this table — it
-writes the single global plugin link at `~/.foreman/plugin` and nothing
-repo-specific; `foreman init` is what writes the per-repo `repos` entry and
-the per-repo plugin activation.
+consumers the same lookup — a loop instance resolves its scope from it by
+cwd. Per-repo settings deep-merge over `repoDefaults`, entry wins — sparse
+overrides only (`RepoSettingsOverrideSchema`), distinguishable from "inherit
+the default" only by being absent, which is why `Value.Default` is never
+called on the `repos` record directly (§3.1.1). `foreman init`, run once per
+repo inside that repo, is the command that produces one `repos` entry **and**
+installs the omp plugin project-scoped into that repo (§3.1); `foreman setup`
+never touches this table — it writes the single global plugin link at
+`~/.foreman/plugin` and nothing repo-specific.
 
 The registry key is named `repos`, not `projects` — in this document
 "project" means a Linear milestone (§4.1), and overloading it for repo
 entries would guarantee confusion.
 
 Sketch (defaults shown; every number quoted elsewhere in this spec is a
-default defined here, not a constant):
+default defined here, not a constant — `packages/core/src/config/schema.ts`
+is the source of truth):
 
 ```jsonc
 {
   "loop": {
-    "wipGlobal": 3,                                       // §17.6
-    "wip": { "refine": 2, "implement": 3, "review": 2, "plan": 1 },
-    "readyBufferTarget": 5,                               // §17.6
-    "backpressureThreshold": 5,                           // §17.7
-    "retryCap": 2,                                        // §17.8
-    "reviewCycleCap": 2,                                  // §7.4
-    "cadenceMinutes": 5,
     "mode": "confirm",                                    // §17.9 — ask before every dispatch and every Linear write; "yolo" acts unattended
-    "workerModes": {},                                    // §17.9 — per-worker override; a missing key inherits loop.mode
-    "mergeDetection": true,                               // §16 item 7 — required (not optional) when repoDefaults.pr.required is false
-    "stateDir": "~/.foreman/state"
-  },
-  "intake": {                                             // §3.12 — team-level process
-    "window": "06:00",
-    "staleLowDays": 90,                                   // §7.1
-    "batchSize": 20,
-    "timezone": "<host IANA zone>"                        // resolved at load time, e.g. "America/Los_Angeles"
+    "pollSeconds": 20,                                     // §17.1 — full-snapshot poll interval for `foreman plan`/`foreman build`
+    "concurrency": { "plan": 1, "build": 3 },              // §17.1 — per-loop in-flight cap
+    "triageBatch": 10,                                     // §17.1, §17.5 — max inbox issues one triage dispatch batches
+    "stateDir": "~/.foreman/state",                        // §17.4 — process lock + in-flight bookkeeping
+    "cleanupMergedWorktrees": true,                        // §12 — remove a merged issue's worktree once reconcile moves it to Done
+    "autoMerge": false,                                    // §17.5 — let `foreman build` dispatch `/foreman:merge`; off by default, merge authority stays with the operator
+    "retryCap": 2,                                         // §17.7 — failed dispatches for one unit of work before escalation to `foreman:blocked`
+    "reviewCycleCap": 2                                    // §7.4, §17.7 — `request-changes` reviews on one issue before escalation
   },
 
   "linear": {
     "apiKeyEnv": "LINEAR_API_KEY",                        // checked first
     "apiKeyFile": null,                                   // checked when the env var is unset
-    "endpoint": "https://api.linear.app/graphql"
+    "endpoint": "https://api.linear.app/graphql",
+    "allowCustomEndpoint": false,                          // required to point endpoint anywhere but api.linear.app
+    "operatorUserId": null                                 // §9 Case B — Linear user id a block is assigned to; null skips assignee routing
+  },
+
+  "githubApp": {                                           // §7.4 — optional; null/null leaves reviews Linear-comment-only
+    "appId": null,
+    "privateKeyFile": null
   },
 
   "agent": {
     "maxRuntimeMs": 7200000,                              // §11 — mirrors omp's own task.maxRuntimeMs; the lock TTL derives from this
     "lockTtlMarginMs": 1800000,                           // lock TTL is 2 × maxRuntimeMs + this (~4.5h by default)
     "ompBin": "omp",
-    "approvalMode": "yolo",                               // §17.2, §17.3 — always-ask | write | yolo, passed to every dispatched parent session
+    "approvalMode": "yolo",                               // always-ask | write | yolo, passed to every dispatched parent session
     "herdrBin": "herdr",
-    "herdrLayout": "tab"                                  // §17.3 — tab (default) or pane
+    "dispatcher": "auto"                                   // §17.2 — auto | print | herdr; "auto" prefers herdr when reachable, else print
   },
 
   "repoDefaults": {                                       // inherited by every repos.* entry
@@ -568,7 +571,7 @@ default defined here, not a constant):
   },
 
   "repos": {                                              // the registry (§3.11) — every Foreman-managed repo
-    "plotroom": {                                         // alias: positional arg to `foreman repo`, herdr workspace name, state dir
+    "plotroom": {                                         // alias: positional arg to `foreman build`/`plan`, state-dir segment
       "path": "~/Code/plotroom",
       "team": "PLT",                                      // optional if unambiguous
       "initiatives": [                                    // one or more; monorepos list several
@@ -581,148 +584,100 @@ default defined here, not a constant):
 }
 ```
 
-Registry validation the split files couldn't do: an initiative bound in two
-`repos` entries is now a config error caught at load, not a runtime surprise
-— previously no single instance could see the collision.
+Registry validation: an initiative bound in two `repos` entries is a config
+error caught at load, not a runtime surprise.
 
 **`pr.required: false` — direct-branch mode.** The workflow shape is unchanged
 (one issue → one worktree → one branch), but implement pushes the branch and
 opens no PR (`prUrl` stays empty in the `ImplementResult`), review diffs
 `baseBranch..head` fetched by the extension (§7.4), the review gate targets the
-pushed branch (§10), and Done cannot come from Linear's GitHub PR integration —
-the merge-detection worker (§16 item 7) becomes **required** in this mode, not
-optional.
+pushed branch (§10), and Done cannot come from Linear's GitHub PR
+integration — the `merged-not-done` reconcile invariant (§17.6) is what moves
+the issue to Done in this mode, by resolving the latest push against
+`baseBranch` when no PR exists (`GitHubClient.mergeBranchLocally`/local merge
+check).
 
-**`/foreman:merge <ISSUE-ID>`.** Operator-invoked, never loop-invoked — this
-does not weaken the no-auto-merge non-goal (§19). The extension checks the
-review gate, then merges with the configured strategy (`gh pr merge` in PR
-mode, a local merge of the branch onto `baseBranch` in direct mode) and
-deletes the branch if configured. One command, both modes, gate-checked
-either way.
+**`/foreman:merge <ISSUE-ID>` and `loop.autoMerge`.** Operator-invoked merge
+never weakens the no-unattended-merge default (§19): `loop.autoMerge` is
+`false` out of the box, so `foreman build`'s merge rule never fires unless
+the operator turns it on, and even then it only offers a candidate once the
+review gate — same validator both paths call — passes. `/foreman:merge`
+checks the same gate, then merges with the configured strategy (`gh pr
+merge` in PR mode, a local merge of the branch onto `baseBranch` in direct
+mode) and deletes the branch if configured.
 
 **Config tunes parameters, never removes invariants.** There is no key that
-disables a gate, the WIP limit, backpressure, the lock protocol, or
-propose-before-apply. `backpressureThreshold: 0` means "no new dispatches
-while anything is blocked," not "off." Validation rejects unknown keys — a
-typo that silently falls back to a default is the config-file equivalent of
-the `autoload-skills` silent-ignore trap (§8).
+disables a gate, the lock protocol, or the review gate the merge rule and
+`/foreman:merge` both call. Validation rejects unknown keys — a typo that
+silently falls back to a default is the config-file equivalent of the
+`autoload-skills` silent-ignore trap (§8).
 
-Reload semantics: the extension reads config at `session_start`; the loop
-re-reads at the top of every cadence tick, so tuning WIP or backpressure does
-not require a loop restart.
+Reload semantics: the extension reads config at `session_start`; `foreman
+plan`/`foreman build` re-read at the top of every poll (§17.1), so tuning a
+loop setting does not require a process restart.
 
-### 3.11 Instance model — one Foreman per repo
+### 3.11 Instance model — one loop pair per repo
 
 Foreman runs **in a repo, for that repo's initiatives**. There is no central
-daemon watching all of Linear; the unit of deployment is an instance launched
-in a working directory (normally a repo root), scoped to a team plus the
-initiatives bound to that repo in the global `repos` registry (§3.10). A
-monorepo binds several initiatives — the `plotroom` entry binds
-`Plotroom Fleet` and `Plotroom Zero`.
+daemon watching all of Linear; the unit of deployment is two long-running
+processes per repo — `foreman plan <alias>` and `foreman build <alias>`
+(§17.1) — each scoped to a team plus the initiatives bound to that repo in
+the global `repos` registry (§3.10). A monorepo binds several initiatives —
+the `plotroom` entry binds `Plotroom Fleet` and `Plotroom Zero`.
 
-**Invocation.** `foreman repo [alias] [--team <KEY>]`, run in the
-repo. The instance's registry entry resolves by matching cwd (symlinks
-resolved) against entry paths; the positional alias overrides, and an unregistered
-directory fails loudly naming the fix (add an entry). Team resolution:
-`--team` flag → the entry's `team` → the sole team the credential can access
-→ fail loudly. Manual slash commands resolve the same way from the session's
-cwd.
+**Invocation.** `foreman plan <alias>` / `foreman build <alias>`, run
+anywhere — the alias, not cwd, resolves the registry entry, since a loop
+process is typically started from a supervisor rather than from inside the
+checkout. An unregistered alias fails loudly naming the fix (add an entry).
+Manual slash commands resolve the entry the same way `foreman init` does:
+from the session's cwd against registry paths.
 
 **Scope predicate.** An issue is in scope iff it belongs to the team AND its
-project's initiative is in this instance's bound set. The loop silently skips
-out-of-scope issues (they belong to another instance); a manual command
+project's initiative is in this instance's bound set. Both loops silently
+skip out-of-scope issues (they belong to another instance); a manual command
 against an out-of-scope issue refuses with the reason, never guesses.
 
-**Ensure pass.** On instance start (and extension `session_start`): verify
-each bound initiative exists and has its standing `Maintenance` project,
-creating that project — team-assigned, since Linear's `ProjectCreateInput`
-requires `teamIds` and has no `initiativeId` — if missing. Attaching the new
-project to the initiative is a second mutation, `initiativeToProjectCreate`,
-run after creation succeeds. Milestone projects enter through intake
-proposals the operator approves (§3.12); the ensure pass itself auto-creates
-only `Maintenance`.
+**Ensure pass** (`packages/core/src/ensure.ts`, `ensureMaintenanceProjects`).
+On extension `session_start` and — indirectly, through the same function —
+available to the loop: verify each bound initiative exists (fail loudly,
+`ConfigError`, if it does not resolve — the registry binds ids and an
+unresolvable one means the binding itself is broken) and has its standing
+`Maintenance` project, creating one — team-assigned, since Linear's
+`ProjectCreateInput` requires `teamIds` and has no `initiativeId` — through
+the `Confirmer` (a Linear write) if missing. `foreman reconcile` also runs
+this pass every invocation (§17.6), so a Maintenance project created by hand
+outside Foreman is picked up, not duplicated — matched case-insensitively and
+trimmed by name. Milestone-sized projects come from `foreman-roadmap` (§7.6a)
+or the operator directly; the ensure pass itself creates only `Maintenance`.
 
 **Concurrent instances are already safe.** The mutex is in Linear, not in any
-process: claim-before-dispatch (§11, §17.5) prevents double-work even if two
-instances' scopes overlap. The per-repo lockfile (§17.5) prevents two
-instances *of the same repo*; nothing else needs coordinating.
+process: the task guard's lock-comment claim (§11, §17.4) prevents
+double-work even if two instances' scopes overlap. The per-alias
+`ProcessLock` (§17.4) prevents two `build` (or two `plan`) processes for the
+same alias; nothing else needs coordinating.
 
-**Triage is not part of the per-repo loop.** The shared team inbox is
-consumed by the single team-level intake process (§3.12); repo instances run
-refine, implement, and review only. One consumer, no scope negotiation, no
-proposal races.
+**Triage is a `plan`-loop rule**, not a separate process (§17.1, §17.5). The
+plan loop's `triage` rule batches up to `loop.triageBatch` Triage-state
+issues into one `/foreman:triage --initiatives <id>... <ISSUE-ID>...`
+dispatch per poll — one consumer of the shared inbox per repo instance, no
+separate scheduler and no proposal step: `foreman-triage`'s
+`TriageResult` is applied directly by the extension (§7.1).
 
-**Shared human, shared tripwire.** WIP limits are per-instance (§17.6);
-backpressure is **team-wide** (§17.7) — the blocked and proposal counts are
-queried across the whole team, so five instances still throttle against the
-one operator's actual drain rate, with Linear as the only coordination point.
+**Per-instance state.** `<stateDir>/<alias>/{plan,build}.json` (in-flight
+dispatch + failure bookkeeping, §17.4) and `<stateDir>/<alias>/{plan,build}.lock`
+(the process lock) live under `loop.stateDir` (default
+`~/.foreman/state`), keyed by the registry alias — no per-repo config
+directory, so state is global too.
 
-**Per-instance state.** The loop lockfile and bookkeeping file (§17.5) live
-in `~/.foreman/state/<repo-alias>/` — with no per-repo config directory,
-state is global too, keyed by the registry alias.
+### 3.12 Intake-drafted issues
 
-### 3.12 Intake — the team-level triage process
-
-One process for the whole team, separate from the per-repo loops:
-`foreman team`. The shared Triage inbox is a single queue, and a single consumer
-is strictly simpler than N repo-scoped loops negotiating over it.
-
-**What it does.** The operator files rough material into the inbox — a
-two-line bug, a one-line idea, naming the initiative it belongs to. On its
-window, intake dispatches `foreman-triage` (§7.1), which turns each item into
-a finished **draft**: bug- and task-sized items become fully drafted issues
-(§13.1 shape, proposed priority and estimate) destined for a project under
-that initiative; idea-sized items become **proposed milestone projects** —
-name, project brief (§4.7), optional seed issues. Everything is
-proposal-grade until approved: the point of intake is that approval becomes a
-yes/no on finished work, not a prompt to go write it yourself. Nothing —
-especially not a project — is created unapproved.
-
-**Intake drafts; refine stamps.** Intake works from the ticket, the Context
-docs, and light repo reads. `foreman-refine` (§7.2) still runs after the
-operator prioritizes: it verifies the draft against the code via LSP,
-finalizes the estimate, and applies `agent:ready`. This keeps the priority
-throttle intact — intake fleshes out everything in the inbox, but nothing is
-repo-verified and dispatched until prioritized.
-
-**Repo lookup.** Intake is team-level and repro/context reads need repos —
-which is exactly what the global registry (§3.10) provides: intake inverts
-`repos` in memory for initiative→repo, no filesystem scanning, no refresh
-interval. An initiative bound to no registry entry still gets classified and
-drafted — just without repro, flagged in the proposal.
-
-**Process shape.** A singleton with a lockfile in `~/.foreman/state/intake/`,
-run from cron/launchd or a herdr pane in the
-`foreman` workspace (§17.3). Respects team-wide proposal backpressure
-(§17.7). The apply pass (§7.1) also runs here on every tick, so approvals are
-picked up without a manual `/foreman:apply`.
-
-**Scratch workspace, plugin activation.** The dispatch cwd
-(`~/.foreman/state/intake/scratch`) is a synthetic workspace, not a
-registered repo — `foreman-triage` runs there instead of inside a checkout
-because intake is team-scoped, not repo-scoped. It never goes through
-`foreman init`, which is what activates Foreman's omp plugin for every
-per-repo dispatch (§3.10, `plugin-activation.ts`), so `runIntakeTick`
-activates it there itself, on every dispatch, before handing the dispatcher
-a cwd — otherwise `foreman-triage` would run with none of the plugin's
-tools or skills discoverable. Same primitive as `foreman init`
-(`activateRepoPlugin`, exported from `@foreman/core` since both the loop
-and the CLI call it), just aimed at the scratch directory instead of a git
-repo; a missing global link (`foreman setup` never run) surfaces as a
-failed dispatch, the same as any other `runIntakeTick` error.
-
-**Repo access for repro.** `foreman-triage-inbox` (§7.1's skill) requires
-repro reads against real code, resolved via the global `repos` registry —
-but the agent holds no config-reading tool, so it cannot resolve that
-registry itself. `runIntakeTick` does it on the agent's behalf, refreshed
-every dispatch alongside the plugin link: `scratch/repos/<alias>` — one
-symlink per registered repo, pointing at that repo's real working tree —
-plus `scratch/repos/index.json`, mapping each batch item's identifier to
-the `repos/<alias>` (if any) its initiative resolves to, built from the
-same `repoEntryForIssue` lookup §3.12's repo-lookup paragraph above
-describes. An item with no resolvable repo gets a `null` manifest entry;
-repro stays unavailable for it, same as an initiative unbound in the
-registry.
+Removed as its own step in the loop simplification; see §7.1.
+`foreman-triage`'s `TriageItem.draftDescription` is what used to be sketched
+here as a `newProject { ..., seedIssues[] }` intake step — the agent drafts a
+`## Context` section for an inadequately-described item at triage time, the
+extension writes it verbatim, and `foreman-refine` later verifies and
+revises that draft against the code (§7.2 step 3) the same way it handles
+any other Backlog issue.
 
 ---
 
@@ -792,7 +747,7 @@ Linear's native set; no custom states.
 | State | Meaning | Moved in by |
 |---|---|---|
 | `Triage` | Unprocessed inbound. | Linear inbox, operator, integrations |
-| `Backlog` | Accepted, not yet refined. | extension, from `TriageProposal` |
+| `Backlog` | Accepted, not yet refined. | extension, from `TriageResult` |
 | `Todo` | **Refined and ready.** Gate §10 satisfied. | extension, from `RefineResult`; also on block, In Progress → Todo (§9) |
 | `In Progress` | Worktree open, code being written. | extension, at implement dispatch |
 | `In Review` | PR open, awaiting review. | extension, from `ImplementResult` |
@@ -809,24 +764,24 @@ workflow-state type (`TERMINAL_STATE_TYPES`) and a project's native status
 type (`TERMINAL_PROJECT_STATUS_TYPES`, §7.6a) — both defined once in
 `packages/core/src/domain/states.ts` and read everywhere else (`isTerminal`,
 `isTerminalProjectStatus`). No part of the loop acts on terminal work: the
-saved views (§4.10) and stage-worker predicates (§17.5) exclude it via
+saved views (§4.10) and loop rule predicates (§17.5) exclude it via
 `notTerminalState()` / `notInTerminalProject()`
-(`packages/core/src/linear/filters.ts`), except the three carve-outs below,
-whose whole job is processing terminal things.
+(`packages/core/src/linear/filters.ts`), except the carve-outs below, whose
+whole job is processing terminal things.
 
 `paused` is explicitly **not** terminal. It carries no claim that the work
 is over — it is a reversible operator hold, not an abandonment — so it stays
 out of the terminal definition above and out of every terminal carve-out.
-It is, however, no longer read-nowhere: refinement alone honors it (§4.2b).
+It is, however, not read-nowhere: refinement alone honors it (§4.2b).
 Everything else keeps running exactly as if the project were active —
-implement, review, merge-detection, the reaper, and the plan worker all
-still act on a paused project's issues.
+implement, review, `foreman reconcile`, and the plan loop's rules all still
+act on a paused project's issues.
 
 | Carve-out | Why it must still see terminal work |
 |---|---|
-| `IN_FLIGHT_FILTER` + the reaper (§11) | A lock held on an issue that has since been completed or canceled is exactly the stale lock the reaper exists to release. |
-| merge-detect worker (§17.5) | Marking a merged issue Done *is* the terminal transition — skip it and the issue is stranded In Review forever. |
-| the project-status worker (§7.6a) | It is the thing that writes `completed` in the first place. |
+| `foreman reconcile`'s invariants (§11, §17.6) | A lock held on an issue that has since been completed or canceled is exactly the stale state reconcile exists to clean up. |
+| the `merged-not-done` invariant (§17.6) | Marking a merged issue Done *is* the terminal transition — skip it and the issue is stranded In Review forever. |
+| the project-status invariant (§7.6a, §17.6) | It is the thing that writes `completed` in the first place. |
 
 ### 4.2b Paused projects
 
@@ -834,21 +789,17 @@ A `paused` project status (§7.6a) withholds exactly one thing: refinement
 never picks up that project's issues. Nothing else changes.
 
 Refinement is the transition that *commits* new work — its output is an
-issue moved to Todo, estimated and labeled `agent:ready`, which implement
+issue moved to Todo, estimated with acceptance criteria, which implement
 then picks up unattended. Pausing a project withholds that commitment and
 nothing more; it is not a recall of work already committed. So implement,
-review, merge-detection, the reaper, and the plan worker all keep treating a
-paused project's issues normally — an issue already in Todo still gets
-implemented, its PR still gets reviewed and merged, and a stale lock on it
-still gets reaped. Only the refine worker's two reads (Backlog, plus
-`legacy` in Backlog or Todo — §4.9, §17.5) exclude a paused project's
-issues, via `notInPausedProject()` (`packages/core/src/linear/filters.ts`),
-alongside `notInTerminalProject()`. The same hold applies to
-`/foreman:refine` (§10), via `evaluateGate`'s `paused-project` refusal.
-
-`readyFilter()` (§4.10.5) deliberately does **not** exclude paused
-projects: an issue already sitting Ready in a paused project is work
-implement will still do, so it is genuine buffer, not phantom capacity.
+review, merge-detection, `foreman reconcile`, and the plan loop's rules all
+keep treating a paused project's issues normally — an issue already in Todo
+still gets implemented, its PR still gets reviewed and merged, and a stale
+lock on it still gets reconciled. Only the plan loop's `refine` rule (§17.5)
+excludes a paused project's issues, via `notInPausedProject()`
+(`packages/core/src/linear/filters.ts`), alongside `notInTerminalProject()`.
+The same hold applies to `/foreman:refine` (§10), via `evaluateGate`'s
+`paused-project` refusal.
 
 ### 4.3 Priority
 
@@ -892,19 +843,18 @@ reads it, delete it. Mutually exclusive groups marked ⊕.
 **`type:` ⊕** — `type:bug`, `type:feature`, `type:chore`, `type:spike`,
 `type:docs`. Required on every issue leaving Triage.
 
-**`agent:` ⊕** — lifecycle control, written only by the Foreman extension.
+**`foreman:` ⊕** — the one managed group, written only by the Foreman
+extension. Collapses the former `agent:*` / `blocked:*` split and the
+`legacy` amnesty marker into a single group, since the loop's own state
+(`InflightStore`, §17.4) now carries what `agent:proposed` and
+`agent:ready` used to encode, and refinement's own predicate (§17.5) now
+carries what `legacy` used to encode (§4.9).
 
 | Label | Meaning |
 |---|---|
-| `agent:ready` | Cleared for pickup by `foreman-implement`. |
-| `agent:running` | An agent holds this issue. Acts as a lock (§11). |
-| `agent:proposed` | Unapproved agent proposal present. |
-| `agent:hands-off` | Agents must never touch this. Operator escape hatch. |
-
-**`blocked:` ⊕** — the human interrupt queue. Only for blocks with no issue to
-link. `blocked:needs-input`, `blocked:needs-decision`, `blocked:external`.
-
-**`legacy`** — amnesty marker (§4.9).
+| `foreman:running` | An agent holds this issue. Acts as a lock (§11); mirrors the loop's own in-flight state so the Blocked/In-flight views (§4.10) don't require reading `InflightStore` directly. |
+| `foreman:blocked` | The human interrupt queue. Applied on escalation (§17.7) or by an agent's `BlockRecord` (§9). Cleared by `/foreman:unblock`. |
+| `foreman:hands-off` | Agents must never touch this. Operator escape hatch. |
 
 **`triage:` ⊕ (optional)** — `triage:cannot-reproduce`, `triage:duplicate`,
 `triage:needs-info`, `triage:wont-fix`.
@@ -912,9 +862,7 @@ link. `blocked:needs-input`, `blocked:needs-decision`, `blocked:external`.
 **`area:` (optional)** — derive from the repo's real structure at build time.
 Build only if `foreman-implement` uses them to scope initial reads.
 
-> `type:`, `agent:`, `blocked:`, and `legacy` are load-bearing. The rest are
-> optional.
-
+> `type:` and `foreman:` are load-bearing. The rest are optional.
 ### 4.6 Estimates
 
 Fibonacci, read as *agent-session size*, not human time.
@@ -960,30 +908,28 @@ Without it, every acceptance-criteria list restates the same boilerplate,
 drifts per issue. Acceptance criteria cover only what is specific to the issue;
 `foreman-review` checks both.
 
-### 4.9 Legacy amnesty
+### 4.9 Pre-existing issues
 
 Issues predating Foreman have no template, no estimate, no priority — and may
-sit in any state, including Todo. Apply `legacy` to all pre-existing issues at
-install time. The label means "unrefined, regardless of state": it never
-bypasses a gate — a `legacy` issue in Todo still fails the implementation gate
-(no `agent:ready`, no criteria) and cannot be dispatched. Instead, the refine
-worker treats `legacy` issues in Backlog *or* Todo as its input (§17.5), and
-`foreman-refine` strips the label when it processes one. Priority remains the
-throttle: an unprioritized legacy issue waits like any other. Without the
-label, day one is a wall of gate failures with no funnel back to refinement.
-Preferred over a cutoff date, which strands issues you actually want. The
-amnesty pass is also when projectless pre-existing issues get homed — default
+sit in any state, including Todo. There is no amnesty label: a pre-existing
+Todo issue is simply held by the same implementation gate as any other (§10)
+— missing acceptance criteria and an unset estimate fail it exactly like an
+issue Foreman itself created but hasn't refined yet. The plan loop's `refine`
+rule (§17.5) does not distinguish "pre-existing" from "created by
+`foreman-plan`" — both are just unrefined Backlog/Todo issues with a
+priority set, and the rule picks either up the same way. Priority remains
+the throttle: an unprioritized issue waits like any other, refined or not.
+Projectless pre-existing issues get homed at install time — default
 destination the product's `Maintenance` project — since the refinement gate
 requires project membership (§10).
 
 ### 4.10 Required saved views
 
 1. **Inbox** — state = Triage
-2. **Blocked (human)** — any `blocked:*` label, excluding terminal issues and issues in a terminal project (§4.2a)
+2. **Blocked** — `foreman:blocked`, excluding terminal issues and issues in a terminal project (§4.2a)
 3. **Blocked (deps)** — incomplete `blocked by` relation, same terminal exclusion
-4. **Proposals** — `agent:proposed`, same terminal exclusion
-5. **Ready** — Todo AND `agent:ready` AND estimate set AND priority ≠ None, plus excludes issues in a terminal project (the `Todo` clause already rules out a terminal *issue* state)
-6. **In flight** — `agent:running` — deliberately unfiltered (§4.2a carve-out 1); the reaper needs it to see locks on issues that finished mid-hold
+4. **Ready** — Todo AND estimate set AND priority ≠ None, plus excludes issues in a terminal or paused project (the `Todo` clause already rules out a terminal *issue* state)
+5. **In flight** — `foreman:running` — deliberately unfiltered (§4.2a carve-out 1); `foreman reconcile` needs it to see locks on issues that finished mid-hold
 
 **Verify during build:** Linear can filter on relation *existence*; whether it
 can filter on *incomplete* blockers specifically is unconfirmed. If it can't,
@@ -991,7 +937,7 @@ keep views 2 and 3 separate rather than contorting a compound filter — a filte
 that silently under-reports costs a stalled issue; two views cost nothing.
 
 View 2's count is the backpressure signal (§17.7): without the terminal
-exclusion, a `blocked:*` label stranded on a canceled issue held the entire
+exclusion, `foreman:blocked` stranded on a canceled issue held the entire
 loop stopped with no operator remedy short of finding and unlabeling it by
 hand. View 1 is unfiltered because triage is never terminal by construction.
 
@@ -1064,17 +1010,17 @@ doesn't happen.
 Sketch schemas — refine during build, but keep the shapes:
 
 ```
-TriageProposal
-  items[]: { issueId, type, proposedPriority, severityReasoning,
-             duplicateOf?, proposedBlockedBy[], reproConfidence,
-             missingInfo[], draftDescription, proposedEstimate?,
-             destination: existingProjectId
-                        | newProject { initiativeId, name, brief,
-                                       seedIssues[] } }
-  summary
+TriageItem
+  issueId, type, proposedPriority, severityReasoning,
+  destination: "backlog" | "new-project" | "cancel" | "duplicate",
+  destinationProjectId?, newProject? { name, description, initiativeId },
+  duplicateOf?, proposedBlockedBy[], draftDescription?, proposedEstimate?,
+  missingInfo[]
+TriageResult
+  items: TriageItem[], summary
 
 PlanResult
-  projectId, proposedIssues[]: { title, type, description,
+  projectId, proposedIssues[]: { key, blockedBy[], title, type, description,
              acceptanceCriteria[], proposedPriority, proposedEstimate? },
   outOfScope[], fullyPlanned, rationale
 
@@ -1084,8 +1030,8 @@ RefineResult
   readyForImplementation
 
 ImplementResult
-  issueId, branch, prUrl?, criteriaMet[], testsAdded[],
-  discoveredWork[]
+  issueId, branch, prUrl, headSha, criteriaMet[], testsAdded[],
+  discoveredWork[], approachSummary
 
 ReviewResult
   issueId, reviewedSha,
@@ -1094,12 +1040,11 @@ ReviewResult
   projectOrganization, verdict
 ```
 
-Plus a `BlockRecord` any agent may return **instead of** its normal result:
-
-```
 BlockRecord
   blocked: true, type, whatIWasDoing, whatINeed,
-  options[]?, recommendation?, stateLeftBehind, costOfWrongGuess
+  options[]: { label, tradeoff }, recommendation,
+  stateLeftBehind: { worktree, branch, pushed, commits[], notes },
+  costOfWrongGuess, blockedByIssues[]
 ```
 
 A union of the normal result and `BlockRecord` is what each `output` schema
@@ -1137,62 +1082,57 @@ model: "@default"
 advisor: off
 prewalk: false
 autoload-skills: [foreman-triage-inbox, foreman-block-protocol]
-output: schemas/triage-proposal.json
+output: schemas/triage-result.json
 schemaMode: strict
 ```
 
 | | |
 |---|---|
-| **Transition** | `Triage → Backlog / Canceled / Duplicate`, or a proposed new project (§3.12) |
-| **Trigger** | The intake process (§3.12). Never called mid-flow by another agent. |
-| **Model role** | default — drafting project briefs and full descriptions outgrew `smol` |
+| **Transition** | `Triage → Backlog / Canceled / Duplicate` |
+| **Trigger** | The plan loop's `triage` rule (§17.1, §17.5), batched up to `loop.triageBatch` Inbox issues per dispatch. Never called mid-flow by another agent. |
+| **Model role** | default — drafting full descriptions outgrew `smol` |
 
 No Linear mutation surface of any kind, no `edit`, no `write`, no `bash`.
-Read-only by construction. Scope is the whole team inbox (§3.12); repro and
-context reads resolve repos through the registry index intake inverts from
-`repos` (§3.10) — no filesystem scanning.
+Read-only by construction. Scope is one batch of the team's Triage inbox
+(§4.10); repro and context reads resolve repos through the `repos` registry
+(§3.10) — no filesystem scanning.
 
 **Per item:** classify (`type:`), dedupe by semantic similarity, attempt repro
 *by reading only*, propose a Priority with severity reasoning, flag missing
-information, propose native `blocked by` relations, and **draft the artifact**
-(§3.12): a full §13.1-shape description with a proposed estimate, destined for
-an existing project (a milestone or the product's standing `Maintenance`
-project, §4.0) — or, for idea-sized items, a proposed new milestone project
-with its brief and optional seed issues.
+information, propose native `blocked by` relations, and choose a
+`destination` — an existing project (`backlog`, with `destinationProjectId`
+set — a milestone or the product's standing `Maintenance` project, §4.0),
+`cancel`, or `duplicate`. `foreman-triage` never creates a new project
+itself; an item that deserves one is filed to `Maintenance` with
+`missingInfo` noting it, for the operator or `foreman-roadmap` to size
+properly (§7.7). When the existing description is inadequate, draft one in
+`draftDescription` (§13.1-shaped `## Context` prose).
 
-**Output:** a `TriageProposal`. The extension writes one comment per item — the
-human rendering plus an embedded machine-readable copy of the item — and
-applies `agent:proposed`. Nothing else is applied. Operator approves by removing
-`agent:proposed`, rejects with `reject: <reason>`.
+**Output:** a `TriageResult`. **The extension applies every item directly**
+(§3.1, §7 — there is no separate operator-approved proposal step): moves the
+issue per `destination`, sets priority and the `type:` label, creates the
+native `blocked by` relations, writes `draftDescription` when present, and
+leaves a comment recording what changed. A mutation is still gated: schema
+validation plus the same `Confirmer` (§17.9) every other extension write
+goes through, so nothing lands unvalidated — but nothing waits on a human
+to remove a label first.
 
-**Applying approvals is not an agent job.** An approved `TriageProposal` item
-already says exactly what to do — applying it is deterministic, so
-`/foreman:apply` is extension code, not a re-dispatch of the agent. It queries
-issues whose latest Foreman proposal comment has no `agent:proposed` label, no
-`reject:` reply, and no later applied-marker comment, and applies each; on
-success it writes the applied marker. Everything it needs lives in the comment,
-so approval state is derivable from Linear alone — no second store to lose.
-(It cannot be an agent anyway: tool allowlists are static frontmatter, so there
-is no such thing as an invocation-scoped write grant.) Triage stays read-only
-forever.
-
-**Known gap — `destinationProject` is ambiguous in a monorepo.** The field is a
-project *name*, never a UUID, but §4.0 gives every product its own standing
-`Maintenance` project, and the ensure pass (§3.11) creates them. A repo binding
-two initiatives therefore ends up with two projects named `Maintenance` in the
-same team, and `TriageItem` carries no initiative field, so the name alone
-cannot say which product the operator meant. The apply pass resolves the name
-and, when it matches more than one project, applies **no** project and records
-the ambiguity in the applied marker — attaching an issue to the wrong product's
-project is worse than leaving it unset for a human. Closing this properly means
-giving `TriageItem` an initiative, not teaching the resolver to guess.
+**Known gap — `destinationProjectId` resolution is the agent's job, not the
+extension's.** `foreman_linear_read` gives the agent the team's real projects
+to choose from, so an ambiguous "which `Maintenance` project" question
+(monorepo with two initiatives, §4.0) is resolved by the agent reading
+context, not by a post-hoc name match. An item the agent genuinely cannot
+place gets `destination: "backlog"` against the team's default
+`Maintenance` project and a `missingInfo` note — attaching an issue to the
+wrong product's project is worse than filing it generically for a human to
+re-home.
 
 **Permission:** may recommend `Canceled` freely. Un-actioned `Low` items older
 than 90 days should be proposed for cancellation by default.
 
 **Weakest link:** dedupe against a large backlog. The schema's
-`severityReasoning` and dedupe fields are the tuning log — read them for the
-first week before touching the threshold.
+`severityReasoning` field is the tuning log — read it for the first week
+before touching the threshold.
 
 ### 7.2 `foreman-refine`
 
@@ -1227,12 +1167,12 @@ a reasoning task, not a lookup.
    write the code. Do not restate the Definition of Done.
 5. Identify affected files/modules via LSP, not guesswork.
 6. Estimate. If ≥5, specify the split in `subIssues[]` with per-sub-issue
-   estimates; the parent becomes a tracking issue and does not get
-   `agent:ready`.
+   estimates; the parent becomes a tracking issue that stays out of the
+   `implement` rule's candidates until its sub-issues are refined.
 7. If a genuine unknown blocks estimation, specify a `type:spike` (§13.3) in
    `spikeCreated` with a native `blocks` relation to the original. Do not guess.
 8. Yield the `RefineResult`. The extension applies it: description, sub-issues,
-   spike, `agent:ready`, move to Todo, strip `legacy`.
+   spike, move to Todo.
 
 Step 1 is the enforcement mechanism for "never bulk-refine the backlog."
 
@@ -1258,7 +1198,7 @@ protocol can reference it. Model role `default` — editing against a concrete
 contract is not where the reasoning budget goes; `prewalk: false` is what
 guards against downgrading mid-edit, not a stronger role.
 
-1. Verify the lock. The dispatcher claimed `agent:running` with this dispatch's
+1. Verify the lock. The extension claimed `foreman:running` with this dispatch's
    ID before the spawn (§11, §17.5); if the ID doesn't match, abort. The agent
    never claims, clears, or refreshes the lock itself.
 2. **Resume check.** If the worktree already contains prior work, this is a
@@ -1311,28 +1251,28 @@ boundaries, naming, placement, as a standing field on every review; scope creep.
 Findings classified `blocking` / `should-fix` / `nit`.
 
 **The fix cycle.** `reviewedSha` pins what was reviewed, which makes both halves
-of the cycle machine-checkable: the review worker re-dispatches whenever the
+of the cycle machine-checkable: the review rule re-dispatches whenever the
 PR's head SHA has no `ReviewResult` (§17.5), and blocking findings route back
 automatically — the extension writes the findings to the issue and re-dispatches
 implement, which lands in resume mode (§7.3 step 2), pushes fixes, and yields an
-updated result; the new head SHA triggers re-review. When the implement agent's
-process is still alive (interactive or herdr-dispatched sessions), messaging the
-parked agent via `hub` is a cheaper equivalent — but under the loop's
-`PrintDispatcher` every dispatch is a fresh process and the registry dies with
-it (§11), so resume-mode re-spawn is the primary path, not a fallback. After
-**2** review→fix cycles without a clean result, convert to
-`blocked:needs-decision` (§17.8) — a standing disagreement between implement and
-review is operator information, not something to ping-pong overnight.
+updated result; the new head SHA triggers re-review. After **`loop.reviewCycleCap`**
+(default 2) `request-changes` verdicts without converging, the build loop
+escalates to `foreman:blocked` with the failure detail attached (§17.7) — a
+standing disagreement between implement and review is operator information,
+not something to ping-pong overnight.
 
-**No merge authority.** Do not build auto-merge in the first pass.
+**No merge authority of its own.** `foreman-review` never merges; that is
+`/foreman:merge`, gated by `loop.autoMerge` (default off, §17.6). A clean
+`ReviewResult` only satisfies the review gate — it does not act on it.
 
 ### 7.5 Explicitly not an agent
 
-**Prioritization and roadmap.** Requires context that cannot be reconstructed
-from the repo or Linear. Operator, weekly, ~1 hour.
+**Prioritization and roadmap sequencing beyond `/foreman:roadmap`.** Requires
+context that cannot be reconstructed from the repo or Linear. Operator,
+weekly, ~1 hour.
 
-**Applying approved proposals.** Deterministic; extension code (§7.1).
-
+**Applying `TriageResult`, `PlanResult`, and `RoadmapResult`.** Deterministic
+once the agent has decided; extension code (§7.1, §7.6, §7.7).
 
 ### 7.6 `foreman-plan`
 
@@ -1387,13 +1327,12 @@ dependencies.
 
 **Output:** a `PlanResult`. The extension creates each `proposedIssues[]`
 entry as a new Backlog issue under the project, and marks the project
-`planned` (§17.5) — nothing else. None of them carry `agent:ready`; every
-one enters the normal refine funnel the moment the operator sets a priority,
-exactly the path any other Backlog issue takes. `foreman-refine` verifies
-and revises each draft against the code before it reaches Todo, the same way
-it already handles intake-drafted issues (§3.12) — `foreman-plan` is
-deliberately not expected to get every draft right; it only has to get the
-decomposition right.
+`planned` (§7.6a) — nothing else. Every one enters the normal refine funnel
+the moment the operator sets a priority, exactly the path any other Backlog
+issue takes. `foreman-refine` verifies and revises each draft against the
+code before it reaches Todo, the same way it already handles intake-drafted
+issues (§3.12) — `foreman-plan` is deliberately not expected to get every
+draft right; it only has to get the decomposition right.
 
 **One-shot, not a buffer.** Unlike refine's Ready-buffer top-up (§17.6),
 plan does not maintain an ongoing backlog depth per project. A project is a
@@ -1411,14 +1350,14 @@ project's own `description` (an operator-facing field) for internal
 bookkeeping was rejected as worse than the gap it would close. So a
 deliberately thin first pass (`fullyPlanned: false`) does not schedule a
 follow-up on its own — it is a signal the operator reads off the loop log
-or `/foreman-status`, not a queued dispatch. Closing this properly means
+or `/foreman:status`, not a queued dispatch. Closing this properly means
 giving Linear (or Foreman's own state) a real per-project marker; until
 then, `foreman-plan` should default to proposing the smallest *complete*
 slice it can rather than banking on a pass that isn't coming.
 
 **No Linear-visible block surface.** A `BlockRecord` from `foreman-plan` has
-no existing issue to attach a `blocked:*` label to — the project has none
-yet by construction. The extension logs the block rather than writing it to
+no existing issue to attach `foreman:blocked` to — the project has none yet
+by construction. The extension logs the block rather than writing it to
 Linear (§9's Case B assumes an issue exists). Reserve blocking for a brief
 with nothing to decompose at all; a thin brief is not a block.
 
@@ -1433,14 +1372,15 @@ state directly off the Linear UI they already look at, instead of opening it
 to count issues.
 
 **Deterministic, not agentic.** No agent sets this; it is extension/loop
-code, the same authority class as `/foreman:apply` (§7.1) and the reaper
-(§11) — a plain function over already-fetched state, not a model call.
+code, the same authority class as `foreman-triage`'s direct-apply (§7.1) and
+the lock sweep (§11) — a plain function over already-fetched state, not a
+model call.
 
 | Transition | Trigger | Who |
 |---|---|---|
 | *(create)* → `planned` | `foreman-plan` creates a project's first slate of issues (§7.6) | `applyPlan`, same mutation batch |
-| `backlog`/`planned` → `started` | Any issue reaches an active or completed workflow-state type | loop's `project-status` worker (§17.5) |
-| any → `completed` | Every issue is terminal (completed or canceled) and at least one completed | loop's `project-status` worker |
+| `backlog`/`planned` → `started` | Any issue reaches an active or completed workflow-state type | `foreman reconcile`'s project-status pass (§17.6) |
+| any → `completed` | Every issue is terminal (completed or canceled) and at least one completed | `foreman reconcile`'s project-status pass |
 
 **Deliberately restrained.** Only the two directions with no reasonable
 disagreement are automated. `paused` and `canceled` are exclusively the
@@ -1500,9 +1440,9 @@ existing projects' own dates (`latestTargetDate`) — informational scheduling
 input, never a gate (§4.10a already gates on the relation, not the date).
 
 **Output:** a `RoadmapResult`. The extension applies it deterministically,
-the same authority class as `/foreman:apply` (§7.1) and project status
-(§7.6a) — the agent proposes, the extension is the sole writer (principle
-9):
+the same authority class as `foreman-triage`'s direct-apply (§7.1) and
+project status (§7.6a) — the agent proposes, the extension is the sole
+writer (principle 9):
 
 1. Create each `proposedProjects[]` entry as a Linear project and attach it
    to `initiativeId` (`initiativeToProjectCreate`, two mutations — the
@@ -1517,10 +1457,9 @@ the same authority class as `/foreman:apply` (§7.1) and project status
    sibling's dates were final should not silently schedule a project to
    start before its own prerequisite finishes.
 
-`foreman-roadmap` never sets `agent:ready` and never decomposes a project
-into issues itself — that is still `foreman-plan`'s job, run automatically
-the moment a created project goes bare (§7.6), the same funnel any other
-bare project falls into.
+`foreman-roadmap` never decomposes a project into issues itself — that is
+still `foreman-plan`'s job, run automatically the moment a created project
+goes bare (§7.6), the same funnel any other bare project falls into.
 
 ---
 
@@ -1528,7 +1467,7 @@ bare project falls into.
 
 | Skill | Bound to | Produces | Authority |
 |---|---|---|---|
-| `foreman-triage-inbox` | triage | `TriageProposal` | Propose only |
+| `foreman-triage-inbox` | triage | `TriageResult` | Applies directly |
 | `foreman-plan-project` | plan | `PlanResult` | Creates issues under one bare project |
 | `foreman-plan-roadmap` | roadmap (operator-invoked) | `RoadmapResult` | Creates one or more projects under one initiative |
 | `foreman-refine-issue` | refine | `RefineResult` | Applies to one prioritized issue |
@@ -1580,26 +1519,27 @@ so an agent that "asks" simply stalls and burns budget.
 
 **Case A — blocked by another issue.** Specify the native `blocked by` relation
 in the `BlockRecord` (the extension creates or verifies it and comments naming
-the blocker). Apply **no** `blocked:*` label; the relation is the state and
-resolves itself. Yield a `BlockRecord` with `type: dependency`; the extension
-releases the lock and moves the issue back to Todo. The incomplete relation now
-fails the implementation gate, so the implement worker skips it; when the
-blocker completes, the relation resolves, the gate passes, and the next loop
-pass re-dispatches — landing in resume mode (§7.3 step 2). No manual step.
+the blocker). Apply **no** `foreman:blocked` label; the relation is the state
+and resolves itself. Yield a `BlockRecord` with `type: dependency`; the
+extension releases the lock and moves the issue back to Todo. The incomplete
+relation now fails the implementation gate, so the implement rule skips it;
+when the blocker completes, the relation resolves, the gate passes, and the
+next loop pass re-dispatches — landing in resume mode (§7.3 step 2). No
+manual step.
 
 **Case B — blocked on a human.** Yield a `BlockRecord` with the question or
 enumerated options, the recommendation, the state left behind (worktree path,
 partial commits), and the cost of a wrong guess. The extension writes the Linear
-comment, applies the `blocked:*` label, releases the lock, moves the issue back
+comment, applies `foreman:blocked`, releases the lock, moves the issue back
 to Todo, and leaves the worktree intact with the branch pushed. The label keeps
-every worker away (§17.5) until the operator answers.
+every rule away (§17.1) until the operator answers.
 
 Budget exhaustion (§3.6) converts into Case B rather than a silent stall. This is
 well-supported: a soft-budget abort on a non-isolated kept-alive agent leaves the
 agent `idle` and resumable.
 
 **Resuming.** `/foreman:unblock <ISSUE-ID>` records the operator's reply as a
-comment and clears the `blocked:*` label.
+comment and clears `foreman:blocked`.
 That is the whole command: with the issue back in Todo and the label gone, the
 implementation gate passes and the next loop pass re-dispatches implement,
 which lands in **resume mode** (§7.3 step 2, §8) — the skill's first move on
@@ -1625,18 +1565,20 @@ is diagnostic information about the refine step.
 ## 10. Gates
 
 Validator functions in the extension, consumed by agents, commands, and hooks.
-Never reimplemented in prose. `legacy` never bypasses a gate — legacy issues
-route through the refine worker instead (§4.9, §17.5).
+Never reimplemented in prose. Pre-existing issues never bypass a gate — an
+unrefined Todo issue fails the implementation gate the same way any other
+unrefined issue would (§4.9, §10).
 
 **Refinement gate** (`Backlog → Todo`): issue state not terminal (§4.2a,
 checked first — finished work is never refined or implemented, regardless of
-what else is wrong with it); belongs to a project with exactly one initiative
-(§4.0); `type:` present; Priority ≠ `None`; description has `## Acceptance
-Criteria`; ≥1 criterion; estimate set and ≤3; no `blocked:*` label.
+what else is wrong with it); has a project; Priority ≠ `None`; description
+has `## Acceptance Criteria` with ≥1 item; estimate set and ≤3.
 
 **Implementation gate** (`Todo → In Progress`): refinement gate satisfied;
-`agent:ready` present; `agent:running` absent; `agent:hands-off` absent; no
-incomplete `blocked by` relations.
+issue state is Todo (`unstarted`); carries no `foreman:` label at all — not
+just `foreman:blocked`/`foreman:hands-off`, but also `foreman:running`,
+since a second claim on an already-locked issue must fail the same check a
+block or a hands-off does; no incomplete `blocked by` relations.
 
 **Terminal project, paused project.** The gates above are pure functions
 over the issue alone and read no network — a project's status is a
@@ -1660,54 +1602,43 @@ is the review target.
 
 ## 11. Locks and crash recovery
 
-`agent:running` is a lock and every lock needs a reaper. **Two reapers exist,
-not one**, because they run on different triggers: the loop's
-`packages/loop/src/workers/reaper.ts`, on the loop's 5-minute cadence
-(§17.5), and the extension's `packages/omp-plugin/src/lock/reaper.ts`, on
-`session_start` and its own timer, covering the gap when no loop process is
-running at all. Both read the same lock comment and classify it the same
-way (`lockState`). omp's own registry (`running | idle | parked | aborted`)
-is **process-global and dies with the process**, while the Linear label
-outlives it — so a reaper is still required either way, but it can
-cross-reference the registry to decide whether a lock is genuinely orphaned
-or just held by a live agent.
+`foreman:running` is a lock, and every lock needs a sweep for the case
+where the process that took it died before releasing it. **One recovery
+path, not a dedicated worker**: `foreman reconcile`'s invariant pass (§17.6)
+runs the sweep as one of its checks, on the loop's cadence, and the
+extension repeats the same check at `session_start` so a lock still clears
+between loop runs or when no loop is running at all. Both read the same
+lock comment through `readLockComment` / `verifyLockOwnership`
+(`packages/core/src/lock.ts`) and classify it the same way (`LockState`).
 
-**`foreman-plan` carries no lock.** `agent:running` is an issue label, and a
-bare project has no issue yet — the loop's own bookkeeping (a project id
-recorded against the `plan` dispatch, §17.5) is what stops a second dispatch
-from racing the first before its issues land, not this mechanism.
+**`foreman-plan` carries no lock.** `foreman:running` is an issue label, and
+a bare project has no issue yet — the plan loop's own `InflightStore`
+(§17.4), keyed by project id, is what stops a second `plan` dispatch from
+racing the first before its issues land, not this mechanism.
 
-- **The dispatcher claims; agents never do.** The extension applies
-  `agent:running` *before* the spawn (§17.5) and releases it when the yield is
-  consumed. The label is the mutex; the dispatch ID and timestamp ride in a
-  machine-readable lock comment (`foreman:lock`) written in the same mutation —
-  a label can't carry them, and the reaper and the agent's verify step both
-  need them. Release marks the comment released. Agents verify via
+- **The dispatcher's caller claims; agents never do.** The extension applies
+  `foreman:running` *before* the spawn (§17.5) and releases it when the
+  yield is consumed. The label is the mutex; the dispatch ID and timestamp
+  ride in a machine-readable lock comment (`foreman:lock`,
+  `packages/core/src/markers.ts`) written in the same mutation — a label
+  can't carry them, and both the sweep and the agent's verify step need
+  them. Release marks the comment released. Agents verify via
   `foreman_linear_read` that the live lock comment carries their dispatch ID
-  (§7.3) and otherwise never write or clear anything. One owner, no claim race,
-  and manual and loop dispatch share the code path.
+  (§7.3) and otherwise never write or clear anything. One owner, no claim
+  race, and manual and loop dispatch share the code path.
 - TTL derives from the runtime cap: 2× `task.maxRuntimeMs` plus margin — with
   the 2 h cap (§3.6), ~4–5 h. Long implementations are legitimate; a lock
   outliving twice the hard runtime cap is not.
-- Both reapers sweep on the same TTL rule: clear expired locks whose dispatch
-  ID is absent from both the registry and the loop's bookkeeping (§17.5),
-  post what was found and when it was taken, flag the worktree. The
-  extension's reaper runs at `session_start` and on its own timer so a lock
-  still gets cleared even between loop cadences or when no loop is running;
-  the loop's reaper runs on its 5-minute cadence.
-- **The reaper never deletes a worktree.** It reports; the operator decides.
+- The sweep clears an expired lock whose dispatch ID is absent from the
+  loop's own `InflightStore` (§17.4), posts what was found and when it was
+  taken, and flags the worktree.
+- **The sweep never deletes a worktree.** It reports; the operator decides.
   An automated delete that races a still-live agent loses work.
-- **A lock on a terminal issue is released without raising a decision, in
-  either reaper.** Both still strip `agent:running` and still post a comment
-  recording what was found, but skip `blocked:needs-input` and the blocked
-  queue (§4.2a) — there is no decision left to make about a lock on work
-  that already finished or was abandoned. The loop's reaper records this as
-  skip code `lock-orphaned-terminal`, distinct from its ordinary
-  `lock-orphaned` path; the extension's reaper has no `SkipRecord` surface,
-  so it says so in the comment body instead (`Issue is already <state
-  name>; the lock was released without raising a decision.`).
-- Subscribe to `task:subagent:lifecycle` to clear locks promptly on clean abort
-  rather than waiting out the TTL.
+- **A lock on a terminal issue is released without raising a decision.** The
+  sweep still strips `foreman:running` and still posts a comment recording
+  what was found, but skips `foreman:blocked` and the Blocked queue
+  (§4.2a) — there is no decision left to make about a lock on work that
+  already finished or was abandoned.
 
 ---
 
@@ -1724,12 +1655,12 @@ from racing the first before its issues land, not this mechanism.
 - Worktrees are disposable but must survive a block. No state outside the
   worktree, Linear, and the PR.
 - Cleanup of merged worktrees and their herdr tabs happens automatically once
-  a merge is confirmed — `merge-detect` (§17.5) and the operator-invoked
-  `/foreman:merge` both call it right after moving the issue to Done. Gated
-  by `loop.cleanupMergedWorktrees` (default `true`), and skipped — with a
-  logged note, never an error — when the worktree still has uncommitted
-  changes. Never runs for a crashed or orphaned lock; that stays the
-  reaper's report-only territory (§11).
+  a merge is confirmed — reconcile's `merged-not-done` invariant (§17.6) and
+  the operator-invoked `/foreman:merge` both call it right after moving the
+  issue to Done. Gated by `loop.cleanupMergedWorktrees` (default `true`), and
+  skipped — with a logged note, never an error — when the worktree still has
+  uncommitted changes. Never runs for a crashed or orphaned lock; that stays
+  the lock sweep's report-only territory (§11).
 
 ---
 
@@ -1794,9 +1725,9 @@ standing project organization section.
 
 | Activity | Frequency | Actor | Effort |
 |---|---|---|---|
-| `foreman repo` (per repo) | Every 5–10 min | Scheduler | — |
-| `foreman team` (team-level) | Daily window | Scheduler | — |
-| Triage approval | Daily | Operator | ~10 min |
+| `foreman plan` (per repo) | Every `loop.pollSeconds` (default 20s) | Loop process | — |
+| `foreman build` (per repo) | Every `loop.pollSeconds` | Loop process | — |
+| Triage review (spot-check applied `TriageResult`s) | Daily | Operator | ~10 min |
 | Blocked drain (`/foreman:status`) | 1–2× daily | Operator | ~15 min each |
 | Prioritization / roadmap | Weekly | Operator | ~1 hour |
 | Workflow retro | Every 2 weeks | Operator | ~30 min |
@@ -1807,7 +1738,7 @@ everything downstream: nothing gets refined, implemented, or reviewed until the
 operator sets a priority, which is exactly where the human judgment belongs.
 
 Planning has no cadence row either, for the same reason: `foreman-plan` runs
-inside `foreman repo` (§17.5), dispatched the moment a project is bare — not
+inside `foreman plan` (§17.1), dispatched the moment a project is bare — not
 on a schedule and not something the operator drains.
 
 Retro tuning targets: avoidable blocks, refine outputs that led to bad
@@ -1912,7 +1843,7 @@ the `HERDR_BIN_PATH` runtime variable.
 
 ## 17. The loop
 
-### 17.1 The loop is a state machine, not an agent
+### 17.1 Two rule engines, not an orchestrator agent
 
 The obvious move is a long-running "orchestrator" agent that watches the board
 and decides what to run next. Don't build it. Every routing decision Foreman
@@ -1921,419 +1852,252 @@ makes is already a pure predicate over Linear state — the gate validators in
 adds nondeterminism to something fully determined, and when it misroutes you
 get to debug a prompt instead of reading a function.
 
-The supervisor is a plain Node process — `foreman repo [--team <KEY>]`, run
-in the repo it serves (§3.11) — that imports the same validators as the
-extension. One instance per repo, each scoped to that repo's bound
-initiatives. It contains no model call. When it decides to dispatch, it hands the decision to a Dispatcher
-(§17.2), which launches the same command the operator would type (§3.4). LLM
-work happens only inside agents.
-
-### 17.2 Dispatchers
-
-The scheduler decides *what* to run. How a spawn actually gets launched is a
-separate, swappable concern behind a small interface:
+`foreman plan` and `foreman build` are the two long-running CLIs (§3.1),
+each a plain Node process running the same generic driver
+(`packages/loop/src/engine.ts`) over its own `Loop<S>`:
 
 ```ts
-interface Dispatcher {
-  dispatch(request): Promise<Handle[]>   // one handle per item in the batch
-  status(handle): "starting" | "running" | "settled" | "lost"
-  attach?(handle): void        // herdr only
+interface Rule<S> {
+  name: string;
+  select(snapshot: S): Candidate[];   // pure — no network, no model call
+}
+interface Loop<S> {
+  name: "plan" | "build";
+  concurrency: number;                // loop.concurrency.{plan,build} (§3.10)
+  fetch(ctx: LoopContext): Promise<S>; // the loop's only network read per poll
+  rules: Rule<S>[];
+  escalations?(snapshot: S, ctx: LoopContext): Escalation[];
 }
 ```
 
-A request carries a *batch* of items — a stage's whole tick — rather than one,
-for the reason §17.4 gives: the session a dispatcher launches is a shim whose
-one job is to turn the slash command into a single `task` call, and only that
-call's `tool_result` carries structured output.
+`fetch` pulls one full snapshot of everything the loop's rules need; each
+`Rule.select(snapshot)` then runs in-process over that snapshot and returns
+its `Candidate[]` — no rule ever calls Linear itself, so all of a poll's
+reads are paid for once, up front. `runLoop` offers every rule's candidates
+once per poll, in rule order, applies the escalations below, dispatches
+what the concurrency cap and each candidate's own retry state allow, and
+sleeps until the next poll or until a running dispatch settles and frees a
+slot — whichever comes first.
 
-Two implementations:
+`foreman plan` runs `triage`, `plan`, and `refine` (§17.4); `foreman build`
+runs `implement`, `review`, and `merge`. Splitting on this boundary, not one
+process per transition, is why there are two CLIs and not six: refine's
+candidates are cheap and Backlog-shaped, implement's are expensive and
+worktree-shaped, and a single concurrency cap per loop is enough to shape
+each mix without a per-rule sub-limit table.
 
-- **`PrintDispatcher`** — `omp -p '/foreman:implement ENG-142'`. No
-  dependencies, works headless anywhere, zero visibility while running. **Pass
-  the approval-mode flag explicitly** — the print-mode parent session is the
-  same second interrupt surface described in §17.3, and left at defaults it can
-  stall headless on its own tool calls.
-- **`HerdrDispatcher`** — a real terminal pane per agent, live state, and the
-  ability to attach and take over. Requires the herdr server.
+### 17.2 Dispatchers
 
-**Keep herdr optional.** It is the better daily driver (§17.3) but it is a
-stateful dependency in the dispatch path, and Foreman should degrade to print
-mode when the server isn't there rather than stalling the loop. Build
-`PrintDispatcher` first and get routing correct against it; adding the terminal
-layer at the same time means you cannot tell whether a bug is in `nextAction` or
-in pane management.
+A rule decides *what* to run. How a spawn actually gets launched is a
+separate, swappable concern behind a small interface
+(`packages/core/src/dispatch/types.ts`):
+
+```ts
+interface Dispatcher {
+  readonly kind: "print" | "herdr";
+  dispatch(request: DispatchRequest): Promise<DispatchHandle[]>;
+  status(handle: DispatchHandle): Promise<DispatchStatus>;
+  settle(handle: DispatchHandle): Promise<DispatchOutcome>;
+  cleanup?(issueId: string, repoPath: string, worktreePath: string | null): Promise<void>;
+  available(): Promise<boolean>;
+}
+```
+
+`DispatchStatus` is `"starting" | "running" | "settled" | "lost"`. A
+`DispatchRequest` carries one candidate's `agent`, `command`, `cwd`, `alias`,
+and a single-item `items[]` — the shape is array-typed because both
+dispatchers accept a batch, but the current rules each offer exactly one
+candidate per dispatch, so in practice it is always length 1.
+`cleanup` is post-merge worktree housekeeping (§12): herdr closes the
+issue's workspace when it had one, print mode leaves it unimplemented.
+
+Two implementations, selected by `agent.dispatcher` (`"auto"` default,
+preferring herdr when reachable):
+
+- **Print** — `omp -p '/foreman:implement ENG-142'`. No dependencies, works
+  headless anywhere, zero visibility while running. **Passes the
+  approval-mode flag explicitly** (`agent.approvalMode`, default `yolo`) —
+  the print-mode parent session is the same second interrupt surface
+  described in §17.3, and left at defaults it can stall headless on its own
+  tool calls.
+- **Herdr** — a real terminal pane per agent, live state, and the ability to
+  attach and take over. Requires the herdr server; `available()` reports
+  false and the loop degrades to print mode when it isn't reachable.
 
 ### 17.3 The herdr dispatcher
 
 Herdr is a terminal workspace manager with a background server: panes survive
-client detach, laptop close, and network loss, and reattach locally or over SSH.
-`omp` is a first-class agent kind, so `agent start … --kind omp` is native
-rather than a shell hack. Given how much the loop runs unattended, and how often
-you're reaching a machine over Tailscale rather than sitting at it, this fits
-better than fire-and-forget print mode.
+client detach, laptop close, and network loss, and reattach locally or over
+SSH. `omp` is a first-class agent kind, so `agent start … --kind omp` is
+native rather than a shell hack. Given how much the loop runs unattended,
+and how often you're reaching a machine over Tailscale rather than sitting
+at it, this fits better than fire-and-forget print mode.
 
 **The rule that makes it safe: herdr agent state is never a routing input.**
 
-Herdr classifies agents as `working`, `idle`, `done`, `blocked`, or `unknown` by
-recognizing patterns in terminal output. Its own docs are explicit that
+Herdr classifies agents as `working`, `idle`, `done`, `blocked`, or `unknown`
+by recognizing patterns in terminal output. Its own docs are explicit that
 `unknown` "does not prove successful completion." That is fine for directing
 human attention and unacceptable as a source of truth for whether an issue
 advanced. Linear state plus the validated structured output (§6) remain
-authoritative for every `nextAction` decision. Herdr state drives the sidebar
-and `/foreman:status` ordering — nothing else.
+authoritative for every dispatch decision. Herdr state drives the sidebar and
+`/foreman:status` ordering — nothing else.
 
-**Terminology collision, and a useful diagnostic.** Herdr's `blocked` means it
-recognized an approval or question UI on screen. Foreman's `blocked` means a
-`BlockRecord` was written to Linear. They are unrelated, and conflating them
-will cost you an afternoon. Better: treat any herdr `blocked` as a **Foreman
-bug**. The design says agents never ask questions and never hit approval
-prompts, so a recognized approval UI means either the parent session's approval
-mode wasn't configured or an agent found a path around the block protocol.
-Surface it in `/foreman:status` as an anomaly, not as a normal queue.
+**Terminology collision, and a useful diagnostic.** Herdr's `blocked` means
+it recognized an approval or question UI on screen. Foreman's `blocked`
+means a `BlockRecord` was written to Linear. They are unrelated, and
+conflating them will cost you an afternoon. Better: treat any herdr
+`blocked` as a **Foreman bug**. The design says agents never ask questions
+and never hit approval prompts, so a recognized approval UI means either the
+parent session's approval mode wasn't configured or an agent found a path
+around the block protocol. Surface it in `/foreman:status` as an anomaly,
+not as a normal queue.
 
-Set the dispatched session's approval mode explicitly. Subagents get forced
-`yolo`, but the *parent* session herdr launches is interactive and can prompt on
-its own tool calls — a second interrupt surface that bypasses `BlockRecord`
-entirely if left at defaults.
+Set the dispatched session's approval mode explicitly (`agent.approvalMode`).
+Subagents get forced `yolo`, but the *parent* session herdr launches is
+interactive and can prompt on its own tool calls — a second interrupt
+surface that bypasses `BlockRecord` entirely if left at defaults.
 
-**Layout.**
-
-| Herdr object | Foreman mapping |
-|---|---|
-| Workspace | One per repo — the instance and its bound initiatives (§3.11). |
-| Tab | One per stage, holding that stage's shared orchestrator (§17.4); one per in-flight *implementing* issue, named for the issue (`ENG-142`). |
-| Pane | The agent. `--cwd` is the repo for a stage orchestrator, that issue's worktree for an implement agent. |
-| `foreman` workspace | The `foreman-board` and `foreman team` panes. Each repo workspace holds its own `foreman repo` pane (§3.11). |
-
-Tabs are bounded by the WIP limit (§17.6), so at WIP 3 the layout stays legible
-rather than becoming a wall of panes.
-
-**`agent.herdrLayout` (`"tab"` default, or `"pane"`).** The table above is
-`"tab"`. Setting `agent.herdrLayout: "pane"` (or `--herdr-layout pane` on
-`foreman repo`/`foreman team`) replaces the stage-orchestrator row only: no
-new tab per stage, just one right-hand column split off the tab hosting the
-process itself (`HERDR_TAB_ID`/`HERDR_PANE_ID`, set only when that process is
-itself running inside a herdr pane), and one row per stage stacked downward
-inside that column. It falls back to `"tab"` when there is no such pane — a
-cron/launchd-run loop has no "current tab" to anchor on. The column spans the
-whole tab's height only if the process's own pane was the tab's sole occupant
-at the moment the first stage split off it; herdr's pane tree has no
-operation to retroactively wrap panes that already sit beside it, so panes
-the operator opened before that first split keep their own height
-(`docs/VERIFIED.md`). Implement agents are unaffected — they still get their
-own worktree-backed workspace either way.
-
-**Naming.** Agent names must match `[a-z][a-z0-9_-]{0,31}`, must be unique among
-live agents, and the alias is cleared when the agent exits — but herdr keeps a
-`done` agent's name reserved until its pane closes, which is why a recycled
-orchestrator's pane is closed rather than left behind. A stage orchestrator is
-`foreman-<alias>-<stage>`: the repo alias is in the name because two loops on
-one machine would otherwise both want `foreman-refine`. An implement agent is
-named for its dispatch id, not its issue, so a redispatch before merge cannot
-collide with the still-reserved name of the previous attempt. Capture pane IDs
-from the JSON that creation commands return; never predict them, and re-read
-`.result.move_result.pane.pane_id` after any `pane move`, since moving a pane
-between workspaces changes its qualified ID.
-
-**Sidebar tokens.** Herdr accepts pane and workspace metadata tokens that render
-in sidebar rows. Push the issue ID and current gate state as tokens with a TTL,
-so the sidebar shows Linear truth rather than only scraped terminal state. Use
-`--source foreman` and `--seq` so stale reports are ignored.
+**Layout.** One workspace per repo alias; one pane per dispatched candidate,
+named for its dispatch id (not its issue, so a redispatch before merge
+cannot collide with the still-reserved name of the previous attempt) and
+`--cwd`'d to the candidate's worktree when it has one, else the repo root.
+There is no shared per-rule orchestrator session: every candidate — triage,
+plan, refine, implement, or review — gets its own pane, because `engine.ts`
+dispatches one candidate at a time (§17.1) and a session with no work left
+to receive is nothing to share.
 
 **Do not collect results by reading panes.** `agent read` returns
-`agent_not_idle` while an agent is working, and alternate-screen history reads
-are fragile. Foreman already has a better channel: the agent writes structured
-output, the extension writes Linear, the loop reads Linear. Pane reads are for
-the human looking at a stuck agent.
+`agent_not_idle` while an agent is working, and alternate-screen history
+reads are fragile. Foreman already has a better channel: the agent writes
+structured output, the extension writes Linear, the loop reads Linear via
+`settle()`. Pane reads are for the human looking at a stuck agent.
 
-**Always pass `--timeout`.** Herdr wait commands have no default and will block
-indefinitely. Pair every wait with `task.maxRuntimeMs` on the omp side so
-neither layer can hang forever.
+**Always pass a timeout.** Herdr wait commands have no default and will
+block indefinitely. Pair every wait with `agent.maxRuntimeMs` on the omp
+side so neither layer can hang forever.
 
-**Worktrees stay Foreman's.** Herdr can create them; don't let it. Foreman owns
-worktree lifecycle (§3.7, §12), and a terminal manager deciding branch and
-checkout contracts is exactly the coupling to avoid.
+**Worktrees stay Foreman's.** Herdr can create them; don't let it. Foreman
+owns worktree lifecycle (§3.7, §12), and a terminal manager deciding branch
+and checkout contracts is exactly the coupling to avoid.
 
-### 17.4 Shared stage orchestrators
-
-§17.1 rules out an orchestrator *agent* that decides what to run next. This is
-not that: routing stays in the supervisor's predicates, and the session
-described here has no routing authority at all. It receives an explicit list of
-subjects and fans them out. Read the two sections together — the distinction is
-the whole reason this is allowed.
-
-**What the dispatched session actually is.** It is not the worker. It runs
-`/foreman:refine ENG-1 ENG-2`, and the command's only instruction is to make one
-`task` call with one item per subject. The real work happens in the
-`foreman-refine` subagents. So the parent session holds no issue state, no
-worktree, and nothing worth keeping between batches — which is exactly what
-makes it shareable.
-
-**Why a batch, and why blocking.** A `foreman-*` agent's structured output
-reaches the parent on exactly one channel: the `tool_result` of the `task` call.
-A background spawn's `async-result` delivery carries prose and no structured
-data, and the `task:subagent:*` events carry status only. Every Foreman agent
-therefore declares `blocking: true`. Blocking does not mean serial: an
-all-blocking `task` call runs its items concurrently under omp's session
-semaphore and returns every `SingleResult` in one payload, and the extension's
-capture path already loops over them. One prompt, N agents, N results.
-
-**One orchestrator per stage, not one per tick.** Per-stage sharing costs four
-session boots per loop lifetime instead of one per dispatch. Sharing a single
-session across *all* stages saves three more boots and is not worth it: a long
-batch in one stage would block every other stage's prompt for its whole
-duration, and one crash would take out the board.
-
-**Implement is excluded.** A non-isolated omp subagent inherits its parent
-session's cwd, so subagents of a repo-rooted orchestrator would write in the
-repo root rather than the issue's worktree (§12). Implement keeps a per-issue
-agent in a worktree-backed workspace — which is also the one stage where a
-dedicated pane earns its keep, since the operator attaches to inspect code.
-
-**Never prompt a working orchestrator.** `herdr agent prompt` accepts a
-submission while its target is `working` — it does not track turns — and omp
-delivers that submission as a queued user message that interrupts the turn's
-in-flight tool calls. Interrupting a turn whose tool call *is* the batch
-abandons the batch. The dispatcher checks `agent get` first: `idle`/`done`
-reuses the session, `working` defers the whole batch to the stage's next tick as
-a routine skip, `blocked` is the §17.3 anomaly, and `unknown` gets the pane
-closed and a fresh agent started. Deferring is safe precisely because nothing
-was recorded in flight yet.
-
-**Dispatch ids move to a reservations file.** The loop must own dispatch ids:
-the reaper compares the id it tracks against the id the agent wrote into the
-Linear lock comment, and a divergence marks a working issue blocked. One
-`FOREMAN_DISPATCH_ID` in the environment cannot serve many items across many
-turns, so the loop writes one reservation per item — agent, subject, id,
-timestamp — to a per-agent file under its state dir, named by
-`FOREMAN_DISPATCH_RESERVATIONS`. The task guard resolves each item's id by the
-subject marker the model already writes, so no id is ever transcribed by a
-model. Reservations are consumed on use and pruned at the lock TTL, so a subject
-dispatched again later cannot pick up an abandoned run's id. Precedence in the
-guard: reservation, then the inherited one-shot env id (still how an operator's
-own dispatch hands its id down), then mint.
-
-**Recycling.** The orchestrator carries no state between batches, so recycling
-exists only to bound context growth: after `agent.orchestratorMaxBatches`
-settled batches (default 20) the loop closes its pane and the next dispatch
-starts a fresh session. Even at 20 that is a twentieth of the boots the
-one-agent-per-dispatch model paid for.
-
-**Settling a batch.** One prompt is one turn, so items dispatched together
-settle together: the dispatcher waits once per batch and hands the same outcome
-to every handle in it. Wait for `idle` as well as `done` — an interactive omp
-session does not exit when its turn ends, so a `done`-only wait never matches
-and every dispatch would sit in flight until its timeout.
-
-### 17.5 Stage workers
-
-One supervisor process, several independent workers — not one monolithic sweep.
-Stages have wildly different durations (refine is minutes, implement can be
-hours), so a single cadence and a single WIP number is wrong for both, and a
-single sweep means implement starves waiting for refinement to happen in the
-same pass.
+### 17.4 Rules
 
 ```
-foreman repo  (one process per repo, one lockfile each, N async workers)
-  ├─ reaper           every 5 min   — stale locks (§11)
-  ├─ project-status   every 5 min   — sync Linear's native project status (§7.6a)
-  ├─ plan             every 5 min   — decompose any bare (zero-issue) project
-  ├─ refine           every 5 min   — top Ready buffer up to target
-  ├─ implement        every 5 min   — pull from Ready
-  └─ review           every 5 min   — PRs whose head SHA has no ReviewResult
+foreman plan   rules: [triage, plan, refine]
+foreman build  rules: [implement, review, merge]
 ```
 
-Triage is not a loop worker — it belongs to the team-level `foreman team`
-process (§3.12).
+Each rule owns one transition and evaluates only its own predicate over the
+loop's already-fetched snapshot:
 
-Each worker owns one transition and evaluates only its own predicate:
+| Rule | Loop | Selects | Condition | Dispatches |
+|---|---|---|---|---|
+| `triage` | plan | Up to `loop.triageBatch` Inbox issues, batched into one candidate keyed on the whole batch | Inbox non-empty | `foreman-triage` |
+| `plan` | plan | In-scope, non-Maintenance projects with zero issues | zero incomplete project blockers (§4.10a); a project with a status transition already terminal or bare-excluded never reaches the snapshot | `foreman-plan` |
+| `refine` | plan | Backlog, plus Todo issues that fail the implementation gate (the label-free successor to the deleted `legacy` funnel, §4.9) | unassigned, no incomplete `blocked by` relations, non-terminal and non-paused project | `foreman-refine` |
+| `implement` | build | Todo | unassigned, implementation gate passes (§10) | `foreman-implement` |
+| `review` | build | In Review | PR (or pushed branch) open, no `ReviewResult` for the current head SHA, under `loop.reviewCycleCap` | `foreman-review` |
+| `merge` | build | In Review | `loop.autoMerge` on, mergeable, review gate passes (§10, §17.6) | `/foreman:merge` |
 
-| Worker | Selects | Condition | Dispatches |
-|---|---|---|---|
-| `plan` | In-scope, non-Maintenance projects | zero issues in any state, zero incomplete project blockers (§4.10a), project status not terminal (§4.2a), no `plan` dispatch already in flight | `foreman-plan` |
-| `refine` | Backlog; plus `legacy` in Backlog or Todo (§4.9) — both scoped to non-terminal, non-paused projects via `notInTerminalProject()` + `notInPausedProject()` (§4.2a, §4.2b) | priority ≠ None, no `agent:*`, no incomplete `blocked by` relations (§4.4) | `foreman-refine` |
-| `implement` | Todo | implementation gate passes | `foreman-implement` |
-| `review` | In Review | PR open, no `ReviewResult` for head SHA | `foreman-review` |
+**Dedup and concurrency are in-process, not a Linear label.** Every
+`Candidate.key` (`issue:<ID>` or `project:<ID>`, or the sorted batch key for
+triage) is checked against the loop's own `InflightStore` — a small JSON
+file at `<stateDir>/<alias>/{plan,build}.json` — before a rule's candidate
+is offered, so a project or issue already mid-dispatch is never offered
+twice. `foreman:running` is a *separate*, Linear-visible lock the extension
+claims when it actually spawns `foreman-implement` (§11) — the loop's own
+`unlabeled()` filters on `refine`/`implement`/`review` already exclude
+anything carrying it (or `foreman:blocked`/`foreman:hands-off`), so the two
+mechanisms never disagree, they just operate at different layers: in-process
+dedup for "is this loop already working it," the Linear label for "is any
+process, including a manually-invoked one, working it."
 
-`plan` is the one worker whose candidates are projects, not issues — its
-in-flight tracking is loop bookkeeping keyed by project id (below), not the
-`agent:running` label the other three share. `project-status` reads and
-writes projects too, but dispatches no agent — it is a housekeeping pass like
-the reaper, not a `nextActions` stage (§7.6a).
+**Concurrency is one global number per loop, not a sub-limit table.**
+`loop.concurrency.plan` (default 1) and `loop.concurrency.build` (default 3)
+cap `InflightStore.inFlightCount()`; when a loop is at cap, `offerCandidates`
+skips every further candidate that poll rather than queueing them
+separately per rule. Rule order therefore doubles as priority: `triage`
+before `plan` before `refine`, `implement` before `review` before `merge`.
 
-**Refine skips a blocked issue too, not just implement.** Promoting an
-issue straight to Todo with `agent:ready` while it still has an incomplete
-`blocked by` relation just relocates the wait: it parks at the
-implementation gate (`incomplete-blockers`, §10) instead of sitting in
-Backlog, filling the Ready buffer with work that cannot start and starving
-work that can. The refine worker re-runs the same blocker check before
-dispatching and records the skip as `incomplete-blockers` — the identical
-code the gate itself uses, not a second predicate that could disagree with
-it.
+**Poll on `loop.pollSeconds`** (default 20s). Each poll re-fetches the whole
+snapshot fresh; a settling dispatch also wakes the loop early so a freed
+concurrency slot doesn't sit idle until the next scheduled poll.
 
-**Plan skips a project with an incomplete project blocker before anything
-else**, recorded as `incomplete-project-blockers`: a bare project whose
-prerequisite hasn't shipped is exactly the project whose brief can't be
-decomposed accurately yet — the issues it should produce depend on
-decisions its blocker hasn't settled — and decomposing it early is how a
-roadmap's intended sequence gets lost.
+### 17.5 Merge
 
-Nothing is dispatched for an issue carrying `blocked:*`, `agent:proposed`,
-`agent:running`, or `agent:hands-off` — every worker checks these first.
+`merge` is the one build-loop rule gated off by default:
+`loop.autoMerge` (default `false`) keeps merge authority with the operator
+unless explicitly turned on. When it is, the rule re-uses `reviewGate`
+directly rather than re-deriving its checks — a refused `/foreman:merge`
+exits 0, so a weaker precondition here would re-spawn a refused merge every
+poll forever with no back-off. `/foreman:merge` itself is the same command
+the operator would type by hand (§3.4); autonomy is entirely in whether the
+loop decides to type it, never in a second merge implementation.
 
-**One process, not six.** Independent cadences, but a shared lockfile, shared
-global counters, and one place to read logs. Six separate processes
-multiplies the singleton problem by six and gives you no shared view of
-total load.
+### 17.6 Retry, escalation, and reconcile
 
-**Claim before dispatch, not after.** Workers overlap and a slow spawn would
-otherwise double-fire. The extension writes `agent:running` with a dispatch ID
-first (§11), closing the window; the reaper cleans up spawns that die between
-claim and start. The Linear label is the mutex across all workers — that is
-what makes concurrent stages safe. Agents verify the ID; they never claim.
+**Retry.** A dispatch that fails to launch, or whose `settle()` outcome is
+non-`"settled"` or a non-zero exit code, increments a per-candidate failure
+counter in `InflightStore`; a successful settle clears it. After
+`loop.retryCap` (default 2) consecutive failures, `offerCandidates` stops
+re-offering that candidate and, once per candidate, confirms and applies a
+`retry-exhausted` escalation instead (below) — logging a "fix by hand"
+notice for a non-issue candidate (e.g. a stuck `plan` project) that has
+nothing to escalate to in Linear.
 
-**Loop bookkeeping.** Attempt counters (§17.8), review-cycle counters (§7.4),
-last-triage-run (so a mid-day loop restart doesn't refire the daily batch),
-`reviewedSha` per PR, and dispatch history live in a small SQLite (or JSON)
-file in `~/.foreman/state/<repo-alias>/` (§3.11). Explicitly
-**non-authoritative** — it is dispatch
-bookkeeping, not workflow state, so it does not create a second source of truth
-beside Linear. Lost or corrupted, the worst case is one redundant dispatch or
-one premature retry; the reaper reconciles it against Linear and the registry
-on start.
+**Review-cycle escalation.** The build loop's `escalations()` hook scans
+every In Review issue and flags any whose `request-changes` review count has
+reached `loop.reviewCycleCap` (default 2) — a standing disagreement between
+implement and review is operator information, not something to ping-pong
+overnight (§7.4).
 
-Poll on a 5-minute cadence. Linear webhooks would be more responsive and are a
-reasonable later optimization; nothing here needs sub-minute latency.
+**`applyEscalation`** (`packages/loop/src/escalate.ts`) is the one place a
+loop writes to Linear directly, because there is no agent output to
+validate here — only the loop's own exhausted counter. It applies
+`foreman:blocked`, clears `foreman:running` if held, clears the assignee,
+and posts a `BlockRecord` block marker (`type: "needs-decision"`) naming
+what was tried and recommending `re-scope the issue` over `fix by hand`.
+Both loop modes confirm this through the same `Confirmer` (§17.7) every
+other Linear write goes through — declining leaves the issue un-escalated
+and the loop simply retries it again next poll, no state lost.
 
-### 17.6 WIP limits
+**`foreman reconcile`** is a separate, short-lived CLI — not a loop rule —
+run on its own cadence (a `launchd`/`systemd` timer, or by hand) that sweeps
+invariants no poll-scoped rule is positioned to catch: orphaned
+`foreman:running` locks past their TTL (§11), a merged issue never moved to
+Done, and native project status left stale (§7.6a). It shares `core`'s
+validators with both loops and the extension, so a lock or a stale status it
+finds is judged by the identical logic that would have caught it live.
 
-Two layers, and the global one is the one that protects you.
-
-**Global cap on concurrent agents. Start at 3.** Per instance (§3.11) — each
-repo's loop caps its own agents; the cross-instance guard is team-wide
-backpressure (§17.7). This governs. The failure mode of an autonomous loop is
-generating work faster than the operator can absorb it, and a low ceiling is
-the only thing that surfaces that early enough to correct. Running several
-instances multiplies effective volume, so start additional instances with the
-same caution as raising the cap.
-
-**Per-stage sub-limits**, which must sum to more than the global cap or they do
-nothing useful — they shape the mix, the global cap sets the volume:
-
-| Worker | Sub-limit | Note |
-|---|---|---|
-| `plan` | 1 | Coarse and rare — one project decomposition at a time by default. |
-| `refine` | 2 | Short, cheap, keeps the buffer stocked. |
-| `implement` | 3 | The expensive one. |
-| `review` | 2 | Fast, and unblocks merges. |
-
-If the global cap is 3 and implement is holding all three, refine waits. That is
-correct — starting refinement you can't act on is just queue growth.
-
-**Refine targets a buffer depth, not a WIP count.** The refine worker's job is
-to keep the Ready view stocked at N issues (start at 5), not to process
-everything prioritized. Below target, it refines; at target, it idles. This is
-what lets implement run continuously without ever waiting on refinement latency,
-while still honoring the rule that refining far ahead of what you'll build is
-waste (§7.2). Skipping a candidate for `incomplete-blockers` (§17.5) does not
-count as topping up the buffer — the worker moves to the next Backlog
-candidate in the same pass rather than stalling on one it can't refine yet.
-
-These are all separate from `task.maxConcurrency`, which bounds fan-out inside a
-single omp session. Foreman's agents span sessions and processes, so it needs its
-own counters, held in Linear where every worker can see them.
-
-### 17.7 Backpressure — the rule that makes this safe
-
-**If the Blocked (human) queue exceeds a threshold, every worker stops
-dispatching new work.** Threshold starts at 5, and the count is **team-wide**,
-not per-instance (§3.11): every instance queries `blocked:*` across the whole
-team, so N repos' loops all throttle against the one operator's actual drain
-rate, with Linear as the only coordination point.
-
-The count is terminal-filtered at the query (§4.10 view 2), not read raw off
-every `blocked:*` label — so a label stranded on an issue or project that
-later completed or was canceled can no longer inflate the queue and trip
-backpressure for work nobody needs to act on.
-
-Backpressure is global, never per-stage or per-instance. This matters more now that stages run
-independently: a per-stage rule would let refine keep stocking the Ready buffer
-while you're drowning in blocked implement work, so you'd surface from the drain
-to find a large queue of refined issues nobody can start on. One tripwire, all
-workers.
-
-Without this, the loop runs unattended overnight and produces forty blocked
-issues, each holding a worktree, each needing a decision. That is strictly worse
-than having done nothing: the operator now faces a queue larger than a day's
-attention, and the work is stale by the time it's unblocked. A loop with a human
-decision point in it must be rate-limited by that human's actual throughput, not
-by machine capacity.
-
-The same rule applies to unapproved proposals: if the team-wide
-`agent:proposed` count exceeds the threshold, the intake process (§3.12)
-skips its dispatch — there is no point generating proposals faster than
-they're being approved.
-
-Backpressure state belongs in `/foreman:status` so it's visible why the loop
-went quiet.
-
-### 17.8 Retry and failure
-
-An agent returning a non-zero exit or a failed schema validation increments an
-attempt counter in the loop's bookkeeping (§17.5). After two failures, stop
-retrying and convert to a `blocked:needs-decision` with the failure output
-attached. A loop that retries indefinitely burns budget on something
-structurally broken, usually an under-refined issue.
-
-One carve-out: a schema-invalid yield from a budget force-stop (§3.6) is not a
-failure — the agent was cut off mid-thought, not broken. The extension detects
-the abort via the lifecycle events (§3.5), synthesizes a Case B `BlockRecord`
-from the partial output, and routes it through §9 instead of the retry counter.
-
-Review→fix cycles are counted the same way and capped at **2** (§7.4); hitting
-the cap converts to `blocked:needs-decision` with both the findings and the
-implement agent's last result attached.
-
-### 17.9 Autonomy
+### 17.7 Autonomy
 
 There are exactly two loop modes, `loop.mode`: `confirm` (the default) and
 `yolo`.
 
 `confirm` asks the operator, on the loop's own terminal, before every action
-that changes state *outside the loop process*: every agent dispatch and every
-Linear mutation. Reads are never gated — the loop still evaluates every
-worker's predicate and still logs its intent either way. The loop's own
-`status.json` / `bookkeeping.json` / `loop.lock` writes are not gated either;
-those files are how the process remembers what it already did, so prompting
-for them would make `confirm` mode unable to keep books rather than more
-careful.
+that changes state *outside the loop process*: every agent dispatch
+(`Confirmer.confirm({ kind: "dispatch-plan" | "dispatch-build" })`) and every
+direct Linear write the loop itself makes — currently only escalation
+(`kind: "linear-write"`). Reads are never gated — the loop still evaluates
+every rule and still logs its intent either way. The loop's own
+`InflightStore` writes are not gated either; that file is how the process
+remembers what it already dispatched, so prompting for it would make
+`confirm` mode unable to keep books rather than more careful.
 
 Declining is how you get a dry run: the loop still evaluates, still logs its
-intent, and records a skip (`dispatch-declined`, `linear-write-declined`).
-There is no separate dry-run rung, because answering `n` to everything is the
-same thing, and it lets you say yes to the one dispatch you did want.
+intent, and simply does not dispatch or write. There is no separate
+dry-run flag, because answering "no" to everything is the same thing, and it
+lets you say yes to the one dispatch you did want.
 
-`loop.workerModes` overrides `loop.mode` per worker. `{ "review": "yolo" }`
-reproduces exactly what the old read-only-auto rung used to do — every
-worker but review evaluates and asks, review dispatches unattended — which is
-why that rung is gone rather than renamed: it is one entry in a map, not a
-separate stage of the ladder.
-
-`confirm` mode needs a terminal. A loop started with any worker's effective
-mode resolving to `confirm` and no TTY attached refuses to start rather than
-declining everything silently — there would be nobody to ask.
-
-Merge authority never enters the loop. The operator merges, in either mode.
-
-Tune WIP and backpressure upward only after a stretch where the blocked queue
-consistently drains to zero within a day. If it doesn't drain, the constraint is
-the operator's attention, and raising the limits makes throughput worse rather
-than better.
+Merge authority is `loop.autoMerge` (§17.5), off by default regardless of
+`loop.mode` — a `yolo` loop still leaves merging to the operator unless
+`autoMerge` is separately turned on.
 
 `loop.mode: "yolo"` and `agent.approvalMode: "yolo"` are different settings
 at different layers and neither implies the other. `loop.mode` governs
-whether the supervisor asks *its* operator before dispatching or writing to
-Linear. `agent.approvalMode` is the omp approval mode each dispatched agent
+whether the loop asks *its* operator before dispatching or writing to
+Linear. `agent.approvalMode` is the omp approval mode each dispatched
 session itself runs under, once dispatched. A `confirm`-mode loop can still
 dispatch agents that run with `approvalMode: "yolo"` inside their own
 sessions, and a `yolo`-mode loop can dispatch agents pinned to a stricter
@@ -2350,45 +2114,46 @@ sessions, and a `yolo`-mode loop can dispatch agents pinned to a stricter
    initiatives enabled, one initiative per product (grouping prefixes where
    wanted), the `repos` registry populated and the ensure pass
    creating `Maintenance` projects (§3.10, §3.11). Then Linear
-   states, load-bearing labels, `legacy` amnesty pass (including homing
-   projectless issues, §4.9), six saved views, one worked product `Context`
-   doc + project brief with a Definition of Done. Resolve §16 items 5, 7,
-   and 9. ~1 day.
-2. **Schemas + extension core + interrupt protocol.** The four result schemas
+   states, the `foreman:` and `type:` label groups, six saved views, one
+   worked product `Context` doc + project brief with a Definition of Done.
+   Resolve §16 items 5, 7, and 9. ~1 day.
+2. **Schemas + extension core + interrupt protocol.** The five result schemas
    and `BlockRecord` union first — everything downstream consumes them. Then
    typed Linear read tools, the result-application layer that makes the
-   extension the sole Linear writer (principle 9), gate validators, the lock manager
-   (dispatch IDs, claim/release), the lock reaper, the config loader's
+   extension the sole Linear writer (principle 9), gate validators, the lock
+   manager (dispatch IDs, claim/release), the config loader's
    `session_start` validation, scope check, and ensure pass (§3.10, §3.11),
-   lifecycle listeners,
-   `foreman-block-protocol` skill, the skill-name resolution guard (§8), and
-   `/foreman:status`. Verify §16 items 1 and 2 here. ~2 days. Build before any
-   agent — retrofitted, one agent gets a "just ask the user" fallback and it
-   becomes the default.
-3. **`foreman team` + `foreman-triage`, propose-only.** The team-level
-   process (§3.12): registry-derived repo lookup, daily window, the drafting
-   agent, and the apply pass — creating nothing without approval. ~1 day. **Run it for a
-   week before building anything else.** Its bad proposals — especially the
-   project briefs — teach more about where the operator's judgment lives than
+   lifecycle listeners, `foreman-block-protocol` skill, the skill-name
+   resolution guard (§8), and `/foreman:status`. Verify §16 items 1 and 2
+   here. ~2 days. Build before any agent — retrofitted, one agent gets a
+   "just ask the user" fallback and it becomes the default.
+3. **`foreman-triage`, applying directly.** `foreman plan`'s `triage` rule
+   (§17.4): registry-derived repo lookup, `TriageResult` applied through the
+   same result-application layer as every other agent. ~1 day. **Run it for
+   a week before building anything else.** Its classification and dedupe
+   calls teach more about where the operator's judgment lives than
    designing the rest up front.
-4. **`foreman-refine` + `foreman-spike`.** After triage tuning. ~half a day.
+4. **`foreman-refine` + `foreman-spike`.** After triage tuning, still inside
+   `foreman plan`'s `refine` rule. ~half a day.
 5. **`foreman-implement` + `foreman-review` + the fix cycle + TTSR rules.**
    Shaped by what 3 and 4 revealed. Includes the resume-mode path in the
-   implement skill, the findings route with its cycle cap (§7.4), both merge
-   modes and `/foreman:merge` (§3.10). ~1.5 days, most of it in worktree
-   lifecycle and the fix cycle.
-6. **`foreman repo` + `PrintDispatcher` + autonomy (§17.9).** The CLI
-   with team resolution (§3.11), supervisor, per-repo lockfile, bookkeeping
-   file, the three stage workers plus reaper, per-instance cap and per-stage
-   sub-limits, Ready buffer target, team-wide backpressure, retry counter,
-   `Confirmer`/`--mode`. Prove it single-instance in one repo before starting a
-   second.
-   ~1.5 days. Start with the `implement` worker alone and add the others one at
-   a time — four workers introduced together makes a routing bug impossible to
-   attribute. Then run a week in `confirm` mode before switching to `yolo`.
-7. **`HerdrDispatcher` (optional).** Workspace/tab/pane layout, agent naming,
-   sidebar tokens, attach path, print-mode fallback. ~half a day. Only after
-   step 6 is boring.
+   implement skill, the findings route with its cycle cap (§7.4), and
+   `/foreman:merge` (§3.10) as a plain command — `loop.autoMerge` and the
+   `merge` rule come in step 6. ~1.5 days, most of it in worktree lifecycle
+   and the fix cycle.
+6. **`foreman plan` + `foreman build` + `PrintDispatcher` + autonomy
+   (§17.7).** The two loop CLIs over the shared rule engine (§17.1), each
+   with its own concurrency cap, `InflightStore`, retry cap, and
+   `Confirmer`/`--mode`. Prove `foreman build` single-instance on the
+   `implement` rule alone before adding `review` and `merge`; prove
+   `foreman plan` on `refine` alone before adding `plan` and `triage` —
+   introducing every rule in one loop together makes a routing bug
+   impossible to attribute. ~1.5 days. Then run a week in `confirm` mode
+   before switching to `yolo`.
+7. **`foreman reconcile` + `HerdrDispatcher` (optional).** The invariant
+   sweep (§17.6): orphaned locks, merged-not-Done, stale project status.
+   Then herdr layout, agent naming, sidebar tokens, attach path, print-mode
+   fallback. ~1 day combined. Only after step 6 is boring.
 
 Roughly 9 focused days of build, spread across several weeks of observation
 windows. The waiting is the point; compressing it is how you end up with a loop
@@ -2398,12 +2163,13 @@ that dispatches confidently into a routing bug.
 
 ## 19. Non-goals
 
-- Auto-merge on clean review, in either loop mode
+- Auto-merge unattended by default — `loop.autoMerge` is off unless the
+  operator turns it on (§17.5)
 - An orchestrator *agent* — routing is a pure function (§17.1)
 - Agents holding Linear or GitHub write tools (implement's `foreman_github_pr`
   excepted) — the extension is the sole writer (principle 9)
-- An uncapped review→fix cycle (§7.4)
-- A loop that dispatches without a WIP limit or backpressure
+- An uncapped review→fix cycle (§7.4, §17.6)
+- A loop that dispatches past its concurrency cap (§17.4)
 - Herdr agent state as a routing input (§17.3)
 - Herdr-managed worktrees — Foreman owns worktree lifecycle
 - Collecting agent results by reading terminal panes
@@ -2417,98 +2183,14 @@ that dispatches confidently into a routing bug.
 - Cross-agent messaging as a design element — `hub` is a live-process
   optimization for revival and the review fix cycle (§9); Linear is the
   message bus
-- Unapproved project creation — intake *proposes* milestone projects with the
-  brief already written (§3.12), but nothing is created until the operator
-  approves; the ensure pass auto-creates only the standing `Maintenance`
-  project (§3.11)
-- A second intake process — the team inbox has exactly one consumer (§3.12)
+- A control-plane socket or `patchConfig` RPC for a running loop — restart
+  the process to pick up a config change
+- A second intake process — the Triage inbox has exactly one consumer,
+  `foreman plan`'s `triage` rule (§17.4)
 - A central daemon watching all of Linear — the instance model (§3.11) is
   per-repo by design
 - An `area:` ontology beyond what `foreman-implement` reads
 - A public plugin marketplace; the design has no marketplace or distribution
   channel beyond the single global symlink `foreman setup` writes
-- Config keys that can disable gates, WIP limits, backpressure, the lock
-  protocol, or propose-before-apply — config tunes parameters, never removes
-  invariants (§3.10)
-
----
-
-## 20. The control plane
-
-### 20.1 Two loop kinds, one control surface
-
-Every long-lived Foreman process — a per-repo loop (§3.11) or the team-level
-intake process (§3.12) — is a *loop* for the purposes of this section, and
-each exposes the same control surface under an id: `repo:<alias>` for a
-per-repo loop, `intake` for the singleton intake process. The id is also the
-state directory name: `~/.foreman/state/<id>/` (the bookkeeping file of
-§17.5 lives one level inside it). Two files live there for control purposes:
-
-| Path | What |
-|---|---|
-| `<stateDir>/<id>/control.sock` | A unix socket, live while the loop holds its lock (§11) |
-| `<stateDir>/<id>/status.json` | A `LoopSnapshot`, written atomically after every `reconcile()` and after every tick |
-
-The socket is the control channel. The file is the fallback: a client that
-cannot reach the socket — the loop process is down, or a client asks before
-the loop has ever registered a control server — still gets a truthful "last
-known state" by reading `status.json` instead of an error. This is what lets
-a status-reading client render a stopped loop's board without special-casing
-it, and it is why the write happens at exactly the two moments state can have
-changed: `reconcile()` and each tick, never on a timer of its own.
-
-`foreman repo --no-control` disables the socket for a given process and skips
-straight to writing `status.json` — an escape hatch for running a loop where a
-listening socket is unwanted, not the normal path.
-
-### 20.2 Wire protocol
-
-Newline-delimited JSON over the unix socket, one connection per client,
-request/response with an out-of-band event channel for `subscribe`:
-
-- **Request** — `{ op, id, ...params }`. `id` is chosen by the client and
-  echoed back so a client with several in-flight requests can match replies.
-- **Response** — `{ id, ok: true, result }` or `{ id, ok: false, error }`.
-- **Event** — `{ seq, at, ...}`, pushed unprompted to a subscribed connection
-  after a successful `subscribe`. `seq` is per-connection and monotonic;
-  a client that sees a gap knows it missed events and should re-`snapshot`.
-
-Ops: `hello` (handshake — protocol version, loop id), `snapshot` (the current
-`LoopSnapshot`, the same shape `status.json` holds), `subscribe` (start
-receiving events), `pause` / `resume` (stop or resume dispatch without
-releasing the lock), `stop` (graceful shutdown), `tick` (run one scheduling
-pass immediately, outside the cadence), `setMode` (change `loop.mode`),
-`patchConfig` (merge a partial config document and hot-reload it), `reload`
-(re-read config from disk without a patch), `attachAgent` / `killAgent`
-(herdr-pane operations, §17.3 — a no-op reply naming the print-mode fallback
-when there is no herdr pane to attach to), `report` (a dispatched session's
-extension handing back what it applied — status, subject, one-line summary,
-and every Linear issue or project it created — which the loop logs and
-re-broadcasts as a `report` event; §17.5), and `logs` (tail the loop's own
-log, not an agent's).
-
-A `LoopSnapshot`, by field group rather than a full type dump: identity (loop
-id, mode, paused/running), the per-worker table from §17.5 (last run,
-in-flight count, next scheduled run), the WIP and backpressure numbers of
-§17.6–§17.7 as measured right now, the blocked and proposed queues (issue ids
-and labels, not full issue bodies — the client fetches those from Linear
-directly if it needs them), and recent log lines for the overview view. It is
-deliberately the read side only: nothing in the shape is round-tripped back
-through a write op except `setMode` and `patchConfig`, and those go through
-their own named ops rather than a general "set snapshot field" verb.
-
-### 20.3 The control plane adds no new authority
-
-Every op in §20.2 is either a read (`hello`, `snapshot`, `subscribe`, `logs`)
-or a call to a state transition the loop already makes on its own schedule
-(`pause`/`resume` stop and start the same dispatch loop the cadence drives;
-`tick` runs the same scheduling pass early; `stop` is the same shutdown path
-as `SIGTERM`). `setMode` and `patchConfig` write to
-`~/.foreman/config.json` (§3.10) exactly as hand-editing the file and letting
-the config loader's `session_start` validation pick it up would — they tune
-parameters, never invariants. There is no op that creates, transitions, or
-comments on a Linear issue, approves a proposal, or claims a lock (§11) on the
-control plane's behalf: those actions have exactly one path each, the ones
-§10 and §9 already define, and the control plane is not a second one. A
-client with a live socket connection has exactly the leverage an operator
-editing the config file and sending `SIGHUP` would have — nothing more.
+- Config keys that can disable gates, the lock protocol, or the loop's
+  retry cap — config tunes parameters, never removes invariants (§3.10)

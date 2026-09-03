@@ -43,6 +43,13 @@ export function isHerdrUnavailable(error: unknown): error is HerdrUnavailableErr
   return error instanceof HerdrUnavailableError;
 }
 
+/** A reused workspace still hosts a working/blocked agent — a routine skip, not a failure (SPEC §17.4). */
+export class DispatcherBusyError extends Error {}
+
+export function isDispatcherBusy(error: unknown): error is DispatcherBusyError {
+  return error instanceof DispatcherBusyError;
+}
+
 interface HerdrRunner {
   run(argv: string[]): Promise<{ stdout: string; stderr: string; code: number }>;
 }
@@ -363,10 +370,10 @@ export class HerdrDispatcher implements Dispatcher {
           const parsed = JSON.parse(stdout) as HerdrPaneGetResult;
           const status = parsed.result.pane?.agent_status;
           if (status === "working" || status === "blocked") {
-            throw new Error(`worktree pane ${anchor} still hosts a ${status} agent`);
+            throw new DispatcherBusyError(`worktree pane ${anchor} still hosts a ${status} agent`);
           }
         } catch (error) {
-          if (error instanceof Error && error.message.includes("still hosts a")) throw error;
+          if (error instanceof DispatcherBusyError) throw error;
           // Unparsable pane payload: fall through and reuse.
         }
       }

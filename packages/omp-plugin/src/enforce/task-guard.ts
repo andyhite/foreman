@@ -92,6 +92,17 @@ export interface TaskGuardDeps {
 const FOREMAN_PREFIX = "foreman-";
 const ISSUE_MARKER_RE = /^FOREMAN-ISSUE:\s*(\S+)\s*$/gm;
 
+/**
+ * One-shot inheritance: a dispatch spawned by `foreman build`/`foreman plan`
+ * carries its own dispatch id forward via `FOREMAN_DISPATCH_ID` in the
+ * environment, so the loop's dispatcher and `reconcile`'s orphan check are
+ * cross-referencing the same id namespace as the guard's own claim, rather
+ * than two disjoint ones (SPEC §11, §17.4). Consumed exactly once: only the
+ * top-level session's first claim inherits it, every subsequent claim in
+ * the same process mints fresh.
+ */
+let inheritedDispatchId: string | null = process.env.FOREMAN_DISPATCH_ID ?? null;
+
 /** The last `FOREMAN-ISSUE` (or similarly shaped) marker line: the guard appends its own after stripping the caller's, so the trailing value is the authoritative one. */
 export function lastMarkerValue(re: RegExp, text: string): string | null {
   re.lastIndex = 0;
@@ -167,7 +178,30 @@ async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Iss
 
 async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateResult> {
   if (foremanLabel(issue) !== FOREMAN_LABEL.running) return { ok: true, failures: [] };
-  const found = readLockComment(issue.comments);
+  // The lock comment is trusted only when it was authored by this
+  // credential's own Linear identity — otherwise any workspace user (or a
+  // prompt-injected agent with comment access) could post a forged
+  // `released: true` marker and let the guard claim on top of a live agent
+  // (SPEC §11). `claimLock` already requires the viewer id to claim, so
+  // failing closed here costs nothing extra on the happy path.
+  let viewerId: string | null;
+  try {
+    viewerId = await deps.linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  if (viewerId === null) {
+    return {
+      ok: false,
+      failures: [
+        {
+          code: "agent-running",
+          message: `\`${FOREMAN_LABEL.running}\` held: could not resolve the credential's viewer id to verify the lock comment's authorship.`,
+        },
+      ],
+    };
+  }
+  const found = readLockComment(issue.comments, viewerId);
   const state = lockState(found?.data ?? null, {
     now: deps.now(),
     liveDispatchIds: deps.liveDispatchIds(),
@@ -182,7 +216,7 @@ async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateRes
 }
 
 /**
- * Claims the lock: applies `agent:running`, assigns the issue to the
+ * Claims the lock: applies `foreman:running`, assigns the issue to the
  * credential's own Linear identity, and writes the `foreman:lock` comment
  * in the same operation (SPEC §11 — the dispatcher claims, agents never
  * do). Assignee makes ownership visible in Linear's UI without a second
@@ -232,7 +266,8 @@ function appendMarkers(task: string, markers: Record<string, string | undefined>
 }
 
 function takeDispatchId(deps: TaskGuardDeps, agent: string, subject: string, now: Date): string {
-  const dispatchId = deps.newDispatchId(agent, subject, now);
+  const dispatchId = inheritedDispatchId ?? deps.newDispatchId(agent, subject, now);
+  inheritedDispatchId = null;
   deps.registerLiveDispatch(dispatchId);
   return dispatchId;
 }
@@ -284,7 +319,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   // roadmap on an initiative, triage on a batch — but the result sink keys
   // every capture on the `FOREMAN-DISPATCH` marker it recovers from the task
   // text (`results/sink.ts`), so all three stages need one anyway. Without
-  // it their `PlanResult`/`RoadmapResult`/`TriageProposal` is dropped on the
+  // it their `PlanResult`/`RoadmapResult`/`TriageResult` is dropped on the
   // floor: the agent yields, the extension sees a structured output it
   // cannot attribute to a dispatch, and nothing is ever written to Linear.
   if (stage === "triage" || stage === "plan" || stage === "roadmap") {
@@ -303,8 +338,8 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
       }
     }
     // "batch" matches the subject the loop's own intake dispatch mints for
-    // triage (`packages/loop/src/team.ts`), so an inherited and a minted id
-    // read the same way in the log.
+    // triage (`packages/loop/src/loops/plan.ts`'s `triageRule`), so an
+    // inherited and a minted id read the same way in the log.
     const dispatchId = takeDispatchId(deps, agent, projectId ?? initiativeId ?? "batch", deps.now());
     revised.task = appendMarkers(item.task, {
       "FOREMAN-DISPATCH": dispatchId,
@@ -325,6 +360,12 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     );
   }
   const issue = await fetchIssue(deps.linear, identifier);
+
+  // Scope is asserted for every issue-targeted stage, refine included: a
+  // refine dispatch used to refuse an issue whose project belongs to zero
+  // or several bound initiatives, and `evaluateGate` no longer fetches
+  // `projectInitiatives` to catch that itself (SPEC §3.11).
+  await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
 
   const held = foremanLabel(issue);
   if (held && held !== FOREMAN_LABEL.running) {
@@ -353,7 +394,6 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
 
 
   if (stage === "implement") {
-    await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
     const repoPath = deps.entry.repoPath;
     branch = branchNameFor(deps.entry.branchPattern, issue, repoPath);
     worktreePath = worktreePathFor(deps.entry.worktreePattern, repoPath, issue);
@@ -363,7 +403,6 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     const inProgress = resolveState("inProgress", teamStates);
     await deps.linear.updateIssue(issue.id, { stateId: inProgress.id });
   } else if (stage === "review") {
-    await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
     const repoPath = deps.entry.repoPath;
     baseBranch = deps.entry.baseBranch;
     branch = branchNameFor(deps.entry.branchPattern, issue, repoPath);
@@ -436,11 +475,12 @@ async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGu
           }),
         });
       } catch {
-        // Preserve the original preparation failure. A reaper can recover a
-        // cleanup that fails because Linear itself is unavailable.
+        // Preserve the original preparation failure. `foreman reconcile`'s
+        // orphan-lock pass can recover a cleanup that fails because Linear
+        // itself is unavailable.
       } finally {
         // A failed Linear rollback above must still drop this id from the
-        // live registry, or the reaper treats an already-unwound claim as
+        // live registry, or reconcile treats an already-unwound claim as
         // live forever (Step 5 item 4).
         deps.releaseLiveDispatch(cleanup.dispatchId);
       }

@@ -6,10 +6,11 @@
  * state *outside this process* — an agent dispatch, a Linear mutation — must
  * pass through `Confirmer.confirm` before it runs.
  *
- * The loop's own control-plane persistence (`status.json`, `bookkeeping.json`,
- * `loop.lock`) is deliberately not gated: those files are how the process
- * remembers what it already did, so prompting for them would make `confirm`
- * mode unable to keep books rather than more careful.
+ * The loop's own state persistence (the in-flight `<loop>.json` file and the
+ * `<loopName>.lock` singleton lockfile under `loop.stateDir`) is deliberately
+ * not gated: those files are how the process remembers what it already did,
+ * so prompting for them would make `confirm` mode unable to keep books
+ * rather than more careful.
  *
  * `summary` is a sentence, not a serialized call. A generic proxy around
  * `LinearWriter` could gate the same writes with less code, but it could only
@@ -17,9 +18,9 @@
  * action means "move ENG-142 to Done". The operator is answering the sentence,
  * so the caller composes it.
  *
- * Blocking here is safe: `Supervisor.runTick` awaits its workers in sequence
- * and the cadence wait happens strictly between ticks, so a pending question
- * delays the next tick instead of racing one.
+ * Blocking here is safe: the loop engine's `runLoop` (§17.1) awaits each
+ * poll's dispatches before the next one starts, so a pending question delays
+ * the next poll instead of racing one.
  */
 
 import * as readline from "node:readline";
@@ -81,11 +82,7 @@ export const DENY_CONFIRMER: Confirmer = {
 export interface TtyConfirmerOptions {
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
-  /**
-   * Where the question itself goes. The loop's `log` also broadcasts to
-   * control-plane subscribers, so `/foreman:status` shows what the loop is
-   * waiting on rather than an unexplained stall.
-   */
+  /** Where the question itself goes — the same sink as the loop's own poll log. */
   log: (message: string) => void;
 }
 

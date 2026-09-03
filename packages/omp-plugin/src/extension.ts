@@ -10,16 +10,24 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallDecision, ToolCallEvent, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
-import type { BlockRecord, LinearWriter } from "@foreman/core";
+import type { BlockRecord, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
+  all,
   ConfigError,
+  ensureMaintenanceProjects,
   FOREMAN_LABEL,
   ensureWorktree,
+  inInitiatives,
   isBudgetTruncation,
   issueIdFromDispatchId,
+  lockState,
   newDispatchId,
   parseAgentOutput,
+  readLockComment,
+  resolveState,
+  RUNNING_FILTER,
+  YOLO_CONFIRMER,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
@@ -115,6 +123,54 @@ export function blockedOutcome(agentName: ForemanAgentName, block: BlockRecord, 
 
 function isForemanAgentName(agent: string): agent is ForemanAgentName {
   return agent in AGENT_OUTPUT_SCHEMAS;
+}
+
+/**
+ * Resolves the Linear team id an entry's bound `team` key (or the
+ * credential's sole reachable team, when unset) actually refers to.
+ * `ensureMaintenanceProjects` needs a real id, not the human-readable key
+ * every registry entry and `Issue.team` otherwise carry.
+ */
+async function resolveEntryTeamId(linear: LinearWriter, entry: ResolvedRepoEntry): Promise<string | null> {
+  const teams = await linear.teams();
+  if (entry.team) return teams.find((team) => team.key === entry.team)?.id ?? null;
+  return teams.length === 1 ? (teams[0]?.id ?? null) : null;
+}
+
+/**
+ * SPEC §11, §17.6/§17.7: the `session_start` sibling of `reconcile`'s
+ * `stale-running` invariant — a manual `/foreman:implement` (or any
+ * plugin-only, loop-less deployment) that dies mid-run leaves an orphaned
+ * `foreman:running` lock nothing else will ever clear. Runs once per
+ * session start; no timer.
+ */
+async function repairOrphanedLocks(linear: LinearWriter, entry: ResolvedRepoEntry, now: Date): Promise<number> {
+  const issues = await linear.issues({
+    filter: all(inInitiatives(entry.initiativeIds), RUNNING_FILTER),
+    includeComments: true,
+  });
+  let repaired = 0;
+  for (const issue of issues) {
+    const record = readLockComment(issue.comments ?? [])?.data ?? null;
+    const orphaned = lockState(record, { now, liveDispatchIds: liveDispatchIds() }).orphaned;
+    if (!orphaned && record !== null) continue;
+
+    const runningLabel = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
+    await linear.updateIssue(issue.id, {
+      assigneeId: null,
+      ...(runningLabel ? { removedLabelIds: [runningLabel.id] } : {}),
+    });
+    if (issue.state.type === "started") {
+      const states = await linear.workflowStates(issue.team.id);
+      await linear.updateIssue(issue.id, { stateId: resolveState("todo", states).id });
+    }
+    const summary = record
+      ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}).`
+      : `Foreman: removed \`${FOREMAN_LABEL.running}\` with no matching lock comment.`;
+    await linear.createComment({ issueId: issue.id, body: summary });
+    repaired += 1;
+  }
+  return repaired;
 }
 
 /**
@@ -343,7 +399,7 @@ export default function createForemanExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand(commandName("unblock"), {
-    description: "Record the operator's reply to a blocked issue and clear its blocked:* label.",
+    description: "Record the operator's reply to a blocked issue and clear its foreman:blocked label.",
     handler: async (args: string) =>
       runCommand("foreman.unblock", async (linear) => {
         const [issueId, ...replyParts] = args.trim().split(/\s+/);
@@ -377,6 +433,40 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     if (existsSync(join(PLUGIN_ROOT, "agents"))) {
       const problems = checkSkillAutoload({ pluginRoot: PLUGIN_ROOT, cwd: ctx.cwd });
       for (const problem of problems) ctx.ui.notify(formatSkillGuardProblem(problem), "error");
+    }
+
+    if (isRepoRegistered()) {
+      try {
+        const linear = getLinear();
+        const entry = getEntry();
+        const repaired = await repairOrphanedLocks(linear, entry, new Date());
+        if (repaired > 0) {
+          ctx.ui.notify(`Foreman: repaired ${repaired} orphaned \`${FOREMAN_LABEL.running}\` lock(s).`, "warn");
+        }
+
+        const teamId = await resolveEntryTeamId(linear, entry);
+        if (teamId) {
+          // `YOLO_CONFIRMER`: no interactive confirmation surface at
+          // `session_start`, so a missing Maintenance project is always
+          // created rather than silently skipped — matching every other
+          // plugin mutation, none of which route through a `Confirmer`.
+          const reports = await ensureMaintenanceProjects(linear, {
+            initiativeIds: entry.initiativeIds,
+            teamId,
+            confirmer: YOLO_CONFIRMER,
+          });
+          for (const report of reports) {
+            if (report.created) {
+              ctx.ui.notify(`Foreman: created the Maintenance project for "${report.initiativeName}".`, "warn");
+            }
+          }
+        }
+      } catch (error) {
+        ctx.ui.notify(
+          `Foreman: session-start repair pass failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warn",
+        );
+      }
     }
   });
 

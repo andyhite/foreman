@@ -12,14 +12,14 @@
  *           the omp plugin active in that repo and nowhere else.
  *   deinit  per-repo — the exact inverse, so a repo can stop using Foreman
  *           without leaving a dangling plugin root behind.
- *   doctor  verification and repair for both layers. The activation surface
+ *   verify  verification and repair for both layers. The activation surface
  *           is two files and a symlink, so drift is silent; this is what
  *           turns "it should be installed" into an answer.
  *   update  pull, rebuild, then repair drift. There is no per-repo install
  *           step: every repo links to `~/.foreman/plugin`, so rebuilding the
  *           checkout updates all of them at once.
  *
- * Hand-rolled argument parsing, same rationale as `foreman repo`: the
+ * Hand-rolled argument parsing, same rationale as the loop CLIs: the
  * workspace's sole runtime dependency is `@sinclair/typebox`.
  */
 
@@ -53,7 +53,7 @@ interface ParsedArgs {
   skipPull: boolean;
   /** Leave the `config.repos` entry in place; deinit-only. */
   keepRegistry: boolean;
-  /** Repair what it can instead of only reporting; doctor-only. */
+  /** Repair what it can instead of only reporting; verify-only. */
   fix: boolean;
   help: boolean;
   initiatives: string[];
@@ -113,7 +113,7 @@ Options for all commands:
 /**
  * Rejects a flag aimed at the wrong command. Table-driven rather than a list
  * per command: several flags are deliberately shared by two or three of them —
- * `--checkout` by setup, doctor, and update; `--skip-plugin` by init and
+ * `--checkout` by setup, verify, and update; `--skip-plugin` by init and
  * update; `--path` by init and deinit — and silently accepting a misaimed flag
  * is how an operator ends up believing they skipped a step they didn't.
  */

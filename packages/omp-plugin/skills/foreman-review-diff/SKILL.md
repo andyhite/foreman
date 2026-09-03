@@ -56,6 +56,8 @@ Load `foreman-block-protocol`; yield a `BlockRecord` when:
   unreadable.
 - Given head SHA does not match the diff (stale dispatch).
 
-Disagreement with the implementer's approach ≠ stop: file a finding. Two
-failed review→fix cycles apply `foreman:blocked` with a needs-decision block
-record; the review worker triggers that, never you mid-review.
+Disagreement with the implementer's approach ≠ stop: file a finding. The
+`foreman build` loop enforces the review→fix cap: it reads `request-changes`
+review markers authored by its own credential and, once the configured
+`loop.reviewCycleCap` is reached, applies `foreman:blocked` with a
+needs-decision block record — never you mid-review.

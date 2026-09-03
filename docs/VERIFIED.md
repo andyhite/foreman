@@ -93,9 +93,9 @@ a lock-only entry — `<repo>/.omp/plugins/omp-plugins.lock.json` naming
 `@foreman/omp-plugin`, with no `package.json` alongside it required in the
 plugin root itself — is sufficient. Verified against omp 18.1.4 by driving
 `omp acp` (`initialize` + `session/new`) in a scratch repo and reading the
-`available_commands_update` notification: `foreman:apply`, `foreman:merge`,
-`foreman:status`, `foreman:unblock`, the markdown commands `plan`, `refine`,
-`implement`, `triage`, and all seven `skill:foreman-*` entries appeared, and
+`available_commands_update` notification: `foreman:merge`, `foreman:status`,
+`foreman:unblock`, the markdown commands `plan`, `refine`, `implement`,
+`triage`, and all `skill:foreman-*` entries appeared, and
 the process debug log showed all three foreman TTSR rules registered
 (`foreman-no-gate-bypass`, `foreman-no-interactive-questions`,
 `foreman-no-scope-expansion`). So the extension module, `skills/`,
@@ -118,7 +118,7 @@ once; every repo's `foreman init` writes only the first hop.
 **A broken symlink target degrades gracefully.** Pointing the repo-side link
 at a nonexistent target and starting a session did not crash it: the session
 still started and Foreman was simply absent, no error surfaced. `foreman
-doctor` is what turns that silence into a diagnosis.
+verify` is what turns that silence into a diagnosis.
 
 **`omp plugin link <dir> --scope project` silently ignores `--scope` and
 installs user-wide — the footgun this design exists to avoid.** Verified
@@ -239,8 +239,8 @@ step and no artifact.
 
 **A `./src/extension.ts` entry loads and registers everything, with no
 measurable startup cost.** Loaded over ACP against omp 18.1.4 from a repo
-with `dist/` deleted: all four extension commands
-(`foreman:status|apply|merge|unblock`) and all seven skills registered.
+with `dist/` deleted: all three extension commands
+(`foreman:status|merge|unblock`) and all eight skills registered.
 End-to-end session startup was indistinguishable from the old bundled
 entrypoint — medians 6.53s source vs 6.75s bundled, both within the
 5.0–7.0s run-to-run variance observed across repeated runs.
@@ -294,15 +294,14 @@ erroring. Each agent's `output` is instead a flat envelope —
 semantics while surviving every normalizer. `parseAgentOutput` enforces the
 "exactly one branch populated" invariant that JSON Schema cannot express.
 
-**There is no `foreman-loop` binary.** §17 names one, in eight places, and it
-was written before the spec had a `foreman` CLI at all — §18 puts the supervisor
-at build step 6 and the installer nowhere. Two installed binaries whose names
-differ by a hyphen is not a surface an operator can hold, so the supervisor is
-the `repo` subcommand of `foreman`, which owns every argument after it. The
-team-level triage process is likewise the `team` subcommand. The log prefix
-and the herdr pane label (§17.3, §17.5) track those names — `foreman-repo` and
-`foreman-team` — naming the long-lived process, not the command, which is
-exactly what §17 describes.
+**There is no `foreman-loop` binary, and the supervisor/`repo`/`team` naming
+this row originally recorded is itself superseded.** §17 (pre-simplification)
+named a `foreman-loop` binary in eight places, written before the spec had a
+`foreman` CLI at all; the first fix made it the `repo`/`team` subcommands of
+`foreman`. The loop simplification replaced that pair of long-lived
+processes with three: `foreman build`, `foreman plan`, `foreman reconcile`
+(§3.11, §17.1), each parsing every argument after its own name. The log
+prefix and the herdr pane label (§17.3) track those three names.
 
 ## Verified runtime facts worth keeping
 
@@ -323,7 +322,7 @@ exactly what §17 describes.
   `loadMode: "discoverable"`, and omp's `tools.xdev` layer (default on) moves
   every discoverable tool out of the tool list into an `xd://` device, in any
   session that holds `write` without naming the tool in an explicit allowlist.
-  The supervisor session that runs `/foreman:*` is exactly that shape, so both
+  A dispatched loop session running `/foreman:*` is exactly that shape, so both
   Foreman tools were mounted as `xd://foreman_linear_read` and
   `xd://foreman_github_pr` while every command, agent, and skill told the
   caller to use the bare name. The first `/foreman:plan` dispatch spent its
@@ -371,47 +370,6 @@ exactly what §17 describes.
 - **`Initiative.projects: ProjectConnection` is a direct edge**, symmetric with
   `Project.initiatives` (above): reading an initiative's projects is one
   query, no fan-out needed.
-
-## Verified building the control plane
-
-- **macOS caps a unix socket path at 104 bytes.** A `stateDir` nested a few
-  levels deep (a long home directory, a long repo alias) can push
-  `<stateDir>/<loop>/control.sock` past that limit, and `bind()` fails outright
-  rather than truncating. `loopPaths` checks the length up front and falls back
-  to a hashed path under `os.tmpdir()` when the natural path would exceed it.
-- **TypeScript does not keep a narrowing on a class field or object property
-  across an `await`, including through get/set accessors.** A run-state check
-  before an `await` and another one after it compare as two unrelated literal
-  types, and the second comparison is flagged dead code even though the field
-  can genuinely have changed underneath the `await`. Both `Supervisor` and
-  `IntakeRuntime` read their run state through a method call
-  (`currentRunState()`) instead of a field or accessor read, because a method
-  call is a boundary the narrower won't cross — it has no way to know the
-  method returns a stored value rather than computing one. An accessor pair
-  (`get`/`set`) was tried first and does not fix it; the narrowing still
-  collapses across the `await`.
-- **`Omit<T, K>` does not distribute over a union.** `Omit<ControlEvent, "seq"
-  | "at">`, where `ControlEvent` is a discriminated union whose members carry
-  different extra fields (`runtime`, `line`, `agent`, ...), collapses to the
-  intersection of keys every member shares and then rejects any of those
-  member-specific fields. The protocol instead exports a distributive
-  `EmittableEvent` type — an `Omit` applied inside a conditional type that
-  distributes over the union — so each member keeps its own fields minus
-  `seq`/`at`.
-- **A listening unix socket keeps Bun's event loop alive**, so setting
-  `process.exitCode` on a fatal startup path is not enough to make the process
-  exit — an open server handle is still a live event-loop reference. This was
-  observed as a real zombie: a loop that failed during the ensure pass (a 401
-  from a stale Linear key) kept running because its control server was still
-  listening, holding `loop.lock` (§11) and making every subsequent `foreman
-  loop` fail with `LoopLockHeldError` until the process was killed by hand.
-  `runLoop` and `runIntake` now wrap everything after lock acquisition in one
-  `try/finally` that stops the supervisor and closes the control server, so a
-  fatal error always releases both.
-- **`/foreman:status` read `<stateDir>/loop-state.json`, which no code ever
-  wrote.** Nothing had produced that file since the command was written; it
-  always read as absent. The command now reads the `status.json` the control
-  plane publishes (§20.1), which is a file something actually writes.
 
 ## Verified building shared stage orchestrators
 
@@ -541,7 +499,7 @@ see, because every fake answered without ever looking at the query text.
 - **An API-created issue lands in the team's default state, which is `Triage`
   on a triage-enabled team, unless `stateId` is passed.** Observed: 8 planned
   issues created with no `stateId` all arrived in Triage - the shared inbox
-  `foreman team` consumes (§7.1) - so agent-authored, already-classified work
+  `foreman plan`'s `triage` rule consumes (§7.1) - so agent-authored, already-classified work
   re-entered intake as if a human had filed it. Every extension-created issue
   (plan's `proposedIssues`, refine's `subIssues` and spike, implement's
   `discoveredWork`) now names Backlog explicitly. The spike was also created

@@ -2,8 +2,8 @@ import type { BlockRecord } from "@foreman/core";
 
 /**
  * SPEC §9 — the Linear comment for a `BlockRecord`. For `type: "dependency"`
- * (Case A) no `blocked:*` label is applied and no options/recommendation are
- * expected — the native `blocks` relation is the state and resolves itself
+ * (Case A) no `foreman:blocked` label is applied and no options/recommendation
+ * are expected — the native `blocks` relation is the state and resolves itself
  * once the blocker completes, so this rendering names the blockers instead.
  */
 export function renderBlockComment(record: BlockRecord): string {
@@ -15,7 +15,7 @@ export function renderBlockComment(record: BlockRecord): string {
   if (record.type === "dependency") {
     lines.push(
       `**Blocked by:** ${record.blockedByIssues.join(", ")}`,
-      "No `blocked:*` label was applied — the native `blocks` relation is the " +
+      "No `foreman:blocked` label was applied — the native `blocks` relation is the " +
         "state, and it resolves itself once the blocker completes.",
     );
   } else {

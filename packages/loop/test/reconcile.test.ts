@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { CommandRunner } from "@foreman/core";
 import { encodeMarker, FOREMAN_LABEL, GitHubClient, groupDisplayName, labelDisplayName, MARKER_KIND, renderLockComment } from "@foreman/core";
-import type { Comment, Issue, IssueLabel, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
+import type { Comment, GlobalConfig, Issue, IssueLabel, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { FakeLinear } from "./fake-linear.ts";
 import { reconcile, type ReconcileContext } from "../src/reconcile.ts";
 
@@ -92,6 +92,26 @@ function recentLockComment(): Comment {
 const ALWAYS_APPROVE = { confirm: async () => true, close: () => {} };
 const ALWAYS_DENY = { confirm: async () => false, close: () => {} };
 
+function makeConfig(): GlobalConfig {
+  return {
+    repos: {},
+    loop: {
+      mode: "yolo",
+      cleanupMergedWorktrees: true,
+      autoMerge: false,
+      retryCap: 2,
+      reviewCycleCap: 2,
+      stateDir: "~/.foreman/state",
+      concurrency: { plan: 1, build: 3 },
+      pollSeconds: 20,
+      triageBatch: 10,
+    },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false, operatorUserId: null },
+    githubApp: { appId: null, privateKeyFile: null },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", dispatcher: "auto" },
+  } as GlobalConfig;
+}
+
 function makeContext(overrides: Partial<ReconcileContext> = {}): ReconcileContext {
   return {
     linear: new FakeLinear([]),
@@ -101,6 +121,8 @@ function makeContext(overrides: Partial<ReconcileContext> = {}): ReconcileContex
     liveDispatchIds: new Set(),
     lockTtlMs: 7_200_000,
     confirmer: ALWAYS_APPROVE,
+    viewerId: null,
+    config: makeConfig(),
     ...overrides,
   };
 }

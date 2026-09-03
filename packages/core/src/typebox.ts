@@ -26,11 +26,11 @@
  * The rewrite matches the bare specifier only, so `@sinclair/typebox/type`
  * and `@sinclair/typebox/value` reach real TypeBox in every host. That
  * matters beyond the extension: `packages/cli` ships the standalone `foreman`
- * binary and `packages/loop` runs the supervisor, neither of which has omp in
- * scope at all - `foreman init` is what installs the omp plugin, so it
- * necessarily runs before omp's runtime exists in a repo. Core has to hold
- * one schema implementation that is correct with or without omp present, and
- * real TypeBox is the only candidate.
+ * binary and `packages/loop` runs the three loop CLIs, neither of which has
+ * omp in scope at all - `foreman init` is what installs the omp plugin, so
+ * it necessarily runs before omp's runtime exists in a repo. Core has to
+ * hold one schema implementation that is correct with or without omp
+ * present, and real TypeBox is the only candidate.
  *
  * Importing the bare specifier anywhere in core would compile, pass tests
  * under `bun test`, and then silently degrade to the facade inside a live omp

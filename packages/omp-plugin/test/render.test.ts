@@ -221,7 +221,7 @@ describe("renderBlockComment", () => {
     };
     const output = renderBlockComment(record);
     expect(output).toContain("ENG-3, ENG-4");
-    expect(output.toLowerCase()).toContain("no `blocked:*` label was applied");
+    expect(output.toLowerCase()).toContain("no `foreman:blocked` label was applied");
   });
 
   it("renders options and recommendation for a needs-decision block", () => {

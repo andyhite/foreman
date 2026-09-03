@@ -113,10 +113,10 @@ export function notInTerminalProject(): IssueFilter {
  *
  * Narrower than `notInTerminalProject` on purpose, and composed by exactly
  * one worker: refinement. Refinement is the transition that *commits* work
- * — its output is an issue in Todo, estimated and `agent:ready`, which
- * implement then picks up unattended. A pause withholds exactly that
- * commitment, and nothing more: it recalls nothing already in Todo or
- * further right, so no other query guards on it.
+ * — its output is an issue in Todo, estimated and unlabeled, which implement
+ * then picks up unattended. A pause withholds exactly that commitment, and
+ * nothing more: it recalls nothing already in Todo or further right, so no
+ * other query guards on it.
  *
  * Same project-less branch, same reason as above.
  */
@@ -141,7 +141,11 @@ export function any(...filters: IssueFilter[]): IssueFilter {
 export const INBOX_FILTER: IssueFilter = inStateType("triage");
 
 /** SPEC §4.10.2: `foreman:blocked` — the human interrupt queue. */
-export const BLOCKED_FILTER: IssueFilter = all(hasLabelNamed(FOREMAN_LABEL.blocked), notTerminalState());
+export const BLOCKED_FILTER: IssueFilter = all(
+  hasLabelNamed(FOREMAN_LABEL.blocked),
+  notTerminalState(),
+  notInTerminalProject(),
+);
 
 /** SPEC §4.10.6: `foreman:running`. */
 export const RUNNING_FILTER: IssueFilter = hasLabelNamed(FOREMAN_LABEL.running);

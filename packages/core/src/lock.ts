@@ -1,13 +1,14 @@
 /**
  * Lock protocol (SPEC §11).
  *
- * `agent:running` is the mutex; it can carry no structure, so the dispatch
+ * `foreman:running` is the mutex; it can carry no structure, so the dispatch
  * ID, timestamp, TTL, and worktree ride in a `foreman:lock` comment marker
  * written in the same mutation as the label. The dispatcher claims — it
  * writes both the label and this comment before spawning; agents only ever
  * read it back to verify ownership (`verifyLockOwnership`). This module
- * classifies lock state; it never takes an action. The reaper that acts on
- * `orphaned` locks lives elsewhere and never deletes a worktree (SPEC §11).
+ * classifies lock state; it never takes an action. `foreman reconcile`'s
+ * orphan-lock pass acts on `orphaned` locks and never deletes a worktree
+ * (SPEC §11).
  */
 
 import { encodeMarker, latestMarker, MARKER_KIND } from "./markers.ts";
@@ -54,8 +55,11 @@ export function renderLockComment(record: LockRecord): string {
   return encodeMarker(MARKER_KIND.lock, record, human);
 }
 
-export function readLockComment(comments: readonly MarkerSource[]): FoundMarker<LockRecord> | null {
-  return latestMarker<LockRecord>(MARKER_KIND.lock, comments);
+export function readLockComment(
+  comments: readonly MarkerSource[],
+  authoredBy?: string,
+): FoundMarker<LockRecord> | null {
+  return latestMarker<LockRecord>(MARKER_KIND.lock, comments, authoredBy ? { authoredBy } : undefined);
 }
 
 export interface LockState {

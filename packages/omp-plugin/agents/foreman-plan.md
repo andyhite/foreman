@@ -54,7 +54,7 @@ output: |
                 "type": "string"
               },
               "proposedIssues": {
-                "description": "New Backlog issues that decompose the project brief into agent-sized units. The extension creates each one directly; none of them get `agent:ready` — they enter the normal refine funnel once the operator sets a priority.",
+                "description": "New Backlog issues that decompose the project brief into agent-sized units. The extension creates each one directly, unlabeled and unprioritized — they enter the normal refine funnel once the operator sets a priority.",
                 "type": "array",
                 "items": {
                   "additionalProperties": false,
@@ -234,7 +234,7 @@ output: |
                 "type": "boolean"
               },
               "type": {
-                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `foreman:blocked` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
                 "anyOf": [
                   {
                     "const": "dependency",

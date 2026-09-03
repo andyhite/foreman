@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker, ensureWorktree, worktreePathFor } from "@foreman/core";
-import type { Comment, CommandRunner, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
+import type { Comment, CommandRunner, CreateIssueInput, GlobalConfig, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { runMerge } from "../src/commands/merge.ts";
 
@@ -195,6 +195,27 @@ const entry: ResolvedRepoEntry = {
   worktreePattern: "../<repo>-<ISSUE-ID>",
 };
 
+function makeConfig(overrides: Partial<GlobalConfig["loop"]> = {}): GlobalConfig {
+  return {
+    repos: {},
+    loop: {
+      mode: "yolo",
+      cleanupMergedWorktrees: true,
+      autoMerge: false,
+      retryCap: 2,
+      reviewCycleCap: 2,
+      stateDir: "~/.foreman/state",
+      concurrency: { plan: 1, build: 3 },
+      pollSeconds: 20,
+      triageBatch: 10,
+      ...overrides,
+    },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: "https://api.linear.app/graphql", allowCustomEndpoint: false, operatorUserId: null },
+    githubApp: { appId: null, privateKeyFile: null },
+    agent: { maxRuntimeMs: 7_200_000, lockTtlMarginMs: 1_800_000, ompBin: "omp", approvalMode: "yolo", herdrBin: "herdr", dispatcher: "auto" },
+  } as GlobalConfig;
+}
+
 describe("runMerge — partial failure recovery", () => {
   it("reports a loud error when git merge succeeds but Linear cannot move to Done, then finishes on re-run", async () => {
     const headSha = "abc123";
@@ -272,7 +293,7 @@ describe("runMerge — partial failure recovery", () => {
       },
     });
 
-    const first = await runMerge(flakyLinear, github, "ENG-1", entry);
+    const first = await runMerge(flakyLinear, github, "ENG-1", entry, makeConfig());
     expect(first.merged).toBe(false);
     expect(first.message).toContain("PR #7 merged");
     expect(first.message).toContain("could NOT be moved to Done");
@@ -280,7 +301,7 @@ describe("runMerge — partial failure recovery", () => {
     expect(mergeCalls).toBe(1);
     expect((await flakyLinear.issue("ENG-1"))?.state.id).toBe(STATE_IN_REVIEW.id);
 
-    const second = await runMerge(flakyLinear, github, "ENG-1", entry);
+    const second = await runMerge(flakyLinear, github, "ENG-1", entry, makeConfig());
     expect(second.merged).toBe(true);
     expect(second.message).toContain("already complete");
     expect(mergeCalls).toBe(1);
@@ -332,7 +353,7 @@ describe("runMerge — worktree cleanup (SPEC §12)", () => {
     const linear = new FakeLinear([issue]);
     const github = new GitHubClient({ runner: stubRunner(() => ({ stdout: "[]" })) });
 
-    const result = await runMerge(linear, github, "ENG-1", directEntry);
+    const result = await runMerge(linear, github, "ENG-1", directEntry, makeConfig());
 
     expect(result.merged).toBe(true);
     expect(existsSync(worktreePath)).toBe(false);
@@ -348,7 +369,7 @@ describe("runMerge — worktree cleanup (SPEC §12)", () => {
     const linear = new FakeLinear([issue]);
     const github = new GitHubClient({ runner: stubRunner(() => ({ stdout: "[]" })) });
 
-    const result = await runMerge(linear, github, "ENG-1", directEntry);
+    const result = await runMerge(linear, github, "ENG-1", directEntry, makeConfig());
 
     expect(result.merged).toBe(true);
     expect(result.message).toContain("uncommitted changes");

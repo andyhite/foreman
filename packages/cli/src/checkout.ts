@@ -3,9 +3,10 @@
  * from — the source of the omp-plugin directory that dev mode links.
  *
  * Named for the checkout, not the repo: "repo" already means two other things
- * in this CLI — the `foreman repo` supervisor command, and a `repos` registry
- * alias naming a product repo Foreman manages (SPEC §3.10, §3.11). This
- * module resolves neither; it finds Foreman's own source tree.
+ * in this CLI — the `foreman build`/`foreman plan`/`foreman reconcile` loop
+ * commands, and a `repos` registry alias naming a product repo Foreman
+ * manages (SPEC §3.10, §3.11). This module resolves neither; it finds
+ * Foreman's own source tree.
  *
  * Walks up from this module's own location (inside `packages/cli`) rather
  * than `process.cwd()`, so `foreman setup` works the same whether it is run

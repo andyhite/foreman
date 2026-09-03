@@ -50,11 +50,11 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
      * Essential, not the extension default of `discoverable`. omp's `tools.xdev`
      * layer (on by default) demotes every discoverable tool into an `xd://`
      * device in any session that holds `write` and does not name the tool in an
-     * explicit allowlist — which is exactly the supervisor session that runs
+     * explicit allowlist — which is exactly the operator's own session that runs
      * every `/foreman:*` command. A demoted tool leaves the model's tool list
      * entirely, so the commands, agents, and skills that name this tool
      * directly ("resolve the project via `foreman_linear_read`") would point at
-     * something the supervisor cannot see, and the dispatch burns its opening
+     * something that session cannot see, and the dispatch burns its opening
      * turns hunting for the name instead of reading Linear.
      *
      * `essential` also keeps the full parameter schema in the prompt:

@@ -20,7 +20,7 @@ export const BlockRecord = Type.Object(
       {
         description:
           "`dependency` is Case A (SPEC §9): another issue blocks this one, so no " +
-          "`blocked:*` label is applied and the native relation is the state. " +
+          "`foreman:blocked` label is applied and the native relation is the state. " +
           "Everything else is Case B and parks the issue in the human queue.",
       },
     ),

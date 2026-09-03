@@ -77,10 +77,10 @@ export type RepoSettingsOverride = Static<typeof RepoSettingsOverrideSchema>;
  *
  * Not to be confused with `agent.approvalMode`, which is omp's own approval
  * setting handed to each *dispatched agent's* session. This one governs the
- * supervisor process itself: `confirm` makes the loop ask its operator before
- * every dispatch and every Linear write, `yolo` lets it act on its own
- * decisions. Both happen to spell "act without asking" as `yolo`; they are
- * separate settings at separate layers and neither implies the other.
+ * loop process itself: `confirm` makes it ask its operator before every
+ * dispatch and every Linear write, `yolo` lets it act on its own decisions.
+ * Both happen to spell "act without asking" as `yolo`; they are separate
+ * settings at separate layers and neither implies the other.
  */
 export const LoopModeSchema = Type.Union([Type.Literal("confirm"), Type.Literal("yolo")], {
   default: "confirm",
@@ -115,6 +115,23 @@ export const LoopSettingsSchema = Type.Object(
      * discards work.
      */
     cleanupMergedWorktrees: Type.Boolean({ default: true }),
+    autoMerge: Type.Boolean({
+      default: false,
+      description:
+        "Let `foreman build` dispatch `/foreman:merge` for an approved, CI-green, gate-passing issue (SPEC §17.5). Off by default: merge authority stays with the operator unless this is explicitly turned on.",
+    }),
+    retryCap: Type.Integer({
+      default: 2,
+      minimum: 1,
+      description:
+        "Failed dispatches for one unit of work before the loop stops retrying and escalates the issue to `foreman:blocked` (SPEC §17.7).",
+    }),
+    reviewCycleCap: Type.Integer({
+      default: 2,
+      minimum: 1,
+      description:
+        "`request-changes` reviews on one issue before the loop stops re-dispatching and escalates it to `foreman:blocked` (SPEC §7.4, §17.7).",
+    }),
   },
   { additionalProperties: false, default: {} },
 );
@@ -233,8 +250,8 @@ export type InitiativeBinding = Static<typeof InitiativeBindingSchema>;
 
 /**
  * One `repos` registry entry, keyed by alias (SPEC §3.10). The alias is the
- * positional alias argument to `foreman repo`, the herdr workspace name, and
- * the state-dir segment.
+ * positional alias argument to `foreman build`/`foreman plan`/`foreman
+ * reconcile`, the herdr workspace name, and the state-dir segment.
  *
  * Carries optional `RepoSettings` overrides that deep-merge over
  * `repoDefaults`, entry wins. Those overrides MUST stay sparse: they are

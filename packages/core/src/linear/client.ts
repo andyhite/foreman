@@ -1121,10 +1121,11 @@ export class LinearClient implements LinearWriter {
   }
 
   /**
-   * Resolves a canonical colon-form label id (e.g. `"agent:ready"`) to its
+   * Resolves a canonical colon-form label id (e.g. `"foreman:running"`) to its
    * Linear label, creating the label — and its nested parent group, e.g.
-   * "Agent" -> "Ready" (SPEC §4.5) — if either is absent. Ungrouped ids
-   * (no colon, e.g. `legacy`) are created flat, unchanged.
+   * "Foreman" -> "Running" (SPEC §4.5) — if either is absent. An ungrouped id
+   * (no colon) would be created flat, unchanged, though every label Foreman
+   * creates today belongs to `type:` or `foreman:`.
    */
   async ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel> {
     const cacheKey = `${teamId}:${name}`;

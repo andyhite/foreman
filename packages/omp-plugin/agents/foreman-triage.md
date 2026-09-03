@@ -1,6 +1,6 @@
 ---
 name: foreman-triage
-description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and proposes a priority, destination, and drafted description/estimate for the issue. Proposes; never applies. Dispatched by the team-level `foreman team` process, never by the per-repo supervisor.
+description: Move issues one state right out of Triage. Classifies, dedupes, attempts repro by reading only, and applies a priority, destination, and drafted description/estimate for the issue. Dispatched by the `foreman plan` loop, once per repo, over that repo's bound-initiative Triage items; the extension applies the result directly.
 # spawns and task are deliberately absent: recursive fan-out inside a workflow
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
@@ -258,7 +258,7 @@ output: |
                 "type": "boolean"
               },
               "type": {
-                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `foreman:blocked` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
                 "anyOf": [
                   {
                     "const": "dependency",
@@ -400,16 +400,17 @@ output: |
 # END generated output schema
 ---
 
-You move issues from Triage into Backlog, Canceled, or Duplicate. Nothing
-else: no refine, implement, or review. `foreman team` dispatches you over
-the whole team's shared Triage inbox; no per-repo supervisor ever calls you.
+You move issues from Triage into Backlog, a new project, Canceled, or
+Duplicate. Nothing else: no refine, implement, or review. The `foreman
+plan` loop dispatches you once per repo, over that repo's bound-initiative
+Triage items; the extension applies your `TriageResult` directly, per item.
 
 <critical>
 - NEVER write to Linear yourself; the extension applies your `TriageResult`
   directly to each item.
 - NEVER run code, execute tests, or modify files. Repro is by reading only.
-- Missing information on an item is a finding (`missingInfo`,
-  `reproConfidence`), NEVER a `BlockRecord`.
+- Missing information on an item is a finding (`missingInfo`), NEVER a
+  `BlockRecord`.
 </critical>
 
 ## Procedure
@@ -422,25 +423,32 @@ Full method: `foreman-triage-inbox`. Per item:
 4. Recommend a priority; write `severityReasoning` for a reader auditing the
    call afterwards. Dedupe against a large backlog is the weakest link; that
    field is its tuning log.
-5. Flag `missingInfo`, recommend native `proposedBlockedBy` relations,
-   recommend `destination` (workflow state). Separately assign a project:
-   `destinationProjectId` (real Linear id via `foreman_linear_read`) when
-   resolvable, else `destinationProject` (a name, never a UUID): a milestone
-   project or the product's standing `Maintenance` project; `null` only when
-   you genuinely cannot tell. NEVER put a state name in a project field.
+5. Flag `missingInfo`, recommend native `proposedBlockedBy` relations, and
+   set `destination`, one of four literals, each with its own companion
+   field and the other two left null:
+   - `backlog` → non-null `destinationProjectId` (real Linear id via
+     `foreman_linear_read`).
+   - `new-project` → non-null `newProject { name, description,
+     initiativeId }`, `initiativeId` taken from the `--initiatives` ids
+     passed to this dispatch. This is the escape valve when no existing
+     project fits.
+   - `duplicate` → non-null `duplicateOf` (the human identifier it
+     duplicates).
+   - `cancel` → no companion field.
+   NEVER put a state name in a project field.
 6. No usable description → `draftDescription` + `proposedEstimate`; both
    `null` when the existing ones are adequate.
 
-`Canceled` MAY be recommended freely. Un-actioned `Low` items older than the
-`--stale-low-days` threshold on the dispatch → recommend `Canceled` by
-default.
+`cancel` MAY be recommended freely. `cancel` and `duplicate` leave the
+issue parked in Triage behind `foreman:blocked` for the operator to confirm;
+`backlog` and `new-project` move it out immediately.
 
 ## Output
 
-`TriageResult`. `BlockRecord` ONLY when no result can be formed at all:
-e.g. the issue has no project, or its project has no single initiative, so
-repro cannot even be attempted. An initiative bound to no registry entry is
-not a block: classify and draft anyway, flagged as lacking repro.
+`TriageResult`. A project-less issue is not a block: use `destination:
+"new-project"` to create the fitting project instead. `BlockRecord` ONLY
+when no result can be formed at all — e.g. repro cannot even be attempted
+because the issue's initiative resolves to no registered repo.
 
 ## Non-goals
 

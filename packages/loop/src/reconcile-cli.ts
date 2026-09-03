@@ -6,9 +6,11 @@
  */
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   ConfigError,
   entryForCwd,
+  expandHome,
   GitHubClient,
   LinearClient,
   loadGlobalConfig,
@@ -23,6 +25,7 @@ import {
   type Confirmer,
   type LinearRequestEvent,
 } from "@foreman/core";
+import { resolveDispatcher } from "./dispatch/resolve.ts";
 import { reconcile } from "./reconcile.ts";
 
 interface ParsedArgs {
@@ -58,8 +61,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       args.mode = value;
     } else if (arg === "--home") {
       args.homePath = argv[(i += 1)] ?? null;
-    } else if (arg && !arg.startsWith("-") && args.repo === null) {
+    } else if (arg !== undefined && !arg.startsWith("-") && args.repo === null) {
       args.repo = arg;
+    } else if (arg !== undefined) {
+      throw new ConfigError(`Unrecognized argument: ${arg}`, ["Run `foreman reconcile --help` for the flag list."]);
     }
   }
   return args;
@@ -142,46 +147,60 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
   }
   const baseConfirmer: Confirmer = confirmationRequired ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
   const confirmer = !confirmationRequired ? verboseConfirmer(baseConfirmer, log) : baseConfirmer;
-
   const liveDispatchIds = readLiveDispatchIds(config.loop.stateDir, entry.alias, args.homePath ?? undefined);
 
   const github = new GitHubClient();
-  const summary = await reconcile(
-    {
-      linear,
-      github,
-      entry,
-      now: new Date(),
-      liveDispatchIds,
-      lockTtlMs: lockTtlMs(config),
-      confirmer,
-    },
-    { dryRun: args.dryRun, log },
-  );
-  confirmer.close();
+  const dispatcher = await resolveDispatcher(config);
+  let viewerId: string | null;
+  try {
+    viewerId = await linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
 
-  log(`fixed=${summary.fixed} skipped=${summary.skipped}${args.dryRun ? " (dry run)" : ""}`);
-  process.exitCode = 0;
+  try {
+    const summary = await reconcile(
+      {
+        linear,
+        github,
+        entry,
+        now: new Date(),
+        liveDispatchIds,
+        lockTtlMs: lockTtlMs(config),
+        confirmer,
+        viewerId,
+        config,
+        dispatcher,
+      },
+      { dryRun: args.dryRun, log },
+    );
+
+    log(`fixed=${summary.fixed} skipped=${summary.skipped}${args.dryRun ? " (dry run)" : ""}`);
+    process.exitCode = 0;
+  } finally {
+    confirmer.close();
+  }
 }
 
 /**
- * `<stateDir>/<alias>/inflight.json`'s live dispatch ids, when Phase 4's
- * loop has written one. This phase never writes that file, so absence —
- * anything from a missing directory to malformed JSON — degrades to an
- * empty set rather than failing the reconcile run.
+ * `<stateDir>/<alias>/{build,plan}.json`'s live dispatch ids — the loops
+ * that actually write in-flight state. Absence — anything from a missing
+ * directory to malformed JSON, e.g. because that loop has never run —
+ * degrades to an empty set for that file rather than failing the reconcile run.
  */
 function readLiveDispatchIds(stateDir: string, alias: string, home: string | undefined): Set<string> {
-  try {
-    const expanded = stateDir.startsWith("~")
-      ? stateDir.replace(/^~/, home ?? process.env.HOME ?? "")
-      : stateDir;
-    const raw = readFileSync(`${expanded}/${alias}/inflight.json`, "utf8");
-    const parsed = JSON.parse(raw) as { inFlight?: Record<string, { handle?: { dispatchId?: string } }> };
-    const ids = Object.values(parsed.inFlight ?? {})
-      .map((entry) => entry.handle?.dispatchId)
-      .filter((id): id is string => typeof id === "string");
-    return new Set(ids);
-  } catch {
-    return new Set();
+  const expanded = expandHome(stateDir, home);
+  const ids = new Set<string>();
+  for (const loop of ["build", "plan"]) {
+    try {
+      const raw = readFileSync(join(expanded, alias, `${loop}.json`), "utf8");
+      const parsed = JSON.parse(raw) as { inFlight?: Record<string, { handle?: { dispatchId?: string } }> };
+      for (const entry of Object.values(parsed.inFlight ?? {})) {
+        if (typeof entry.handle?.dispatchId === "string") ids.add(entry.handle.dispatchId);
+      }
+    } catch {
+      // No file for this loop: it has never run, or is mid-write. Absence is not liveness.
+    }
   }
+  return ids;
 }

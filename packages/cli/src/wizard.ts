@@ -312,7 +312,7 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Machine setup complete.`);
   deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it and activate the plugin there.`);
-  deps.log(`  ${style("cyan", "→")} Run \`foreman doctor\` any time to verify the plugin link is healthy.`);
+  deps.log(`  ${style("cyan", "→")} Run \`foreman verify\` any time to verify the plugin link is healthy.`);
   if (missingGh) {
     deps.log(`  ${style("yellow", "!")} gh not found — Foreman cannot open PRs until you install it: https://cli.github.com`);
   }

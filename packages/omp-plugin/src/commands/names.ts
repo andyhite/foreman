@@ -9,14 +9,12 @@
 
 export const COMMAND_NAMES = {
   status: "foreman:status",
-  apply: "foreman:apply",
   merge: "foreman:merge",
   unblock: "foreman:unblock",
 } as const;
 
 export const FALLBACK_COMMAND_NAMES = {
   status: "foreman-status",
-  apply: "foreman-apply",
   merge: "foreman-merge",
   unblock: "foreman-unblock",
 } as const;

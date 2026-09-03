@@ -19,6 +19,7 @@ import type {
   ReviewResult,
   RoadmapResult,
   TeamRef,
+  TriageItem,
   TriageResult,
 } from "@foreman/core";
 import {
@@ -100,8 +101,10 @@ export interface ApplyDeps {
 /** Releases the running-label lock; `assigneeId` sets the final owner in the same mutation (`null` clears it, the default). */
 async function releaseLock(deps: ApplyDeps, issue: Issue, assigneeId: string | null = null): Promise<void> {
   const runningLabel = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
-  if (!runningLabel) return;
-  await deps.linear.updateIssue(issue.id, { removedLabelIds: [runningLabel.id], assigneeId });
+  await deps.linear.updateIssue(issue.id, {
+    assigneeId,
+    ...(runningLabel ? { removedLabelIds: [runningLabel.id] } : {}),
+  });
 }
 
 async function moveToState(deps: ApplyDeps, issue: Issue, stateKey: Parameters<typeof resolveState>[0]): Promise<void> {
@@ -112,10 +115,11 @@ async function moveToState(deps: ApplyDeps, issue: Issue, stateKey: Parameters<t
 
 /**
  * Linear drops an API-created issue into the team's default state, which on a
- * triage-enabled team is `Triage` - the shared inbox `foreman team` consumes
- * (§7.1). Every issue the extension creates is already classified, so it has
- * to name Backlog explicitly (§7.2 sub-issues, §7.3 `discoveredWork`, §7.6
- * plan), or agent-authored work re-enters intake as if a human had filed it.
+ * triage-enabled team is `Triage` - the shared inbox `foreman plan`'s
+ * `triage` rule consumes (§7.1). Every issue the extension creates is
+ * already classified, so it has to name Backlog explicitly (§7.2 sub-issues,
+ * §7.3 `discoveredWork`, §7.6 plan), or agent-authored work re-enters intake
+ * as if a human had filed it.
  */
 async function backlogStateId(deps: ApplyDeps, teamId: string): Promise<string> {
   const states = await deps.linear.workflowStates(teamId);
@@ -123,101 +127,151 @@ async function backlogStateId(deps: ApplyDeps, teamId: string): Promise<string> 
 }
 
 /**
- * Triage applies directly (no proposal/approval step): `backlog` moves the
- * issue into a project and Backlog with priority/description/estimate set
- * and its `blockedBy` relations wired; `new-project` creates the project
- * (and attaches it to the named initiative) before doing the same; `cancel`
- * and `duplicate` leave the issue in Triage, park it behind `foreman:blocked`
- * with a `block` marker recording the operator decision needed, and (for
- * `duplicate`) wire the native `duplicate` relation.
+ * One triage item: `backlog` moves the issue into a project and Backlog
+ * with priority/description/estimate set and its `blockedBy` relations
+ * wired; `new-project` reuses an existing same-named project under the
+ * initiative when one exists, otherwise creates and attaches one, before
+ * doing the same; `cancel` and `duplicate` leave the issue in Triage, park
+ * it behind `foreman:blocked` with a `block` marker recording the operator
+ * decision needed, and (for `duplicate`) wire the native `duplicate`
+ * relation. Throws on any failure — the caller isolates one item's failure
+ * from the rest of the batch.
  */
-async function applyTriage(deps: ApplyDeps, result: TriageResult): Promise<AppliedFacts> {
-  const created: CreatedEntity[] = [];
-  for (const item of result.items) {
-    const issue = await deps.linear.issue(item.issueId);
-    if (!issue) continue;
+async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: CreatedEntity[]): Promise<void> {
+  const issue = await deps.linear.issue(item.issueId);
+  if (!issue) throw new Error(`unknown issue "${item.issueId}"`);
 
-    if (item.destination === "backlog" || item.destination === "new-project") {
-      let projectId = item.destinationProjectId;
-      if (item.destination === "new-project") {
-        if (!item.newProject) throw new Error(`applyTriage: ${issue.identifier} is "new-project" with no newProject.`);
-        const project = await deps.linear.createProject({
-          name: item.newProject.name,
+  if (item.destination === "backlog" || item.destination === "new-project") {
+    let projectId = item.destinationProjectId;
+    if (item.destination === "new-project") {
+      if (!item.newProject) throw new Error(`applyTriage: ${issue.identifier} is "new-project" with no newProject.`);
+      const newProject = item.newProject;
+      // Idempotent: no durable dedupe marker survives a redelivered batch
+      // any more (SPEC §17.7), so a second apply must reuse the project it
+      // already created rather than creating a sibling with the same name.
+      const siblings = await deps.linear.initiativeProjects(newProject.initiativeId);
+      const existing = siblings.find(
+        (candidate) => candidate.name.trim().toLowerCase() === newProject.name.trim().toLowerCase(),
+      );
+      const project =
+        existing ??
+        (await deps.linear.createProject({
+          name: newProject.name,
           teamIds: [issue.team.id],
-          description: item.newProject.description,
-        });
-        await deps.linear.addProjectToInitiative({ projectId: project.id, initiativeId: item.newProject.initiativeId });
+          description: newProject.description,
+        }));
+      if (!existing) {
+        await deps.linear.addProjectToInitiative({ projectId: project.id, initiativeId: newProject.initiativeId });
         const status = await deps.linear.projectStatus(project.id);
         if (status?.type !== "backlog") await deps.linear.updateProjectStatus({ projectId: project.id, type: "backlog" });
-        projectId = project.id;
         created.push({ kind: "project", id: project.id, identifier: null, title: project.name, url: null });
       }
-      if (!projectId) throw new Error(`applyTriage: ${issue.identifier} is "backlog" with no destinationProjectId.`);
-
-      const typeLabel = await deps.linear.ensureLabel(item.type, issue.team.id);
-      await deps.linear.updateIssue(issue.id, {
-        priority: item.proposedPriority,
-        description: item.draftDescription ?? undefined,
-        estimate: item.proposedEstimate ?? undefined,
-        projectId,
-        addedLabelIds: [typeLabel.id],
-      });
-      await moveToState(deps, issue, "backlog");
-
-      for (const blockerId of item.proposedBlockedBy) {
-        const blocker = await deps.linear.issue(blockerId);
-        if (!blocker) continue;
-        const alreadyRelated = issue.relations.some(
-          (relation) =>
-            relation.type === "blocks" &&
-            relation.direction === "incoming" &&
-            relation.other.id === blocker.id,
-        );
-        if (!alreadyRelated) {
-          await deps.linear.createRelation({ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
-        }
-      }
-      continue;
+      projectId = project.id;
     }
+    if (!projectId) throw new Error(`applyTriage: ${issue.identifier} is "backlog" with no destinationProjectId.`);
 
-    // cancel | duplicate: stays in Triage, parked for an operator decision.
-    if (item.destination === "duplicate") {
-      if (!item.duplicateOf) throw new Error(`applyTriage: ${issue.identifier} is "duplicate" with no duplicateOf.`);
-      const original = await deps.linear.issue(item.duplicateOf);
-      if (original) {
-        const alreadyRelated = issue.relations.some(
-          (relation) => relation.type === "duplicate" && relation.other.id === original.id,
-        );
-        if (!alreadyRelated) {
-          await deps.linear.createRelation({ issueId: issue.id, relatedIssueId: original.id, type: "duplicate" });
-        }
-      }
-    }
-    const block: BlockRecord = {
-      blocked: true,
-      type: "needs-decision",
-      whatIWasDoing: `Triaging ${issue.identifier}.`,
-      whatINeed: item.destination === "duplicate"
-        ? `Confirm ${issue.identifier} duplicates ${item.duplicateOf}: ${item.severityReasoning}`
-        : `Confirm ${issue.identifier} should be canceled: ${item.severityReasoning}`,
-      options: [
-        { label: item.destination, tradeoff: item.severityReasoning },
-        { label: "keep", tradeoff: "Leave the issue open in Triage." },
-      ],
-      recommendation: item.destination,
-      stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "" },
-      costOfWrongGuess: "Applying a cancel/duplicate disposition without confirmation can silently drop real work.",
-      blockedByIssues: [],
-    };
-    const label = await deps.linear.ensureLabel(FOREMAN_LABEL.blocked, issue.team.id);
+    const typeLabel = await deps.linear.ensureLabel(item.type, issue.team.id);
     await deps.linear.updateIssue(issue.id, {
-      addedLabelIds: [label.id],
-      ...(deps.operatorUserId ? { assigneeId: deps.operatorUserId } : {}),
+      priority: item.proposedPriority,
+      description: item.draftDescription ?? undefined,
+      estimate: item.proposedEstimate ?? undefined,
+      projectId,
+      addedLabelIds: [typeLabel.id],
     });
-    const body = encodeMarker(MARKER_KIND.block, block, renderBlockComment(block));
-    await deps.linear.createComment({ issueId: issue.id, body });
+    await moveToState(deps, issue, "backlog");
+
+    // Otherwise read and discarded: the operator's only view onto why this
+    // landed where it did (SPEC §7.1).
+    const notes = [`Foreman triage: ${item.severityReasoning}`];
+    if (item.missingInfo.length > 0) {
+      notes.push("", "Missing before this is refinable:", ...item.missingInfo.map((line) => `- ${line}`));
+    }
+    await deps.linear.createComment({ issueId: issue.id, body: notes.join("\n") });
+
+    for (const blockerId of item.proposedBlockedBy) {
+      const blocker = await deps.linear.issue(blockerId);
+      if (!blocker) continue;
+      const alreadyRelated = issue.relations.some(
+        (relation) =>
+          relation.type === "blocks" &&
+          relation.direction === "incoming" &&
+          relation.other.id === blocker.id,
+      );
+      if (!alreadyRelated) {
+        await deps.linear.createRelation({ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+      }
+    }
+    return;
   }
-  return { subject: null, summary: `triaged ${result.items.length} issue(s)`, created, movedTo: null };
+
+  // cancel | duplicate: stays in Triage, parked for an operator decision.
+  if (item.destination === "duplicate") {
+    if (!item.duplicateOf) throw new Error(`applyTriage: ${issue.identifier} is "duplicate" with no duplicateOf.`);
+    const original = await deps.linear.issue(item.duplicateOf);
+    if (original) {
+      const alreadyRelated = issue.relations.some(
+        (relation) =>
+          relation.type === "duplicate" &&
+          relation.direction === "outgoing" &&
+          relation.other.id === original.id,
+      );
+      if (!alreadyRelated) {
+        await deps.linear.createRelation({ issueId: issue.id, relatedIssueId: original.id, type: "duplicate" });
+      }
+    }
+  }
+  const block: BlockRecord = {
+    blocked: true,
+    type: "needs-decision",
+    whatIWasDoing: `Triaging ${issue.identifier}.`,
+    whatINeed: item.destination === "duplicate"
+      ? `Confirm ${issue.identifier} duplicates ${item.duplicateOf}: ${item.severityReasoning}`
+      : `Confirm ${issue.identifier} should be canceled: ${item.severityReasoning}`,
+    options: [
+      { label: item.destination, tradeoff: item.severityReasoning },
+      { label: "keep", tradeoff: "Leave the issue open in Triage." },
+    ],
+    recommendation: item.destination,
+    stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "" },
+    costOfWrongGuess: "Applying a cancel/duplicate disposition without confirmation can silently drop real work.",
+    blockedByIssues: [],
+  };
+  const label = await deps.linear.ensureLabel(FOREMAN_LABEL.blocked, issue.team.id);
+  await deps.linear.updateIssue(issue.id, {
+    addedLabelIds: [label.id],
+    ...(deps.operatorUserId ? { assigneeId: deps.operatorUserId } : {}),
+  });
+  const body = encodeMarker(MARKER_KIND.block, block, renderBlockComment(block));
+  await deps.linear.createComment({ issueId: issue.id, body });
+}
+
+/**
+ * Triage applies directly (no proposal/approval step). Each item is applied
+ * in isolation: `deps.linear.issue()` throws `LinearApiError: Entity not
+ * found` for a hallucinated id rather than returning null, so a per-item
+ * try/catch — not an `if (!issue)` guard — is what actually keeps one bad
+ * item from aborting the rest of the batch (SPEC §7.1, mirroring
+ * `applyRoadmap`'s per-project isolation).
+ */
+async function applyTriage(deps: ApplyDeps, result: TriageResult, notify?: Notify): Promise<AppliedFacts> {
+  const created: CreatedEntity[] = [];
+  const problems: string[] = [];
+  for (const item of result.items) {
+    try {
+      await applyTriageItem(deps, item, created);
+    } catch (error) {
+      problems.push(`${item.issueId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (problems.length > 0) {
+    notify?.(`Foreman could not triage ${problems.length} item(s): ${problems.join("; ")}`, "error");
+  }
+  return {
+    subject: null,
+    summary: `triaged ${result.items.length - problems.length} of ${result.items.length} issue(s)`,
+    created,
+    movedTo: null,
+  };
 }
 
 /** SPEC §7.2: description, estimate, sub-issues, spike (with its native `blocks` relation), move to Todo when ready. */
@@ -360,8 +414,8 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 
 /**
  * SPEC §7.6: creates each `proposedIssue` as a new Backlog issue under the
- * project. Nothing else — plan never claims `agent:running`, so there is no
- * lock to release, and it never touches an existing issue's state.
+ * project. Nothing else — plan never claims `foreman:running`, so there is
+ * no lock to release, and it never touches an existing issue's state.
  */
 async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFacts> {
   const project = await deps.linear.project(result.projectId);
@@ -481,7 +535,7 @@ async function applyReview(deps: ApplyDeps, result: ReviewResult, notify?: Notif
   };
 }
 
-/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no `blocked:*` label, back to Todo. */
+/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no `foreman:blocked` label, back to Todo. */
 async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
   for (const blockerId of block.blockedByIssues) {
     const blocker = await deps.linear.issue(blockerId);
@@ -602,9 +656,9 @@ async function applyRoadmapResult(
  * Dispatches one `AgentOutcome` to the matching applier. A blocked outcome
  * with no `issueId` (possible for `foreman-plan` and `foreman-roadmap`, which
  * operate on a project and an initiative rather than an issue) has nothing to
- * write to — Linear has no project-level `blocked:*` surface — so it is a
- * documented no-op; the block is still visible in the loop's own log and
- * `/foreman-status`.
+ * write to — Linear has no project-level `foreman:blocked` surface — so it is
+ * a documented no-op; the block is still visible in the loop's own log and
+ * `/foreman:status`.
  *
  * `notify` is optional because only the roadmap applier has a partial-success
  * report worth showing an operator mid-apply; every other stage either
@@ -618,7 +672,7 @@ export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notif
     return applyBlock(deps, outcome.issueId, outcome.block);
   }
   if (outcome.agent === "foreman-triage") {
-    return applyTriage(deps, outcome.result);
+    return applyTriage(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-plan") {
     return applyPlan(deps, outcome.result);
   } else if (outcome.agent === "foreman-roadmap") {

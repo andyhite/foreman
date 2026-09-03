@@ -20,8 +20,8 @@ Judge by:
 Missed duplicate: one redundant backlog issue; cheap, catchable later. Wrong
 duplicate call: the merged item's acceptance detail, repro steps, and
 reporter context silently absorbed into an issue that may not cover them.
-Uncertain → do not call it: lower `reproConfidence`, note the candidate in
-`missingInfo`, let the operator decide.
+Uncertain → do not call it: note the candidate in `missingInfo` and let the
+operator decide.
 
 ## Naming the duplicate
 

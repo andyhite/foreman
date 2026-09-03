@@ -213,16 +213,15 @@ Slash commands inside any omp session:
 
 | Command | Does |
 | --- | --- |
-| `/foreman:triage` | Propose classification, priority, and destination for a batch of Inbox items. `[--stale-low-days <days>] <ISSUE-ID>...` |
+| `/foreman:triage` | Classify, prioritize, and route a batch of Inbox items. `[--initiatives <id,id,...>] <ISSUE-ID>...` |
 | `/foreman:roadmap` | Decompose an initiative's brief into sequenced projects. `<INITIATIVE-ID>...` |
 | `/foreman:plan` | Seed a bare project's first Backlog issues. `<PROJECT-ID>...` |
 | `/foreman:refine` | Refine prioritized issues to Todo. `<ISSUE-ID>...` |
 | `/foreman:implement` | Implement one ready issue and open its PR. `<ISSUE-ID>` |
 | `/foreman:review` | Cold-review in-review diffs. `<ISSUE-ID or PR>...` |
-| `/foreman:status` | Operator console: blocked queue, locks, proposals, agents, loop state. |
-| `/foreman:apply` | Apply approved triage proposals, or approve/reject one. `[--yes]`, `<ISSUE-ID> --approve`, `<ISSUE-ID> --reject <reason>` |
+| `/foreman:status` | Operator console: blocked queue, in-flight locks, and loop state. |
 | `/foreman:merge` | Merge one issue's PR (or branch) once the review gate passes. `<ISSUE-ID>`. Operator-invoked only. |
-| `/foreman:unblock` | Record your reply to a blocked issue and clear its `blocked:*` label. `<ISSUE-ID> <reply>` |
+| `/foreman:unblock` | Record your reply to a blocked issue and clear its `foreman:blocked` label. `<ISSUE-ID> <reply>` |
 
 ## Development
 

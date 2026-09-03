@@ -3,14 +3,13 @@ import type { LinearReader } from "./linear/api.ts";
 
 /**
  * Resolves the Linear team key an instance operates in (SPEC §3.11):
- * `--team` flag (or, for `foreman team`, the positional key), then the
- * registry entry's `team`, then the sole team the credential can reach,
- * then fail loudly.
+ * an explicit flag, then the registry entry's `team`, then the sole team
+ * the credential can reach, then fail loudly.
  *
- * Shared by `foreman repo` and `foreman team` — the team process simply has
- * no registry entry, so it passes `entryTeam: null`. Two processes
- * disagreeing about which team they serve is a silent split-brain, so the
- * order lives in one place.
+ * Shared by `foreman build`, `foreman plan`, and `foreman reconcile` — all
+ * three resolve a registry entry first and pass its `team` through, so
+ * `flagTeam` is currently always null; the parameter exists so a future
+ * `--team` override has one place to land instead of three.
  *
  * The API call happens only when neither the flag nor the entry supplies a
  * key, so a fully configured instance starts without it.

@@ -273,9 +273,9 @@ export async function ensureWorktree(
 /**
  * Merged-worktree cleanup only (SPEC §12), called from `cleanupMergedWork`
  * once a merge is confirmed and the issue moves to Done. Never called by an
- * agent, and never by the reaper — the reaper reports crashed/orphaned
- * locks, the operator decides (§11); this only removes worktrees for work
- * that has already landed.
+ * agent, and never by `foreman reconcile`'s orphan-lock pass — that pass
+ * reports crashed/orphaned locks, the operator decides (§11); this only
+ * removes worktrees for work that has already landed.
  */
 export async function removeWorktree(
   repoPath: string,

@@ -1,7 +1,7 @@
 /**
- * Terminal prompts for `foreman setup`.
+ * Terminal prompts for `foreman setup` and `foreman init`.
  *
- * Hand-rolled, same rationale as `foreman repo`'s argument parser: the
+ * Hand-rolled, same rationale as the loop CLIs' argument parsers: the
  * workspace's sole runtime dependency is `@sinclair/typebox`, so no prompt
  * library here. `Prompter` is the seam — `NonInteractivePrompter` answers
  * every question with its default so `--yes` and piped/CI stdin behave the

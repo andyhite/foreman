@@ -1,6 +1,6 @@
 ---
 name: foreman-triage-inbox
-description: Use when foreman-triage processes the Linear Triage inbox — classifies, dedupes, and proposes routing for each item without applying anything.
+description: Use when foreman-triage processes the Linear Triage inbox — classifies, dedupes, and applies routing for each item; the extension applies the result directly.
 ---
 
 # Foreman Triage Inbox
@@ -8,8 +8,8 @@ description: Use when foreman-triage processes the Linear Triage inbox — class
 <critical>
 - NEVER apply anything yourself: no issues, sub-issues, spikes, comments, labels, or state changes. You return a `TriageResult`; the extension applies it to Linear.
 - Repro by reading only. You hold no exec tool.
-- Uncertainty is a finding (`reproConfidence`, `missingInfo`), NEVER a `BlockRecord`.
-- `destination` = workflow state; `destinationProject` / `destinationProjectId` = project. NEVER conflate.
+- Uncertainty is a finding (`missingInfo`), NEVER a `BlockRecord`.
+- `destination` = workflow state; `destinationProjectId` / `newProject` = project. NEVER conflate.
 </critical>
 
 ## Preconditions
@@ -21,10 +21,9 @@ implementation gate downstream cares about `type:`, priority, and estimate.
 
 - Each item: title, description, comments, reporter.
 - The existing backlog, for dedupe (`foreman_linear_read`).
-- The repo, read-only, for repro: your cwd's `repos/index.json` maps each
-  item's identifier to a `repos/<alias>` symlink (a real checkout) when its
-  initiative resolves to a registered repo; a `null` entry means it doesn't
-  — treat repro as unavailable for that item, not an error.
+- The repo, read-only, for repro: your cwd *is* the checkout for the
+  initiatives this batch was drawn from. An item whose code is not found
+  there means repro is unavailable for that item, not an error.
 
 ## Procedure
 

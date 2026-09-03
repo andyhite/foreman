@@ -90,7 +90,7 @@ export const RefineResult = Type.Object(
     subIssues: Type.Array(SubIssue, {
       description:
         "Non-empty when `estimate` is 5 or more: the parent becomes a tracking " +
-        "issue and does not get `agent:ready`.",
+        "issue that stays out of the implement rule's candidates.",
     }),
     spikeCreated: Type.Union([SpikeSpec, Type.Null()], {
       description:

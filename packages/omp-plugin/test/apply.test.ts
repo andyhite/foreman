@@ -264,7 +264,7 @@ describe("applyOutcome — triage", () => {
     const linear = new FakeLinear([issue]);
     await applyOutcome(makeDeps(linear), { kind: "result", agent: "foreman-triage", result: makeTriageItem() });
 
-    expect(linear.commentCalls.length).toBe(0);
+    expect(linear.commentCalls.length).toBe(1);
     expect(linear.updateCalls.some((call) => call.input.projectId === "project-1")).toBe(true);
     expect(linear.updateCalls.some((call) => call.input.priority === PRIORITY.Medium)).toBe(true);
     expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);

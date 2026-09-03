@@ -235,7 +235,7 @@ output: |
                 "type": "boolean"
               },
               "type": {
-                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `foreman:blocked` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
                 "anyOf": [
                   {
                     "const": "dependency",
@@ -404,9 +404,11 @@ Full method: `foreman-review-diff`. Outline:
    placement). Standing field: no concerns → say so explicitly.
 6. Note scope creep beyond the stated criteria.
 7. Classify findings by severity. `blocking` routes back to implement and
-   burns one of two review→fix cycles before the issue gains `foreman:blocked`
-   with a needs-decision block record: reserve it for a criterion or
-   Definition of Done that genuinely fails, never as a hedge.
+   burns one of the review→fix cycles the `foreman build` loop counts;
+   once `loop.reviewCycleCap` is reached, the loop applies
+   `foreman:blocked` with a needs-decision block record. Reserve `blocking`
+   for a criterion or Definition of Done that genuinely fails, never as a
+   hedge.
 
 ## Output
 

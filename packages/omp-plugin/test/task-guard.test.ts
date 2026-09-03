@@ -180,6 +180,9 @@ function makeConfig(): GlobalConfig {
     loop: {
       mode: "confirm",
       cleanupMergedWorktrees: true,
+      autoMerge: false,
+      retryCap: 2,
+      reviewCycleCap: 2,
       stateDir: "~/.foreman/state",
       concurrency: { plan: 1, build: 3 },
       pollSeconds: 20,

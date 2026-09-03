@@ -13,7 +13,7 @@ extension performs every mutation.
 | `skills/*/SKILL.md` | autoloaded skills | The procedure each agent follows; supporting files sit beside `SKILL.md` |
 | `commands/*.md` | `/foreman:<stem>` | Operator dispatch: resolve, gate, one `task` call |
 | `rules/*.md` | TTSR rules | Mid-stream interrupts: no Linear API from a shell, no in-session questions, no scope creep |
-| `src/extension.ts` | extension module | Linear write client, gate validators, task guard, lock manager, result sink, config loader, and `/foreman:status`, `/foreman:apply`, `/foreman:merge`, `/foreman:unblock` |
+| `src/extension.ts` | extension module | Linear write client, gate validators, task guard, lock manager, result sink, config loader, and `/foreman:status`, `/foreman:merge`, `/foreman:unblock` |
 | `schemas/*.json` | reference | Generated copies of each agent's output schema |
 
 Active **per repo only**: `foreman init` writes the repo's omp plugin root
@@ -61,13 +61,12 @@ with each entry's overrides.
 
 | Command | Dispatches | Argument |
 | --- | --- | --- |
-| `/foreman:triage` | `foreman-triage`, one batch | `[--stale-low-days <days>] <ISSUE-ID>...` |
+| `/foreman:triage` | `foreman-triage`, one batch | `[--initiatives <id,id,...>] <ISSUE-ID>...` |
 | `/foreman:roadmap` | `foreman-roadmap` per initiative | `<INITIATIVE-ID>...` |
 | `/foreman:plan` | `foreman-plan` per bare project | `<PROJECT-ID>...` |
 | `/foreman:refine` | `foreman-refine` per issue | `<ISSUE-ID>...` |
 | `/foreman:implement` | `foreman-implement`, one issue | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` per target | `<ISSUE-ID or PR>...` |
-| `/foreman:apply` | extension: review or apply staged proposals | none, `--yes`, `<ISSUE-ID> --approve`, `<ISSUE-ID> --reject <reason>` |
 | `/foreman:merge` | extension: merge once the review gate passes | `<ISSUE-ID>` |
 | `/foreman:unblock` | extension: record the operator's reply, clear the block | `<ISSUE-ID> <reply>` |
 | `/foreman:status` | extension: operator console | none |

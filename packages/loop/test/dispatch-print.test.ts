@@ -35,6 +35,9 @@ function makeConfig(ompBin: string): GlobalConfig {
     loop: {
       mode: "yolo",
       cleanupMergedWorktrees: true,
+      autoMerge: false,
+      retryCap: 2,
+      reviewCycleCap: 2,
       stateDir: "~/.foreman/state",
       concurrency: { plan: 1, build: 3 },
       pollSeconds: 20,

@@ -460,6 +460,7 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   await checkGitHubAppInstall(deps, options, repoRoot);
 
   printSection(deps.log, "Next step");
-  deps.log("  foreman repo --once");
-  deps.log("  foreman doctor");
+  deps.log(`  foreman plan ${alias} --once`);
+  deps.log(`  foreman build ${alias} --once`);
+  deps.log("  foreman verify");
 }

@@ -34,8 +34,8 @@ Priority ≠ `None`. Issue is in scope in either Backlog or Todo.
 5. Affected files and modules via `lsp`, not guesswork.
 6. Estimate on the scale in `description-template.md`. 5 → decompose:
    `subIssues[]` with per-sub-issue estimates; parent becomes a tracking
-   issue and stays unlabeled. 8 → not an issue: recommend a project or a
-   spike instead of estimating.
+   issue, parked via `readyForImplementation: false`. 8 → not an issue:
+   recommend a project or a spike instead of estimating.
 7. Genuine unknown blocks estimation → `spikeCreated` (`type:spike`, native
    `blocks` relation to this issue) per `foreman-spike`.
 8. Yield `RefineResult`.

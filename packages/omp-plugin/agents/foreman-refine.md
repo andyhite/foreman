@@ -106,7 +106,7 @@ output: |
                 }
               },
               "subIssues": {
-                "description": "Non-empty when `estimate` is 5 or more: the parent becomes a tracking issue and does not get `agent:ready`.",
+                "description": "Non-empty when `estimate` is 5 or more: the parent becomes a tracking issue that stays out of the implement rule's candidates.",
                 "type": "array",
                 "items": {
                   "additionalProperties": false,
@@ -266,7 +266,7 @@ output: |
                 "type": "boolean"
               },
               "type": {
-                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `blocked:*` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
+                "description": "`dependency` is Case A (SPEC §9): another issue blocks this one, so no `foreman:blocked` label is applied and the native relation is the state. Everything else is Case B and parks the issue in the human queue.",
                 "anyOf": [
                   {
                     "const": "dependency",

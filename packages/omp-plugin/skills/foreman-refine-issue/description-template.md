@@ -54,7 +54,7 @@ signals".
 - A near-duplicate with materially different reproduction scope (e.g. a
   narrower query-length trigger) is marked as `blocked by`, not
   `duplicateOf`.
-- `severityReasoning` for a proposed duplicate names the specific matched
+- `severityReasoning` for an applied duplicate names the specific matched
   issue ID, not a general description.
 
 `affectedAreas`:
@@ -67,7 +67,7 @@ signals".
 - Changing the dedupe threshold or introducing embedding-based similarity —
   this issue only fixes the exact-match limitation, not the whole matching
   strategy.
-- Retroactively re-triaging already-proposed items.
+- Retroactively re-triaging already-applied items.
 
 Note that no field carries a `##` heading: every heading in the stored issue
 comes from the renderer.

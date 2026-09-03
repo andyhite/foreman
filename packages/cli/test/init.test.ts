@@ -108,7 +108,7 @@ describe("runInit", () => {
       expect(config.repos).toEqual({
         plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
       });
-      expect(logs.some((line) => line.includes("foreman repo --once"))).toBe(true);
+      expect(logs.some((line) => line.includes("foreman plan plotroom --once"))).toBe(true);
 
       const loaded = loadGlobalConfig({ home });
       expect(loaded.config.repos.plotroom?.path).toBe("/repos/plotroom");
@@ -383,7 +383,7 @@ describe("runInit", () => {
 
     // Restored, not deleted: `bun test` shares one process across files, so
     // unconditionally dropping the variable leaks this test's setup into every
-    // later file that reads it (`foreman doctor` reports it as the credential).
+    // later file that reads it (`foreman verify` reports it as the credential).
     const ambientApiKey = process.env.LINEAR_API_KEY;
     try {
       process.env.LINEAR_API_KEY = "lin_api_test";

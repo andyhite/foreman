@@ -299,11 +299,24 @@ export class GitHubClient {
    * `in-review-no-pr` invariant's "branch not pushed" probe.
    */
   async refExists(repoPath: string, ref: string): Promise<boolean> {
+    assertSafeRef(ref, "ref");
     try {
       await this.#runner.run(["git", "rev-parse", "--verify", ref], { cwd: repoPath });
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** `git rev-parse <ref>` — the resolved SHA, or null when the ref does not resolve. Direct-branch mode's stand-in for a PR head SHA (SPEC §7.4). */
+  async revParse(repoPath: string, ref: string): Promise<string | null> {
+    assertSafeRef(ref, "ref");
+    try {
+      const { stdout } = await this.#runner.run(["git", "rev-parse", ref], { cwd: repoPath });
+      const sha = stdout.trim();
+      return sha.length > 0 ? sha : null;
+    } catch {
+      return null;
     }
   }
 

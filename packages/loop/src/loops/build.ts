@@ -14,6 +14,7 @@ import {
   all,
   branchNameFor,
   DISPATCH_COMMAND,
+  findMarkers,
   implementationGate,
   inInitiatives,
   inState,
@@ -22,18 +23,13 @@ import {
   latestMarker,
   MARKER_KIND,
   notInTerminalProject,
-  priorityRank,
+  reviewGate,
+  type CiState,
   type ReviewResult,
   unlabeled,
   worktreePathFor,
 } from "@foreman/core";
-import type { Candidate, Loop, Rule } from "../engine.ts";
-
-function byPriorityThenAge(a: Issue, b: Issue): number {
-  const rankDiff = priorityRank(a.priority) - priorityRank(b.priority);
-  if (rankDiff !== 0) return rankDiff;
-  return Date.parse(a.createdAt) - Date.parse(b.createdAt);
-}
+import { byPriorityThenAge, type Candidate, type Escalation, type Loop, type Rule } from "../engine.ts";
 
 interface TodoEntry {
   issue: Issue;
@@ -48,11 +44,17 @@ interface ReviewEntry {
   mergeable: boolean | null;
   headSha: string;
   latestReview: { data: ReviewResult; commentId: string } | null;
+  requestChangesCycles: number;
+  ciStatus: CiState;
 }
 
 export interface BuildSnapshot {
   todo: TodoEntry[];
   inReview: ReviewEntry[];
+  autoMerge: boolean;
+  ciRequired: boolean;
+  prRequired: boolean;
+  reviewCycleCap: number;
 }
 
 const implementRule: Rule<BuildSnapshot> = {
@@ -79,7 +81,13 @@ const reviewRule: Rule<BuildSnapshot> = {
   name: "review",
   select(snapshot) {
     const eligible = snapshot.inReview
-      .filter((entry) => entry.prOpen && entry.headSha !== "" && entry.latestReview?.data.reviewedSha !== entry.headSha)
+      .filter(
+        (entry) =>
+          entry.prOpen &&
+          entry.headSha !== "" &&
+          entry.latestReview?.data.reviewedSha !== entry.headSha &&
+          entry.requestChangesCycles < snapshot.reviewCycleCap,
+      )
       .sort((a, b) => byPriorityThenAge(a.issue, b.issue));
     return eligible.map(
       (entry): Candidate => ({
@@ -95,17 +103,30 @@ const reviewRule: Rule<BuildSnapshot> = {
   },
 };
 
+/**
+ * Gated on `loop.autoMerge` (SPEC §17.5, decision 1) and brought to
+ * `reviewGate` parity by calling it directly rather than re-deriving its
+ * checks: a refused `/foreman:merge` exits 0, so a weaker precondition here
+ * would re-spawn a refused merge every poll forever with no back-off.
+ */
 const mergeRule: Rule<BuildSnapshot> = {
   name: "merge",
   select(snapshot) {
+    if (!snapshot.autoMerge) return [];
     const eligible = snapshot.inReview
-      .filter(
-        (entry) =>
-          entry.headSha !== "" &&
-          entry.latestReview?.data.reviewedSha === entry.headSha &&
-          entry.latestReview.data.verdict === "approve" &&
-          entry.mergeable !== false,
-      )
+      .filter((entry) => {
+        if (entry.mergeable === false) return false;
+        const gate = reviewGate({
+          issue: entry.issue,
+          review: entry.latestReview?.data ?? null,
+          headSha: entry.headSha !== "" ? entry.headSha : null,
+          ciStatus: entry.ciStatus,
+          prOpen: entry.prOpen,
+          prRequired: snapshot.prRequired,
+          ciRequired: snapshot.ciRequired,
+        });
+        return gate.ok;
+      })
       .sort((a, b) => byPriorityThenAge(a.issue, b.issue));
     return eligible.map(
       (entry): Candidate => ({
@@ -125,6 +146,13 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
   name: "build",
   concurrency: 3,
   async fetch(ctx) {
+    let viewerId: string | null;
+    try {
+      viewerId = await ctx.linear.viewerId();
+    } catch {
+      viewerId = null;
+    }
+
     const todoIssues = await ctx.linear.issues({
       filter: all(
         inInitiatives(ctx.entry.initiativeIds),
@@ -146,25 +174,73 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
     const inReview: ReviewEntry[] = [];
     for (const issue of inReviewIssues) {
       const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
-      // eslint-disable-next-line no-await-in-loop -- one GitHub read per In Review issue; this loop's own poll cadence bounds the cost.
-      const pr = ctx.entry.pr.required
-        ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open" })
-        : null;
-      // eslint-disable-next-line no-await-in-loop
-      const branchPushed = ctx.entry.pr.required ? false : await ctx.github.refExists(ctx.entry.repoPath, `origin/${branch}`);
-      const headSha = pr?.headSha ?? (branchPushed ? branch : "");
-      const latestReview = latestMarker<ReviewResult>(MARKER_KIND.review, issue.comments ?? []);
+      let pr = null;
+      let branchSha: string | null = null;
+      try {
+        // eslint-disable-next-line no-await-in-loop -- one GitHub read per In Review issue; this loop's own poll cadence bounds the cost.
+        pr = ctx.entry.pr.required ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open" }) : null;
+        // eslint-disable-next-line no-await-in-loop
+        branchSha = ctx.entry.pr.required ? null : await ctx.github.revParse(ctx.entry.repoPath, `origin/${branch}`);
+      } catch {
+        pr = null;
+        branchSha = null;
+      }
+      const headSha = pr?.headSha ?? branchSha ?? "";
+      const prOpen = ctx.entry.pr.required ? pr !== null : branchSha !== null;
+
+      const latestReview =
+        viewerId === null
+          ? null
+          : latestMarker<ReviewResult>(MARKER_KIND.review, issue.comments ?? [], { authoredBy: viewerId });
+      const requestChangesCycles =
+        viewerId === null
+          ? 0
+          : findMarkers<ReviewResult>(MARKER_KIND.review, issue.comments ?? [], { authoredBy: viewerId }).filter(
+              (found) => found.data.verdict === "request-changes",
+            ).length;
+
+      let ciStatus: CiState = "none";
+      if (ctx.entry.pr.required && ctx.entry.pr.ciRequired && headSha !== "") {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          ciStatus = await ctx.github.ciStatus(ctx.entry.repoPath, headSha);
+        } catch {
+          ciStatus = "none";
+        }
+      }
+
       inReview.push({
         issue,
         cwd: ctx.entry.repoPath,
-        prOpen: ctx.entry.pr.required ? pr !== null : branchPushed,
+        prOpen,
         mergeable: pr?.mergeable ?? null,
         headSha,
         latestReview,
+        requestChangesCycles,
+        ciStatus,
       });
     }
 
-    return { todo, inReview };
+    return {
+      todo,
+      inReview,
+      autoMerge: ctx.config.loop.autoMerge,
+      ciRequired: ctx.entry.pr.required && ctx.entry.pr.ciRequired,
+      prRequired: ctx.entry.pr.required,
+      reviewCycleCap: ctx.config.loop.reviewCycleCap,
+    };
   },
   rules: [implementRule, reviewRule, mergeRule],
+  escalations(snapshot) {
+    return snapshot.inReview
+      .filter((entry) => entry.requestChangesCycles >= snapshot.reviewCycleCap)
+      .map(
+        (entry): Escalation => ({
+          issueId: entry.issue.identifier,
+          kind: "review-cycle-exhausted",
+          attempts: entry.requestChangesCycles,
+          detail: `Latest review: ${entry.latestReview?.data.verdict ?? "none"} at ${entry.headSha || "unknown head"}.`,
+        }),
+      );
+  },
 };

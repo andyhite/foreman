@@ -11,23 +11,29 @@ import {
   BLOCKED_FILTER,
   branchNameFor,
   type Confirmer,
+  DENY_CONFIRMER,
+  type Dispatcher,
   encodeMarker,
+  ensureMaintenanceProjects,
   FOREMAN_LABEL,
   type GitHubClient,
+  type GlobalConfig,
   inInitiatives,
   inState,
-  inStateType,
   type Issue,
   latestMarker,
   type LinearWriter,
   lockState,
   MARKER_KIND,
   type MergedRecord,
+  nextProjectStatus,
   readLockComment,
   type ResolvedRepoEntry,
   resolveState,
   RUNNING_FILTER,
   unlabeled,
+  type WorkflowStateType,
+  cleanupMergedWork,
 } from "@foreman/core";
 
 export interface ReconcileContext {
@@ -38,6 +44,9 @@ export interface ReconcileContext {
   liveDispatchIds: Set<string>;
   lockTtlMs: number;
   confirmer: Confirmer;
+  viewerId: string | null;
+  config: GlobalConfig;
+  dispatcher?: Dispatcher;
 }
 
 export interface Invariant {
@@ -56,7 +65,7 @@ async function removeForemanLabel(linear: LinearWriter, issue: Issue, label: str
   await linear.updateIssue(issue.id, { removedLabelIds: [target.id], assigneeId: null });
 }
 
-/** Whether `issue` is actually merged: PR mode checks `gh`, direct-branch mode trusts the latest `merged` marker or falls back to a branch-merge check. */
+/** Whether `issue` is actually merged: PR mode checks `gh`, direct-branch mode trusts the latest `merged` marker (when its authorship can be verified) or falls back to a branch-merge check. */
 async function isIssueMerged(issue: Issue, ctx: ReconcileContext): Promise<boolean> {
   const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
   if (ctx.entry.pr.required) {
@@ -67,9 +76,11 @@ async function isIssueMerged(issue: Issue, ctx: ReconcileContext): Promise<boole
     return pr !== null && pr.baseBranch === ctx.entry.baseBranch && (await ctx.github.isMerged(ctx.entry.repoPath, pr.number));
   }
 
-  const mergedMarker = latestMarker<MergedRecord>(MARKER_KIND.merged, issue.comments ?? []);
-  if (mergedMarker && mergedMarker.data.branch === branch && mergedMarker.data.baseBranch === ctx.entry.baseBranch) {
-    return true;
+  if (ctx.viewerId !== null) {
+    const mergedMarker = latestMarker<MergedRecord>(MARKER_KIND.merged, issue.comments ?? [], { authoredBy: ctx.viewerId });
+    if (mergedMarker && mergedMarker.data.branch === branch && mergedMarker.data.baseBranch === ctx.entry.baseBranch) {
+      return true;
+    }
   }
   const mergedBranches = await ctx.github.mergedBranches(ctx.entry.repoPath, ctx.entry.baseBranch, [branch]);
   return mergedBranches.includes(branch);
@@ -83,7 +94,7 @@ const staleRunning: Invariant = {
       includeComments: true,
     });
     return issues.filter((issue) => {
-      const record = readLockComment(issue.comments ?? [])?.data ?? null;
+      const record = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined)?.data ?? null;
       return lockState(record, { now: ctx.now, liveDispatchIds: [...ctx.liveDispatchIds] }).orphaned || record === null;
     });
   },
@@ -93,9 +104,9 @@ const staleRunning: Invariant = {
       const states = await ctx.linear.workflowStates(issue.team.id);
       await ctx.linear.updateIssue(issue.id, { stateId: resolveState("todo", states).id });
     }
-    const record = readLockComment(issue.comments ?? [])?.data ?? null;
+    const record = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined)?.data ?? null;
     const summary = record
-      ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}).`
+      ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}). Worktree ${record.worktree ?? "none"} left standing for inspection — reconcile never deletes it.`
       : `Foreman: removed \`${FOREMAN_LABEL.running}\` with no matching lock comment.`;
     await ctx.linear.createComment({ issueId: issue.id, body: summary });
     return `removed ${FOREMAN_LABEL.running}${issue.state.type === "started" ? "; moved to Todo" : ""}`;
@@ -106,14 +117,14 @@ const inProgressAbandoned: Invariant = {
   name: "in-progress-abandoned",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), inStateType("started"), unlabeled()),
+      filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Progress"), unlabeled()),
       includeComments: true,
     });
     return issues.filter((issue) => {
-      const record = readLockComment(issue.comments ?? [])?.data ?? null;
-      if (record === null) return true;
-      const takenAt = new Date(record.takenAt).getTime();
-      return !Number.isFinite(takenAt) || ctx.now.getTime() - takenAt > ctx.lockTtlMs;
+      const found = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined);
+      const record = found?.data ?? null;
+      if (record === null) return ctx.now.getTime() - new Date(issue.updatedAt).getTime() > 60_000;
+      return lockState(record, { now: ctx.now, liveDispatchIds: [...ctx.liveDispatchIds] }).orphaned;
     });
   },
   async fix(issue, ctx) {
@@ -132,14 +143,27 @@ const mergedNotDone: Invariant = {
     const issues = await ctx.linear.issues({
       filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Review")),
       includeComments: true,
+      first: 250,
     });
-    const flags = await Promise.all(issues.map((issue) => isIssueMerged(issue, ctx)));
-    return issues.filter((_, index) => flags[index]);
+    const out: Issue[] = [];
+    for (const issue of issues) {
+      const merged = await isIssueMerged(issue, ctx);
+      if (merged) out.push(issue);
+    }
+    return out;
   },
   async fix(issue, ctx) {
     const states = await ctx.linear.workflowStates(issue.team.id);
     await ctx.linear.updateIssue(issue.id, { stateId: resolveState("done", states).id });
-    return "moved to Done (merged)";
+    if (!ctx.config.loop.cleanupMergedWorktrees) return "moved to Done (merged)";
+    const notes = await cleanupMergedWork({
+      repoPath: ctx.entry.repoPath,
+      worktreePattern: ctx.entry.worktreePattern,
+      baseBranch: ctx.entry.baseBranch,
+      issue: { identifier: issue.identifier, title: issue.title },
+      dispatcher: ctx.dispatcher,
+    });
+    return `moved to Done (merged)${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`;
   },
 };
 
@@ -222,6 +246,50 @@ export const INVARIANTS: Invariant[] = [
   blockedAnswered,
 ];
 
+/** SPEC §7.6a: advance a project's native status to `started`/`completed` from its issues' state types. `paused`/`canceled` are the operator's and never advanced. */
+async function reconcileProjectStatus(
+  ctx: ReconcileContext,
+  opts: { dryRun: boolean; log: (line: string) => void },
+): Promise<{ fixed: number; skipped: number }> {
+  let fixed = 0;
+  let skipped = 0;
+  const issues = await ctx.linear.issues({ filter: inInitiatives(ctx.entry.initiativeIds), first: 250 });
+  const byProject = new Map<string, WorkflowStateType[]>();
+  for (const issue of issues) {
+    if (!issue.project) continue;
+    const types = byProject.get(issue.project.id) ?? [];
+    types.push(issue.state.type);
+    byProject.set(issue.project.id, types);
+  }
+  for (const initiativeId of ctx.entry.initiativeIds) {
+    for (const project of await ctx.linear.initiativeProjects(initiativeId)) {
+      const current = project.status?.type;
+      if (!current) continue;
+      const next = nextProjectStatus(current, byProject.get(project.id) ?? []);
+      if (next === null) continue;
+      const summary = `project-status ${project.name}: ${current} → ${next}`;
+      if (opts.dryRun) {
+        opts.log(`${summary}: would fix (dry run)`);
+        continue;
+      }
+      if (!(await ctx.confirmer.confirm({ kind: "reconcile-project-status", summary }))) {
+        opts.log(`${summary}: skipped (declined)`);
+        skipped += 1;
+        continue;
+      }
+      try {
+        await ctx.linear.updateProjectStatus({ projectId: project.id, type: next });
+        opts.log(summary);
+        fixed += 1;
+      } catch (error) {
+        opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+        skipped += 1;
+      }
+    }
+  }
+  return { fixed, skipped };
+}
+
 export async function reconcile(
   ctx: ReconcileContext,
   opts: { dryRun: boolean; log: (line: string) => void },
@@ -242,10 +310,35 @@ export async function reconcile(
         skipped += 1;
         continue;
       }
-      const detail = await invariant.fix(issue, ctx);
-      opts.log(`${summary}: ${detail}`);
-      fixed += 1;
+      try {
+        const detail = await invariant.fix(issue, ctx);
+        opts.log(`${summary}: ${detail}`);
+        fixed += 1;
+      } catch (error) {
+        opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+        skipped += 1;
+      }
     }
   }
+
+  const statusResult = await reconcileProjectStatus(ctx, opts);
+  fixed += statusResult.fixed;
+  skipped += statusResult.skipped;
+
+  const teams = await ctx.linear.teams();
+  const team = ctx.entry.team !== null ? teams.find((candidate) => candidate.key === ctx.entry.team) : teams[0];
+  if (team) {
+    for (const report of await ensureMaintenanceProjects(ctx.linear, {
+      initiativeIds: ctx.entry.initiativeIds,
+      teamId: team.id,
+      confirmer: opts.dryRun ? DENY_CONFIRMER : ctx.confirmer,
+    })) {
+      if (report.created) opts.log(`maintenance ${report.initiativeName}: created project ${report.projectId}`);
+    }
+  } else {
+    opts.log(`maintenance: skipped, could not resolve team "${ctx.entry.team ?? "(sole accessible)"}"`);
+    skipped += 1;
+  }
+
   return { fixed, skipped };
 }

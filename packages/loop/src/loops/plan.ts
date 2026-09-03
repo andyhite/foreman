@@ -1,39 +1,28 @@
 /**
  * `foreman plan` — triage, plan, refine (simplification plan Phase 4).
- *
- * KNOWN GAP: the plan's `fetch` also wants Triage issues with no project at
- * all (the team-wide inbox), reachable only through a filter shape
- * (`{ project: { null: true } }`) this implementation has not verified
- * against the live Linear API. `inbox` here is the straightforward,
- * verified `all(inInitiatives(ids), INBOX_FILTER, unlabeled())` read; the
- * no-project fallback is not implemented. Flagged explicitly rather than
- * guessed at.
  */
 
 import {
   all,
+  any,
   DISPATCH_COMMAND,
   incompleteBlockers,
   incompleteProjectBlockers,
+  implementationGate,
   inInitiatives,
   INBOX_FILTER,
   inStateType,
+  isTerminalProjectStatus,
   type Issue,
+  MAINTENANCE_PROJECT_NAME,
   notInPausedProject,
   notInTerminalProject,
   prioritized,
   type ProjectRef,
   type ProjectRelation,
-  priorityRank,
   unlabeled,
 } from "@foreman/core";
-import type { Candidate, Loop, Rule } from "../engine.ts";
-
-function byPriorityThenAge(a: Issue, b: Issue): number {
-  const rankDiff = priorityRank(a.priority) - priorityRank(b.priority);
-  if (rankDiff !== 0) return rankDiff;
-  return Date.parse(a.createdAt) - Date.parse(b.createdAt);
-}
+import { byPriorityThenAge, type Candidate, type Loop, type Rule } from "../engine.ts";
 
 interface ProjectEntry {
   project: ProjectRef;
@@ -44,9 +33,11 @@ interface ProjectEntry {
 export interface PlanSnapshot {
   inbox: Issue[];
   backlog: Issue[];
+  unrefinedTodo: Issue[];
   projects: ProjectEntry[];
   cwd: string;
   triageBatch: number;
+  initiativeIds: readonly string[];
 }
 
 const triageRule: Rule<PlanSnapshot> = {
@@ -57,10 +48,14 @@ const triageRule: Rule<PlanSnapshot> = {
     const identifiers = batch.map((issue) => issue.identifier);
     return [
       {
-        key: `triage:${identifiers[0]}`,
+        // Keyed on the whole batch, not just its head: keying on `identifiers[0]` alone
+        // changes identity the instant the head issue leaves Triage, resetting the
+        // failure counter and, at `concurrency.plan > 1`, admitting a second agent onto
+        // the same issue.
+        key: `triage:${[...identifiers].sort().join(",")}`,
         agent: "foreman-triage",
         command: DISPATCH_COMMAND.triage,
-        subject: identifiers.join(" "),
+        subject: `--initiatives ${snapshot.initiativeIds.join(",")} ${identifiers.join(" ")}`,
         cwd: snapshot.cwd,
         worktree: null,
         reason: `dispatch foreman-triage for ${identifiers.join(", ")}`,
@@ -90,7 +85,7 @@ const planRule: Rule<PlanSnapshot> = {
 const refineRule: Rule<PlanSnapshot> = {
   name: "refine",
   select(snapshot) {
-    const eligible = snapshot.backlog
+    const eligible = [...snapshot.backlog, ...snapshot.unrefinedTodo]
       .filter((issue) => issue.assignee === null && incompleteBlockers(issue).length === 0)
       .sort(byPriorityThenAge);
     return eligible.map(
@@ -111,8 +106,17 @@ export const PLAN_LOOP: Loop<PlanSnapshot> = {
   name: "plan",
   concurrency: 1,
   async fetch(ctx) {
+    // A Triage issue with no project at all cannot match `inInitiatives`, whose
+    // `{ project: { initiatives: { some: … } } }` shape requires a project to exist —
+    // so the team-wide inbox needs the `{ project: { null: true } }` escape hatch too
+    // (measured against the live API, `docs/VERIFIED.md`), or the inbox is permanently
+    // empty and triage never fires.
     const inbox = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), INBOX_FILTER, unlabeled()),
+      filter: all(
+        any(inInitiatives(ctx.entry.initiativeIds), { project: { null: true } }),
+        INBOX_FILTER,
+        unlabeled(),
+      ),
     });
 
     const backlog = await ctx.linear.issues({
@@ -126,19 +130,56 @@ export const PLAN_LOOP: Loop<PlanSnapshot> = {
       ),
     });
 
+    // The legacy funnel, re-expressed label-free: a pre-existing Todo issue that fails
+    // the implementation gate (no acceptance criteria, no estimate, …) is exactly what
+    // the deleted `legacy` label used to mark. `refineRule` only reads `backlog`
+    // (inStateType "backlog"), so without this a Todo issue in that shape is stranded —
+    // refine cannot see it and implement drops it on the gate.
+    const unrefinedTodo = (
+      await ctx.linear.issues({
+        filter: all(
+          inInitiatives(ctx.entry.initiativeIds),
+          inStateType("unstarted"),
+          unlabeled(),
+          prioritized(),
+          notInTerminalProject(),
+          notInPausedProject(),
+        ),
+      })
+    ).filter((issue) => !implementationGate(issue).ok);
+
+    // One issue query for the whole scope, then in-memory membership: a project's
+    // native `status` never advances on its own (that is `reconcile`'s job now, SPEC
+    // §7.6a), so testing `status?.type !== "backlog"` re-plans a populated Backlog
+    // project on every poll. The real predicate is "has zero issues yet".
+    const scopeIssues = await ctx.linear.issues({ filter: inInitiatives(ctx.entry.initiativeIds) });
+    const projectsWithIssues = new Set(
+      scopeIssues.map((issue) => issue.project?.id).filter((id): id is string => id != null),
+    );
+
     const projects: ProjectEntry[] = [];
     for (const initiativeId of ctx.entry.initiativeIds) {
       // eslint-disable-next-line no-await-in-loop -- bounded by the small, fixed set of initiatives one repo entry binds.
       const initiativeProjects = await ctx.linear.initiativeProjects(initiativeId);
       for (const project of initiativeProjects) {
-        if (project.status?.type !== "backlog") continue;
+        if (project.name.trim().toLowerCase() === MAINTENANCE_PROJECT_NAME.toLowerCase()) continue;
+        if (isTerminalProjectStatus(project.status)) continue;
+        if (projectsWithIssues.has(project.id)) continue;
         // eslint-disable-next-line no-await-in-loop
         const relations = await ctx.linear.projectRelations(project.id);
         projects.push({ project, cwd: ctx.entry.repoPath, relations });
       }
     }
 
-    return { inbox, backlog, projects, cwd: ctx.entry.repoPath, triageBatch: ctx.config.loop.triageBatch };
+    return {
+      inbox,
+      backlog,
+      unrefinedTodo,
+      projects,
+      cwd: ctx.entry.repoPath,
+      triageBatch: ctx.config.loop.triageBatch,
+      initiativeIds: ctx.entry.initiativeIds,
+    };
   },
   rules: [triageRule, planRule, refineRule],
 };

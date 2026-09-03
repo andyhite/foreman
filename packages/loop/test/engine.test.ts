@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Dispatcher, DispatchHandle, DispatchOutcome, DispatchRequest, DispatchStatus } from "@foreman/core";
+import { DispatcherBusyError } from "../src/dispatch/herdr.ts";
 import { runLoop, type Candidate, type Loop, type LoopContext, type Rule } from "../src/engine.ts";
 import { InflightStore } from "../src/inflight.ts";
 
@@ -114,7 +115,7 @@ afterEach(() => {
   }
 });
 
-function makeCtx(): LoopContext {
+function makeCtx(overrides: Partial<LoopContext> = {}): LoopContext {
   return {
     linear: { issue: async () => null } as unknown as LoopContext["linear"],
     github: {} as LoopContext["github"],
@@ -125,8 +126,9 @@ function makeCtx(): LoopContext {
       worktreePattern: "../<repo>",
       baseBranch: "main",
     } as unknown as LoopContext["entry"],
-    config: {} as LoopContext["config"],
+    config: { loop: { retryCap: 2 } } as unknown as LoopContext["config"],
     now: () => new Date(),
+    ...overrides,
   };
 }
 
@@ -188,12 +190,12 @@ describe("runLoop", () => {
     expect(dispatcher.dispatched.length).toBe(3);
   });
 
-  it("skips a candidate whose key has failed twice already and logs it once", async () => {
+  it("logs once and does not re-dispatch a non-issue candidate whose key has exhausted the retry cap", async () => {
     const dispatcher = new FakeDispatcher();
     const state = await InflightStore.load(tempStatePath(), dispatcher);
-    state.recordFailure("issue:A");
-    state.recordFailure("issue:A");
-    const loop = makeLoop([makeCandidate("issue:A")], 3);
+    state.recordFailure("project:xyz");
+    state.recordFailure("project:xyz");
+    const loop = makeLoop([makeCandidate("project:xyz")], 3);
     const logs: string[] = [];
 
     await runLoop(loop, makeCtx(), {
@@ -207,6 +209,73 @@ describe("runLoop", () => {
 
     expect(dispatcher.dispatched.length).toBe(0);
     expect(logs.some((line) => line.includes("gave up after 2 failed dispatches"))).toBe(true);
+  });
+
+  it("escalates an issue-keyed candidate that has exhausted the retry cap: applies foreman:blocked and a block marker, exactly once", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    state.recordFailure("issue:ENG-1");
+    state.recordFailure("issue:ENG-1");
+    const loop = makeLoop([makeCandidate("issue:ENG-1")], 3);
+    const updateCalls: unknown[] = [];
+    const commentCalls: unknown[] = [];
+    let blocked = false;
+    const fakeLinear = {
+      issue: async () =>
+        blocked
+          ? null // second poll: already-escalated issues drop out of the unlabeled() snapshot, so nothing re-fires
+          : {
+              id: "id-1",
+              identifier: "ENG-1",
+              team: { id: "team-1" },
+              labels: [],
+            },
+      ensureLabel: async (name: string) => ({ id: `label-${name}`, name }),
+      updateIssue: async (id: string, input: unknown) => {
+        updateCalls.push({ id, input });
+        blocked = true;
+      },
+      createComment: async (input: unknown) => {
+        commentCalls.push(input);
+      },
+    } as unknown as LoopContext["linear"];
+
+    await runLoop(loop, makeCtx({ linear: fakeLinear }), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 5000,
+    });
+
+    expect(dispatcher.dispatched.length).toBe(0);
+    expect(updateCalls.length).toBe(1);
+    expect(commentCalls.length).toBe(1);
+  });
+
+  it("does not record a failure for a DispatcherBusyError, only logs a routine skip", async () => {
+    class BusyDispatcher extends FakeDispatcher {
+      override async dispatch(): Promise<never> {
+        throw new DispatcherBusyError("worktree pane still hosts a working agent");
+      }
+    }
+    const dispatcher = new BusyDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 3);
+    const logs: string[] = [];
+
+    await runLoop(loop, makeCtx(), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 5000,
+    });
+
+    expect(state.failures("issue:A")).toBe(0);
+    expect(logs.some((line) => line.includes("skipped, its workspace is busy"))).toBe(true);
   });
 
   it("settling an in-flight dispatch removes it from the in-flight set and wakes the next poll without waiting the full pollMs", async () => {

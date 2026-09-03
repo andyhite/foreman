@@ -10,9 +10,13 @@
  * redundant dispatch.
  */
 
-import { branchNameFor, type Confirmer, type Dispatcher, type DispatchRequest, type GitHubClient, type GlobalConfig, type LinearWriter, type ResolvedRepoEntry } from "@foreman/core";
+import { branchNameFor, priorityRank, type Confirmer, type Dispatcher, type DispatchRequest, type GitHubClient, type GlobalConfig, type Issue, type LinearWriter, type ResolvedRepoEntry } from "@foreman/core";
 import nodeProcess from "node:process";
+import { isDispatcherBusy } from "./dispatch/index.ts";
+import { applyEscalation, type Escalation } from "./escalate.ts";
 import type { InflightStore } from "./inflight.ts";
+
+export type { Escalation } from "./escalate.ts";
 
 export interface Rule<S> {
   name: string;
@@ -30,11 +34,20 @@ export interface Candidate {
   reason: string;
 }
 
+/** Highest priority first, then oldest first — the tie-break every rule's candidate list shares. */
+export function byPriorityThenAge(a: Issue, b: Issue): number {
+  const rankDiff = priorityRank(a.priority) - priorityRank(b.priority);
+  if (rankDiff !== 0) return rankDiff;
+  return Date.parse(a.createdAt) - Date.parse(b.createdAt);
+}
+
 export interface Loop<S> {
   name: "plan" | "build";
   concurrency: number;
   fetch(ctx: LoopContext): Promise<S>;
   rules: Rule<S>[];
+  /** Units of work this loop refuses to dispatch again; `runLoop` writes each to Linear before offering candidates (SPEC §17.7). */
+  escalations?(snapshot: S, ctx: LoopContext): Escalation[];
 }
 
 export interface LoopContext {
@@ -46,9 +59,6 @@ export interface LoopContext {
 }
 
 export type Logger = (message: string) => void;
-
-const GAVE_UP_FAILURE_THRESHOLD = 2;
-
 /**
  * `candidate.worktree` is only a path (per `Candidate`'s own shape); the
  * `DispatchItem.worktree` a print/herdr dispatch needs also carries `branch`
@@ -64,7 +74,7 @@ async function resolveWorktree(
 ): Promise<{ path: string; branch: string; baseBranch: string } | null> {
   if (candidate.worktree === null) return null;
   const issue = await ctx.linear.issue(candidate.subject);
-  if (!issue) return null;
+  if (!issue) throw new Error(`${candidate.subject}: cannot resolve a worktree — Linear returned no issue for the identifier.`);
   return {
     path: candidate.worktree,
     branch: branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath),
@@ -113,18 +123,42 @@ async function offerCandidates<S>(
   opts: RunLoopOptions,
   wake: () => void,
   gaveUpLogged: Set<string>,
-): Promise<Promise<void>[]> {
+): Promise<{ settling: Promise<void>[]; dispatched: number; candidates: number }> {
   const settling: Promise<void>[] = [];
+  let dispatched = 0;
+  let candidates = 0;
   for (const rule of loop.rules) {
     for (const candidate of rule.select(snapshot)) {
+      candidates += 1;
       if (opts.state.has(candidate.key)) continue;
       if (opts.state.inFlightCount() >= loop.concurrency) continue;
-      if (opts.state.failures(candidate.key) >= GAVE_UP_FAILURE_THRESHOLD) {
+
+      const cap = ctx.config.loop.retryCap;
+      const failures = opts.state.failures(candidate.key);
+      if (failures >= cap) {
         if (!gaveUpLogged.has(candidate.key)) {
           gaveUpLogged.add(candidate.key);
-          opts.log(
-            `${candidate.key}: gave up after ${GAVE_UP_FAILURE_THRESHOLD} failed dispatches; add \`foreman:blocked\` or fix by hand.`,
-          );
+          if (candidate.key.startsWith("issue:")) {
+            const summary = `escalate ${candidate.subject} (retry-exhausted)`;
+            // eslint-disable-next-line no-await-in-loop -- confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
+            if (await opts.confirmer.confirm({ kind: "linear-write", summary })) {
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                opts.log(
+                  await applyEscalation(ctx.linear, {
+                    issueId: candidate.subject,
+                    kind: "retry-exhausted",
+                    attempts: failures,
+                    detail: candidate.reason,
+                  }),
+                );
+              } catch (error) {
+                opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+              }
+            }
+          } else {
+            opts.log(`${candidate.key}: gave up after ${failures} failed dispatches; fix by hand.`);
+          }
         }
         continue;
       }
@@ -133,27 +167,42 @@ async function offerCandidates<S>(
       const approved = await opts.confirmer.confirm({ kind: `dispatch-${loop.name}`, summary: candidate.reason });
       if (!approved) continue;
 
-      // eslint-disable-next-line no-await-in-loop
-      const request = await buildRequest(candidate, ctx);
-      // eslint-disable-next-line no-await-in-loop
-      const handles = await opts.dispatcher.dispatch(request);
-      const handle = handles[0];
-      if (!handle) continue;
-      opts.state.record(candidate.key, handle);
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const request = await buildRequest(candidate, ctx);
+        // eslint-disable-next-line no-await-in-loop
+        const handles = await opts.dispatcher.dispatch(request);
+        const handle = handles[0];
+        if (!handle) continue;
+        opts.state.record(candidate.key, handle);
+        dispatched += 1;
 
-      const settled = opts.dispatcher.settle(handle).then((outcome) => {
-        opts.state.remove(candidate.key);
-        if (outcome.status !== "settled" || outcome.exitCode !== 0) {
-          opts.state.recordFailure(candidate.key);
-        } else {
-          opts.state.clearFailures(candidate.key);
+        const settled = opts.dispatcher
+          .settle(handle)
+          .then((outcome) => {
+            if (outcome.status !== "settled" || outcome.exitCode !== 0) opts.state.recordFailure(candidate.key);
+            else opts.state.clearFailures(candidate.key);
+          })
+          .catch((error: unknown) => {
+            opts.log(`${candidate.key}: settle failed (${error instanceof Error ? error.message : String(error)})`);
+            opts.state.recordFailure(candidate.key);
+          })
+          .finally(() => {
+            opts.state.remove(candidate.key);
+            if (!opts.once) wake();
+          });
+        settling.push(settled);
+      } catch (error) {
+        if (isDispatcherBusy(error)) {
+          opts.log(`${candidate.key}: skipped, its workspace is busy`);
+          continue;
         }
-        if (!opts.once) wake();
-      });
-      settling.push(settled);
+        opts.log(`${candidate.key}: dispatch failed (${error instanceof Error ? error.message : String(error)})`);
+        opts.state.recordFailure(candidate.key);
+      }
     }
   }
-  return settling;
+  return { settling, dispatched, candidates };
 }
 
 export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopOptions): Promise<void> {
@@ -177,8 +226,31 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
     };
 
     for (;;) {
-      const snapshot = await loop.fetch(ctx);
-      const settling = await offerCandidates(loop, snapshot, ctx, opts, wake, gaveUpLogged);
+      let snapshot: S;
+      try {
+        snapshot = await loop.fetch(ctx);
+      } catch (error) {
+        if (opts.once) throw error;
+        opts.log(`fetch failed, retrying next poll: ${error instanceof Error ? error.message : String(error)}`);
+        await new Promise<void>((res) => setTimeout(res, opts.pollMs));
+        if (stop) return;
+        continue;
+      }
+
+      for (const escalation of loop.escalations?.(snapshot, ctx) ?? []) {
+        const summary = `escalate ${escalation.issueId} (${escalation.kind})`;
+        // eslint-disable-next-line no-await-in-loop
+        if (!(await opts.confirmer.confirm({ kind: "linear-write", summary }))) continue;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          opts.log(await applyEscalation(ctx.linear, escalation));
+        } catch (error) {
+          opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+        }
+      }
+
+      const { settling, dispatched, candidates } = await offerCandidates(loop, snapshot, ctx, opts, wake, gaveUpLogged);
+      opts.log(`${loop.name}: ${dispatched} dispatched, ${opts.state.inFlightCount()} in flight, ${candidates} eligible`);
 
       if (opts.once) {
         await Promise.all(settling);
