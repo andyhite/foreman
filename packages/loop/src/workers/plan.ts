@@ -35,11 +35,8 @@ async function findPlanCandidates(ctx: WorkerContext): Promise<PlanCandidate[]> 
 
   const [projectLists, issuesInScope] = await Promise.all([
     Promise.all(initiativeIds.map((initiativeId) => ctx.linear.initiativeProjects(initiativeId))),
-    ctx.linear.issues({ filter: inInitiatives(initiativeIds), limit: 500 }),
+    ctx.linear.issues({ filter: inInitiatives(initiativeIds), first: 250 }),
   ]);
-  if (issuesInScope.length >= 500) {
-    ctx.log(`plan: query returned a full page of 500 issues; some projects may look bare when they are not.`);
-  }
   const projectsWithIssues = new Set(
     issuesInScope.map((issue) => issue.project?.id).filter((id): id is string => id != null),
   );
@@ -83,7 +80,7 @@ async function runPlan(ctx: WorkerContext): Promise<WorkerReport> {
 
   const [planCandidates, blockedHuman] = await Promise.all([
     findPlanCandidates(ctx),
-    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
+    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, first: 250 }),
   ]);
 
   const snapshot: BoardSnapshot = {

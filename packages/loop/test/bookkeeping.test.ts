@@ -58,7 +58,7 @@ describe("Bookkeeping.save — atomic write", () => {
   it("round-trips through save/load", () => {
     const { path } = tempPath();
     const bookkeeping = Bookkeeping.load(path);
-    bookkeeping.setLastTriageRun(new Date("2026-02-01T06:00:00.000Z"));
+    bookkeeping.recordTriageRun("2026-02-01", new Date("2026-02-01T06:00:00.000Z"));
     bookkeeping.setReviewedSha("ENG-5", "deadbeef");
     bookkeeping.save();
 

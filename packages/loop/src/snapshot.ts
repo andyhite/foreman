@@ -59,7 +59,6 @@ export function toQueueItem(issue: Issue): QueueItem {
 /** Maps a blocked-human issue to `BlockedItem`, reusing the same marker decode as `/foreman:status`. */
 export function toBlockedItem(issue: Issue): BlockedItem {
   const found =
-    decodeMarker<BlockRecord>(MARKER_KIND.block, issue.description ?? "") ??
     [...issue.comments]
       .reverse()
       .map((comment) => decodeMarker<BlockRecord>(MARKER_KIND.block, comment.body))

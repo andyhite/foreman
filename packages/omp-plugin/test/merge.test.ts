@@ -292,10 +292,10 @@ describe("runMerge — worktree cleanup (SPEC §12)", () => {
   beforeEach(() => {
     repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-merge-cleanup-")));
     directBranchRepoPath = join(repoRoot, "repo");
-    execFileSync("git", ["init", "--initial-branch=main", directBranchRepoPath], { encoding: "utf8" });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: directBranchRepoPath, encoding: "utf8" });
-    execFileSync("git", ["config", "user.name", "Test"], { cwd: directBranchRepoPath, encoding: "utf8" });
-    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: directBranchRepoPath, encoding: "utf8" });
+    execFileSync("git", ["init", "--initial-branch=main", directBranchRepoPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: directBranchRepoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: directBranchRepoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: directBranchRepoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   });
 
   afterEach(() => {

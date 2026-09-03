@@ -492,6 +492,23 @@ for (const file of readdirSync(join(pluginRoot, "rules")).filter((f) => f.endsWi
   }
 }
 
+/*
+ * Marker lines are the contract between the command prompts that carry them,
+ * the guard that writes them, and the sink that reads them (AGENTS.md). A
+ * marker with a reader and no writer is dead code that looks load-bearing;
+ * one with a writer and no reader silently drops data.
+ */
+const MARKER_SOURCES = {
+  guard: join(pluginRoot, "src/enforce/task-guard.ts"),
+  sink: join(pluginRoot, "src/results/sink.ts"),
+} as const;
+const markerNames = (text: string): Set<string> => new Set([...text.matchAll(/FOREMAN-[A-Z][A-Z-]*/g)].map((m) => m[0]));
+const written = markerNames(readFileSync(MARKER_SOURCES.guard, "utf8"));
+const read = markerNames(readFileSync(MARKER_SOURCES.sink, "utf8"));
+for (const name of read) {
+  if (!written.has(name)) problems.push(`${name} is read in results/sink.ts but written nowhere in enforce/task-guard.ts`);
+}
+
 if (problems.length > 0) {
   console.error(`agent contract check failed (${problems.length}):`);
   for (const problem of problems) console.error(`  - ${problem}`);

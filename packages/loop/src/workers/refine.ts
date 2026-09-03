@@ -38,14 +38,14 @@ async function runRefine(ctx: WorkerContext): Promise<WorkerReport> {
     // implement or review: work already committed keeps moving.
     ctx.linear.issues({
       filter: all(inState("Backlog"), notInTerminalProject(), notInPausedProject()),
-      limit: 500,
+      first: 250,
     }),
     ctx.linear.issues({
       filter: all(inState("Todo"), notInTerminalProject(), notInPausedProject()),
-      limit: 500,
+      first: 250,
     }),
-    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
-    ctx.linear.issues({ filter: readyFilter(), limit: 500 }),
+    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, first: 250 }),
+    ctx.linear.issues({ filter: readyFilter(), first: 250 }),
   ]);
 
   const legacyInTodo = todoIssues.filter((issue) => hasLabel(issue, LEGACY_LABEL));

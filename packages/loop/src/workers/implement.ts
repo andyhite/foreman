@@ -28,8 +28,8 @@ async function runImplement(ctx: WorkerContext): Promise<WorkerReport> {
   const dispatched: DispatchDecision[] = [];
 
   const [todoIssues, blockedHuman] = await Promise.all([
-    ctx.linear.issues({ filter: all(inState("Todo"), notInTerminalProject()), limit: 500 }),
-    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
+    ctx.linear.issues({ filter: all(inState("Todo"), notInTerminalProject()), first: 250 }),
+    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, first: 250 }),
   ]);
 
   const { inScope: todo, skipped: scopeSkips } = await filterInScope(ctx, "implement", todoIssues);

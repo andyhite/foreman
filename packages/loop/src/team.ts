@@ -20,11 +20,13 @@ import { HerdrDispatcher, PrintDispatcher } from "./dispatch/index.ts";
 import {
   activateRepoPlugin,
   BATCH_SUBJECT,
+  ConfigError,
   ControlServer,
   DISPATCH_COMMAND,
   INBOX_FILTER,
   INTAKE_LOOP_ID,
   LinearClient,
+  linearEnvNames,
   PROPOSALS_FILTER,
   emptyBoardCounts,
   expandHome,
@@ -50,6 +52,7 @@ import {
   type ControlEvent,
   type ControlHandlers,
   type Dispatcher,
+  type DispatchHandle,
   type EmittableEvent,
   type LinearRequestEvent,
   type GlobalConfig,
@@ -59,6 +62,7 @@ import {
   type ResolvedRepoEntry,
   type RunState,
   style,
+  stripControlChars,
 } from "@foreman/core";
 import { Bookkeeping } from "./bookkeeping";
 import { patchAndWriteGlobalConfig } from "./control";
@@ -75,6 +79,7 @@ interface ParsedArgs {
   team: string | null;
   once: boolean;
   verbose: boolean;
+  force: boolean;
   homePath: string | null;
   noControl: boolean;
   herdrLayout: "tab" | "pane" | null;
@@ -87,6 +92,8 @@ Usage: foreman team [key] [options]
 
   [key]                   Linear team key. Defaults to the sole team the credential can reach.
   --once                  Run one tick, then exit.
+  --force                 Bypass the daily-throttle/window gate for the next tick only,
+                          e.g. after the batch already dispatched today.
   --verbose               Log skip reasons, Linear request tracing, auto-approved actions, and full error stacks.
   --home <path>           Home directory containing .foreman/config.json (default: real home).
   --no-control            Skip the control-plane socket/status.json; --once already implies this.
@@ -102,6 +109,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     team: null,
     once: false,
     verbose: false,
+    force: false,
     homePath: null,
     noControl: false,
     herdrLayout: null,
@@ -115,6 +123,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--verbose":
         parsed.verbose = true;
+        break;
+      case "--force":
+        parsed.force = true;
         break;
       case "--no-control":
         parsed.noControl = true;
@@ -277,6 +288,16 @@ export interface IntakeContext {
   ensurePluginActive(repoRoot: string): void;
   /** `--verbose`: full error stacks alongside the one-line failures already logged unconditionally. */
   verbose?: boolean;
+  /**
+   * `--force`: bypasses the daily-throttle/window gate for exactly the
+   * next tick, then `runIntakeTick` clears it back to `false`. Mutated
+   * in place rather than threaded through `IntakeTickReport` because the
+   * same `ctx` object is reused across every tick of the long-running
+   * loop (SPEC §3.12) — a one-shot flag has to live on shared state.
+   */
+  force?: boolean;
+  /** Observes a launched `foreman-triage` dispatch to completion in the background, mirroring `Supervisor#watchSettle`; shutdown drains it before releasing the intake lock. */
+  watchSettle(handles: readonly DispatchHandle[]): void;
 }
 
 export interface IntakeTickReport {
@@ -299,7 +320,16 @@ export interface IntakeTickReport {
 export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickReport> {
   const now = ctx.now();
 
-  const proposed = await ctx.linear.issues({ filter: PROPOSALS_FILTER, limit: 500 });
+  // One-shot: `--force` (SPEC §3.12) bypasses the window/daily-throttle
+  // gate for exactly this tick, then clears itself so the loop resumes
+  // normal once-a-day dispatch — an operator override for "the batch
+  // already ran today, but I want it to run again right now", not a
+  // standing setting. Consumed unconditionally, even when backpressure
+  // trips below, so a forced call never leaves it armed for a later tick.
+  const forced = ctx.force === true;
+  if (ctx.force) ctx.force = false;
+
+  const proposed = await ctx.linear.issues({ filter: PROPOSALS_FILTER, first: 250 });
   const proposedCount = proposed.length;
   const backpressureTripped = proposedCount > ctx.config.loop.backpressureThreshold;
 
@@ -308,16 +338,13 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
 
   if (backpressureTripped) {
     skipReason = `team-wide proposal backpressure: ${proposedCount} proposed > threshold ${ctx.config.loop.backpressureThreshold}`;
-    ctx.log(style("yellow", skipReason));
   } else {
-    const lastRunAt = ctx.bookkeeping.state.lastTriageRunAt;
-    const alreadyRanToday =
-      lastRunAt !== null &&
-      intakeDayKey(new Date(lastRunAt), ctx.config.intake.timezone) === intakeDayKey(now, ctx.config.intake.timezone);
-    if (!pastIntakeWindow(ctx.config.intake.window, now, ctx.config.intake.timezone)) {
+    const dayKey = intakeDayKey(now, ctx.config.intake.timezone);
+    const alreadyRanToday = !forced && ctx.bookkeeping.triageRunsOn(dayKey) >= ctx.config.intake.batchesPerDay;
+    if (!forced && !pastIntakeWindow(ctx.config.intake.window, now, ctx.config.intake.timezone)) {
       skipReason = `before intake.window (${ctx.config.intake.window})`;
     } else if (alreadyRanToday) {
-      skipReason = "already dispatched the intake batch today";
+      skipReason = `already dispatched ${ctx.config.intake.batchesPerDay} intake batch(es) today`;
     } else {
       const inbox = await ctx.linear.issues({ filter: INBOX_FILTER, limit: ctx.config.intake.batchSize });
       if (inbox.length === 0) {
@@ -377,17 +404,31 @@ export async function runIntakeTick(ctx: IntakeContext): Promise<IntakeTickRepor
               alias: "intake",
               items: [{ issueId: null, subject: null, dispatchId, worktree: null }],
             });
-            void handles;
-            ctx.bookkeeping.setLastTriageRun(now);
-            ctx.bookkeeping.setLastRun("intake", now);
+            ctx.watchSettle(handles);
+            ctx.bookkeeping.recordTriageRun(dayKey, now);
             dispatched = true;
           } catch (error) {
             skipReason = `dispatch ${DISPATCH_COMMAND.triage} failed: ${String(error)}`;
-            if (ctx.verbose && error instanceof Error && error.stack) ctx.log(style("dim", `  · ${error.stack}`));
+            if (error instanceof Error && error.stack) ctx.log(style("dim", `  · ${error.stack}`));
           }
         }
       }
     }
+  }
+
+  // Dispatch-pass outcome (mirrors the apply pass below): logged
+  // unconditionally, not gated behind --verbose. Without this an
+  // unattended `foreman team` prints its startup banner once and then
+  // falls silent on every subsequent tick that has nothing new to do —
+  // indistinguishable from a hung process. `backpressureTripped` keeps
+  // its own yellow styling since it is an operator-actionable warning,
+  // not a routine skip.
+  if (dispatched) {
+    ctx.log(`${style("green", "✓")} dispatch pass: dispatched foreman-triage for the triage batch${forced ? " (forced)" : ""}.`);
+  } else if (backpressureTripped) {
+    ctx.log(style("yellow", skipReason ?? ""));
+  } else if (skipReason) {
+    ctx.log(`${style("dim", "○")} dispatch pass: ${skipReason}.`);
   }
 
   // Apply pass (SPEC §7.1, §3.12): runs every tick regardless of the
@@ -595,7 +636,7 @@ function createIntakeControlHandlers(ctx: IntakeContext, runtime: IntakeRuntime,
         `${report.agent} ${report.status}${report.subject ? ` ${report.subject}` : ""}: ${report.summary}`,
       );
       for (const entity of report.created) {
-        ctx.log(`  + ${entity.kind} ${entity.identifier ?? entity.id} — ${entity.title}`);
+        ctx.log(`  + ${entity.kind} ${entity.identifier ?? entity.id} — ${stripControlChars(entity.title)}`);
       }
       runtime.emit({ event: "report", report }, ctx.now);
     },
@@ -684,12 +725,18 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   // process has no registry entry, so `entryTeam` is always null and the
   // fallback is the sole team the credential can reach.
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
+  let endpointHost: string;
   try {
-    if (new URL(config.linear.endpoint).host !== "api.linear.app") {
-      log(style("yellow", `! linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key is being sent there.`));
-    }
+    endpointHost = new URL(config.linear.endpoint).host;
   } catch {
     log(style("yellow", `! linear.endpoint "${config.linear.endpoint}" is not a valid URL — the API key is being sent there.`));
+    endpointHost = "";
+  }
+  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
+    throw new ConfigError(
+      `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
+      ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
+    );
   }
   const team = await resolveTeamKey({ linear: bootstrapLinear, flagTeam: args.team, entryTeam: null });
   const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
@@ -704,8 +751,8 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
 
   const dispatcher = await resolveDispatcher(
     {
-      createPrint: () => new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket }),
-      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket }),
+      createPrint: () => new PrintDispatcher(config, { scrubEnv: linearEnvNames(config), reservationsDir: controlPaths.reservations, controlSocket }),
+      createHerdr: () => new HerdrDispatcher(config, { scrubEnv: linearEnvNames(config), reservationsDir: controlPaths.reservations, controlSocket }),
     },
     log,
   );
@@ -722,6 +769,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
   const statusPath = args.once || args.noControl ? null : controlPaths.status;
   const home = args.homePath ?? homedir();
 
+  const activeSettles = new Set<Promise<void>>();
   const ctx: IntakeContext = {
     config,
     linear,
@@ -736,6 +784,20 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
       activateRepoPlugin(repoRoot, home);
     },
     verbose: args.verbose,
+    force: args.force,
+    watchSettle: (handles) => {
+      const first = handles[0];
+      if (!first) return;
+      const settle = (async () => {
+        try {
+          await dispatcher.settle(first);
+        } catch (error) {
+          log(`intake settle failed: ${String(error)}`);
+        }
+      })();
+      activeSettles.add(settle);
+      void settle.finally(() => activeSettles.delete(settle));
+    },
   };
   const runtime = new IntakeRuntime();
 
@@ -802,7 +864,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
       log(`${style("cyan", "i")} control socket listening at ${controlPaths.socket}`);
     }
 
-    log(style("bold", `starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}`));
+    log(style("bold", `starting: team=${team} dispatcher=${dispatcher.kind} window=${config.intake.window}${args.force ? " (--force: next tick bypasses the daily-throttle/window gate)" : ""}`));
 
     if (config.loop.mode === "confirm") {
       const rule = style("yellow", "─".repeat(62));
@@ -818,10 +880,7 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     // the process polling forever instead of draining.
     if (runtime.currentRunState() === "starting") runtime.runState = "running";
     if (args.once) {
-      const report = await runIntakeTick(ctx);
-      if (args.verbose && report.skipReason) {
-        log(`skip: ${report.skipReason}`);
-      }
+      await runIntakeTick(ctx);
     } else {
       while (!runtime.stopped) {
         const state = runtime.currentRunState();
@@ -836,9 +895,6 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
           runtime.lastReport = report;
           runtime.ticks += 1;
           runtime.lastTickAt = ctx.now().toISOString();
-          if (args.verbose && report.skipReason) {
-            log(`skip: ${report.skipReason}`);
-          }
           publishIntakeStatus(ctx, runtime, statusPath);
         } catch (error) {
           // A transient Linear error (SPEC §17.5's per-worker isolation,
@@ -852,6 +908,11 @@ export async function runTeam(argv: readonly string[]): Promise<void> {
     }
   } finally {
     runtime.runState = "stopped";
+    if (runtime.stopMode !== "now" && activeSettles.size > 0) {
+      log(`draining ${activeSettles.size} in-flight dispatch(es) before releasing the lock`);
+      const deadline = intakeInterruptibleWait(runtime, 30_000);
+      await Promise.race([Promise.allSettled([...activeSettles]), deadline]);
+    }
     lock.release();
     await controlServer?.close();
     confirmer.close();

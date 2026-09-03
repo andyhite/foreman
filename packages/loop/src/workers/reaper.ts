@@ -12,9 +12,21 @@ import {
   lockState,
   readLockComment,
   type BlockedItem,
+  type FoundMarker,
+  type LockRecord,
 } from "@foreman/core";
 import type { Worker, WorkerContext, WorkerReport } from "./types.ts";
 
+/** The stage a lock's `agent` field maps back to, for a skip/blocked entry's `stage`. */
+function stageFor(record: FoundMarker<LockRecord> | null): "refine" | "review" | "plan" | "implement" {
+  return record?.data.agent === "foreman-refine"
+    ? "refine"
+    : record?.data.agent === "foreman-review"
+      ? "review"
+      : record?.data.agent === "foreman-plan"
+        ? "plan"
+        : "implement";
+}
 async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
   const now = ctx.now();
   const errors: string[] = [];
@@ -28,10 +40,7 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
     viewerId = null;
   }
 
-  const running = await ctx.linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500, includeComments: true });
-  if (running.length >= 500) {
-    ctx.log(`reaper: query returned a full page of 500 in-flight issues; some may not have been swept this pass.`);
-  }
+  const running = await ctx.linear.issues({ filter: IN_FLIGHT_FILTER, first: 250, includeComments: true });
 
   // Live dispatch ids: anything the loop itself started and has not yet
   // cleared from bookkeeping. This is deliberately non-authoritative (SPEC
@@ -55,40 +64,42 @@ async function runReaper(ctx: WorkerContext): Promise<WorkerReport> {
 
     const summary = `release the stale agent lock on ${issue.identifier}`;
     const terminal = isTerminal(issue.state);
-    if (await ctx.confirm({ kind: "linear-write", summary })) {
-      try {
-        const runningLabelIds = issue.labels
-          .filter((label) => label.name === AGENT_LABEL.running)
-          .map((label) => label.id);
-        const addedLabelIds: string[] = [];
-        if (!terminal) {
-          const needsInputLabel = await ctx.linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
-          addedLabelIds.push(needsInputLabel.id);
-        }
-        await ctx.linear.updateIssue(issue.id, {
-          addedLabelIds,
-          removedLabelIds: runningLabelIds,
-        });
-        await ctx.linear.createComment({
-          issueId: issue.id,
-          body:
-            `Reaper: lock orphaned (${classification.reason}). ` +
-            `Taken at ${record?.data.takenAt ?? "unknown"}, worktree ${record?.data.worktree ?? "unknown"} ` +
-            `left standing for inspection — the reaper never deletes it.`,
-        });
-      } catch (error) {
-        errors.push(`reaper failed on ${issue.identifier}: ${String(error)}`);
-        continue;
+    const approved = await ctx.confirm({ kind: "linear-write", summary });
+    if (!approved) {
+      skipped.push({
+        stage: stageFor(record),
+        issueId: issue.identifier,
+        code: "reaper-declined",
+        message: `Operator declined: ${summary}`,
+      });
+      continue;
+    }
+    try {
+      const runningLabelIds = issue.labels
+        .filter((label) => label.name === AGENT_LABEL.running)
+        .map((label) => label.id);
+      const addedLabelIds: string[] = [];
+      if (!terminal) {
+        const needsInputLabel = await ctx.linear.ensureLabel(BLOCKED_LABEL.needsInput, issue.team.id);
+        addedLabelIds.push(needsInputLabel.id);
       }
+      await ctx.linear.updateIssue(issue.id, {
+        addedLabelIds,
+        removedLabelIds: runningLabelIds,
+      });
+      await ctx.linear.createComment({
+        issueId: issue.id,
+        body:
+          `Reaper: lock orphaned (${classification.reason}). ` +
+          `Taken at ${record?.data.takenAt ?? "unknown"}, worktree ${record?.data.worktree ?? "unknown"} ` +
+          `left standing for inspection — the reaper never deletes it.`,
+      });
+    } catch (error) {
+      errors.push(`reaper failed on ${issue.identifier}: ${String(error)}`);
+      continue;
     }
 
-    const stage = record?.data.agent === "foreman-refine"
-      ? "refine"
-      : record?.data.agent === "foreman-review"
-        ? "review"
-        : record?.data.agent === "foreman-plan"
-          ? "plan"
-          : "implement";
+    const stage = stageFor(record);
 
     if (terminal) {
       // The issue is already completed/canceled — releasing the lock is the

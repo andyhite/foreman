@@ -12,7 +12,7 @@
  * Linear and the omp registry on every supervisor start (SPEC §11, §17.5).
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { style, type ForemanAgentName } from "@foreman/core";
@@ -48,6 +48,8 @@ export interface BookkeepingState {
   attempts: Record<string, AttemptRecord>;
   reviewCycles: Record<string, number>;
   lastTriageRunAt: string | null;
+  /** Triage dispatches recorded per calendar day (an `intakeDayKey` value) — only the current day is ever populated. */
+  triageRuns: Record<string, number>;
   reviewedSha: Record<string, string>;
   inFlight: DispatchRecordEntry[];
   pendingDecisions: PendingDecision[];
@@ -68,6 +70,7 @@ export function emptyBookkeepingState(): BookkeepingState {
     attempts: {},
     reviewCycles: {},
     lastTriageRunAt: null,
+    triageRuns: {},
     reviewedSha: {},
     inFlight: [],
     pendingDecisions: [],
@@ -119,8 +122,9 @@ export class Bookkeeping {
     const dir = dirname(this.#path);
     mkdirSync(dir, { recursive: true });
     const tempPath = `${this.#path}.${randomUUID()}.tmp`;
-    writeFileSync(tempPath, JSON.stringify(this.#state, null, 2), "utf8");
+    writeFileSync(tempPath, JSON.stringify(this.#state, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(tempPath, this.#path);
+    chmodSync(this.#path, 0o600);
   }
 
   // ---- in-flight dispatch tracking --------------------------------------
@@ -142,6 +146,15 @@ export class Bookkeeping {
     const ids = new Set<string>();
     for (const entry of this.#state.inFlight) {
       if (entry.stage === stage && entry.projectId) ids.add(entry.projectId);
+    }
+    return ids;
+  }
+
+  /** Issue identifiers among the current in-flight dispatches, any stage. */
+  inFlightIssueIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of this.#state.inFlight) {
+      if (entry.issueId) ids.add(entry.issueId);
     }
     return ids;
   }
@@ -249,8 +262,18 @@ export class Bookkeeping {
 
   // ---- misc ---------------------------------------------------------------
 
-  setLastTriageRun(now: Date): void {
+  /** Records one triage dispatch against `dayKey` (an `intakeDayKey` value). */
+  recordTriageRun(dayKey: string, now: Date): void {
     this.#state.lastTriageRunAt = now.toISOString();
+    this.#state.triageRuns[dayKey] = (this.#state.triageRuns[dayKey] ?? 0) + 1;
+    // One key per day would grow without bound; only the current day is ever read.
+    for (const key of Object.keys(this.#state.triageRuns)) {
+      if (key !== dayKey) delete this.#state.triageRuns[key];
+    }
+  }
+
+  triageRunsOn(dayKey: string): number {
+    return this.#state.triageRuns[dayKey] ?? 0;
   }
 
   setReviewedSha(issueId: string, sha: string): void {

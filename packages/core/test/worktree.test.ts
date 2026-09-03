@@ -115,7 +115,7 @@ describe("worktreePathFor", () => {
 
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 describe("worktree lifecycle against a real repo", () => {
@@ -125,7 +125,7 @@ describe("worktree lifecycle against a real repo", () => {
   beforeEach(() => {
     repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-worktree-")));
     repoPath = join(repoRoot, "repo");
-    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8" });
+    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     git(repoPath, "config", "user.email", "test@example.com");
     git(repoPath, "config", "user.name", "Test");
     git(repoPath, "commit", "--allow-empty", "-m", "initial commit");
@@ -291,7 +291,7 @@ describe("worktree lifecycle against a real repo", () => {
         if (argv[0] === "git" && argv[1] === "fetch") {
           throw new Error("simulated offline: could not resolve host");
         }
-        const stdout = execFileSync("git", argv.slice(1), { cwd: options.cwd, encoding: "utf8" });
+        const stdout = execFileSync("git", argv.slice(1), { cwd: options.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
         return { stdout, stderr: "", code: 0 };
       },
     };

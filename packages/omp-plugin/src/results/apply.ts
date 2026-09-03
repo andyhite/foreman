@@ -31,6 +31,7 @@ import {
   MARKER_KIND,
   resolveState,
   sanitizeAgentText,
+  stripControlChars,
   TYPE_LABEL,
   resolveTeamKey,
 } from "@foreman/core";
@@ -152,7 +153,8 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
   const existingChildTitles = new Set(issue.children.map((child) => child.title));
   const created: CreatedEntity[] = [];
   for (const subIssue of result.subIssues) {
-    if (existingChildTitles.has(subIssue.title)) continue;
+    const subIssueTitle = stripControlChars(subIssue.title);
+    if (existingChildTitles.has(subIssueTitle)) continue;
     const subDescription = renderIssueDescription({
       context: subIssue.description,
       acceptanceCriteria: subIssue.acceptanceCriteria,
@@ -162,7 +164,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
     const subTypeLabel = await deps.linear.ensureLabel(subIssue.type, issue.team.id);
     const child = await deps.linear.createIssue({
       teamId: issue.team.id,
-      title: subIssue.title,
+      title: subIssueTitle,
       description: subDescription,
       estimate: subIssue.estimate,
       parentId: issue.id,
@@ -174,18 +176,19 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
   }
 
   if (result.spikeCreated) {
+    const spikeTitle = stripControlChars(result.spikeCreated.title);
     // The spike is created as a sibling with a `blocks` relation, not a
     // child, so the retry guard checks the parent's existing relations
     // instead of `issue.children`.
     const existingSpike = issue.relations.some(
-      (relation) => relation.type === "blocks" && relation.other.title === result.spikeCreated?.title,
+      (relation) => relation.type === "blocks" && relation.other.title === spikeTitle,
     );
     if (!existingSpike) {
       const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
       const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue.team.id);
       const spike = await deps.linear.createIssue({
         teamId: issue.team.id,
-        title: result.spikeCreated.title,
+        title: spikeTitle,
         description: spikeBody,
         projectId: issue.project?.id,
         labelIds: [spikeTypeLabel.id],
@@ -223,7 +226,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
     const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue.team.id);
     const created = await deps.linear.createIssue({
       teamId: issue.team.id,
-      title: discovered.title,
+      title: stripControlChars(discovered.title),
       description: discovered.description,
       projectId: issue.project?.id,
       labelIds: [discoveredTypeLabel.id],
@@ -288,7 +291,7 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFa
     const typeLabel = await deps.linear.ensureLabel(proposed.type, teamRef.id);
     const created = await deps.linear.createIssue({
       teamId: teamRef.id,
-      title: proposed.title,
+      title: stripControlChars(proposed.title),
       description,
       priority: proposed.proposedPriority,
       estimate: proposed.proposedEstimate ?? undefined,

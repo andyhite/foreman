@@ -81,11 +81,12 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
       endpoint: "https://api.linear.app/graphql",
+      allowCustomEndpoint: false,
     },
     agent: {
       maxRuntimeMs: 7_200_000,
@@ -538,11 +539,11 @@ describe("project-status guards on dispatch-feeding queries", () => {
 
     expect(linear.queries).toContainEqual({
       filter: all(inState("Backlog"), notInTerminalProject(), notInPausedProject()),
-      limit: 500,
+      first: 250,
     });
     expect(linear.queries).toContainEqual({
       filter: all(inState("Todo"), notInTerminalProject(), notInPausedProject()),
-      limit: 500,
+      first: 250,
     });
   });
 
@@ -553,7 +554,7 @@ describe("project-status guards on dispatch-feeding queries", () => {
 
     await implementWorker.run(ctx);
 
-    expect(linear.queries).toContainEqual({ filter: all(inState("Todo"), notInTerminalProject()), limit: 500 });
+    expect(linear.queries).toContainEqual({ filter: all(inState("Todo"), notInTerminalProject()), first: 250 });
   });
 
   it("review's In Review query carries the terminal-project guard", async () => {
@@ -565,7 +566,7 @@ describe("project-status guards on dispatch-feeding queries", () => {
 
     expect(linear.queries).toContainEqual({
       filter: all(inState("In Review"), notInTerminalProject()),
-      limit: 500,
+      first: 250,
       includeComments: true,
     });
   });
@@ -1067,10 +1068,10 @@ describe("mergeDetectWorker — worktree/herdr cleanup (SPEC §12)", () => {
   beforeEach(() => {
     repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-merge-detect-")));
     repoPath = join(repoRoot, "repo");
-    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8" });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath, encoding: "utf8" });
-    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, encoding: "utf8" });
-    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: repoPath, encoding: "utf8" });
+    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   });
 
   afterEach(() => {
@@ -1304,5 +1305,20 @@ describe("reaperWorker — terminal-issue carve-out (SPEC §11)", () => {
     expect(blocked[0]?.issueId).toBe(issue.identifier);
     const skip = report.skipped.find((s) => s.issueId === issue.identifier);
     expect(skip?.code).toBe("lock-orphaned");
+  });
+
+  it("a declined release records only the decline, with no Linear write and no blocked-queue entry", async () => {
+    const issue = orphanedLockIssue({ state: { id: "state-1", name: "Todo", type: "unstarted", position: 1 } });
+    const linear = new ReaperFakeLinear([issue]);
+    const declining = { confirm: async () => false };
+    const ctx = makeContext(linear, makeConfig(), new FakeDispatcher(), makeEntry(), declining);
+
+    const report = await reaperWorker.run(ctx);
+
+    expect(linear.updateIssueCalls).toEqual([]);
+    expect(linear.createCommentCalls).toHaveLength(0);
+    expect(report.queues?.blocked ?? []).toEqual([]);
+    const skip = report.skipped.find((s) => s.issueId === issue.identifier);
+    expect(skip?.code).toBe("reaper-declined");
   });
 });

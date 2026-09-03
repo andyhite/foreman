@@ -40,7 +40,7 @@ async function buildReviewCandidates(
   }
   const inReviewIssues = await ctx.linear.issues({
     filter: all(inState("In Review"), notInTerminalProject()),
-    limit: 500,
+    first: 250,
     includeComments: true,
   });
   const { inScope: inReview, skipped: scopeSkips } = await filterInScope(ctx, "review", inReviewIssues);
@@ -110,7 +110,7 @@ async function runReview(ctx: WorkerContext): Promise<WorkerReport> {
   const candidateSkips: WorkerReport["skipped"] = [];
   const [reviewCandidates, blockedHuman] = await Promise.all([
     buildReviewCandidates(ctx, github, candidateSkips),
-    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, limit: 500 }),
+    ctx.linear.issues({ filter: BLOCKED_HUMAN_FILTER, first: 250 }),
   ]);
 
   const snapshot: BoardSnapshot = {

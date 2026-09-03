@@ -174,6 +174,8 @@ export const IntakeSettingsSchema = Type.Object(
     staleLowDays: Type.Integer({ default: 90, minimum: 1 }),
     /** Inbox items handed to one triage batch. */
     batchSize: Type.Integer({ default: 20, minimum: 1 }),
+    /** Triage batches dispatched per calendar day. Raise to drain a large inbox faster. */
+    batchesPerDay: Type.Integer({ default: 1, minimum: 1 }),
     /** IANA zone name `pastIntakeWindow` compares `window` against. Defaults to the host zone at load time. */
     timezone: Type.String({ default: Intl.DateTimeFormat().resolvedOptions().timeZone, minLength: 1 }),
   },
@@ -194,6 +196,12 @@ export const LinearSettingsSchema = Type.Object(
       default: null,
     }),
     endpoint: Type.String({ default: "https://api.linear.app/graphql", minLength: 1 }),
+    /**
+     * Required to point `endpoint` anywhere but api.linear.app. The API key is
+     * sent to whatever host `endpoint` names, so a typo or an edited config is a
+     * credential leak unless the operator said so explicitly.
+     */
+    allowCustomEndpoint: Type.Boolean({ default: false }),
   },
   { additionalProperties: false, default: {} },
 );

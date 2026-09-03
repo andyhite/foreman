@@ -38,16 +38,14 @@ export interface CapturedOutput {
   /** The `FOREMAN-PREV-STATE` workflow state id embedded in the dispatched task text, or null when absent (refine/review dispatches never move state, or the marker predates this field) — read back to restore the issue on an invalid result (Step 5 item 1). */
   previousStateId: string | null;
 }
-
-/** Recovers `agent`/`dispatchId`/`issueId`/`previousStateId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
+/** Recovers `dispatchId`/`issueId`/`previousStateId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
 export function extractDispatchInfo(
   taskText: string,
-): { agent: string | null; dispatchId: string | null; issueId: string | null; previousStateId: string | null } {
-  const agent = lastMarkerValue(/^FOREMAN-AGENT:\s*(\S+)\s*$/gm, taskText);
+): { dispatchId: string | null; issueId: string | null; previousStateId: string | null } {
   const dispatchId = lastMarkerValue(/^FOREMAN-DISPATCH:\s*(\S+)\s*$/gm, taskText);
   const issueId = lastMarkerValue(/^FOREMAN-ISSUE:\s*(\S+)\s*$/gm, taskText);
   const previousStateId = lastMarkerValue(/^FOREMAN-PREV-STATE:\s*(\S+)\s*$/gm, taskText);
-  return { agent, dispatchId, issueId, previousStateId };
+  return { dispatchId, issueId, previousStateId };
 }
 
 function taskTextOf(entry: unknown): string {

@@ -138,6 +138,18 @@ function assertIntakeTimezoneValid(config: GlobalConfig, describeFor: string): v
   }
 }
 
+/** Rejects an `intake.window` that is not `HH:MM` — otherwise `pastIntakeWindow` compares NaN and skips intake forever, silently. */
+function assertIntakeWindowValid(config: GlobalConfig, describeFor: string): void {
+  const match = /^(\d{2}):(\d{2})$/.exec(config.intake.window);
+  const hour = match ? Number(match[1]) : NaN;
+  const minute = match ? Number(match[2]) : NaN;
+  if (!match || hour > 23 || minute > 59) {
+    throw new ConfigError(`Invalid global config${describeFor ? ` at ${describeFor}` : ""}`, [
+      `intake.window must be "HH:MM" (00:00–23:59), got ${JSON.stringify(config.intake.window)}`,
+    ]);
+  }
+}
+
 /** `~` expands to `home` (default `os.homedir()`); any other path is returned unchanged. */
 export function expandHome(p: string, home: string = homedir()): string {
   if (p === "~") return home;
@@ -191,6 +203,7 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
   assertInitiativesUnique(config, describeFor);
   assertMergeDetectionReachable(config, describeFor);
   assertIntakeTimezoneValid(config, describeFor);
+  assertIntakeWindowValid(config, describeFor);
   return config;
 }
 
@@ -342,6 +355,23 @@ export function resolveLinearApiKey(config: GlobalConfig, env: Record<string, st
       `or point linear.apiKeyFile at a file whose first line is the key.`,
     [`env.${config.linear.apiKeyEnv} is unset`, `linear.apiKeyFile is ${config.linear.apiKeyFile ?? "unset"}`],
   );
+}
+
+/**
+ * Every environment variable name a Linear credential could plausibly reach a
+ * dispatched agent through: the configured one plus anything the operator's
+ * shell exported under a `LINEAR_` prefix. Scrubbing only the configured name
+ * leaves a second export of the same key readable by an agent holding `bash`.
+ */
+export function linearEnvNames(
+  config: GlobalConfig,
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const names = new Set<string>([config.linear.apiKeyEnv]);
+  for (const name of Object.keys(env)) {
+    if (/^LINEAR_/i.test(name)) names.add(name);
+  }
+  return [...names];
 }
 
 /** Lock TTL is `2 × maxRuntimeMs + lockTtlMarginMs` (SPEC §11). */

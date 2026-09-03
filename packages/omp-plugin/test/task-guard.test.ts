@@ -209,11 +209,12 @@ function makeConfig(): GlobalConfig {
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
       endpoint: "https://api.linear.app/graphql",
+      allowCustomEndpoint: false,
     },
     agent: {
       maxRuntimeMs: 7_200_000,

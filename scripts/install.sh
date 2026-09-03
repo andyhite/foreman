@@ -16,13 +16,14 @@
 #
 #   curl -fsSL .../install.sh | bash -s -- --yes
 #
-# Env overrides: FOREMAN_REPO_URL, FOREMAN_INSTALL_DIR, FOREMAN_BIN_DIR.
+# Env overrides: FOREMAN_REPO_URL, FOREMAN_INSTALL_DIR, FOREMAN_BIN_DIR, FOREMAN_REF.
 
 set -euo pipefail
 
 FOREMAN_REPO_URL="${FOREMAN_REPO_URL:-https://github.com/andyhite/foreman.git}"
 FOREMAN_INSTALL_DIR="${FOREMAN_INSTALL_DIR:-$HOME/.foreman/src}"
 FOREMAN_BIN_DIR="${FOREMAN_BIN_DIR:-$HOME/.local/bin}"
+FOREMAN_REF="${FOREMAN_REF:-}"
 
 info() { printf '  %s\n' "$1"; }
 die() { printf 'foreman-install: error: %s\n' "$1" >&2; exit 1; }
@@ -67,6 +68,13 @@ else
   if ! git clone --quiet "$FOREMAN_REPO_URL" "$FOREMAN_INSTALL_DIR"; then
     die "could not clone $FOREMAN_REPO_URL; check the repository URL, credentials, and network connection."
   fi
+fi
+
+if [ -n "$FOREMAN_REF" ]; then
+  info "checking out $FOREMAN_REF"
+  git -C "$FOREMAN_INSTALL_DIR" fetch --quiet --tags origin
+  git -C "$FOREMAN_INSTALL_DIR" checkout --quiet "$FOREMAN_REF" ||
+    die "could not check out $FOREMAN_REF in $FOREMAN_INSTALL_DIR."
 fi
 
 info "bun install --frozen-lockfile && bun run build"

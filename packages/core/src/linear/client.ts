@@ -785,8 +785,25 @@ export class LinearClient implements LinearWriter {
 
   /** Every initiative in the workspace — the setup wizard's picker (SPEC §3.10). */
   async initiatives(): Promise<InitiativeRef[]> {
-    const data = await this.request<{ initiatives: { nodes: InitiativeRef[] } }>(INITIATIVES_QUERY, {});
-    return data.initiatives.nodes;
+    const results: InitiativeRef[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const data = await this.request<{
+        initiatives: { nodes: InitiativeRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(INITIATIVES_QUERY, { after });
+      results.push(...data.initiatives.nodes);
+      if (!data.initiatives.pageInfo.hasNextPage || !data.initiatives.pageInfo.endCursor) break;
+      if (data.initiatives.pageInfo.endCursor === after) {
+        this.refusePartialPage("initiatives()", pages, results.length);
+      }
+      after = data.initiatives.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        this.refusePartialPage("initiatives()", pages, results.length);
+      }
+    }
+    return results;
   }
 
   /** The Linear user id the API key belongs to, memoized for `CACHE_TTL_MS`. */
@@ -891,14 +908,49 @@ export class LinearClient implements LinearWriter {
   }
 
   async teams(): Promise<TeamRef[]> {
-    const data = await this.request<{ teams: { nodes: TeamRef[] } }>(TEAMS_QUERY, {});
-    return data.teams.nodes;
+    const results: TeamRef[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const data = await this.request<{
+        teams: { nodes: TeamRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(TEAMS_QUERY, { after });
+      results.push(...data.teams.nodes);
+      if (!data.teams.pageInfo.hasNextPage || !data.teams.pageInfo.endCursor) break;
+      if (data.teams.pageInfo.endCursor === after) {
+        this.refusePartialPage("teams()", pages, results.length);
+      }
+      after = data.teams.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        this.refusePartialPage("teams()", pages, results.length);
+      }
+    }
+    return results;
   }
 
   async projects(): Promise<ProjectRef[]> {
-    const data = await this.request<{ projects: { nodes: ProjectRef[] } }>(PROJECTS_QUERY, {});
-    return data.projects.nodes;
+    const results: ProjectRef[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const data = await this.request<{
+        projects: { nodes: ProjectRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(PROJECTS_QUERY, { after });
+      results.push(...data.projects.nodes);
+      if (!data.projects.pageInfo.hasNextPage || !data.projects.pageInfo.endCursor) break;
+      if (data.projects.pageInfo.endCursor === after) {
+        this.refusePartialPage("projects()", pages, results.length);
+      }
+      after = data.projects.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        this.refusePartialPage("projects()", pages, results.length);
+      }
+    }
+    return results;
   }
+
 
   /** An initiative's projects — used to check for the standing Maintenance project (SPEC §3.11). */
   async initiativeProjects(initiativeId: string): Promise<ProjectRef[]> {

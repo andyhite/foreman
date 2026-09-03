@@ -158,25 +158,28 @@ export const WORKSPACE_LABELS_QUERY = `
 `;
 
 export const TEAMS_QUERY = `
-  query Teams {
-    teams {
+  query Teams($after: String) {
+    teams(first: 250, after: $after) {
       nodes { id key name }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
 
 export const PROJECTS_QUERY = `
-  query Projects {
-    projects(first: 250) {
+  query Projects($after: String) {
+    projects(first: 250, after: $after) {
       nodes { id name }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
 
 export const INITIATIVES_QUERY = `
-  query Initiatives {
-    initiatives(first: 250) {
+  query Initiatives($after: String) {
+    initiatives(first: 250, after: $after) {
       nodes { id name }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;

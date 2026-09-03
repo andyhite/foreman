@@ -46,12 +46,9 @@ async function runMergeDetect(ctx: WorkerContext): Promise<WorkerReport> {
   // and pollutes every review query behind it.
   const inReviewIssues = await ctx.linear.issues({
     filter: inState("In Review"),
-    limit: 500,
+    first: 250,
     includeComments: true,
   });
-  if (inReviewIssues.length >= 500) {
-    ctx.log(`merge-detect: query returned a full page of 500 In Review issues; some may not have been checked this pass.`);
-  }
   const { inScope: inReview, skipped: scopeSkips } = await filterInScope(ctx, "review", inReviewIssues);
   skipped.push(...scopeSkips);
 

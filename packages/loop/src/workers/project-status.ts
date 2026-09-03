@@ -17,11 +17,8 @@ async function runProjectStatus(ctx: WorkerContext): Promise<WorkerReport> {
 
   const [projectLists, issuesInScope] = await Promise.all([
     Promise.all(initiativeIds.map((initiativeId) => ctx.linear.initiativeProjects(initiativeId))),
-    initiativeIds.length === 0 ? Promise.resolve([]) : ctx.linear.issues({ filter: inInitiatives(initiativeIds), limit: 500 }),
+    initiativeIds.length === 0 ? Promise.resolve([]) : ctx.linear.issues({ filter: inInitiatives(initiativeIds), first: 250 }),
   ]);
-  if (issuesInScope.length >= 500) {
-    ctx.log(`project-status: query returned a full page of 500 issues; some projects' status may be stale this pass.`);
-  }
   const issuesByProject = new Map<string, WorkflowStateType[]>();
   for (const issue of issuesInScope) {
     if (!issue.project) continue;

@@ -114,6 +114,8 @@ export class GitHubClient {
     repoPath: string,
     options: { title: string; body: string; head: string; base: string; draft: boolean },
   ): Promise<{ number: number; url: string; headSha: string }> {
+    assertSafeRef(options.head, "head");
+    assertSafeRef(options.base, "base");
     const args = [
       "gh",
       "pr",
@@ -152,6 +154,7 @@ export class GitHubClient {
    * the two would let an unconfigured CI setup read as green.
    */
   async ciStatus(repoPath: string, ref: string): Promise<CiState> {
+    assertSafeRef(ref, "ref");
     const { stdout } = await this.#runner.run(
       [
         "gh",

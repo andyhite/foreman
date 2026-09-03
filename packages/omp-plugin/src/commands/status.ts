@@ -82,8 +82,6 @@ export function readLoopState(
 }
 
 function questionFor(issue: Issue): string {
-  const found = decodeMarker<{ whatINeed: string }>(MARKER_KIND.block, issue.description ?? "");
-  if (found) return found.whatINeed;
   const latestBlockComment = [...issue.comments]
     .reverse()
     .map((comment) => decodeMarker<{ whatINeed: string }>(MARKER_KIND.block, comment.body))

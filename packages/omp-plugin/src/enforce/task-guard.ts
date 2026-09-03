@@ -15,7 +15,6 @@ import {
   AGENT_LABEL,
   AGENT_OUTPUT_SCHEMAS,
   assertIssueInScope,
-  assertSafeRef,
   LABEL_GROUP,
   RESERVATIONS_ENV,
   branchNameFor,
@@ -429,8 +428,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
     const repoPath = deps.entry.repoPath;
     baseBranch = deps.entry.baseBranch;
-    branch = issue.branchName;
-    assertSafeRef(branch, "issue.branchName");
+    branch = branchNameFor(deps.entry.branchPattern, issue, repoPath);
     const pr = await deps.github.prForBranch(repoPath, branch);
     const diff =
       deps.entry.pr.required && pr

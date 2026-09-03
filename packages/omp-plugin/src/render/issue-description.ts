@@ -4,7 +4,7 @@
  * parses back out, so the two must stay in lockstep: this renders, that reads.
  */
 
-import { contextBody } from "@foreman/core";
+import { contextBody, sanitizeAgentText } from "@foreman/core";
 
 export interface IssueDescriptionInput {
   context: string;
@@ -40,20 +40,22 @@ function renderCriteria(items: string[]): string {
 export function renderIssueDescription(input: IssueDescriptionInput): string {
   const openQuestions = input.openQuestions ?? [];
   const context = (contextBody(input.context) ?? input.context).trim();
-  return [
-    "## Context",
-    context.length > 0 ? context : "_none_",
-    "",
-    "## Acceptance Criteria",
-    renderCriteria(input.acceptanceCriteria),
-    "",
-    "## Affected Areas",
-    renderList(input.affectedAreas),
-    "",
-    "## Out of Scope",
-    renderList(input.outOfScope),
-    "",
-    "## Open Questions",
-    renderList(openQuestions),
-  ].join("\n");
+  return sanitizeAgentText(
+    [
+      "## Context",
+      context.length > 0 ? context : "_none_",
+      "",
+      "## Acceptance Criteria",
+      renderCriteria(input.acceptanceCriteria),
+      "",
+      "## Affected Areas",
+      renderList(input.affectedAreas),
+      "",
+      "## Out of Scope",
+      renderList(input.outOfScope),
+      "",
+      "## Open Questions",
+      renderList(openQuestions),
+    ].join("\n"),
+  );
 }

@@ -47,11 +47,12 @@ function makeConfig(overrides: Partial<GlobalConfig> = {}): GlobalConfig {
       cleanupMergedWorktrees: true,
       stateDir: "~/.foreman/state",
     },
-    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "UTC" },
+    intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "UTC" },
     linear: {
       apiKeyEnv: "LINEAR_API_KEY",
       apiKeyFile: null,
       endpoint: "https://api.linear.app/graphql",
+      allowCustomEndpoint: false,
     },
     agent: {
       maxRuntimeMs: 7_200_000,
@@ -287,6 +288,7 @@ function makeContext(overrides: Partial<IntakeContext> & { config: GlobalConfig;
     log: () => {},
     confirm: async () => true,
     ensurePluginActive: () => {},
+    watchSettle: () => {},
     ...overrides,
   };
 }
@@ -410,7 +412,7 @@ describe("runIntakeTick — window guard", () => {
   });
 
   it("carries a non-default intake.staleLowDays through to the dispatched command", async () => {
-    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 30, batchSize: 20, timezone: "UTC" } });
+    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 30, batchSize: 20, batchesPerDay: 1, timezone: "UTC" } });
     const dispatcher = new FakeDispatcher();
     const issue = makeIssue();
     const linear = new FakeLinear([issue], []);
@@ -447,13 +449,37 @@ describe("runIntakeTick — window guard", () => {
     expect(dispatcher.calls).toHaveLength(0);
   });
 
+  it("dispatches up to intake.batchesPerDay times in one calendar day, then skips the next", async () => {
+    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 2, timezone: "UTC" } });
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+    });
+
+    const first = await runIntakeTick(ctx);
+    expect(first.dispatched).toBe(true);
+    dispatcher.calls.length = 0;
+    const second = await runIntakeTick({ ...ctx, now: () => new Date("2026-06-01T14:00:00.000Z") });
+    expect(second.dispatched).toBe(true);
+    dispatcher.calls.length = 0;
+    const third = await runIntakeTick({ ...ctx, now: () => new Date("2026-06-01T16:00:00.000Z") });
+
+    expect(third.dispatched).toBe(false);
+    expect(third.skipReason).toContain("already dispatched 2 intake batch(es) today");
+    expect(dispatcher.calls).toHaveLength(0);
+  });
+
   it("does not re-dispatch when UTC has rolled to a new calendar day but intake.timezone has not (B8)", async () => {
-    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 90, batchSize: 20, timezone: "America/New_York" } });
+    const config = makeConfig({ intake: { window: "06:00", staleLowDays: 90, batchSize: 20, batchesPerDay: 1, timezone: "America/New_York" } });
     const dispatcher = new FakeDispatcher();
     const linear = new FakeLinear([makeIssue()], []);
     const bookkeeping = freshBookkeeping();
     // Ran at 14:00 UTC on 2026-06-01 (10:00 America/New_York, same calendar day there).
-    bookkeeping.setLastTriageRun(new Date("2026-06-01T14:00:00.000Z"));
+    bookkeeping.recordTriageRun("2026-06-01", new Date("2026-06-01T14:00:00.000Z"));
     const ctx = makeContext({
       config,
       linear,
@@ -468,7 +494,7 @@ describe("runIntakeTick — window guard", () => {
     const report = await runIntakeTick(ctx);
 
     expect(report.dispatched).toBe(false);
-    expect(report.skipReason).toContain("already dispatched the intake batch today");
+    expect(report.skipReason).toContain("already dispatched 1 intake batch(es) today");
     expect(dispatcher.calls).toHaveLength(0);
   });
 
@@ -503,6 +529,54 @@ describe("runIntakeTick — window guard", () => {
 
     expect(approvedReport.dispatched).toBe(true);
     expect(dispatcher.calls).toHaveLength(1);
+  });
+
+  it("--force bypasses the window gate before it opens", async () => {
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T05:00:00.000Z"),
+      force: true,
+    });
+
+    const report = await runIntakeTick(ctx);
+
+    expect(report.dispatched).toBe(true);
+    expect(dispatcher.calls).toHaveLength(1);
+  });
+
+  it("--force bypasses the daily throttle, then self-clears so the following tick obeys it again", async () => {
+    const config = makeConfig();
+    const dispatcher = new FakeDispatcher();
+    const linear = new FakeLinear([makeIssue()], []);
+    const ctx = makeContext({
+      config,
+      linear,
+      dispatcher,
+      now: () => new Date("2026-06-01T12:00:00.000Z"),
+    });
+
+    await runIntakeTick(ctx);
+    dispatcher.calls.length = 0;
+
+    const forced = { ...ctx, force: true, now: () => new Date("2026-06-01T18:00:00.000Z") };
+    const forcedReport = await runIntakeTick(forced);
+    expect(forcedReport.dispatched).toBe(true);
+    expect(dispatcher.calls).toHaveLength(1);
+    // One-shot: the flag clears itself on the shared ctx object rather than
+    // staying armed, so a subsequent tick reusing the same ctx (as the long
+    // running loop does) reverts to the normal once-a-day gate.
+    expect(forced.force).toBe(false);
+    dispatcher.calls.length = 0;
+
+    const thirdReport = await runIntakeTick({ ...forced, now: () => new Date("2026-06-01T20:00:00.000Z") });
+    expect(thirdReport.dispatched).toBe(false);
+    expect(thirdReport.skipReason).toContain("already dispatched");
+    expect(dispatcher.calls).toHaveLength(0);
   });
 });
 

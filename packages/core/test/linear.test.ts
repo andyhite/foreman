@@ -120,7 +120,7 @@ describe("LinearClient projects", () => {
   it("maps the projects connection into ProjectRef[]", async () => {
     const fetchStub: FetchLike = async () =>
       jsonResponse(200, {
-        data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }, { id: "p2", name: "Herdr" }] } },
+        data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }, { id: "p2", name: "Herdr" }], pageInfo: { hasNextPage: false, endCursor: null } } },
       });
     const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
     expect(await client.projects()).toEqual([
@@ -1012,6 +1012,28 @@ describe("LinearClient workspace label pagination", () => {
     const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
 
     expect((await client.labels()).map((label) => label.name)).toEqual(["type:bug", "type:feature"]);
+  });
+});
+
+describe("LinearClient teams pagination", () => {
+  it("pages teams before returning them, concatenating both pages' nodes", async () => {
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as { variables: { after?: string } };
+      if (body.variables.after === undefined) {
+        return jsonResponse(200, {
+          data: { teams: { nodes: [{ id: "team-1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: true, endCursor: "teams-1" } } },
+        });
+      }
+      expect(body.variables.after).toBe("teams-1");
+      return jsonResponse(200, {
+        data: { teams: { nodes: [{ id: "team-2", key: "OPS", name: "Operations" }], pageInfo: { hasNextPage: false, endCursor: null } } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    expect(await client.teams()).toEqual([
+      { id: "team-1", key: "ENG", name: "Engineering" },
+      { id: "team-2", key: "OPS", name: "Operations" },
+    ]);
   });
 });
 

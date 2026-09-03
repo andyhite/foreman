@@ -16,7 +16,7 @@
  * half-written file, without needing a lock of its own.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { expandHome } from "../config/load.ts";
@@ -101,8 +101,9 @@ export function writeStatusFile(path: string, snapshot: LoopSnapshot): void {
   mkdirSync(dir, { recursive: true });
   const tempPath = `${path}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(tempPath, JSON.stringify(statusFile, null, 2), "utf8");
+    writeFileSync(tempPath, JSON.stringify(statusFile, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(tempPath, path);
+    chmodSync(path, 0o600);
   } catch (error) {
     if (existsSync(tempPath)) unlinkSync(tempPath);
     throw error;

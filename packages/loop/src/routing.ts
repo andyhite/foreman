@@ -29,6 +29,7 @@ import {
   incompleteBlockers,
   labelsInGroup,
   priorityRank,
+  stripControlChars,
 } from "@foreman/core";
 import type { Bookkeeping } from "./bookkeeping.ts";
 
@@ -177,6 +178,8 @@ interface RoutingContext {
   loop: GlobalConfig["loop"];
   /** Project ids that already have a `plan` dispatch in flight (SPEC §7.6) — prevents a second dispatch before the first's issues land. */
   planInFlightProjectIds: ReadonlySet<string>;
+  /** Issue identifiers among the current in-flight dispatches, any stage (guards against a dropped `reconcile()` row causing a re-dispatch). */
+  inFlightIssueIds: ReadonlySet<string>;
 }
 
 function pushSkip(ctx: RoutingContext, stage: StageName, issueId: string | null, code: string, message: string): void {
@@ -201,6 +204,10 @@ function admitCandidate(
   const suppressed = suppressingLabel(issue);
   if (suppressed) {
     pushSkip(ctx, stage, issue.identifier, suppressed.code, suppressed.message);
+    return false;
+  }
+  if (ctx.inFlightIssueIds.has(issue.identifier)) {
+    pushSkip(ctx, stage, issue.identifier, "already-in-flight", `${issue.identifier} already has a dispatch in flight.`);
     return false;
   }
   if (backpressureTripped) {
@@ -362,12 +369,12 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
         "plan",
         project.id,
         "incomplete-project-blockers",
-        `"${project.name}" is blocked by: ${candidate.blockedBy.map((relation) => relation.other.name).join(", ")}.`,
+        `"${stripControlChars(project.name)}" is blocked by: ${candidate.blockedBy.map((relation) => stripControlChars(relation.other.name)).join(", ")}.`,
       );
       continue;
     }
     if (ctx.planInFlightProjectIds.has(project.id)) {
-      pushProjectSkip(ctx, "plan", project.id, "already-in-flight", `"${project.name}" already has a plan dispatch in flight.`);
+      pushProjectSkip(ctx, "plan", project.id, "already-in-flight", `"${stripControlChars(project.name)}" already has a plan dispatch in flight.`);
       continue;
     }
     if (backpressureTripped) {
@@ -388,7 +395,7 @@ function routePlan(ctx: RoutingContext, snapshot: BoardSnapshot, backpressureTri
       projectId: project.id,
       command: DISPATCH_COMMAND.plan,
       subject: project.id,
-      reason: `"${project.name}" has no issues yet.`,
+      reason: `"${stripControlChars(project.name)}" has no issues yet.`,
     });
     admitDecision(ctx, "plan");
   }
@@ -421,6 +428,7 @@ export function nextActions(
     stageRemaining,
     loop,
     planInFlightProjectIds: bookkeeping.inFlightProjectIds("plan"),
+    inFlightIssueIds: bookkeeping.inFlightIssueIds(),
   };
 
   routePlan(ctx, snapshot, backpressureTripped);

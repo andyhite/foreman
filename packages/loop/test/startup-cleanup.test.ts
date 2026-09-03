@@ -58,7 +58,7 @@ beforeEach(() => {
       demo: { path: home, initiatives: ["init-1"], team: "ENG" },
     },
     loop: { stateDir: join(home, "state"), mode: "yolo" },
-    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint },
+    linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint, allowCustomEndpoint: true },
   };
   mkdirSync(join(home, ".foreman"), { recursive: true });
   writeFileSync(join(home, ".foreman", "config.json"), JSON.stringify(config), "utf8");
@@ -212,7 +212,7 @@ describe("startup cleanup (zombie-loop regression)", () => {
       async fetch(request) {
         const { query } = (await request.json()) as { query: string };
         const data = query.includes(teamsOp)
-          ? { teams: { nodes: [{ id: "team-1", key: "ENG", name: "ENG" }] } }
+          ? { teams: { nodes: [{ id: "team-1", key: "ENG", name: "ENG" }], pageInfo: { hasNextPage: false, endCursor: null } } }
           : query.includes(initiativeDocsOp)
             ? { initiative: { id: "init-1", name: "Init One", documents: { nodes: [] } } }
             : query.includes(initiativeProjectsOp)
@@ -233,7 +233,7 @@ describe("startup cleanup (zombie-loop regression)", () => {
       const config = {
         repos: { demo: { path: home, initiatives: ["init-1"], team: "ENG" } },
         loop: { stateDir: join(home, "state"), mode: "yolo" },
-        linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: `http://127.0.0.1:${okServer.port}/graphql` },
+        linear: { apiKeyEnv: "LINEAR_API_KEY", apiKeyFile: null, endpoint: `http://127.0.0.1:${okServer.port}/graphql`, allowCustomEndpoint: true },
       };
       writeFileSync(join(home, ".foreman", "config.json"), JSON.stringify(config), "utf8");
 

@@ -19,7 +19,7 @@ import type {
   DispatchStatus,
   GlobalConfig,
 } from "@foreman/core";
-import { reservationsPath, RESERVATIONS_ENV, LOOP_SOCKET_ENV } from "@foreman/core";
+import { reservationsPath, RESERVATIONS_ENV, LOOP_SOCKET_ENV, ensureWorktree } from "@foreman/core";
 
 /** Total stdout+stderr retained per dispatch; beyond this, older bytes are dropped, keeping the tail. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
@@ -63,6 +63,26 @@ export class PrintDispatcher implements Dispatcher {
     const { promise: outcomeReady, resolve: resolveOutcome } =
       Promise.withResolvers<DispatchOutcome>();
 
+    const worktreeItems = request.items.filter((item) => item.worktree);
+    if (worktreeItems.length > 0 && request.items.length > 1) {
+      throw new Error("print dispatch cannot mix a worktree item with other items in one request");
+    }
+    const worktree = request.items.length === 1 ? request.items[0]?.worktree : undefined;
+    const cwd = worktree?.path ?? request.cwd;
+    if (worktree) {
+      // Print mode has no herdr `worktree create` step, and the task guard's
+      // own `ensureWorktree` call runs inside the dispatched session, after
+      // spawn — so the worktree must exist before we spawn into it.
+      // Idempotent: a resumed attempt against an already-registered worktree
+      // returns `created: false` rather than failing.
+      await ensureWorktree({
+        repoPath: request.cwd,
+        worktreePath: worktree.path,
+        branch: worktree.branch,
+        baseBranch: worktree.baseBranch,
+      });
+    }
+
     const subjects = request.items
       .map((item) => item.subject)
       .filter((subject): subject is string => subject !== null);
@@ -73,7 +93,7 @@ export class PrintDispatcher implements Dispatcher {
       "--approval-mode",
       this.#config.agent.approvalMode,
       "--cwd",
-      request.cwd,
+      cwd,
       prompt,
     ];
 
@@ -103,7 +123,7 @@ export class PrintDispatcher implements Dispatcher {
     }
 
     const child = spawn(this.#config.agent.ompBin, argv, {
-      cwd: request.cwd,
+      cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env,
     });
@@ -138,10 +158,12 @@ export class PrintDispatcher implements Dispatcher {
     });
 
     const maxRuntimeMs = this.#config.agent.maxRuntimeMs;
+    let hardKillTimer: NodeJS.Timeout | undefined;
     const killTimer =
       maxRuntimeMs > 0
         ? setTimeout(() => {
             child.kill("SIGTERM");
+            hardKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
           }, maxRuntimeMs)
         : undefined;
 
@@ -159,6 +181,7 @@ export class PrintDispatcher implements Dispatcher {
 
     child.on("error", (error) => {
       clearTimeout(killTimer);
+      clearTimeout(hardKillTimer);
       entry.status = "lost";
       entry.settled = true;
       // Retained (not deleted) until every handle in the batch has consumed
@@ -179,6 +202,7 @@ export class PrintDispatcher implements Dispatcher {
     child.on("close", (code) => {
       if (entry.settled) return;
       clearTimeout(killTimer);
+      clearTimeout(hardKillTimer);
       entry.status = "settled";
       entry.settled = true;
       resolveOutcome({
@@ -192,6 +216,9 @@ export class PrintDispatcher implements Dispatcher {
     return handles;
   }
 
+  // A `batchId` absent from `#running` is overwhelmingly a batch whose
+  // `settle()` already pruned the entry, not a lost dispatch — defaulting to
+  // "settled" here is deliberate, not a fallback for a bug.
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
     const entry = this.#running.get(handle.batchId);
     return entry ? entry.status : "settled";

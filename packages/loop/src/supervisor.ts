@@ -24,6 +24,7 @@ import {
   reservationsPath,
   reserveDispatches,
   style,
+  stripControlChars,
   writeStatusFile,
   type AgentReport,
   type AgentStatus,
@@ -161,7 +162,7 @@ export class SupervisorLock {
     const token = randomUUID();
     const info: LoopLockInfo = { pid, startedAt: now.toISOString(), token };
     try {
-      writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx" });
+      writeFileSync(this.#path, JSON.stringify(info, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
       this.#acquired = true;
       this.#token = token;
       return;
@@ -184,7 +185,7 @@ export class SupervisorLock {
     // concurrent reclaimer straight into deleting whichever process wrote
     // its fresh lock first.
     const tempPath = `${this.#path}.${token}`;
-    writeFileSync(tempPath, JSON.stringify(info, null, 2), "utf8");
+    writeFileSync(tempPath, JSON.stringify(info, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(tempPath, this.#path);
     // Two reclaimers can both rename; the last writer owns the lock. Re-read and
     // compare tokens so the loser fails like any other held lock instead of
@@ -319,6 +320,7 @@ export class Supervisor {
 
   readonly #workerMeta = new Map<string, { cadenceMs: number }>();
   readonly #runningWorkers = new Set<string>();
+  readonly #activeSettles = new Set<Promise<void>>();
   readonly #lastRunAt = new Map<string, number>();
   readonly #reports = new Map<string, WorkerReport>();
   readonly #counts: Partial<BoardCounts> = {};
@@ -457,7 +459,7 @@ export class Supervisor {
         (report.movedTo ? ` → ${report.movedTo}` : ""),
     );
     for (const entity of report.created) {
-      this.#log(`  ${style("dim", "+")} ${entity.kind} ${entity.identifier ?? entity.id} — ${entity.title}`);
+      this.#log(`  ${style("dim", "+")} ${entity.kind} ${entity.identifier ?? entity.id} — ${stripControlChars(entity.title)}`);
     }
     this.#emit({ event: "report", report });
   }
@@ -470,7 +472,7 @@ export class Supervisor {
    */
   async reconcile(): Promise<void> {
     const before = this.#bookkeeping.state.inFlight.length;
-    const running = await this.#linear.issues({ filter: IN_FLIGHT_FILTER, limit: 500 });
+    const running = await this.#linear.issues({ filter: IN_FLIGHT_FILTER, first: 250 });
     const liveIssueIds = new Set(running.map((issue) => issue.identifier));
     const liveDispatchIds = new Set<string>();
     await Promise.all(
@@ -653,7 +655,7 @@ export class Supervisor {
   #watchSettle(handles: readonly DispatchHandle[], stage: StageName): void {
     const first = handles[0];
     if (!first) return;
-    void (async () => {
+    const settle = (async () => {
       try {
         const outcome = await this.#dispatcherFor(first).settle(first);
         this.#logVerbose(
@@ -693,6 +695,24 @@ export class Supervisor {
         }
       }
     })();
+    this.#activeSettles.add(settle);
+    void settle.finally(() => this.#activeSettles.delete(settle));
+  }
+
+  /**
+   * Graceful stop only: a released lock with a live child lets a second loop
+   * claim the same board. `stop("now")` deliberately skips this — its
+   * documented contract is that in-flight dispatches expire at lock TTL.
+   */
+  async drainSettles(timeoutMs = 30_000): Promise<void> {
+    if (this.#activeSettles.size === 0) return;
+    this.#log(`draining ${this.#activeSettles.size} in-flight dispatch(es) before releasing the lock`);
+    const deadline = sleep(timeoutMs);
+    await Promise.race([Promise.allSettled([...this.#activeSettles]), deadline.promise]);
+    deadline.cancel();
+    if (this.#activeSettles.size > 0) {
+      this.#log(`${this.#activeSettles.size} dispatch(es) still running after ${timeoutMs}ms; releasing the lock anyway — they expire at lock TTL`);
+    }
   }
 
   /**
@@ -782,6 +802,9 @@ export class Supervisor {
           this.#log(
             `  ${marker} ${action} ${worker.name} [mode: ${mode}] ${decision.issueId ?? decision.projectId ?? "(batch)"}: ${decision.reason}`,
           );
+        }
+        for (const error of report.errors) {
+          this.#log(`  ${style("red", "✗")} error ${worker.name} [mode: ${mode}]: ${error}`);
         }
         if (this.#verbose) {
           for (const skip of report.skipped) {
@@ -893,6 +916,7 @@ export class Supervisor {
         const last = this.#lastRunAt.get(worker.name) ?? 0;
         return nowMs - last >= worker.cadenceMs;
       });
+      const tickStartedAt = this.#now().getTime();
       if (due.length > 0) {
         try {
           await this.reconcile();
@@ -902,9 +926,10 @@ export class Supervisor {
         await this.runTick(due, { workerNames: due.map((worker) => worker.name) });
       }
       if (this.#currentRunState() === "draining") break;
-      await this.#interruptibleWait(pollMs);
+      await this.#interruptibleWait(Math.max(0, pollMs - (this.#now().getTime() - tickStartedAt)));
     }
     this.#runState = "stopped";
+    if (this.#stopMode !== "now") await this.drainSettles();
     this.releaseLock();
     this.#emit({ event: "state", runtime: this.snapshot().runtime });
     this.publishStatus();

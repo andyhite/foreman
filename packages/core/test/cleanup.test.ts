@@ -37,10 +37,10 @@ describe("cleanupMergedWork", () => {
   beforeEach(() => {
     repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "foreman-cleanup-")));
     repoPath = join(repoRoot, "repo");
-    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8" });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath, encoding: "utf8" });
-    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, encoding: "utf8" });
-    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: repoPath, encoding: "utf8" });
+    execFileSync("git", ["init", "--initial-branch=main", repoPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "initial commit"], { cwd: repoPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   });
 
   afterEach(() => {

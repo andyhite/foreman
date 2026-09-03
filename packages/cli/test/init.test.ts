@@ -365,6 +365,7 @@ describe("runInit", () => {
                   { id: "i1", name: "Plotroom Fleet" },
                   { id: "i2", name: "Plotroom Zero" },
                 ],
+                pageInfo: { hasNextPage: false, endCursor: null },
               },
             },
           }),
@@ -372,7 +373,7 @@ describe("runInit", () => {
       }
       if (query.includes("query Teams")) {
         return new Response(
-          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }] } } }),
+          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
         );
       }
       throw new Error(`unexpected query: ${query}`);

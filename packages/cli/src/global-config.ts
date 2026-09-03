@@ -9,9 +9,10 @@
  */
 
 import { defaultAndValidateGlobalConfig, type RepoEntry } from "@foreman/core";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { withFileLock } from "./file-lock.ts";
 
 /**
  * A sparse slice of the global config. Both fields are optional because the two
@@ -102,17 +103,20 @@ function mergePatch(existing: Record<string, unknown>, patch: ConfigPatch): Reco
 export function writeGlobalConfig(patch: ConfigPatch, home: string = homedir()): string {
   const dir = join(home, ".foreman");
   const configPath = join(dir, "config.json");
-  const merged = mergePatch(readExistingConfig(configPath), patch);
-
-  // Throws ConfigError before anything touches disk if the merged patch is invalid.
-  defaultAndValidateGlobalConfig(structuredClone(merged), configPath);
-
   mkdirSync(dir, { recursive: true });
-  const payload = `${JSON.stringify(merged, null, 2)}\n`;
-  const tempPath = join(dir, `.config.json.tmp-${process.pid}`);
-  writeFileSync(tempPath, payload, "utf8");
-  renameSync(tempPath, configPath);
-  return configPath;
+  return withFileLock(join(dir, ".config.json.lock"), () => {
+    const merged = mergePatch(readExistingConfig(configPath), patch);
+
+    // Throws ConfigError before anything touches disk if the merged patch is invalid.
+    defaultAndValidateGlobalConfig(structuredClone(merged), configPath);
+
+    const payload = `${JSON.stringify(merged, null, 2)}\n`;
+    const tempPath = join(dir, `.config.json.tmp-${process.pid}`);
+    writeFileSync(tempPath, payload, { encoding: "utf8", mode: 0o600 });
+    renameSync(tempPath, configPath);
+    chmodSync(configPath, 0o600);
+    return configPath;
+  });
 }
 
 /** Writes the Linear API key to `<home>/.foreman/linear-api-key`, mode 0600, and returns the path. */
@@ -120,6 +124,17 @@ export function writeLinearApiKeyFile(apiKey: string, home: string = homedir()):
   const dir = join(home, ".foreman");
   const keyPath = join(dir, "linear-api-key");
   mkdirSync(dirname(keyPath), { recursive: true });
+  // A pre-planted symlink here would redirect both the write and the chmod to
+  // whatever it points at. Refuse rather than follow.
+  let existing;
+  try {
+    existing = lstatSync(keyPath);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+  }
+  if (existing?.isSymbolicLink()) {
+    throw new Error(`${keyPath} is a symlink; refusing to write the Linear API key through it. Remove it and re-run.`);
+  }
   writeFileSync(keyPath, `${apiKey.trim()}\n`, { mode: 0o600 });
   chmodSync(keyPath, 0o600);
   return keyPath;

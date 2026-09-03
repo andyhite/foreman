@@ -24,6 +24,7 @@ import {
   ControlServer,
   ensureMaintenanceProjects,
   LinearClient,
+  linearEnvNames,
   loopPaths,
   repoLoopId,
   entryForCwd,
@@ -243,12 +244,18 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   // process then goes through a second, team-scoped client (SPEC §3.11) —
   // simpler than threading an optional team through every query site.
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, onRequest: traceLinearRequest });
+  let endpointHost: string;
   try {
-    if (new URL(config.linear.endpoint).host !== "api.linear.app") {
-      log(style("yellow", `! linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key is being sent there.`));
-    }
+    endpointHost = new URL(config.linear.endpoint).host;
   } catch {
     log(style("yellow", `! linear.endpoint "${config.linear.endpoint}" is not a valid URL — the API key is being sent there.`));
+    endpointHost = "";
+  }
+  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
+    throw new ConfigError(
+      `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
+      ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
+    );
   }
 
   let team: string;
@@ -288,8 +295,8 @@ export async function runRepo(argv: readonly string[]): Promise<void> {
   // session has nothing to report to; the env var is then simply absent.
   const controlSocket = args.once || args.noControl ? undefined : controlPaths.socket;
 
-  const printDispatcher = new PrintDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket });
-  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: [config.linear.apiKeyEnv], reservationsDir: controlPaths.reservations, controlSocket });
+  const printDispatcher = new PrintDispatcher(config, { scrubEnv: linearEnvNames(config), reservationsDir: controlPaths.reservations, controlSocket });
+  const herdrDispatcher = new HerdrDispatcher(config, { scrubEnv: linearEnvNames(config), reservationsDir: controlPaths.reservations, controlSocket });
 
   const dispatcher = await resolveDispatcher(
     {
