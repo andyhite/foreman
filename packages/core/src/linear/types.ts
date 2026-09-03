@@ -69,8 +69,6 @@ export interface ProjectRef {
   /** `TimelessDate` (`YYYY-MM-DD`), not a timestamp. Present on the same reads that carry `status`. */
   startDate?: string | null;
   targetDate?: string | null;
-  /** Canonical colon-form ids (e.g. `app:fleet`), present on the same reads that carry `status`. */
-  labels?: IssueLabel[];
 }
 
 /**

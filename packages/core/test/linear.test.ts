@@ -122,8 +122,8 @@ describe("LinearClient projects", () => {
         data: {
           projects: {
             nodes: [
-              { id: "p1", name: "Plotroom", labels: { nodes: [] } },
-              { id: "p2", name: "Herdr", labels: { nodes: [] } },
+              { id: "p1", name: "Plotroom" },
+              { id: "p2", name: "Herdr" },
             ],
             pageInfo: { hasNextPage: false, endCursor: null },
           },
@@ -132,8 +132,8 @@ describe("LinearClient projects", () => {
     };
     const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
     expect(await client.projects("ENG")).toEqual([
-      { id: "p1", name: "Plotroom", startDate: undefined, targetDate: undefined, status: null, labels: [] },
-      { id: "p2", name: "Herdr", startDate: undefined, targetDate: undefined, status: null, labels: [] },
+      { id: "p1", name: "Plotroom", startDate: undefined, targetDate: undefined, status: null },
+      { id: "p2", name: "Herdr", startDate: undefined, targetDate: undefined, status: null },
     ]);
     expect(capturedBody?.variables).toMatchObject({ teamKey: "ENG" });
   });

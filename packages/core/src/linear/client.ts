@@ -106,10 +106,15 @@ interface WireProjectRef {
   targetDate: string | null;
   status: WireStateRef | null;
 }
-/** `PROJECTS_QUERY`'s row shape — `WireProjectRef` plus its labels connection. */
-interface WireTeamProjectRef extends WireProjectRef {
-  labels: { nodes: WireLabel[] };
-}
+/**
+ * `PROJECTS_QUERY`'s row shape. Deliberately just `WireProjectRef` — an
+ * earlier revision also fetched each project's `labels` connection here,
+ * but nothing downstream reads `ProjectRef.labels` from a team-scoped read,
+ * and the unbounded nested `labels`/`parent` connection under a
+ * `first: 250` project page is exactly the shape Linear's complexity
+ * ceiling rejects with `Query too complex` (measured against the live API).
+ */
+type WireTeamProjectRef = WireProjectRef;
 /**
  * `type`, `anchorType`, and `relatedAnchorType` are all `String` on the wire —
  * Linear declares no enum for any of them (introspected). Only the far side of
@@ -669,7 +674,6 @@ export class LinearClient implements LinearWriter {
       status: this.mapProjectStatus(project.status),
       startDate: project.startDate,
       targetDate: project.targetDate,
-      labels: this.mapLabels(project.labels.nodes),
     };
   }
 

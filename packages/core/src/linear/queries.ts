@@ -182,7 +182,6 @@ export const PROJECTS_QUERY = `
       nodes {
         id name startDate targetDate
         status { id name type }
-        labels { nodes { id name parent { id name } } }
       }
       pageInfo { hasNextPage endCursor }
     }
