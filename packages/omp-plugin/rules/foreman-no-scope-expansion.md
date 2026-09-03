@@ -6,5 +6,5 @@ interruptMode: always
 ---
 
 Stop. The acceptance criteria are the contract for this pass, not a floor.
-Leave the extra work out of this diff, record it in `discoveredWork`, and let
+Leave the extra work out of this diff; record it in `discoveredWork` and let
 the extension file it as a new issue.

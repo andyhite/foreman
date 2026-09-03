@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/andyhite/foreman/actions/workflows/ci.yml/badge.svg)](https://github.com/andyhite/foreman/actions/workflows/ci.yml)
 
-An [omp](https://github.com/andyhite/oh-my-pi) plugin that runs a single-operator
-agile SDLC over [Linear](https://linear.app). Agents move issues one state to the
-right; you approve what they propose.
+An [omp](https://github.com/andyhite/oh-my-pi) plugin that runs a
+single-operator agile SDLC over [Linear](https://linear.app). Agents move
+issues one state to the right; you approve what they propose.
 
-Foreman keeps no database. Linear is the state machine, the queue, and the audit
-log. Every decision an agent makes lands as a Linear mutation or a comment, so
-the board you already look at is the whole system state.
+Foreman keeps no database. Linear is the state machine, the queue, and the
+audit log: every agent decision lands as a Linear mutation or comment, so the
+board you already look at is the whole system state.
 
 ## The shape of it
 
@@ -24,177 +24,125 @@ flowchart LR
     V -->|foreman-review| P
 ```
 
-Six workflow agents, each responsible for exactly one edge. None of them can
-spawn another agent, and none of them can write to Linear — the `task` tool and
-Linear's mutation API are both withheld, and the loop scrubs the Linear API key
-from every dispatched agent's environment on both dispatch paths (print-mode
-`omp -p` and the herdr terminal pane). The one residual exposure the code
-cannot close: an implement agent still holds `bash`, so it can read
-`linear.apiKeyFile` directly if the operator stores the credential that way.
-A loop-dispatched deployment requires `linear.apiKeyFile` for this reason in
-reverse, too: both dispatch paths (`packages/loop/src/repo.ts`,
-`packages/loop/src/team.ts`) scrub `apiKeyEnv` from every dispatched agent's
-environment, so the dispatched session's own extension — which needs a
-write-capable Linear client to claim locks and apply results — can only
-resolve a key from `linear.apiKeyFile` in that scrubbed environment. An
-env-var-only deployment cannot support loop dispatch.
-An agent returns a validated structured result; the extension performs the
-mutation. That split is the design. (The `bash` boundary above is
-defense-in-depth, not a sandbox — issue content is untrusted input.)
-
 | Agent | Edge | Model | Produces |
 | --- | --- | --- | --- |
-| `foreman-triage` | Triage → Backlog / Canceled / Duplicate | `@smol` | A priority, a `type:` label, dedupe findings |
-| `foreman-plan` | New project (zero issues) → Backlog | session | A first slate of draft issues from the project brief |
-| `foreman-roadmap` | Initiative brief → sequenced projects | session | Projects with dependency edges and start/target dates |
-| `foreman-refine` | Backlog → Todo | session | Acceptance criteria, a Fibonacci estimate, a split proposal |
-| `foreman-implement` | In Progress → In Review | session | A branch, tests, a PR, per-criterion evidence |
+| `foreman-triage` | Triage → Backlog / Canceled / Duplicate | `@default` | A priority, a `type:` label, dedupe findings |
+| `foreman-roadmap` | Initiative brief → sequenced projects | `@plan` | Projects with dependency edges and start/target dates |
+| `foreman-plan` | New project (zero issues) → Backlog | `@plan` | A first slate of draft issues from the project brief |
+| `foreman-refine` | Backlog → Todo | `@plan` | Acceptance criteria, a Fibonacci estimate, a split proposal |
+| `foreman-implement` | In Progress → In Review | `@default` | A branch, tests, a PR, per-criterion evidence |
 | `foreman-review` | In Review → Done / In Progress | `@slow` | Findings by severity against the diff |
 
-Sequence is expressed as native Linear relations, not as dates or a reading
-order: `foreman-roadmap` wires `dependency` edges between projects and
-`foreman-plan` wires `blocks` edges between the issues it drafts. The loop
-reads them back as gates — a project with an unshipped prerequisite is not a
-planning candidate, and an issue with an open blocker is neither refined nor
-implemented — so a roadmap laid out in Linear is the order work actually
-happens in.
+Six agents, one edge each. An agent returns a validated structured result;
+the extension performs the mutation. That split is the design:
 
-An agent that cannot proceed does not guess and does not stall. It yields a
-`BlockRecord` naming the question and the options, which becomes a `blocked:`
-label and an entry in the drain you resolve with one keypress.
+- No agent can spawn another: the `task` tool is withheld.
+- No agent can write to Linear: no write tool, and the loop scrubs the Linear
+  API key from every dispatched agent's environment on both dispatch paths
+  (`omp -p` print mode and the herdr pane). Residual exposure: an implement
+  agent holds `bash`, so it can read `linear.apiKeyFile` if the credential
+  is stored that way. This is defense in depth, not a sandbox; issue content
+  is untrusted input.
+- A loop-dispatched deployment therefore requires `linear.apiKeyFile`. Both
+  dispatch paths (`packages/loop/src/repo.ts`, `packages/loop/src/team.ts`)
+  scrub `apiKeyEnv`, and the dispatched session's own extension still needs
+  a write-capable client to claim locks and apply results. An env-var-only
+  deployment cannot support loop dispatch.
+
+Sequence is native Linear relations, never dates or reading order:
+`foreman-roadmap` wires `dependency` edges between projects,
+`foreman-plan` wires `blocks` edges between the issues it drafts. The loop
+reads them back as gates: a project with an unshipped prerequisite is not a
+planning candidate; an issue with an open blocker is neither refined nor
+implemented.
+
+An agent that cannot proceed neither guesses nor stalls. It yields a
+`BlockRecord` naming the question and the options, which becomes a
+`blocked:*` label and an entry in the queue you drain with one keypress.
 
 ## Install
 
 Requires [Bun](https://bun.sh) 1.3+, `git`, `gh` authenticated for the repos
 Foreman will open PRs against, and [omp](https://github.com/andyhite/oh-my-pi).
-Foreman isn't published as a standalone package, so getting the CLI means a
-one-time clone-and-build — after that, `foreman setup` points one global
-symlink at this checkout, and every repo you `foreman init` follows it.
+Foreman is not published as a package: the CLI comes from a clone-and-build,
+after which one global symlink points every registered repo at that checkout.
 
-The one-line installer clones the checkout to `~/.foreman/src`, builds it,
-drops a `foreman` wrapper on `$PATH` (`~/.local/bin` by default), and launches
-`foreman setup`:
+1. **Get the checkout and run `foreman setup`.** One-liner:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/install.sh | bash
-```
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/andyhite/foreman/main/scripts/install.sh | bash
+   ```
 
-It's re-runnable — running it again pulls the latest checkout, rebuilds, and
-re-runs setup on top of your existing `~/.foreman/config.json`. Extra
-arguments pass straight through to `foreman setup`, e.g.
-`... | bash -s -- --yes`. To bring an already-installed machine current after
-Foreman changes land on GitHub, don't re-run the installer — use
-`foreman update` (below); it pulls, rebuilds, and every registered repo picks
-up the change automatically, with no per-repo work. Prefer to do it by hand:
+   It clones to `~/.foreman/src`, builds, drops a `foreman` wrapper on
+   `$PATH` (`~/.local/bin` by default), and launches `foreman setup`. Extra
+   arguments pass through to `setup` (`... | bash -s -- --yes`). Re-running
+   pulls, rebuilds, and re-runs setup over your existing config. By hand:
 
-```bash
-git clone https://github.com/andyhite/foreman
-cd foreman
-bun install && bun run build
-bun run packages/cli/dist/main.js setup --yes
-```
+   ```bash
+   git clone https://github.com/andyhite/foreman
+   cd foreman
+   bun install && bun run build
+   bun run packages/cli/dist/main.js setup --yes
+   ```
 
-`foreman setup` is the one-time-per-machine installer: it checks for
-`bun`/`git`/`gh`/`omp`/`herdr`, walks you through the Linear API key, and
-writes a single symlink, `~/.foreman/plugin -> <checkout>/packages/omp-plugin`
-— the one indirection every repo's plugin link points through. It never
-touches repos, initiatives, or teams, and it never activates the plugin in
-any repo itself — that happens per repo, below, as part of `foreman init`. If
-`$LINEAR_API_KEY` is already set, setup skips the key prompt entirely — the
-loop and extension resolve the key the same way at runtime, so setup does not
-call Linear to validate it. Without a key (or without network access to
-Linear), setup skips writing one — set `$LINEAR_API_KEY` or
-`linear.apiKeyFile` yourself before starting the loop. When you do paste a
-key, it always writes to the fixed path `<home>/.foreman/linear-api-key` at
-mode `0600`; there is no prompt for where to store it. Pass `--link` to
-symlink the `foreman` CLI to a wrapper that execs this checkout's TypeScript
-**source** directly via `bun` — not the built `dist/main.js` — so a source
-edit takes effect with no rebuild; dev mode for the CLI only, unrelated to the
-omp plugin link. Drop `--yes` to be walked through the prompts interactively
-instead. Flags: `--link`, `--checkout <path>` (defaults to auto-detecting this
-checkout), `--skip-linear`, `--home <path>`, `-y`/`--yes`.
+2. **Register each repo with `foreman init`, inside that repo.**
 
-Once setup has run, register each repo Foreman will manage — and activate its
-plugin **in that repo only** — by running `foreman init` **inside that
-repo**:
+   ```bash
+   cd ~/Code/my-app
+   foreman init
+   ```
 
-```bash
-cd ~/Code/my-app
-foreman init
-```
+3. **Bring a machine current later with `foreman update`.** Never re-run the
+   installer or a bare `git pull` for this.
 
-`foreman init` resolves the repo root with `git rev-parse --show-toplevel`,
-then writes `<repo>/.omp/plugins/omp-plugins.lock.json` and
-`<repo>/.omp/plugins/node_modules/@foreman/omp-plugin`, a symlink to
-`~/.foreman/plugin` (skip both with `--skip-plugin`), plus a
-`.git/info/exclude` line so that machine-local state never shows up in `git
-status`. It then lists every product (initiative) in your Linear workspace as
-a checkbox picker (`↑`/`↓` to move, `space` to toggle, `a` to toggle all,
-`enter` to confirm) — pre-checking any already mapped to this repo — and
-scrolls with `↑ N more` / `↓ N more` when the list is taller than the
-terminal. It then asks for the team and alias. You confirm or edit every
-choice before it's written to `~/.foreman/config.json`. `--initiative
-<uuid>[:subdir]` binds one or more initiatives (repeat the flag; the optional
-`:subdir` is the per-initiative subdirectory binding); `--alias <name>` and
-`--team <KEY>` override the registry alias and Linear team key.
-`--skip-linear` takes manual initiative ids instead of querying the API;
-`--path <dir>` registers a directory other than the current one; `-y`/`--yes`
-accepts every default and pre-checked value non-interactively — on a repo
-with no prior registration that means nothing is selected and init fails
-unless you also pass `--initiative`. `foreman init` never prompts for or
-writes the Linear API key — that's `foreman setup`'s job.
+### `foreman setup` (once per machine)
 
-Run `foreman deinit` inside a repo to undo `foreman init`: it removes the
-plugin lock and symlink under `.omp/plugins/` and, unless you pass
-`--keep-registry`, drops the repo's entry from `~/.foreman/config.json`.
-`--path <dir>` targets a directory other than the current one.
+Checks for `bun`/`git`/`gh`/`omp`/`herdr`, walks you through the Linear API
+key, and writes one symlink: `~/.foreman/plugin -> <checkout>/packages/omp-plugin`.
+It never touches repos, initiatives, or teams, and never activates the plugin
+anywhere; that is `foreman init`'s job.
 
-Run `foreman doctor` any time to check whether the global plugin link and
-every registered repo's activation are healthy — a broken symlink or a stale
-lock entry are each reported as a problem. Pass `--fix`
-to repair what it can (re-running the equivalent of `activateRepoPlugin` for
-each affected repo); `--checkout <path>` overrides which checkout it expects
-the global link to point at. It exits `0` when healthy, `1` when it found
-problems `--fix` didn't (or wasn't asked to) resolve.
-
-**Already have the old machine-wide install?** `foreman setup` used to
-register an omp marketplace and let `omp plugin install` land the plugin
-user-scoped, so it loaded in every omp session, including repos that never
-use Foreman. `foreman doctor` detects that leftover automatically and
-`foreman doctor --fix` removes it — no manual `omp plugin uninstall` step is
-needed. Then run `foreman init` in each repo that should actually have
-Foreman.
-
-## Updating
-
-After pushing plugin or CLI changes to GitHub, `foreman update` is the single
-command that brings a machine current — it pulls the checkout and rebuilds
-the CLI; the plugin loads straight from source, so pulling the checkout is
-all it needs. Because every registered repo's plugin link resolves through
-`~/.foreman/plugin` into this one checkout, that pull-and-rebuild is the
-entire update: no per-repo work happens.
-
-```bash
-foreman update
-```
-
-Flags:
+Key handling: `$LINEAR_API_KEY` already set → prompt skipped, nothing
+validated against Linear (runtime resolves the key the same way). No key or
+no network → setup writes none; set `$LINEAR_API_KEY` or `linear.apiKeyFile`
+before starting the loop. A pasted key always goes to
+`~/.foreman/linear-api-key`, mode `0600`.
 
 | Flag | Does |
 | --- | --- |
-| `--checkout <path>` | Path to the foreman checkout (default: auto-detected). |
-| `--skip-pull` | Rebuild without touching git. |
-| `--skip-plugin` | Update the checkout only; leave the global plugin link alone. |
-| `--home <path>` | Home directory for `~/.foreman` (default: real home; test hook). |
+| `--link` | Symlink `foreman` to a wrapper that execs this checkout's TypeScript source via `bun`; edits take effect with no rebuild. CLI dev mode only; unrelated to the plugin link. |
+| `--checkout <path>` | Checkout to link (default: auto-detect this one). |
+| `--skip-linear` | Skip the key prompt. |
+| `--home <path>` | Home directory for `~/.foreman` (test hook). |
+| `-y`, `--yes` | Accept every default non-interactively. |
 
-`--checkout` is shared with `setup`; `--skip-plugin` is shared with `init`;
-`--home` is shared by every command above. Don't reach for a bare `git pull`
-by hand — `foreman update` rebuilds and revalidates the global plugin link in
-the order that keeps every registered repo working, not just the one you're
-standing in.
+### `foreman init` (once per repo)
 
-`foreman init` writes an entry like this to `~/.foreman/config.json`'s
-`repos` table — or edit it directly:
+Resolves the repo root (`git rev-parse --show-toplevel`), then:
+
+1. Writes `<repo>/.omp/plugins/omp-plugins.lock.json` and
+   `<repo>/.omp/plugins/node_modules/@foreman/omp-plugin` (a symlink to
+   `~/.foreman/plugin`), plus a `.git/info/exclude` line so neither shows in
+   `git status`. `--skip-plugin` skips both.
+2. Lists every initiative in your Linear workspace as a checkbox picker
+   (`↑`/`↓` move, `space` toggle, `a` toggle all, `enter` confirm; scrolls
+   with `↑ N more` / `↓ N more`), pre-checking any already mapped to this
+   repo.
+3. Asks for the team and alias. You confirm or edit every choice before it is
+   written to `~/.foreman/config.json`.
+
+`foreman init` never prompts for or writes the Linear API key.
+
+| Flag | Does |
+| --- | --- |
+| `--initiative <uuid>[:subdir]` | Bind an initiative (repeat the flag); `:subdir` is the per-initiative subdirectory binding. |
+| `--alias <name>`, `--team <KEY>` | Override the registry alias and Linear team key. |
+| `--skip-linear` | Take initiative ids manually instead of querying the API. |
+| `--skip-plugin` | Register only; leave `.omp/plugins/` alone. |
+| `--path <dir>` | Register a directory other than the current one. |
+| `-y`, `--yes` | Accept every default and pre-checked value. On a fresh repo nothing is pre-checked, so init fails unless `--initiative` is also passed. |
+
+The resulting entry:
 
 ```json
 {
@@ -210,53 +158,61 @@ standing in.
 }
 ```
 
-Foreman reads the Linear personal API key from `$LINEAR_API_KEY`, or from
-`linear.apiKeyFile` when the env var is unset — `foreman setup` writes that file
-for you (mode `0600`) if you paste a key during the prompt. The `repos`
-registry, keyed by alias, is the single table binding a repo to a team and the
-initiatives it hosts, each entry written by one `foreman init` run; an issue
-whose project has no initiative, or whose initiative isn't bound to any
-entry, is skipped rather than guessed at. A monorepo lists several
-initiatives on one entry.
+The `repos` registry, keyed by alias, is the single table binding a repo to
+a team and the initiatives it hosts; a monorepo lists several initiatives on
+one entry. An issue whose project has no initiative, or whose initiative is
+bound to no entry, is skipped rather than guessed at. The key resolves from
+`$LINEAR_API_KEY`, else `linear.apiKeyFile`.
 
-Order of operations: `foreman setup` once per machine, `foreman init` once
-per repo, `foreman update` whenever Foreman changes on GitHub need to reach
-this machine, then Foreman is **one `foreman repo` instance per repo**: run
-`foreman repo [alias] [--team <KEY>]` inside each Foreman-managed
-repo — the instance's entry resolves by matching cwd against registry paths,
-or the positional alias overrides. The shared Triage inbox is consumed separately, by one
-team-level `foreman team [key]` process — not by any repo
-instance.
+### `foreman deinit`, `foreman doctor`, `foreman update`
 
-Once installed, day-to-day use is `foreman repo` (below) and the `/foreman:*`
-slash commands inside any omp session. See [Development](#development) below
-if you want to hack on Foreman itself instead of just running it.
+- `foreman deinit` (inside a repo) removes the plugin lock and symlink under
+  `.omp/plugins/` and, unless `--keep-registry`, drops the repo's registry
+  entry. `--path <dir>` targets another directory.
+- `foreman doctor` checks the global plugin link and every registered repo's
+  activation; a broken symlink or stale lock entry is a problem. `--fix`
+  repairs what it can (re-runs the equivalent of `activateRepoPlugin` per
+  affected repo); `--checkout <path>` overrides the expected checkout. Exits
+  `0` when healthy, `1` when problems remain.
+- `foreman update` pulls the checkout and rebuilds the CLI. The plugin loads
+  from source, so that is the entire update; every registered repo follows
+  the global link with no per-repo work. Flags: `--checkout <path>`,
+  `--skip-pull` (rebuild only), `--skip-plugin` (leave the global link
+  alone), `--home <path>`.
+
+**Old machine-wide install?** Earlier `foreman setup` registered an omp
+marketplace and installed the plugin user-scoped, so it loaded in every omp
+session. `foreman doctor` detects the leftover; `foreman doctor --fix`
+removes it. Then `foreman init` in each repo that should have Foreman.
 
 ## Running the loop
 
-The supervisor polls Linear and dispatches whatever the gates allow.
+Order of operations: `setup` once per machine, `init` once per repo,
+`update` when Foreman changes upstream. Then one `foreman repo` process per
+managed repo, and one team-level `foreman team` process consuming the shared
+Triage inbox.
 
 ```bash
-foreman repo --once             # one tick, asking before each action
-foreman repo --mode yolo        # unattended
+foreman repo [alias] [--team <KEY>]   # inside the repo; alias overrides cwd matching
+foreman repo --once                   # one tick, asking before each action
+foreman repo --mode yolo              # unattended
+foreman team [key]                    # triage intake for the team
 ```
 
-`loop.mode` is the global fallback and defaults to `confirm`, so a loop
-started before you are ready asks before every agent dispatch and every
-Linear mutation instead of acting on them — reads are never gated, and the
-loop still evaluates every worker's predicate and logs its intent either
-way. Declining is how you get a dry run: say no to everything and the loop
-only ever logs. Override an individual worker in `loop.workerModes` when you
-want to validate the pipeline one step at a time — `{ "review": "yolo" }`
-lets `review` dispatch unattended while every other worker still asks first.
-`confirm` mode needs a terminal: a loop started with any worker's effective
-mode resolving to `confirm` and no TTY attached refuses to start rather than
-declining everything silently.
-Every tick logs a per-worker summary plus each dispatch intent and every
-routing skip to stdout by default. `foreman repo` does take `--verbose`: it
-adds per-item skip reasons, timings, and dispatch handles on top of that
-default output. `foreman team` takes `--verbose` too, where it adds the skip
-reason for each triaged issue.
+The supervisor polls Linear and dispatches whatever the gates allow.
+
+`loop.mode` defaults to `confirm`: the loop asks before every agent dispatch
+and every Linear mutation. Reads are never gated, and every worker's
+predicate is still evaluated and logged, so declining everything is a dry
+run. `loop.workerModes` overrides one worker: `{ "review": "yolo" }` lets
+review dispatch unattended while the rest ask. `confirm` needs a TTY; a loop
+whose effective mode resolves to `confirm` with no terminal attached refuses
+to start rather than declining silently.
+
+Every tick logs a per-worker summary, each dispatch intent, and every
+routing skip. `--verbose` adds per-item skip reasons, timings, and dispatch
+handles (`foreman repo`) or the skip reason per triaged issue (`foreman
+team`).
 
 ```
 [foreman-repo:plotroom] confirm: dispatch foreman-plan for project Plotroom
@@ -267,38 +223,42 @@ Proceed? [y/N] y
 [foreman-repo:plotroom]   ✓ dispatched plan [mode: confirm] 8f2c1d90: "Plotroom" has no issues yet.
 ```
 
-The `foreman-repo` prefix names the long-lived process, not the command — the
-same spelling herdr uses for its pane. The loop is a singleton: a second one
-refuses to start while the first holds the lock.
+`foreman-repo` names the long-lived process (the same spelling herdr uses
+for its pane). The loop is a singleton; a second refuses to start while the
+first holds the lock.
 
 ### Control plane
 
-Each loop process — a repo's `foreman repo` and the team-level `foreman
-team` — serves a unix socket at `<loop.stateDir>/<loop>/control.sock`,
-speaking newline-delimited JSON, and publishes `<loop.stateDir>/<loop>/status.json`
-after `reconcile()` and after every tick. Ops: `hello`, `snapshot`,
-`subscribe`, `pause`, `resume`, `stop`, `tick`, `setMode`, `patchConfig`,
-`reload`, `attachAgent`, `killAgent`, `report`, `logs`. `stop` takes
-`mode: "graceful" | "now"`: both transition to `draining` and release the
-lock once shutdown completes. `"graceful"` lets the in-flight tick finish
-every worker in the pass; `"now"` cuts the tick short between workers, wakes
-the poll wait immediately, and leaves in-flight dispatches to expire at lock
-TTL. The socket is live control; the file is the fallback a client reads
-when nothing is listening, which lets a status-reading client render a
-stopped loop's last-known state instead of an error. Run `foreman repo
---no-control` to skip the socket entirely.
+Each loop process serves a unix socket at
+`<loop.stateDir>/<loop>/control.sock` (newline-delimited JSON) and publishes
+`<loop.stateDir>/<loop>/status.json` after `reconcile()` and after every
+tick. Ops: `hello`, `snapshot`, `subscribe`, `pause`, `resume`, `stop`,
+`tick`, `setMode`, `patchConfig`, `reload`, `attachAgent`, `killAgent`,
+`report`, `logs`.
+
+`stop` takes `mode: "graceful" | "now"`. Both transition to `draining` and
+release the lock on completion; `graceful` lets the in-flight tick finish
+every worker, `now` cuts between workers, wakes the poll wait, and leaves
+in-flight dispatches to expire at lock TTL. The socket is live control; the
+file is what a client reads when nothing is listening, so a stopped loop's
+last state still renders. `foreman repo --no-control` skips the socket.
 
 ## Operator surface
 
-Slash commands, inside any omp session:
+Slash commands inside any omp session:
 
 | Command | Does |
 | --- | --- |
-|`/foreman:roadmap`|Decompose an initiative's brief into sequenced projects — dependency edges and start/target dates derived from what already exists. Takes `<INITIATIVE-ID>`.|
-|`/foreman:status`|Foreman operator console: blocked queue, locks, proposals, agents, loop state.|
-|`/foreman:apply`|Apply approved triage proposals, or approve/reject one by issue id. Takes `[--yes]`, or `<ISSUE-ID> --approve`, or `<ISSUE-ID> --reject <reason>`.|
-|`/foreman:merge`|Merge one issue's PR (or branch) once the review gate passes. Takes `<ISSUE-ID>`. Operator-invoked only.|
-|`/foreman:unblock`|Record the operator's reply to a blocked issue and clear its `blocked:*` label. Takes `<ISSUE-ID> <reply>`.|
+| `/foreman:triage` | Propose classification, priority, and destination for a batch of Inbox items. `[--stale-low-days <days>] <ISSUE-ID>...` |
+| `/foreman:roadmap` | Decompose an initiative's brief into sequenced projects. `<INITIATIVE-ID>...` |
+| `/foreman:plan` | Seed a bare project's first Backlog issues. `<PROJECT-ID>...` |
+| `/foreman:refine` | Refine prioritized issues to Todo. `<ISSUE-ID>...` |
+| `/foreman:implement` | Implement one ready issue and open its PR. `<ISSUE-ID>` |
+| `/foreman:review` | Cold-review in-review diffs. `<ISSUE-ID or PR>...` |
+| `/foreman:status` | Operator console: blocked queue, locks, proposals, agents, loop state. |
+| `/foreman:apply` | Apply approved triage proposals, or approve/reject one. `[--yes]`, `<ISSUE-ID> --approve`, `<ISSUE-ID> --reject <reason>` |
+| `/foreman:merge` | Merge one issue's PR (or branch) once the review gate passes. `<ISSUE-ID>`. Operator-invoked only. |
+| `/foreman:unblock` | Record your reply to a blocked issue and clear its `blocked:*` label. `<ISSUE-ID> <reply>` |
 
 ## Development
 
@@ -317,5 +277,7 @@ bun run schemas        # regenerate output schemas into agent frontmatter
 bun run check          # typecheck + test + contract
 ```
 
-`omp.extensions` names `./src/extension.ts` directly, so the plugin has no
-build step and no artifact — a plugin source change just needs a commit.
+The plugin has no build step: `omp.extensions` names `./src/extension.ts`
+directly, so a plugin source change just needs a commit. See
+`packages/omp-plugin/README.md` for the plugin's layout and editing rules,
+and `AGENTS.md` for the conventions agents working on this repo follow.

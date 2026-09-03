@@ -1,6 +1,6 @@
 # Description template
 
-The extension renders the stored body, per SPEC §13.1:
+The extension renders the stored body:
 
 ```markdown
 ## Context
@@ -19,28 +19,22 @@ The extension renders the stored body, per SPEC §13.1:
 <empty at Todo; anything here means it isn't refined>
 ```
 
-You do not write that markdown. You return its parts, and the extension
-assembles them in exactly this order:
+You return the parts; the extension assembles them in exactly this order:
 
 | Section | Field |
 |---|---|
-| `## Context` | `refinedDescription` — prose only, no headings |
+| `## Context` | `refinedDescription`: prose only, no headings |
 | `## Acceptance Criteria` | `acceptanceCriteria[]` |
 | `## Affected Areas` | `affectedAreas[]` |
 | `## Out of Scope` | `outOfScope[]` |
-| `## Open Questions` | nothing — always rendered empty |
+| `## Open Questions` | nothing; always rendered empty |
 
-Putting the headings in `refinedDescription` nests a second copy of the
-template inside the `## Context` section, and leaves the real acceptance
-criteria orphaned where the parser cannot read them back.
+Headings inside `refinedDescription` nest a second template under
+`## Context` and orphan the real criteria where the parser cannot read them.
 
-Do not restate the Definition of Done in `refinedDescription` or anywhere else
-in the description — it is per-product and lives in the product `Context` doc.
-
-There is no open-questions field: a refined issue has none. An unresolved
-unknown is not something to park in the body — resolve it (read more, check
-the product `Context` doc or project brief, or spin off a spike) before
-yielding.
+No open-questions field: a refined issue has none. Resolve an unknown (read
+more, check the product `Context` doc or project brief, or spin off a spike)
+before yielding.
 
 ## Worked example
 
@@ -78,12 +72,11 @@ signals".
 Note that no field carries a `##` heading: every heading in the stored issue
 comes from the renderer.
 
-## Writing an `## Out of Scope` that actually prevents scope creep
+## `## Out of Scope` that prevents scope creep
 
-A weak out-of-scope entry restates the acceptance criteria negatively ("don't
-implement anything not listed above") — that adds nothing an implementer
-doesn't already know. A strong entry names a *specific adjacent temptation*:
-a related bug in the same file, a refactor that would make the fix cleaner,
-a broader version of the same problem. Naming the temptation is what stops an
-implement agent from picking it up as "obviously part of this" — anything
-picked up anyway becomes `discoveredWork`, not silently expanded scope.
+Weak entry: negates the criteria ("don't implement anything not listed
+above"); adds nothing. Strong entry: names a *specific adjacent temptation*
+(a related bug in the same file, a refactor that would make the fix cleaner,
+a broader version of the same problem). Naming the temptation stops an
+implement agent from treating it as "obviously part of this"; anything picked
+up anyway becomes `discoveredWork`.

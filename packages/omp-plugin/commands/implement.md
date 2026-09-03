@@ -3,38 +3,39 @@ description: Implement a refined, ready issue and open a PR
 argument-hint: <ISSUE-ID>
 ---
 
-Resolve issue `$1` via `foreman_linear_read`. Assemble the shared `context`
-from the two-layer `Context` digest (§4.7) plus this issue's description,
-acceptance criteria, and estimate.
+<critical>
+- Exactly ONE issue per invocation, ONE `tasks[]` entry. NEVER batch: each issue needs its own Foreman-managed worktree, and a non-isolated spawn inherits its parent's cwd.
+- Task text MUST carry `FOREMAN-ISSUE: $1` on its own line; the extension keys the lock, worktree, and result capture on it.
+- NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
+- NEVER restate the implementation procedure; `foreman-implement-issue` is autoloaded.
+</critical>
 
-Gate: the implementation gate must pass (refinement gate satisfied,
-`agent:ready` present, `agent:running` absent, `agent:hands-off` absent, no
-incomplete `blocked by` relations). Do not dispatch if it doesn't hold.
+## Resolve
 
-Before the spawn, the extension claims the `agent:running` lock for this
-dispatch and creates or reuses the Foreman-managed worktree for the issue's
-repo. The dispatch ID it wrote into the lock comment must be included in the
-task `context`, so `foreman-implement` can verify the lock matches this
-dispatch before doing anything.
+`$1` via `foreman_linear_read`: description, acceptance criteria, estimate,
+labels, relations.
 
-Dispatch `foreman-implement` through the `task` tool with
-`agent: foreman-implement` and the assembled `context`, including the
-dispatch ID, as a single `tasks[]` entry — unlike plan/refine/review, which
-may batch several subjects into one `task` call, an implement dispatch is
-always one issue per invocation, never a batch: each issue needs its own
-Foreman-managed worktree, and a non-isolated `task` spawn inherits its
-parent session's cwd, so implement keeps its own per-issue agent rather than
-sharing one orchestrator session. The extension revises the call to force
-`schemaMode: "strict"`; do not set it yourself and do not try to override
-it.
+## Gate
 
-The agent returns an `ImplementResult`; the extension moves the issue to In
-Review, releases the lock, and files any `discoveredWork` as new Backlog
-issues.
+Implementation gate MUST hold: refinement gate satisfied, `agent:ready`
+present, `agent:running` absent, `agent:hands-off` absent, no incomplete
+`blocked by` relation. Fails → do not dispatch; tell the operator which
+predicate failed.
 
-`/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
-are extension code, not agent dispatches; they live in `src/extension.ts`,
-not in this commands directory.
+## Dispatch
 
-Do not restate the implementation procedure here — it lives in the
-`foreman-implement-issue` skill, autoloaded by the `foreman-implement` agent.
+One `task` call, one `tasks[]` entry, `agent: foreman-implement`. Task text:
+`FOREMAN-ISSUE: $1`, the issue's description, acceptance criteria, estimate,
+and the two-layer `Context` digest (product `Context` doc + project brief,
+Definition of Done included).
+
+Before the spawn the extension claims the `agent:running` lock, creates or
+reuses the worktree, moves the issue to In Progress, and appends
+`FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and `FOREMAN-BASE`
+lines to the task text. You add none of these yourself.
+
+## After
+
+`ImplementResult` → extension moves the issue to In Review, releases the
+lock, files `discoveredWork` as Backlog issues. `BlockRecord` → extension
+labels and parks the issue. Nothing else changes state.

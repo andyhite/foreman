@@ -5,66 +5,59 @@ description: Use when foreman-triage processes the Linear Triage inbox — class
 
 # Foreman Triage Inbox
 
+<critical>
+- NEVER apply anything: no issues, sub-issues, spikes, comments, labels, or state changes. You return a `TriageProposal`; nothing else reaches Linear.
+- Repro by reading only. You hold no exec tool.
+- Uncertainty is a finding (`reproConfidence`, `missingInfo`), NEVER a `BlockRecord`.
+- `destination` = workflow state; `destinationProject` / `destinationProjectId` = project. NEVER conflate.
+</critical>
+
 ## Preconditions
 
-None. Every item in the Inbox view is in scope; the agent holds no write tool
-of any kind, so there is no gate to satisfy before running — only the
+None. Every item in the batch is in scope; no write tool, no gate. Only the
 implementation gate downstream cares about `type:`, priority, and estimate.
 
 ## Required reads
 
-- Each Triage item: title, description, comments, reporter.
-- The existing backlog, for dedupe comparison (`foreman_linear_read`).
-- The repo, read-only, for repro attempts — resolved via the global `repos` registry (§3.10, §3.12).
+- Each item: title, description, comments, reporter.
+- The existing backlog, for dedupe (`foreman_linear_read`).
+- The repo, read-only, for repro; resolved via the global `repos` registry.
 
 ## Procedure
 
-For each item, in order:
+Per item, in order:
 
-1. **Classify.** Assign a `type:` label (`bug`, `feature`, `chore`, `spike`,
-   `docs`).
-2. **Dedupe.** Compare against the existing backlog for semantic duplicates.
-   See `dedupe.md` for how to judge a match.
-3. **Attempt repro, by reading only.** No exec tool is held — confirm or
-   refute by reading the relevant code paths, not by running anything.
-4. **Propose a Priority** with severity reasoning in `severityReasoning`. An
-   un-actioned `Low` item older than the `--stale-low-days` threshold on the
-   dispatch (the operator's configured `intake.staleLowDays`, default 90)
-   defaults to a `Canceled` recommendation.
-5. **Flag missing information** in `missingInfo` when repro or scoping is
-   incomplete.
-6. **Propose `blocked by` relations** in `proposedBlockedBy` where a
-   dependency is evident.
-7. **Recommend a destination** (`Backlog`, `Canceled`, `Duplicate`).
-8. **Assign a project** in `destinationProject`, by name — never a UUID — for
-   the issue to land in: a milestone project or the product's standing
-   `Maintenance` project. This is a separate axis from `destination` (the
-   workflow state) — writing a state name into `destinationProject` is a
-   conflation bug. Use `null` only when you genuinely cannot tell which
-   project fits.
+1. **Classify.** `type:` label: `bug`, `feature`, `chore`, `spike`, `docs`.
+2. **Dedupe** against the backlog for semantic duplicates per `dedupe.md`.
+3. **Attempt repro** by reading the relevant code paths.
+4. **Propose a Priority** with `severityReasoning`. Un-actioned `Low` older
+   than the dispatch's `--stale-low-days` (operator's `intake.staleLowDays`,
+   default 90) → recommend `Canceled` by default.
+5. **`missingInfo`** when repro or scoping is incomplete.
+6. **`proposedBlockedBy`** where a dependency is evident.
+7. **`destination`**: `Backlog` | `Canceled` | `Duplicate`.
+8. **Project**: `destinationProjectId` (real Linear id, read via
+   `foreman_linear_read`) when resolvable, else `destinationProject` (a name,
+   never a UUID): a milestone project or the product's standing
+   `Maintenance` project. `null` only when you genuinely cannot tell.
+9. No usable description → `draftDescription` + `proposedEstimate`; both
+   `null` when the existing ones are adequate.
 
 ## Output
 
-Fill `TriageProposal`: `items[]` per the schema
-(`schemas/triage-proposal.json`), plus `summary`. Nothing here is applied by
-this agent — the extension writes one comment per item (human rendering plus
-an embedded machine-readable copy) and applies `agent:proposed`. The operator
-approves by removing that label, rejects by replying `reject: <reason>`.
-`/foreman-apply` performs the actual mutation later, deterministically, from
-the approved comment.
+`TriageProposal` (`schemas/triage-proposal.json`): `items[]` + `summary`. The
+extension writes one comment per item (human rendering + embedded
+machine-readable copy) and applies `agent:proposed`. Operator approves by
+removing that label, rejects by replying `reject: <reason>`; `/foreman:apply`
+performs the mutation later, deterministically, from the approved comment.
 
 ## Stop conditions
 
-Essentially none. This skill produces proposals, not blocks. An item that
-can't be classified, reproduced, or deduped confidently is not a block — it is
-low `reproConfidence` and populated `missingInfo`, reported as part of the
-proposal. A triage agent that yields a `BlockRecord` has misread its job: the
-whole point of triage is to surface uncertainty to the operator as a
-reviewable proposal, not to stall on it.
+Essentially none. An item that cannot be classified, reproduced, or deduped
+confidently → low `reproConfidence` + populated `missingInfo`, inside the
+proposal. Triage exists to surface uncertainty as a reviewable proposal, not
+to stall on it.
 
 ## Non-goals
 
-- Applying any proposal (extension code, §7.1).
-- Creating issues, sub-issues, or spikes.
-- Prioritizing the roadmap — that is the operator's weekly pass.
-- Writing to Linear in any form beyond the returned `TriageProposal`.
+- Prioritizing the roadmap; that is the operator's weekly pass.

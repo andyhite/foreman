@@ -3,39 +3,35 @@ description: Decompose one or more bare projects' briefs into their first slate 
 argument-hint: <PROJECT-ID>...
 ---
 
-Resolve each project id in `$ARGUMENTS` via `foreman_linear_read`. Assemble
-each one's shared `context` from the two-layer `Context` digest (§4.7): the
-product `Context` doc plus that project's brief.
+<critical>
+- ONE `task` call; every passing project its own `tasks[]` entry. NEVER one call per project, NEVER a partial batch: `foreman-*` agents are `blocking: true`, so one call runs N items concurrently and returns all N results on the one channel the extension captures.
+- Each task text MUST carry `FOREMAN-PROJECT: <PROJECT-ID>` on its own line; the extension keys result capture on it.
+- NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
+- NEVER restate the planning procedure; `foreman-plan-project` is autoloaded.
+</critical>
 
-Gate per project id: none written to Linear, but refuse to dispatch a
-project that already carries at least one issue in any state — plan is a
-one-shot bootstrap for a bare project, never a top-up (see the
-`foreman-plan-project` skill's non-goals). Tell the operator that project
-already has issues and point them at `foreman-refine` for individual issues
-instead; dispatch the rest of the batch normally.
+## Resolve
 
-Every project id in `$ARGUMENTS` gets its own `tasks[]` entry, each with
-`agent: foreman-plan`, its own assembled `context`, and its own
-`FOREMAN-PROJECT: <PROJECT-ID>` marker in the task text — dispatch all of
-them in a SINGLE `task` call, never one `task` call per project id and never
-a partial batch. Every `foreman-*` agent is `blocking: true`, so one call
-with N items runs them concurrently and returns all N structured results on
-the one channel the extension can capture; splitting the call loses that.
-The extension revises the call to force `schemaMode: "strict"` on every
-item; do not set it yourself and do not try to override it.
+Each project id in `$ARGUMENTS` via `foreman_linear_read`: brief, issue
+count.
 
-The agent returns a `PlanResult`; the extension creates each
-`proposedIssues[]` entry as a new Backlog issue under the project, then
-wires every `blockedBy` edge into a native Linear `blocks` relation between
-the created issues — the relation, not a label or prose, is what later
-gates a dependent issue in the implement loop. Nothing else changes state —
-none of the new issues carry `agent:ready`, and none of them move out of
-Backlog until the operator sets a priority and `foreman-refine` picks them
-up through the normal funnel.
+## Gate (per project)
 
-`/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
-are extension code, not agent dispatches; they live in `src/extension.ts`,
-not in this commands directory.
+Zero issues in any state. Plan is a one-shot bootstrap, never a top-up.
+Project already has issues → skip it, tell the operator, point them at
+`/foreman:refine` for individual issues; dispatch the rest.
 
-Do not restate the planning procedure here — it lives in the
-`foreman-plan-project` skill, autoloaded by the `foreman-plan` agent.
+## Dispatch
+
+`agent: foreman-plan` per entry. Task text: `FOREMAN-PROJECT: <PROJECT-ID>`
+and the project's brief. The extension appends the two-layer `Context`
+digest (product `Context` doc + project brief) to the shared `context`
+itself.
+
+## After
+
+`PlanResult` → extension creates each `proposedIssues[]` entry as a Backlog
+issue under the project and wires every `blockedBy` edge into a native
+Linear `blocks` relation; that relation gates a dependent issue in the
+implement loop. No new issue carries `agent:ready` or leaves Backlog until
+the operator sets a priority and `foreman-refine` picks it up.

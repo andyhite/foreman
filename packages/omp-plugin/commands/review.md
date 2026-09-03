@@ -3,41 +3,38 @@ description: Review the diffs for one or more in-review issues against their acc
 argument-hint: <ISSUE-ID or PR>...
 ---
 
-Resolve each target issue or PR in `$ARGUMENTS` via `foreman_linear_read`.
-Gate per target: a PR is open for the issue (or, with `pr.required: false`,
-the branch is pushed), and no `ReviewResult` exists yet for the current head
-SHA. Skip a target that fails its gate and dispatch the rest of the batch
-normally.
+<critical>
+- ONE `task` call; every passing target its own `tasks[]` entry. NEVER one call per target, NEVER a partial batch: `foreman-*` agents are `blocking: true`, so one call runs N items concurrently and returns all N results on the one channel the extension captures.
+- Each task text MUST carry `FOREMAN-ISSUE: <ISSUE-ID>` on its own line.
+- Cold review: NEVER put implementation rationale, conversation history, or your own reading of the diff in `context` or task text. The agent gets the diff path, the issue, the SHA, and the `Context` digest; nothing else.
+- NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
+- NEVER restate the review procedure; `foreman-review-diff` is autoloaded.
+</critical>
 
-The agent holds no git or GitHub tool. Before the spawn, the extension
-fetches each target's diff and head SHA — from the PR via its GitHub read
-client, or from git when `pr.required: false` — and writes them to a file.
-Put that file's path, not the diff text, in that item's task `context`,
-alongside the two-layer `Context` digest (§4.7) and the issue's acceptance
-criteria. The agent `read`s the file itself.
+## Resolve
 
-Cold-context warning: review runs in a fresh child session with no memory of
-the implementation conversation. Do not put implementation rationale in
-`context` — that defeats the cold review this dispatch exists to guarantee.
-Give it only the diff file path, the issue, and the two-layer `Context`
-digest.
+Each target in `$ARGUMENTS` (issue id or PR) → its issue via
+`foreman_linear_read`; its PR via `foreman_github_pr` `view` with `head` =
+the issue's branch. Head SHA: the PR head, or `git rev-parse <branch>` when
+`pr.required: false`.
 
-Every target that passes its gate gets its own `tasks[]` entry, each with
-`agent: foreman-review`, its own assembled `context`, and its own
-`FOREMAN-ISSUE: <ISSUE-ID>` marker in the task text — dispatch all of them
-in a SINGLE `task` call, never one `task` call per target and never a
-partial batch. Every `foreman-*` agent is `blocking: true`, so one call with
-N items runs them concurrently and returns all N structured results on the
-one channel the extension can capture; splitting the call loses that. The
-extension revises the call to force `schemaMode: "strict"` on every item; do
-not set it yourself and do not try to override it.
+## Gate (per target)
 
-The agent returns a `ReviewResult`; the extension renders it as a Linear
-comment and a PR review, and drives the review gate and fix cycle from it.
+PR open for the issue (or branch pushed when `pr.required: false`), and no
+`ReviewResult` yet for the current head SHA. Fails → skip it; dispatch the
+rest. A failing item inside the call blocks the whole call, so filter before
+dispatching.
 
-`/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
-are extension code, not agent dispatches; they live in `src/extension.ts`,
-not in this commands directory.
+## Dispatch
 
-Do not restate the review procedure here — it lives in the
-`foreman-review-diff` skill, autoloaded by the `foreman-review` agent.
+`agent: foreman-review` per entry. Task text: `FOREMAN-ISSUE: <ISSUE-ID>`,
+the head SHA, the issue's acceptance criteria and Out of Scope, and that
+issue's two-layer `Context` digest (product `Context` doc + project brief,
+Definition of Done included). The extension fetches the diff before the
+spawn and appends a `FOREMAN-DIFF: <path>` line; the agent reads the file
+itself. NEVER inline diff text.
+
+## After
+
+`ReviewResult` → extension renders a Linear comment and a PR review, and
+drives the review gate and fix cycle from it.

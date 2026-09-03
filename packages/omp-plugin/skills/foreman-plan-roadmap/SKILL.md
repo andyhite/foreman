@@ -5,100 +5,76 @@ description: Use when foreman-roadmap turns an initiative's brief into its next 
 
 # Foreman Plan Roadmap
 
+<critical>
+- NEVER write `proposedProjects` to Linear or attach them to the initiative; the extension does both.
+- Dependency edge = "cannot start until", never "would read better after". A false edge blocks `foreman-plan` off a project for no reason.
+- Combined graph (this result's edges + every `blockedByExisting` edge) MUST be a DAG; a cycle or dangling reference drops the whole result.
+- NEVER gate on dates. Dates are informational; the dependency graph is the only machine-readable sequence.
+- NEVER edit the product `Context` doc or an existing project's brief; propose edits as a comment.
+</critical>
+
 ## Preconditions
 
-None enforced by routing — unlike `foreman-plan`, you are operator-invoked,
-never dispatched by the loop, and may run against the same initiative more
-than once as its roadmap grows. There is no "bare initiative" requirement:
-an initiative you are pointed at may already carry any number of projects.
+None enforced by routing. Operator-invoked, never loop-dispatched; MAY run
+against the same initiative repeatedly as its roadmap grows. The initiative
+MAY already carry any number of projects.
 
 ## Required reads
 
-- The product `Context` doc (`project_context` at the initiative layer):
-  architectural decisions, constraints, and domain vocabulary that shape how
-  the brief splits into projects.
-- Every existing project already attached to the initiative — name, status,
-  `startDate`/`targetDate`, and dependency edges — via the
-  `initiative_roadmap` op. This is what lets you place new work relative to
-  what is already committed, instead of re-proposing it or sequencing blind.
+- The product `Context` doc (`project_context`, initiative layer):
+  architectural decisions, constraints, domain vocabulary.
+- Every project already attached to the initiative (name, status,
+  `startDate`/`targetDate`, dependency edges) via the `initiative_roadmap`
+  op. This places new work relative to committed work instead of
+  re-proposing it or sequencing blind.
 
 ## Procedure
 
-1. Read the product `Context` doc and the initiative's existing roadmap.
-   If the brief you were given has no problem statement or shippable scope
-   to decompose — not merely short, genuinely absent — this is a stop
-   condition; see below.
-2. Decompose the brief into shippable increments: each `proposedProject` is
-   a project that *ends* — has a defined finish, closes, ships something —
-   never an open-ended theme like "Performance" or "Platform Health" that
-   never reaches `completed`.
-3. For each increment, draft a `ProposedProject`:
+1. Read both. Brief has no problem statement or shippable scope (genuinely
+   absent, not merely short) → stop condition below.
+2. Decompose into shippable increments: each `proposedProject` *ends*
+   (defined finish, ships something). NEVER an open-ended theme
+   ("Performance", "Platform Health") that never reaches `completed`.
+3. Draft each `ProposedProject`:
    - `key`: short, stable, local to this result.
-   - `name`: the project name as it will read in Linear's sidebar.
-   - `description`: Linear's one-line summary — orientation for someone
-     scanning the initiative, not the brief.
-   - `brief`: a real project brief (SPEC §4.7), not a restatement of the
-     name. `foreman-plan` reads exactly this document to decompose the
-     project into issues — a project without one is unplannable, so a thin
-     or missing brief here silently blocks every issue that project would
-     otherwise have produced.
-4. Sequence with `blockedBy` (sibling `key`s in this same result) and
-   `blockedByExisting` (ids of projects already in Linear) for genuine
-   prerequisites only — one project's work is a real precondition for
-   another's, not merely a preferred reading or delivery order. The
-   extension creates a native `dependency` relation for each edge, which is
-   what later gates `foreman-plan` off a project until its prerequisites
-   ship (SPEC §17.5). The combined graph — this result's edges plus every
-   `blockedByExisting` edge into the existing roadmap — must stay a DAG; a
-   cycle or a dangling reference drops the whole result.
-5. Derive `startDate` from the latest `targetDate` among a project's
-   blockers (its own siblings' proposed dates, or the resolved `targetDate`
-   of an existing blocker) and `targetDate` from a defensible duration for
-   the scope you gave it. Get this reasonably right, not exactly right: the
-   extension re-clamps every date against the real blocker dates before
-   creating anything, shifting a `startDate` that lands before its blocker
-   finishes and preserving the requested duration when it does. That
-   clamp is a safety net for arithmetic drift, not a substitute for a
-   thought-out sequence.
-6. Write `rationale`: one paragraph connecting the initiative's brief to the
-   slate you chose, including what the dates were derived from. Logged for
-   the operator, never written to Linear.
-7. Yield the `RoadmapResult`.
+   - `name`: as it reads in Linear's sidebar.
+   - `description`: Linear's one-line summary; orientation for someone
+     scanning the initiative.
+   - `brief`: a real project brief, not a restatement of the name.
+     `foreman-plan` reads exactly this to decompose the project; a thin or
+     missing brief silently blocks every issue the project would produce.
+4. Sequence with `blockedBy` (sibling `key`s) and `blockedByExisting` (ids of
+   projects already in Linear) for genuine prerequisites only. The extension
+   creates a native `dependency` relation per edge; that relation gates
+   `foreman-plan` off a project until prerequisites ship.
+5. `startDate` = latest `targetDate` among blockers (siblings' proposed
+   dates, or an existing blocker's resolved `targetDate`); `targetDate` =
+   `startDate` + defensible duration. Reasonable, not exact: the extension
+   re-clamps every date against real blocker dates, shifting an early
+   `startDate` and preserving the requested duration. The clamp catches
+   arithmetic drift; it does not replace a thought-out sequence.
+6. `rationale`: one paragraph, brief → slate, including what the dates
+   derive from. Logged, never written to Linear.
+7. Yield `RoadmapResult`.
 
 ## Output
 
-Fill `RoadmapResult` (`schemas/roadmap-result.json`). The extension creates
-each `proposedProjects[]` entry, attaches it to `initiativeId`, sets its
-dates, and wires every dependency edge — nothing else. None of the created
-projects get issues; a created, approved project becomes a `foreman-plan`
-candidate the normal way, the moment it carries zero issues (which it does,
-being new).
+`RoadmapResult` (`schemas/roadmap-result.json`). The extension creates each
+`proposedProjects[]` entry, attaches it to `initiativeId`, sets dates, wires
+every dependency edge; nothing else. Created projects get no issues; a
+created, approved project becomes a `foreman-plan` candidate the normal way
+(zero issues).
 
 ## Stop conditions
 
-A `BlockRecord` is right only when the initiative's brief itself cannot
-support any confident decomposition — no problem statement, no shippable
-scope, nothing to split. A *thin* brief is not a stop condition: propose the
-smallest honest first project and say so in `rationale` rather than
-blocking. Since you have no existing project or issue to attach a
-`blocked:*` label to, a block here is logged by the loop rather than written
-to Linear (SPEC known gap) — reserve it for cases where proceeding would
-mean inventing scope the brief never described.
+`BlockRecord` ONLY when the brief cannot support any confident
+decomposition: no problem statement, no shippable scope. Thin ≠ block:
+propose the smallest honest first project and say so in `rationale`. No
+project or issue exists to label, so a block here is logged by the loop, not
+written to Linear; reserve it for cases where proceeding means inventing
+scope.
 
 ## Non-goals
 
-- Proposing issues, estimates, or anything below the project level.
-  `foreman-plan` decomposes a project's brief into issues once that project
-  exists and is approved — this skill stops at the project boundary.
-- Gating on `startDate`/`targetDate`, here or anywhere else in Foreman.
-  Dates are informational, derived for the operator's timeline view; the
-  dependency graph (`blockedBy`/`blockedByExisting`) is the only
-  machine-readable sequence anything gates on.
-- A dependency edge to express a merely preferred order. `blockedBy` and
-  `blockedByExisting` mean "cannot start until," not "would read better
-  after." An edge that doesn't reflect a real prerequisite blocks
-  `foreman-plan` off a project for no reason.
-- Writing `proposedProjects` into Linear yourself, or attaching any of them
-  to the initiative — the extension does both.
-- Editing the product `Context` doc or any existing project's brief.
-  Propose edits as a comment if something is stale; never write to either.
+- Issues, estimates, or anything below the project level; `foreman-plan`
+  decomposes a project once it exists and is approved.

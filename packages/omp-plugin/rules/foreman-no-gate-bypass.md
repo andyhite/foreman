@@ -5,9 +5,9 @@ scope: "tool:bash(*), tool:eval(*)"
 interruptMode: tool-only
 ---
 
-Stop. No agent holds a Linear write tool, and reaching the API through a shell
-is the one path around that. State transitions, labels, relations, and comments
-belong to the extension, applied from your validated structured result.
+Stop. No agent holds a Linear write tool; a shell call is the one path around
+that. State transitions, labels, relations, and comments belong to the
+extension, applied from your validated structured result.
 
-Put what you wanted changed into your result and yield. If it has no field for
-it, that is the finding — say so in the result rather than routing around it.
+Put the change you wanted into your result and yield. No field for it? That
+is the finding: say so in the result. NEVER route around it.

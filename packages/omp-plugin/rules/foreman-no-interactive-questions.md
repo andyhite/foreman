@@ -5,7 +5,7 @@ scope: "text"
 interruptMode: always
 ---
 
-Stop. You cannot pause for approval — headless children have no approval UI,
-so asking just stalls the run and burns budget. Yield a `BlockRecord` with
-the question, your options, and your recommendation instead. The operator
-reviews blocks in batch; they never watch you type.
+Stop. Headless children have no approval UI; asking stalls the run and burns
+budget. Yield a `BlockRecord` with the question, your options, and your
+recommendation. The operator reviews blocks in batch and never watches you
+type.

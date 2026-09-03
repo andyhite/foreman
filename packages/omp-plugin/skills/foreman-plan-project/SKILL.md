@@ -5,113 +5,81 @@ description: Use when foreman-plan turns a bare project's brief into its first s
 
 # Foreman Plan Project
 
+<critical>
+- NEVER write `proposedIssues` to Linear or set `agent:ready`; the extension creates them, `foreman-refine` readies them.
+- `blockedBy` = real prerequisite only. Graph MUST be a DAG: a cycle, duplicate `key`, self-block, or `blockedBy` naming no sibling `key` drops the whole result.
+- NEVER put `##` headings in `description`; the extension renders the template.
+- NEVER edit the project brief or the product `Context` doc; propose edits as a comment.
+</critical>
+
 ## Preconditions
 
-The project is bare: it carries zero issues in any state. Routing enforces
-this — you are never dispatched at a project that already has one. There is
-no "top up the backlog" mode: a project reaches you exactly once, right after
-it is created and approved, unless the operator later empties it back out.
+Project is bare: zero issues in any state. Routing enforces this. No "top up"
+mode: a project reaches you exactly once, right after creation and approval,
+unless the operator later empties it.
 
 ## Required reads
 
-- The project brief (SPEC §4.7): the increment's problem statement and
-  success criteria.
-- The product `Context` doc, Definition of Done included — architectural
-  decisions, constraints, and domain vocabulary that shape how the brief
-  splits into issues.
+- The project brief: problem statement and success criteria.
+- The product `Context` doc, Definition of Done included: architectural
+  decisions, constraints, domain vocabulary.
 
 ## Procedure
 
-1. Read the project brief and the product `Context` doc. If the brief has no
-   problem statement or success criteria to decompose — not merely short,
-   genuinely absent — this is a stop condition; see below.
-2. Break the brief's scope into agent-sized slices. Use the same scale
-   `foreman-refine` estimates against (SPEC §4.6): a slice that would score 5
-   or higher is too big for one issue — split it into more than one
-   `proposedIssue` rather than proposing one oversized draft.
-3. For each slice, draft a `ProposedIssue`:
-   - `key`: a short stable identifier, unique within this result (e.g.
-     `schema`, `api`, `ui`). Local to this result only — never written to
-     Linear, which assigns the real identifier on creation. Other entries'
+1. Read both. Brief has no problem statement or success criteria (genuinely
+   absent, not merely short) → stop condition below.
+2. Split scope into agent-sized slices on `foreman-refine`'s scale. A slice
+   scoring ≥5 → split into several `proposedIssues`.
+3. Draft each `ProposedIssue`:
+   - `key`: short, stable, unique within this result (e.g. `schema`, `api`,
+     `ui`). Local only; Linear assigns the real identifier. Siblings'
      `blockedBy` reference it.
    - `title`: short, specific, not a restatement of the brief.
-   - `type`: the `type:` label it should carry.
-   - `description`: the `## Context` body only — prose, no headings. The
-     extension renders the SPEC §13.1 template around it from this plus
-     `acceptanceCriteria` and the pass's `outOfScope`, so writing the
-     headings yourself nests one template inside another. This is a draft,
-     not a finished refinement — `foreman-refine` verifies and revises it
-     against the actual code before the issue reaches Todo, exactly as it
-     already does for intake-drafted issues (SPEC §3.12). Do not restate the
-     Definition of Done.
-   - `acceptanceCriteria`: draft observable behaviors. `foreman-refine` may
-     sharpen these once it reads the code — a rough but honest first pass
-     beats an over-specified guess.
-   - `proposedPriority`: a real priority when the brief gives you enough to
-     judge urgency; `None` only when you truly cannot tell — an issue stuck
-     at `None` sits outside the refine funnel until the operator sets one.
-   - `proposedEstimate`: a rough Fibonacci call, or `null` when you cannot
-     estimate at all. `foreman-refine` re-estimates against the code.
-   - `blockedBy`: `key`s of sibling entries in this same result that must
-     ship first — a real prerequisite, meaning this slice cannot be built
-     until the other's work exists, never a preference, priority signal, or
-     a preferred reading order. Leave it empty for anything that can start
-     immediately; at least one entry in the result should always be
-     startable. The graph must be a DAG — a cycle, a duplicate `key`, a
-     self-block, or a `blockedBy` naming no sibling `key` fails parsing and
-     drops the whole result. `blockedBy` cannot reference an issue that
-     already exists outside this result; a dependency on prior work belongs
-     in the operator's hands, not this field.
-4. Record explicit non-goals in `outOfScope` — scope the brief describes but
-   this pass deliberately does not turn into an issue. This also guards a
-   *future* planning pass: a project can only go bare again if every issue is
-   later canceled or deleted, but when it does, the same `outOfScope` list
-   should stop the same non-goals from resurfacing.
-5. Set `fullyPlanned` to `true` only when `proposedIssues` plus `outOfScope`
-   together account for everything the brief describes. This field is
-   informational — Foreman has no durable per-project flag, so a `false`
-   here does not schedule a follow-up pass on its own (see Non-goals). Set it
-   honestly anyway: it is the operator's signal, reading the loop log or
-   `/foreman-status`, that a project was deliberately planned thin.
-6. Write `rationale`: one paragraph connecting the brief to the slices you
-   chose. This is logged for the operator, not written to Linear.
-7. Yield the `PlanResult`.
+   - `type`: the `type:` label.
+   - `description`: `## Context` body only; prose, no headings. A draft:
+     `foreman-refine` verifies it against the code before Todo. NEVER
+     restate the Definition of Done.
+   - `acceptanceCriteria`: draft observable behaviors. Rough and honest beats
+     over-specified guess; refine sharpens them.
+   - `proposedPriority`: a real priority when the brief supports a judgment;
+     `None` only when you truly cannot tell. `None` parks the issue outside
+     the refine funnel until the operator sets one.
+   - `proposedEstimate`: rough Fibonacci, or `null`. Refine re-estimates.
+   - `blockedBy`: sibling `key`s whose work MUST exist first. Empty for
+     anything startable now; at least one entry SHOULD be startable.
+     Cannot reference an issue outside this result; a dependency on prior
+     work is the operator's to wire.
+4. Record explicit non-goals in `outOfScope`: scope the brief describes that
+   this pass deliberately skips. Also guards a future pass should the
+   project go bare again.
+5. `fullyPlanned: true` ONLY when `proposedIssues` + `outOfScope` account for
+   the whole brief. Informational: no durable flag, no follow-up pass
+   scheduled; the operator reads it in the loop log or `/foreman:status`.
+6. `rationale`: one paragraph, brief → slices. Logged, never written to Linear.
+7. Yield `PlanResult`.
 
 ## Output
 
-Fill `PlanResult` (`schemas/plan-result.json`). The extension creates each
-`proposedIssues[]` entry as a new Backlog issue under the project, then
-wires each `blockedBy` edge into a native Linear `blocks` relation between
-the created issues — nothing else. The relation, not a label or a sentence
-in the description, is what the implement gate reads to hold a dependent
-issue back, so a real prerequisite that never becomes a `blockedBy` entry
-gates nothing. None of them carry `agent:ready`; they enter the normal
-refine funnel the moment the operator sets a priority, the same path every
-other Backlog issue takes.
+`PlanResult` (`schemas/plan-result.json`). The extension creates each
+`proposedIssues[]` entry as a Backlog issue under the project and wires each
+`blockedBy` edge into a native Linear `blocks` relation; nothing else. The
+relation, not a label or prose, is what the implement gate reads, so a
+prerequisite that never becomes a `blockedBy` entry gates nothing. No issue
+gets `agent:ready`; each enters the refine funnel when the operator sets a
+priority.
 
 ## Stop conditions
 
-A `BlockRecord` is right only when the brief itself cannot support any
-confident decomposition — no problem statement, no success criteria, nothing
-to split. A *thin* brief is not a stop condition: propose the smallest
-honest first slice (even a single spike-sized issue to investigate the
-unknown) and set `fullyPlanned: false` rather than blocking. Since you have
-no existing issue to attach a `blocked:*` label to, a block here is
-logged by the loop rather than written to Linear (SPEC known gap) — reserve
-it for cases where proceeding would mean inventing scope the brief never
-described.
+`BlockRecord` ONLY when the brief cannot support any confident
+decomposition: no problem statement, no success criteria. Thin ≠ block:
+propose the smallest honest first slice (even one spike-sized issue) and set
+`fullyPlanned: false`. No issue exists to label, so a block here is logged by
+the loop, not written to Linear; reserve it for cases where proceeding means
+inventing scope.
 
 ## Non-goals
 
-- Dedupe against existing issues. Routing only ever dispatches you at a
-  project with zero issues, so there is nothing to dedupe against.
-- Topping up an already-seeded project's backlog. Once a project carries one
-  issue, it never becomes a plan candidate again — this is a one-shot
-  bootstrap, not an ongoing buffer to refill. If a project's scope grows
-  after its first pass, that is new issues filed the normal way (triage,
-  the operator, or `discoveredWork` from implement), not a second plan pass.
-- Writing `proposedIssues` into Linear yourself, or setting `agent:ready` on
-  any of them — the extension creates the issues; `foreman-refine` is what
-  makes one implementable.
-- Editing the project brief or the product `Context` doc. Propose edits as a
-  comment if something is stale; never write to either.
+- Deduping against existing issues; there are none.
+- Topping up a seeded project. Scope growth after the first pass = new
+  issues via triage, the operator, or `discoveredWork`; never a second plan
+  pass.

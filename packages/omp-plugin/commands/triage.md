@@ -3,36 +3,34 @@ description: Triage the Linear Inbox and propose classification, priority, and d
 argument-hint: "[--stale-low-days <days>] <ISSUE-ID...>"
 ---
 
-Triage exactly the issues named in `$ARGUMENTS` (space-separated identifiers,
-e.g. `ENG-101 ENG-102`), not the whole Inbox view — the dispatch already
-selected this batch via `intake.batchSize`. `$ARGUMENTS` may lead with
-`--stale-low-days <days>`, the operator's configured `intake.staleLowDays`;
-carry that number into the assembled `context` so the agent's staleness rule
-uses it instead of an assumed default. Resolve each issue via
-`foreman_linear_read`. Assemble the shared `context` from the two-layer
-`Context` digest (§4.7) plus the full batch of resolved items — triage works
-on the batch, not a single issue.
+<critical>
+- Exactly ONE `tasks[]` entry carrying the WHOLE batch. NEVER one entry per issue: triage proposes over the batch as a unit.
+- Triage exactly the issues named in `$ARGUMENTS`, never the whole Inbox view; the dispatch already selected this batch via `intake.batchSize`.
+- NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
+- NEVER restate the triage procedure; `foreman-triage-inbox` is autoloaded.
+</critical>
 
-Dispatch `foreman-triage` through the `task` tool as a single `tasks[]`
-entry with `agent: foreman-triage` and the assembled `context` — unlike
-plan/refine/review, triage is always one item per invocation, never one item
-per issue: the whole batch of issue ids named in `$ARGUMENTS` goes into that
-one item's `context`, because triage proposes over the batch as a unit, not
-issue by issue. The extension revises the call to force `schemaMode:
-"strict"`; do not set it yourself and do not try to override it.
+## Resolve
 
-Gate: none. Triage is read-only and has no precondition — it runs over
-whatever is currently in the Inbox.
+`$ARGUMENTS`: optional leading `--stale-low-days <days>` (the operator's
+`intake.staleLowDays`), then space-separated issue ids (`ENG-101 ENG-102`).
+Resolve each via `foreman_linear_read`.
 
-Nothing is applied by this dispatch. The agent returns a `TriageProposal`; the
-extension writes one proposal comment per item and applies `agent:proposed`.
-The operator approves by removing that label or rejects with `reject:
-<reason>`. Applying approved proposals happens later, via `/foreman:apply`,
-which is extension code — not an agent dispatch.
+## Gate
 
-`/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
-are also extension code, not agent dispatches; they live in
-`src/extension.ts`, not in this commands directory.
+None. Triage is read-only.
 
-Do not restate the triage procedure here — it lives in the
-`foreman-triage-inbox` skill, autoloaded by the `foreman-triage` agent.
+## Dispatch
+
+One entry, `agent: foreman-triage`. Task text: every resolved item in full,
+plus the `--stale-low-days` value so the staleness rule uses it instead of
+a default. Shared `context`: the two-layer `Context` digest (product
+`Context` doc + project brief) for the items' projects; the extension
+appends nothing for triage.
+
+## After
+
+Nothing is applied. `TriageProposal` → extension writes one proposal comment
+per item and applies `agent:proposed`. Operator approves by removing that
+label or rejects with `reject: <reason>`; `/foreman:apply` applies approved
+proposals later.

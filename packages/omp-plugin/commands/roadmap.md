@@ -3,35 +3,36 @@ description: Decompose one or more initiatives' briefs into their next slate of 
 argument-hint: <INITIATIVE-ID>...
 ---
 
-Resolve each initiative id in `$ARGUMENTS` via `foreman_linear_read`. Assemble
-each one's shared `context` from the two-layer product `Context` digest
-(`project_context`, initiative layer only — there is no project yet) plus
-that initiative's existing roadmap, read via the `initiative_roadmap` op:
-every project already attached, its status, dates, and dependency edges.
-`foreman-roadmap` places new work relative to that existing roadmap, not in
-a vacuum.
+<critical>
+- ONE `task` call; every initiative its own `tasks[]` entry. NEVER one call per initiative, NEVER a partial batch: `foreman-*` agents are `blocking: true`, so one call runs N items concurrently and returns all N results on the one channel the extension captures.
+- Each task text MUST carry `FOREMAN-INITIATIVE: <INITIATIVE-ID>` on its own line; the extension keys result capture on it.
+- NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
+- NEVER restate the roadmapping procedure; `foreman-plan-roadmap` is autoloaded.
+</critical>
 
-Every initiative id in `$ARGUMENTS` gets its own `tasks[]` entry, each with
-`agent: foreman-roadmap`, its own assembled `context`, and its own
-`FOREMAN-INITIATIVE: <INITIATIVE-ID>` marker in the task text — dispatch all
-of them in a SINGLE `task` call, never one `task` call per initiative id and
-never a partial batch. Every `foreman-*` agent is `blocking: true`, so one
-call with N items runs them concurrently and returns all N structured
-results on the one channel the extension can capture; splitting the call
-loses that. The extension revises the call to force `schemaMode: "strict"`
-on every item; do not set it yourself and do not try to override it.
+## Resolve
 
-The agent returns a `RoadmapResult`; the extension creates each
-`proposedProjects[]` entry as a new project attached to the initiative, sets
-its dates, and wires every `blockedBy` / `blockedByExisting` edge into a
-native `dependency` relation. Nothing below the project level changes —
-`foreman-plan` is what turns a created, approved project into its first
-slate of issues, exactly as it already does for a project created any other
-way.
+Each initiative id in `$ARGUMENTS` via `foreman_linear_read`:
+`project_context` at the initiative layer (product `Context` doc; no project
+exists yet) and `initiative_roadmap` (every attached project: status, dates,
+dependency edges). The extension appends nothing for roadmap; you assemble
+both.
 
-`/foreman:apply`, `/foreman:merge`, `/foreman:unblock`, and `/foreman:status`
-are extension code, not agent dispatches; they live in `src/extension.ts`,
-not in this commands directory.
+## Gate
 
-Do not restate the roadmapping procedure here — it lives in the
-`foreman-plan-roadmap` skill, autoloaded by the `foreman-roadmap` agent.
+None. Operator-invoked only.
+
+## Dispatch
+
+`agent: foreman-roadmap` per entry. Task text:
+`FOREMAN-INITIATIVE: <INITIATIVE-ID>`, the initiative's brief, its product
+`Context` doc, and its existing roadmap. `foreman-roadmap` places new work
+relative to that roadmap, never in a vacuum.
+
+## After
+
+`RoadmapResult` → extension creates each `proposedProjects[]` entry attached
+to the initiative, sets dates, wires every `blockedBy` /
+`blockedByExisting` edge into a native `dependency` relation. Nothing below
+the project level changes; `foreman-plan` seeds a created, approved project
+the normal way.

@@ -1,6 +1,8 @@
 # PR body template
 
-The extension renders every other artifact from structured output. This one it doesn't — the PR must exist before you yield, so you author the body yourself, from the same data you're about to put in `ImplementResult`. There's no second pass: the extension never rewrites it.
+The one artifact the extension never renders: the PR MUST exist before you
+yield, so you author the body from the same data you put in
+`ImplementResult`. No second pass.
 
 ## Template
 
@@ -71,4 +73,5 @@ fail if the similarity pass were reverted.
   hardening its config.
 ```
 
-Fill the Definition of Done checklist with the actual items from the product's `Context` doc, not the generic placeholders above — those vary per product.
+Definition of Done checklist MUST carry the product `Context` doc's actual
+items, not the placeholders above.

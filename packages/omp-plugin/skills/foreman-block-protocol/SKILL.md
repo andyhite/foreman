@@ -3,25 +3,38 @@ name: foreman-block-protocol
 description: How to yield a BlockRecord instead of asking the operator a question. Bound to every agent.
 ---
 
+<critical>
+- NEVER ask the operator in-session. Headless children have no approval UI;
+  asking stalls until the runtime kills the run.
+- NEVER wait for a reply. Nobody is listening.
+- NEVER guess past a genuine unknown to avoid blocking.
+</critical>
+
 ## Preconditions
 
-You've hit something you'd otherwise ask the operator about, or you've exhausted budget.
+You hit something you would otherwise ask the operator about, or exhausted
+budget.
 
 ## Required reads
 
-None. This skill is self-contained by design — it's loaded on every spawn.
+None; self-contained, loaded on every spawn.
 
 ## Procedure
 
-No agent asks the operator a question in-session. Headless children have no approval UI; an agent that "asks" just stalls and burns budget until the runtime kills it. Yield a `BlockRecord` instead.
+**Case A, blocked by another issue.** `type: "dependency"`; name the
+blocker(s) in `blockedByIssues`. No label: the native relation is the state
+and resolves itself when the blocker completes.
 
-**Case A — blocked by another issue.** Set `type: "dependency"`, name the blocker(s) in `blockedByIssues`. Apply no label — the native relation is the state, and it resolves itself when the blocker completes.
+**Case B, blocked on a human.** `type`: `needs-input` | `needs-decision`.
+Fill `whatIWasDoing`, `whatINeed` (the question, or `options[]` with
+tradeoffs), `recommendation` when you have a lean, `stateLeftBehind`
+(worktree, branch, pushed, commits, notes), `costOfWrongGuess`.
 
-**Case B — blocked on a human.** Set `type` to `needs-input` or `needs-decision`. Fill `whatIWasDoing`, `whatINeed` (the question or `options[]` with tradeoffs), `recommendation` if you have one, `stateLeftBehind` (worktree, branch, pushed, commits, notes), and `costOfWrongGuess`.
+Budget exhaustion = Case B, `type: "budget"`; never a silent stall.
 
-Budget exhaustion is Case B, `type: "budget"` — not a silent stall.
-
-Yield through the `yield` tool with the envelope's `blocked: true` and `result: null`. A run that stops without yielding this way delivers nothing; the lock and worktree sit until the reaper notices.
+Yield through the `yield` tool with the envelope's `blocked: true`,
+`result: null`. A run that stops any other way delivers nothing; lock and
+worktree sit until the reaper notices.
 
 ## Output schema
 
@@ -29,9 +42,7 @@ The `BlockRecord` branch of your agent's envelope schema.
 
 ## Stop conditions
 
-This skill *is* the stop condition. There is no further escalation past yielding a `BlockRecord`.
+This skill is the stop condition. No escalation past a `BlockRecord`.
 
-## Non-goals
-
-- Never wait for a reply. There's no one listening.
-- Never guess past a genuine unknown to avoid blocking. A vague `BlockRecord` usually means the issue was under-refined — write the confusion down precisely; that's diagnostic value, not failure.
+A vague `BlockRecord` usually means the issue was under-refined: write the
+confusion down precisely. That is diagnostic value, not failure.

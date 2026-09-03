@@ -1,56 +1,73 @@
 # foreman
 
-An omp plugin that runs a single-operator agile SDLC over Linear: triage the
-inbox, refine prioritized issues, implement them in worktrees, and review the
-diff, with every mutation applied by the extension from validated structured
-output.
+The omp plugin that runs a single-operator agile SDLC over Linear: triage
+the inbox, plan bare projects, refine prioritized issues, implement them in
+worktrees, review the diff. Agents return validated structured output; the
+extension performs every mutation.
 
-The plugin ships six agents, eight skills, ten commands (six Markdown,
-four registered by the extension), three TTSR rules, and one extension
-module (`src/extension.ts`) that owns the Linear write client, gate
-validators, lock manager, and config loader.
+## Layout
 
-This plugin is only ever active **per repo**, never user-wide, so it cannot
-fire in a repo that does not use Foreman. Every registered repo symlinks the
-single global copy at `~/.foreman/plugin`; nothing is copied, so every repo
-moves together with the checkout that copy points at.
+| Path | Loaded as | Owns |
+| --- | --- | --- |
+| `agents/*.md` | omp agents | One workflow edge each; frontmatter carries the tool allowlist and the inlined output schema |
+| `skills/*/SKILL.md` | autoloaded skills | The procedure each agent follows; supporting files sit beside `SKILL.md` |
+| `commands/*.md` | `/foreman:<stem>` | Operator dispatch: resolve, gate, one `task` call |
+| `rules/*.md` | TTSR rules | Mid-stream interrupts: no Linear API from a shell, no in-session questions, no scope creep |
+| `src/extension.ts` | extension module | Linear write client, gate validators, task guard, lock manager, result sink, config loader, and `/foreman:status`, `/foreman:apply`, `/foreman:merge`, `/foreman:unblock` |
+| `schemas/*.json` | reference | Generated copies of each agent's output schema |
 
-## Install
+Active **per repo only**: `foreman init` writes the repo's omp plugin root
+(`.omp/plugins/node_modules/@foreman/omp-plugin` → `~/.foreman/plugin` →
+this directory) plus the enable lock. Nothing is copied, so every
+registered repo follows the checkout the global symlink points at. See the
+repo root README for `foreman setup` / `foreman init`.
 
-`foreman init`, run inside the target repo — see the repo root README. No
-`omp plugin` subcommand is involved, because none of them can do this: omp
-honors `--scope` for a marketplace install (`name@marketplace`) alone, so
-`omp plugin link <dir>` and installs from a local path are unconditionally
-user-wide regardless of the flag passed. `foreman init` writes omp's project
-plugin root directly instead — a `node_modules` symlink to
-`~/.foreman/plugin`, plus this machine's enable lock.
+No build step: `omp.extensions` names `./src/extension.ts` and omp loads the
+TypeScript directly.
 
-There is no build step. `omp.extensions` names `./src/extension.ts` and omp
-loads the TypeScript directly, so there is no artifact to rebuild, to go
-stale, or to ship missing.
+## Editing
 
-`/reload-plugins` picks up changes to Markdown (agents, skills, commands,
-rules) without a restart. It does **not** pick up changes to
-`src/extension.ts` or anything it imports — those require restarting the omp
-session.
+- Markdown (agents, skills, commands, rules): `/reload-plugins` picks up
+  changes without a restart.
+- `src/extension.ts` and its imports: restart the omp session.
+- Output schemas: edit `packages/core/src/schemas/*.ts`, then `bun run
+  schemas`. Never edit the generated block in an agent's frontmatter; omp
+  `JSON.parse`s that string, so the schema must stay inlined.
+- `bun run contract` after any change here. It parses every frontmatter with
+  a real YAML parser, checks tool allowlists, `autoloadSkills` resolution
+  and shadowing, rule scopes and regexes, and schema drift.
+
+## Invariants the files encode
+
+- Agent frontmatter never sets `spawns`, `task`, `schemaMode`, or
+  `isolated`. Omitting `spawns` and `task` is what prevents fan-out; the
+  task guard forces `schemaMode: "strict"` and strips `isolated` at spawn.
+- Every agent is `blocking: true`. A background spawn's result arrives
+  without structured output, so the extension would have nothing to apply.
+- No agent holds a Linear write tool. `foreman_github_pr` on
+  `foreman-implement` is the one mutation tool any agent gets.
+- Task text carries marker lines (`FOREMAN-ISSUE`, `FOREMAN-PROJECT`,
+  `FOREMAN-INITIATIVE`; the guard appends `FOREMAN-DISPATCH`,
+  `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, `FOREMAN-BASE`, `FOREMAN-DIFF`). The
+  result sink keys every capture on them.
 
 ## Configuration
 
-Foreman reads one global config file:
-
-- `~/.foreman/config.json` — the `repos` registry (alias → path, team, bound initiatives), loop tuning, and `repoDefaults`, deep-merged with each entry's overrides.
+One global file, `~/.foreman/config.json`: the `repos` registry (alias →
+path, team, bound initiatives), loop tuning, and `repoDefaults`, deep-merged
+with each entry's overrides.
 
 ## Commands
 
 | Command | Dispatches | Argument |
-|---|---|---|
-| `/foreman:triage` | `foreman-triage` over the Inbox | none |
-| `/foreman:plan` | `foreman-plan` over one or more bare projects | `<PROJECT-ID>...` |
-| `/foreman:roadmap` | `foreman-roadmap` over one initiative — creates sequenced projects | `<INITIATIVE-ID>` |
-| `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
-| `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
-| `/foreman:review` | `foreman-review` | `<ISSUE-ID or PR>` |
-| `/foreman:apply` | extension code — reviews or applies staged proposals | none, `--yes`, `<ISSUE-ID> --approve`, or `<ISSUE-ID> --reject <reason>` |
-| `/foreman:merge` | extension code — merges once the review gate passes | `<ISSUE-ID>` |
-| `/foreman:unblock` | extension code — records the operator's reply and clears a block | `<ISSUE-ID>` |
-| `/foreman:status` | extension code — renders the operator console | none |
+| --- | --- | --- |
+| `/foreman:triage` | `foreman-triage`, one batch | `[--stale-low-days <days>] <ISSUE-ID>...` |
+| `/foreman:roadmap` | `foreman-roadmap` per initiative | `<INITIATIVE-ID>...` |
+| `/foreman:plan` | `foreman-plan` per bare project | `<PROJECT-ID>...` |
+| `/foreman:refine` | `foreman-refine` per issue | `<ISSUE-ID>...` |
+| `/foreman:implement` | `foreman-implement`, one issue | `<ISSUE-ID>` |
+| `/foreman:review` | `foreman-review` per target | `<ISSUE-ID or PR>...` |
+| `/foreman:apply` | extension: review or apply staged proposals | none, `--yes`, `<ISSUE-ID> --approve`, `<ISSUE-ID> --reject <reason>` |
+| `/foreman:merge` | extension: merge once the review gate passes | `<ISSUE-ID>` |
+| `/foreman:unblock` | extension: record the operator's reply, clear the block | `<ISSUE-ID> <reply>` |
+| `/foreman:status` | extension: operator console | none |

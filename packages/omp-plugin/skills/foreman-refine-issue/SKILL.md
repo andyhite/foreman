@@ -5,63 +5,57 @@ description: Use when foreman-refine turns one prioritized Backlog or Todo issue
 
 # Foreman Refine Issue
 
+<critical>
+- Priority `None` → refuse. Sole enforcement of "never bulk-refine the backlog."
+- NEVER write `refinedDescription` to Linear; the extension renders it.
+- NEVER put `##` headings in `refinedDescription`; section bodies are separate fields.
+- NEVER restate the Definition of Done; it is per-product, in the product `Context` doc.
+- NEVER guess to force an estimate; a genuine unknown is a spike.
+- NEVER edit the product `Context` doc or the project brief; propose edits as a comment.
+</critical>
+
 ## Preconditions
 
-Priority ≠ `None`. Verify this first and refuse if unprioritized — this is
-the enforcement mechanism for "never bulk-refine the backlog." A `legacy`
-issue is in scope regardless of the state it sits in (Backlog or Todo); the
-label only means "unrefined," and refining it is how it re-enters the funnel.
-The extension strips `legacy` when it applies this agent's result.
+Priority ≠ `None`. A `legacy` issue is in scope in either Backlog or Todo;
+the label means "unrefined," and refining it re-enters the funnel. The
+extension strips `legacy` when applying your result.
 
 ## Required reads
 
-- The issue: title, description, comments, existing labels.
-- The product `Context` doc and the project brief, Definition of Done
-  included (§4.7).
+- The issue: title, description, comments, labels.
+- The product `Context` doc and the project brief, Definition of Done included.
 
 ## Procedure
 
-1. Verify Priority ≠ `None`. Refuse if unprioritized.
-2. Read the product `Context` doc and the project brief, Definition of Done
-   included.
-3. Draft the `## Context` prose per `description-template.md` and return it as
-   `refinedDescription` — the section bodies are separate fields, the
-   extension renders the template, and you never write to Linear directly.
-4. Write acceptance criteria as observable behaviors, verifiable by someone
-   who did not write the code. Do not restate the Definition of Done — it is
-   per-product, lives in the product `Context` doc, and applies to every
-   issue in that product automatically. Repeating it per issue drifts from
-   the source and wastes output.
-5. Identify affected files and modules via LSP, not guesswork.
-6. Estimate the work (see `description-template.md` for the scale). At 5,
-   decompose: specify the split in `subIssues[]` with a per-sub-issue
-   estimate; the parent becomes a tracking issue and does not get
-   `agent:ready`. At 8, this is not an issue — recommend converting it to a
-   project or a spike instead of estimating it.
-7. If a genuine unknown blocks estimation, specify a `type:spike` in
-   `spikeCreated` with a native `blocks` relation to the original issue. See
-   `foreman-spike`. Do not guess to force a number.
-8. Yield the `RefineResult`.
+1. Verify Priority ≠ `None`.
+2. Read the product `Context` doc and the project brief.
+3. Draft the `## Context` prose per `description-template.md` →
+   `refinedDescription`.
+4. Acceptance criteria: observable behaviors, verifiable by someone who did
+   not write the code.
+5. Affected files and modules via `lsp`, not guesswork.
+6. Estimate on the scale in `description-template.md`. 5 → decompose:
+   `subIssues[]` with per-sub-issue estimates; parent becomes a tracking
+   issue without `agent:ready`. 8 → not an issue: recommend a project or a
+   spike instead of estimating.
+7. Genuine unknown blocks estimation → `spikeCreated` (`type:spike`, native
+   `blocks` relation to this issue) per `foreman-spike`.
+8. Yield `RefineResult`.
 
 ## Output
 
-Fill `RefineResult` (`schemas/refine-result.json`). The extension applies it:
-writes the description, creates sub-issues and the spike if any, applies
-`agent:ready`, moves the issue to Todo, and strips `legacy`.
+`RefineResult` (`schemas/refine-result.json`). The extension writes the
+description, creates sub-issues and the spike, applies `agent:ready`, moves
+the issue to Todo, strips `legacy`.
 
 ## Stop conditions
 
-A `BlockRecord` is right only when the *intent* of the issue is unrecoverable
-from the issue text, the project brief, and the product `Context` doc — not merely under-specified. A
-genuine unknown that blocks estimation is a spike, not a block: spin it off
-via `spikeCreated` and keep moving. Reserve the block for cases where refining
-further would mean guessing at what the operator actually wants.
+`BlockRecord` ONLY when the issue's *intent* is unrecoverable from the issue
+text, the project brief, and the product `Context` doc; under-specified ≠
+block. Unknown that blocks estimation = spike, not block. Reserve the block
+for cases where refining further means guessing what the operator wants.
 
 ## Non-goals
 
-- Writing `refinedDescription` into Linear directly — the extension does
-  that from the returned result.
-- Editing the product `Context` doc or the project brief. Propose edits as a
-  comment if something is stale; never write to either.
-- Refining issues ahead of what will actually be built next — priority is
-  the throttle; refine what the dispatcher hands you, not the whole backlog.
+- Refining ahead of what will be built next. Priority is the throttle:
+  refine what the dispatcher hands you, not the backlog.
