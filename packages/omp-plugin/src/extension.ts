@@ -99,9 +99,28 @@ function toGuardDeps(): TaskGuardDeps {
   };
 }
 
+/**
+ * Plan, roadmap, and triage dispatch ids carry a project id, an initiative
+ * id, or the literal "batch" where the issue-stage ids carry an identifier —
+ * `issueIdFromDispatchId`'s regex extraction cannot tell the difference, so
+ * every caller that would otherwise hand its result to a Linear issue-scoped
+ * lookup must check this first.
+ */
+export function isProjectScopedAgent(agent: string): boolean {
+  return agent === "foreman-plan" || agent === "foreman-roadmap" || agent === "foreman-triage";
+}
+
 function markerAppliedTracker(): AppliedTracker {
   return {
-    wasApplied: async (dispatchId: string) => {
+    wasApplied: async (dispatchId: string, agent: string) => {
+      // A project-scoped dispatch id's "subject" is never an issue id —
+      // querying Linear's issue-by-id endpoint with one throws
+      // `LinearApiError: Entity not found: Issue` before `apply()` ever
+      // runs, discarding the whole result with nothing created. There is no
+      // durable dedup for these agents (SPEC: duplicate risk is bounded
+      // upstream by routing/operator-only dispatch), so "not applied yet" is
+      // the only safe answer.
+      if (isProjectScopedAgent(agent)) return false;
       const issueId = issueIdFromDispatchId(dispatchId);
       if (!issueId) return false;
       const issue = await getLinear().issue(issueId, { includeComments: true });
@@ -265,9 +284,7 @@ export async function handleCaptured(
     // those stages lock anything: no target.
     const target =
       lockedIssueId ??
-      (agent === "foreman-plan" || agent === "foreman-roadmap" || agent === "foreman-triage"
-        ? null
-        : issueIdFromDispatchId(dispatchId));
+      (isProjectScopedAgent(agent) ? null : issueIdFromDispatchId(dispatchId));
     try {
       const parsed = parseAgentOutput(agent, data);
       if (parsed.kind === "invalid") {

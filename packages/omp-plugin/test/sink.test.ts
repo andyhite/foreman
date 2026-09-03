@@ -124,6 +124,21 @@ describe("sink — idempotency", () => {
 
     expect(calls.length).toBe(1);
   });
+
+  it("forwards the captured agent to wasApplied, so a tracker can skip a project-scoped dispatch id's issue lookup", async () => {
+    const seenAgents: string[] = [];
+    const tracker: AppliedTracker = {
+      wasApplied: async (_dispatchId, agent) => {
+        seenAgents.push(agent);
+        return false;
+      },
+    };
+    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-plan", data: {}, aborted: false, issueId: null, previousStateId: null };
+
+    await sink(captured, tracker, async () => {});
+
+    expect(seenAgents).toEqual(["foreman-plan"]);
+  });
 });
 
 describe("routing invalid results through the block path", () => {

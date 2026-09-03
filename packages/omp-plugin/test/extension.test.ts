@@ -15,7 +15,7 @@ import type {
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
-import { applyBoundResult, blockedOutcome, handleCaptured, __resetAppliedDispatchIdsForTest, __resetInFlightCapturesForTest } from "../src/extension.ts";
+import { applyBoundResult, blockedOutcome, handleCaptured, isProjectScopedAgent, __resetAppliedDispatchIdsForTest, __resetInFlightCapturesForTest } from "../src/extension.ts";
 import type { ApplyDeps, AgentOutcome } from "../src/results/apply.ts";
 import { extractFromToolResult } from "../src/results/sink.ts";
 
@@ -615,6 +615,31 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     const payload = toolResultPayload(planEnvelope());
     payload.input.tasks[0]!.task = `Decompose the brief.\n\nFOREMAN-PROJECT: ${PROJECT_ID}\n`;
     expect(extractFromToolResult(payload)).toEqual([]);
+  });
+});
+
+/**
+ * Regression: `markerAppliedTracker`'s applied-dedup check used to derive an
+ * "issue id" from every dispatch id via `issueIdFromDispatchId` and query
+ * Linear's issue-by-id endpoint with it unconditionally. A plan/roadmap
+ * dispatch id's encoded subject is a project or initiative id, and a triage
+ * dispatch id's is the literal "batch" — never an issue id — so that lookup
+ * threw `LinearApiError: Entity not found: Issue` before `applyPlan` ever
+ * ran, silently discarding the whole result with zero issues created. Every
+ * caller that would otherwise resolve a dispatch id into a Linear issue
+ * lookup must check this predicate first.
+ */
+describe("isProjectScopedAgent", () => {
+  it("is true for plan, roadmap, and triage — dispatch ids whose subject is never an issue id", () => {
+    expect(isProjectScopedAgent("foreman-plan")).toBe(true);
+    expect(isProjectScopedAgent("foreman-roadmap")).toBe(true);
+    expect(isProjectScopedAgent("foreman-triage")).toBe(true);
+  });
+
+  it("is false for issue-scoped stages, whose dispatch id subject is a real issue id", () => {
+    expect(isProjectScopedAgent("foreman-implement")).toBe(false);
+    expect(isProjectScopedAgent("foreman-refine")).toBe(false);
+    expect(isProjectScopedAgent("foreman-review")).toBe(false);
   });
 });
 

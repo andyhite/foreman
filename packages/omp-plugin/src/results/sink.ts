@@ -113,7 +113,8 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
 
 /** Marks a dispatch as applied, and checks whether it already was. Backed by Linear markers (`results/apply.ts` writes them). */
 export interface AppliedTracker {
-  wasApplied(dispatchId: string): Promise<boolean>;
+  /** `agent` lets a plan/roadmap/triage dispatch id — whose encoded "subject" is a project id, initiative id, or the literal `"batch"`, never an issue id — skip the issue-scoped marker lookup entirely rather than querying Linear with a non-issue id. */
+  wasApplied(dispatchId: string, agent: string): Promise<boolean>;
 }
 
 /**
@@ -126,6 +127,6 @@ export async function sink(
   tracker: AppliedTracker,
   apply: (captured: CapturedOutput) => Promise<void>,
 ): Promise<void> {
-  if (await tracker.wasApplied(captured.dispatchId)) return;
+  if (await tracker.wasApplied(captured.dispatchId, captured.agent)) return;
   await apply(captured);
 }
