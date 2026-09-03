@@ -10,6 +10,7 @@ const validTriageResult = {
     {
       issueId: "ENG-1",
       type: "type:bug",
+      app: null,
       proposedPriority: 2,
       severityReasoning: "Breaks login for all users.",
       duplicateOf: null,
@@ -47,6 +48,7 @@ const validPlanResult = {
       key: "search-index",
       title: "Wire the search index",
       type: "type:feature",
+      app: null,
       description: "## Context\nBuild the index.",
       acceptanceCriteria: ["Search returns results for a known query"],
       proposedPriority: 3,

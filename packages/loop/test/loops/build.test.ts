@@ -6,7 +6,7 @@ import { BUILD_LOOP } from "../../src/loops/build.ts";
 import type { LoopContext } from "../../src/engine.ts";
 import { FakeLinear } from "../fake-linear.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 2 };
 const STATE_IN_REVIEW: WorkflowState = { id: "state-in-review", name: "In Review", type: "started", position: 4 };
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
@@ -21,8 +21,8 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    state: STATE_TODO,
-    labels: [],
+    state: STATE_READY,
+    labels: [{ id: "type:feature", name: "type:feature", parentId: null }],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -39,7 +39,8 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
     alias: "acme",
     repoPath: "/repos/acme",
     team: "ENG",
-    initiativeIds: ["initiative-1"],
+    apps: [],
+    appNames: [],
     baseBranch: "main",
     pr: { required: true, draft: false, ciRequired: true },
     merge: { strategy: "squash", deleteBranch: true },
@@ -160,7 +161,7 @@ describe("BUILD_LOOP — implement rule", () => {
           id: "rel-1",
           type: "blocks",
           direction: "incoming",
-          other: { id: "issue-2", identifier: "ENG-2", title: "Blocker", state: STATE_TODO },
+          other: { id: "issue-2", identifier: "ENG-2", title: "Blocker", state: STATE_READY },
         },
       ],
     });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ConfigError, loadGlobalConfig } from "@foreman/core";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "../src/global-config.ts";
 
 function makeHome(): string {
@@ -15,7 +16,7 @@ describe("writeGlobalConfig", () => {
       const path = writeGlobalConfig(
         {
           repos: {
-            plotroom: { path: "~/Code/app", team: "ENG", initiatives: ["initiative-1"] },
+            plotroom: { path: "~/Code/app", team: "ENG", apps: [{ name: "fleet" }] },
           },
           linear: { apiKeyFile: "~/.foreman/linear-api-key" },
         },
@@ -23,7 +24,7 @@ describe("writeGlobalConfig", () => {
       );
       const written = JSON.parse(readFileSync(path, "utf8"));
       expect(written.repos).toEqual({
-        plotroom: { path: "~/Code/app", team: "ENG", initiatives: ["initiative-1"] },
+        plotroom: { path: "~/Code/app", team: "ENG", apps: [{ name: "fleet" }] },
       });
       expect(written.linear.apiKeyFile).toBe("~/.foreman/linear-api-key");
       expect(written.linear.teamKeys).toBeUndefined();
@@ -40,7 +41,7 @@ describe("writeGlobalConfig", () => {
       writeFileSync(
         join(dir, "config.json"),
         JSON.stringify({
-          repos: { existing: { path: "/repo", initiatives: ["initiative-existing"] } },
+          repos: { existing: { path: "/repo", team: "ENG" } },
           loop: { pollSeconds: 7 },
         }),
         "utf8",
@@ -48,15 +49,15 @@ describe("writeGlobalConfig", () => {
 
       const path = writeGlobalConfig(
         {
-          repos: { added: { path: "/repo2", initiatives: ["initiative-added"] } },
+          repos: { added: { path: "/repo2", team: "OPS" } },
           linear: { apiKeyFile: null },
         },
         home,
       );
       const written = JSON.parse(readFileSync(path, "utf8"));
       expect(written.repos).toEqual({
-        existing: { path: "/repo", initiatives: ["initiative-existing"] },
-        added: { path: "/repo2", initiatives: ["initiative-added"] },
+        existing: { path: "/repo", team: "ENG" },
+        added: { path: "/repo2", team: "OPS" },
       });
       expect(written.loop.pollSeconds).toBe(7);
       expect(written.linear).toBeUndefined();
@@ -71,8 +72,8 @@ describe("writeGlobalConfig", () => {
       writeGlobalConfig(
         {
           repos: {
-            old: { path: "/repo", initiatives: ["initiative-old"] },
-            other: { path: "/other", initiatives: ["initiative-other"] },
+            old: { path: "/repo", team: "ENG" },
+            other: { path: "/other", team: "OPS" },
           },
         },
         home,
@@ -80,15 +81,15 @@ describe("writeGlobalConfig", () => {
 
       const path = writeGlobalConfig(
         {
-          repos: { renamed: { path: "/repo", initiatives: ["initiative-old"] } },
+          repos: { renamed: { path: "/repo", team: "ENG" } },
           removeRepos: ["old"],
         },
         home,
       );
 
       expect(JSON.parse(readFileSync(path, "utf8")).repos).toEqual({
-        other: { path: "/other", initiatives: ["initiative-other"] },
-        renamed: { path: "/repo", initiatives: ["initiative-old"] },
+        other: { path: "/other", team: "OPS" },
+        renamed: { path: "/repo", team: "ENG" },
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -100,7 +101,7 @@ describe("writeGlobalConfig", () => {
     try {
       expect(() =>
         writeGlobalConfig(
-          { repos: { plotroom: { path: "/repo", initiatives: [] } }, linear: { apiKeyFile: null } },
+          { repos: { plotroom: { path: "/repo", team: "ENG", apps: [{ name: "Not Valid" }] } as never }, linear: { apiKeyFile: null } },
           home,
         ),
       ).toThrow(/Invalid global config/);
@@ -143,6 +144,32 @@ describe("writeLinearApiKeyFile", () => {
       const path = writeLinearApiKeyFile("  lin_api_abc123  ", home);
       expect(readFileSync(path, "utf8")).toBe("lin_api_abc123\n");
       expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadGlobalConfig", () => {
+  it("rejects a config that predates the team-per-repo mapping", () => {
+    const home = makeHome();
+    try {
+      const dir = join(home, ".foreman");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "config.json"),
+        JSON.stringify({ repos: { a: { path: "/r", initiatives: ["i1"] } } }),
+        "utf8",
+      );
+      expect(() => loadGlobalConfig({ home })).toThrow(/predates the team-per-repo mapping/);
+      try {
+        loadGlobalConfig({ home });
+        throw new Error("expected loadGlobalConfig to throw");
+      } catch (error) {
+        if (!(error instanceof ConfigError)) throw error;
+        expect(error.message).toContain("predates the team-per-repo mapping");
+        expect(error.problems.join(" ")).toContain("foreman init");
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

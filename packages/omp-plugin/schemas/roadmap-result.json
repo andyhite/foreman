@@ -21,14 +21,15 @@
           "title": "RoadmapResult",
           "type": "object",
           "required": [
-            "initiativeId",
+            "teamId",
             "proposedProjects",
+            "sourceDocument",
             "rationale"
           ],
           "properties": {
-            "initiativeId": {
+            "teamId": {
               "minLength": 1,
-              "description": "The initiative every proposed project is attached to. One initiative per result.",
+              "description": "The Linear team every proposed project is created under — this repo's team.",
               "type": "string"
             },
             "proposedProjects": {
@@ -47,7 +48,8 @@
                   "blockedBy",
                   "blockedByExisting",
                   "startDate",
-                  "targetDate"
+                  "targetDate",
+                  "app"
                 ],
                 "properties": {
                   "key": {
@@ -93,9 +95,33 @@
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
                     "description": "Calendar day, `YYYY-MM-DD`. Not a timestamp — Linear rejects one.",
                     "type": "string"
+                  },
+                  "app": {
+                    "description": "App label for this project. Null when the repo has no apps.",
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               }
+            },
+            "sourceDocument": {
+              "description": "Repo-relative path of the brief/PRD/spec you decomposed, or null when you worked from the repo's own docs.",
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "rationale": {
               "minLength": 1,

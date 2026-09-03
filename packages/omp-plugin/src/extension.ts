@@ -15,10 +15,7 @@ import {
   AGENT_OUTPUT_SCHEMAS,
   all,
   ConfigError,
-  ensureMaintenanceProjects,
-  FOREMAN_LABEL,
   ensureWorktree,
-  inInitiatives,
   isBudgetTruncation,
   issueIdFromDispatchId,
   lockState,
@@ -27,7 +24,6 @@ import {
   readLockComment,
   resolveState,
   RUNNING_FILTER,
-  YOLO_CONFIRMER,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
@@ -126,15 +122,12 @@ function isForemanAgentName(agent: string): agent is ForemanAgentName {
 }
 
 /**
- * Resolves the Linear team id an entry's bound `team` key (or the
- * credential's sole reachable team, when unset) actually refers to.
- * `ensureMaintenanceProjects` needs a real id, not the human-readable key
- * every registry entry and `Issue.team` otherwise carry.
+ * Resolves the Linear team id an entry's bound `team` key actually refers
+ * to. `team` is required and non-nullable on every resolved entry.
  */
 async function resolveEntryTeamId(linear: LinearWriter, entry: ResolvedRepoEntry): Promise<string | null> {
   const teams = await linear.teams();
-  if (entry.team) return teams.find((team) => team.key === entry.team)?.id ?? null;
-  return teams.length === 1 ? (teams[0]?.id ?? null) : null;
+  return teams.find((team) => team.key === entry.team)?.id ?? null;
 }
 
 /**
@@ -144,9 +137,9 @@ async function resolveEntryTeamId(linear: LinearWriter, entry: ResolvedRepoEntry
  * `foreman:running` lock nothing else will ever clear. Runs once per
  * session start; no timer.
  */
-async function repairOrphanedLocks(linear: LinearWriter, entry: ResolvedRepoEntry, now: Date): Promise<number> {
+async function repairOrphanedLocks(linear: LinearWriter, now: Date): Promise<number> {
   const issues = await linear.issues({
-    filter: all(inInitiatives(entry.initiativeIds), RUNNING_FILTER),
+    filter: RUNNING_FILTER,
     includeComments: true,
   });
   let repaired = 0;
@@ -155,18 +148,14 @@ async function repairOrphanedLocks(linear: LinearWriter, entry: ResolvedRepoEntr
     const orphaned = lockState(record, { now, liveDispatchIds: liveDispatchIds() }).orphaned;
     if (!orphaned && record !== null) continue;
 
-    const runningLabel = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
-    await linear.updateIssue(issue.id, {
-      assigneeId: null,
-      ...(runningLabel ? { removedLabelIds: [runningLabel.id] } : {}),
-    });
+    await linear.updateIssue(issue.id, { assigneeId: null });
     if (issue.state.type === "started") {
       const states = await linear.workflowStates(issue.team.id);
-      await linear.updateIssue(issue.id, { stateId: resolveState("todo", states).id });
+      await linear.updateIssue(issue.id, { stateId: resolveState("ready", states).id });
     }
     const summary = record
       ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}).`
-      : `Foreman: removed \`${FOREMAN_LABEL.running}\` with no matching lock comment.`;
+      : "Foreman: released an orphaned lock with no matching lock comment.";
     await linear.createComment({ issueId: issue.id, body: summary });
     repaired += 1;
   }
@@ -206,14 +195,11 @@ export async function applyBoundResult(
     });
     const lockedIssue = await deps.linear.issue(target);
     if (lockedIssue) {
-      const running = lockedIssue.labels.find((label) => label.name === FOREMAN_LABEL.running);
-      const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
-      if (running) mutation.removedLabelIds = [running.id];
-      // The guard already moved this issue Todo → In Progress (implement
-      // only); removing `foreman:running` alone would strand it there with no
-      // live agent and no retry, since `routeImplement` only selects Todo.
-      // Restore the dispatch's recorded pre-claim state in the same
-      // mutation, mirroring the invalid-result branch below.
+      const mutation: { stateId?: string } = {};
+      // The guard already moved this issue to In Progress or Refining;
+      // restore the dispatch's recorded pre-claim state, mirroring the
+      // invalid-result branch below, so it does not strand with no live
+      // agent and no retry.
       if (previousStateId && lockedIssue.state.id !== previousStateId) mutation.stateId = previousStateId;
       if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(lockedIssue.id, mutation);
     }
@@ -285,14 +271,11 @@ export async function handleCaptured(
           const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
           if (issue) {
             await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
-            const running = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
-            const mutation: { removedLabelIds?: string[]; stateId?: string } = {};
-            if (running) mutation.removedLabelIds = [running.id];
-            // The guard already moved this issue Todo → In Progress (implement
-            // only); removing `foreman:running` alone would strand it there with
-            // no live agent and no retry, since `routeImplement` only selects
-            // Todo. Restore the dispatch's recorded pre-claim state — a no-op
-            // for refine/review, which never move state (Step 5 item 1).
+            const mutation: { stateId?: string } = {};
+            // The guard already moved this issue to In Progress or Refining;
+            // restore the dispatch's recorded pre-claim state so the issue
+            // does not strand there with no live agent and no retry — a
+            // no-op for review, which never moves state.
             if (previousStateId && issue.state.id !== previousStateId) mutation.stateId = previousStateId;
             if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
           }
@@ -438,28 +421,9 @@ export default function createForemanExtension(pi: ExtensionAPI) {
     if (isRepoRegistered()) {
       try {
         const linear = getLinear();
-        const entry = getEntry();
-        const repaired = await repairOrphanedLocks(linear, entry, new Date());
+        const repaired = await repairOrphanedLocks(linear, new Date());
         if (repaired > 0) {
-          ctx.ui.notify(`Foreman: repaired ${repaired} orphaned \`${FOREMAN_LABEL.running}\` lock(s).`, "warn");
-        }
-
-        const teamId = await resolveEntryTeamId(linear, entry);
-        if (teamId) {
-          // `YOLO_CONFIRMER`: no interactive confirmation surface at
-          // `session_start`, so a missing Maintenance project is always
-          // created rather than silently skipped — matching every other
-          // plugin mutation, none of which route through a `Confirmer`.
-          const reports = await ensureMaintenanceProjects(linear, {
-            initiativeIds: entry.initiativeIds,
-            teamId,
-            confirmer: YOLO_CONFIRMER,
-          });
-          for (const report of reports) {
-            if (report.created) {
-              ctx.ui.notify(`Foreman: created the Maintenance project for "${report.initiativeName}".`, "warn");
-            }
-          }
+          ctx.ui.notify(`Foreman: repaired ${repaired} orphaned lock(s).`, "warn");
         }
       } catch (error) {
         ctx.ui.notify(

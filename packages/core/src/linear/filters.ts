@@ -5,9 +5,9 @@
  */
 
 import type { IssueFilter } from "./api.ts";
-import { FOREMAN_LABEL, groupDisplayName, labelDisplayName, LABEL_GROUP } from "../domain/labels.ts";
+import { groupDisplayName, labelDisplayName } from "../domain/labels.ts";
 import { PRIORITY } from "../domain/priority.ts";
-import { TERMINAL_PROJECT_STATUS_TYPES, TERMINAL_STATE_TYPES } from "../domain/states.ts";
+import { FOREMAN_STATE, TERMINAL_PROJECT_STATUS_TYPES, TERMINAL_STATE_TYPES } from "../domain/states.ts";
 
 export function inState(name: string): IssueFilter {
   return { state: { name: { eq: name } } };
@@ -62,16 +62,6 @@ export function inProject(id: string): IssueFilter {
   return { project: { id: { eq: id } } };
 }
 
-/**
- * Every issue under any of these initiatives, filtered through the project
- * edge in a single hop (verified live: `IssueFilter` has no direct
- * initiative field, but `NullableProjectFilter.initiatives` does — see
- * docs/VERIFIED.md). Lets a worker that needs "every issue across an
- * initiative's projects" ask once instead of once per project.
- */
-export function inInitiatives(ids: readonly string[]): IssueFilter {
-  return { project: { initiatives: { some: { id: { in: ids } } } } };
-}
 
 export function hasBlockedByRelations(present: boolean): IssueFilter {
   return { hasBlockedByRelations: { eq: present } };
@@ -91,13 +81,11 @@ export function notTerminalState(): IssueFilter {
  * §4.2a). The loop must not act on work inside a project the operator has
  * closed out, no matter what state the individual issue is still in.
  *
- * Project-less issues deliberately survive this filter. They are already
- * out of scope for a different, more specific reason (`issueScope`'s
- * `no-project`), and that verdict is what the operator sees in
- * `/foreman:status` — swallowing them here would hide a misfiled issue
- * behind the wrong explanation. Verified against the live API:
- * `IssueFilter.project` is a `NullableProjectFilter`, so `null: true` is a
- * real branch and `status.type` is a real `StringComparator`.
+ * A project-less issue survives this filter: a project is optional on an
+ * issue now, so `project: { null: true }` is a normal, supported case, not
+ * a misfiled one. Verified against the live API: `IssueFilter.project` is a
+ * `NullableProjectFilter`, so `null: true` is a real branch and
+ * `status.type` is a real `StringComparator`.
  */
 export function notInTerminalProject(): IssueFilter {
   return {
@@ -113,9 +101,9 @@ export function notInTerminalProject(): IssueFilter {
  *
  * Narrower than `notInTerminalProject` on purpose, and composed by exactly
  * one worker: refinement. Refinement is the transition that *commits* work
- * — its output is an issue in Todo, estimated and unlabeled, which implement
+ * — its output is an issue in Ready, estimated and hands-on, which implement
  * then picks up unattended. A pause withholds exactly that commitment, and
- * nothing more: it recalls nothing already in Todo or further right, so no
+ * nothing more: it recalls nothing already in Ready or further right, so no
  * other query guards on it.
  *
  * Same project-less branch, same reason as above.
@@ -140,17 +128,28 @@ export function any(...filters: IssueFilter[]): IssueFilter {
 /** SPEC §4.10.1: state = Triage. */
 export const INBOX_FILTER: IssueFilter = inStateType("triage");
 
-/** SPEC §4.10.2: `foreman:blocked` — the human interrupt queue. */
-export const BLOCKED_FILTER: IssueFilter = all(
-  hasLabelNamed(FOREMAN_LABEL.blocked),
-  notTerminalState(),
+/** `Needs Input` — the refine-stage human interrupt queue: foreman-refine couldn't proceed. */
+export const NEEDS_INPUT_FILTER: IssueFilter = all(
+  inState(FOREMAN_STATE.needsInput),
   notInTerminalProject(),
 );
 
-/** SPEC §4.10.6: `foreman:running`. */
-export const RUNNING_FILTER: IssueFilter = hasLabelNamed(FOREMAN_LABEL.running);
+/** `Blocked` — the implementation-stage human interrupt queue: foreman-implement, foreman-review, or a build-loop escalation couldn't proceed. */
+export const BLOCKED_FILTER: IssueFilter = all(
+  inState(FOREMAN_STATE.blocked),
+  notInTerminalProject(),
+);
 
-/** No label in the `foreman:` group. */
-export function unlabeled(): IssueFilter {
-  return { labels: { none: { parent: { name: { eq: groupDisplayName(LABEL_GROUP.foreman) } } } } };
+/** Every issue waiting on the operator, regardless of which stage stalled — the loop's overall backpressure signal. */
+export const HUMAN_QUEUE_FILTER: IssueFilter = any(NEEDS_INPUT_FILTER, BLOCKED_FILTER);
+
+/** `Refining` or `In Progress` — an agent is actively working the issue. */
+export const RUNNING_FILTER: IssueFilter = any(
+  inState(FOREMAN_STATE.refining),
+  inState(FOREMAN_STATE.inProgress),
+);
+
+/** Issue unassigned, or assigned to this credential itself — excludes issues a human operator claimed for themselves. */
+export function notHandsOff(viewerId: string): IssueFilter {
+  return { or: [{ assignee: { null: true } }, { assignee: { id: { eq: viewerId } } }] };
 }

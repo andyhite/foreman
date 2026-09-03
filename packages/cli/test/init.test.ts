@@ -1,4 +1,4 @@
-import { loadGlobalConfig, repoPluginLinkPath, repoPluginLockPath } from "@foreman/core";
+import { ConfigError, loadGlobalConfig, MANAGED_STATES, repoPluginLinkPath, repoPluginLockPath } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -93,12 +93,12 @@ function seedGlobalLink(home: string, pluginDir: string): void {
 }
 
 describe("runInit", () => {
-  it("registers a fresh repo with one manually-entered initiative", async () => {
+  it("registers a fresh repo with a manually-entered team", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       const logs: string[] = [];
       const deps: InitDeps = { prompter, git, log: (message) => logs.push(message) };
@@ -106,7 +106,7 @@ describe("runInit", () => {
 
       const config = readConfig(home);
       expect(config.repos).toEqual({
-        plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
+        plotroom: { path: "/repos/plotroom", team: "ENG" },
       });
       expect(logs.some((line) => line.includes("foreman plan plotroom --once"))).toBe(true);
 
@@ -117,20 +117,20 @@ describe("runInit", () => {
     }
   });
 
-  it("registers a monorepo with two initiatives, one carrying a subdirectory hint", async () => {
+  it("registers a monorepo with two apps", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/mono"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i2";
-      prompter.textAnswers['Subdirectory for initiative "i2" (blank = repo root)'] = "apps/zero";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
+      prompter.textAnswers["Apps in this repo (comma-separated, blank for a single-app repo)"] = "fleet, zero";
 
       const deps: InitDeps = { prompter, git, log: () => {} };
       await runInit(baseOptions({}, home, "/repos/mono"), deps);
 
       const config = readConfig(home);
       expect(config.repos).toEqual({
-        mono: { path: "/repos/mono", initiatives: ["i1", { id: "i2", path: "apps/zero" }] },
+        mono: { path: "/repos/mono", team: "ENG", apps: [{ name: "fleet" }, { name: "zero" }] },
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -142,12 +142,12 @@ describe("runInit", () => {
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const first = new ScriptedPrompter();
-      first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      first.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter: first, git, log: () => {} });
 
       const second = new ScriptedPrompter();
-      // Default for the manual-ids prompt should now be pre-filled with "i1" — confirm by adding i2.
-      second.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i2";
+      // Default for the team prompt should now be pre-filled with "ENG" — confirm by keeping it.
+      second.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
       await runInit(baseOptions({}, home, "/repos/plotroom"), {
         prompter: second,
@@ -158,7 +158,7 @@ describe("runInit", () => {
       const config = readConfig(home);
       expect(Object.keys(config.repos as object)).toEqual(["plotroom"]);
       expect(config.repos).toEqual({
-        plotroom: { path: "/repos/plotroom", initiatives: ["i1", "i2"] },
+        plotroom: { path: "/repos/plotroom", team: "ENG" },
       });
       expect(logs.some((line) => line.includes("already registered"))).toBe(true);
     } finally {
@@ -174,7 +174,7 @@ describe("runInit", () => {
       mkdirSync(configDir);
       writeFileSync(
         join(configDir, "config.json"),
-        JSON.stringify({ repos: { old: { path: "~/repos/plotroom", initiatives: ["i1"] } } }),
+        JSON.stringify({ repos: { old: { path: "~/repos/plotroom", team: "ENG" } } }),
       );
       const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
@@ -183,45 +183,53 @@ describe("runInit", () => {
       await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: () => {} });
 
       expect(readConfig(home).repos).toEqual({
-        new: { path: repoRoot, initiatives: ["i1"] },
+        new: { path: repoRoot, team: "ENG" },
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("rejects duplicate initiative ids before writing the config", async () => {
+  it("rejects a team already bound to a different alias", async () => {
+    const home = makeTempHome();
+    try {
+      const gitA = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const promptA = new ScriptedPrompter();
+      promptA.textAnswers["Linear team key for this repo"] = "ENG";
+      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter: promptA, git: gitA, log: () => {} });
+
+      const gitB = new FakeGit(defaultGitResponses("/repos/other"));
+      const promptB = new ScriptedPrompter();
+      promptB.textAnswers["Linear team key for this repo"] = "ENG";
+
+      let thrown: unknown;
+      try {
+        await runInit(baseOptions({}, home, "/repos/other"), { prompter: promptB, git: gitB, log: () => {} });
+      } catch (error) {
+        thrown = error;
+      }
+      if (!(thrown instanceof ConfigError)) throw new Error("expected a ConfigError");
+      expect(thrown.problems.join(" ")).toContain("is bound to both");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a blank team", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1, i1";
+      // Team prompt defaults to "" and ScriptedPrompter returns the default when unanswered.
 
       await expect(
         runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
-      ).rejects.toThrow(/both "plotroom" and "plotroom"/);
+      ).rejects.toThrow(/A Linear team is required/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("omits team when the answer is blank", async () => {
-    const home = makeTempHome();
-    try {
-      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
-      const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
-      // Team prompt defaults to "" and ScriptedPrompter returns the default when unanswered.
-
-      await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
-
-      const config = readConfig(home);
-      const entry = (config.repos as Record<string, Record<string, unknown>>).plotroom;
-      expect(entry?.team).toBeUndefined();
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
 
   it("omits baseBranch when the default branch is main and writes it otherwise", async () => {
     const homeMain = makeTempHome();
@@ -229,7 +237,7 @@ describe("runInit", () => {
     try {
       const gitMain = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const promptMain = new ScriptedPrompter();
-      promptMain.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      promptMain.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, homeMain, "/repos/plotroom"), {
         prompter: promptMain,
         git: gitMain,
@@ -243,7 +251,7 @@ describe("runInit", () => {
         "git symbolic-ref --short refs/remotes/origin/HEAD": "origin/trunk\n",
       });
       const promptOther = new ScriptedPrompter();
-      promptOther.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      promptOther.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, homeOther, "/repos/plotroom"), {
         prompter: promptOther,
         git: gitOther,
@@ -268,7 +276,7 @@ describe("runInit", () => {
 
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
@@ -293,7 +301,7 @@ describe("runInit", () => {
         "git symbolic-ref --short refs/remotes/origin/HEAD": "origin/trunk\n",
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
@@ -315,7 +323,7 @@ describe("runInit", () => {
         ["git symbolic-ref --short refs/remotes/origin/HEAD"],
       );
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
@@ -340,7 +348,7 @@ describe("runInit", () => {
         ["git symbolic-ref --short refs/remotes/origin/HEAD", "git rev-parse --abbrev-ref HEAD"],
       );
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} });
 
@@ -353,44 +361,54 @@ describe("runInit", () => {
     }
   });
 
-  it("uses the Linear API to pick initiatives and pre-checks/hints existing bindings", async () => {
+  it("uses the Linear API to select a team and hints existing bindings", async () => {
     const home = makeTempHome();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       const query = JSON.parse(String(init?.body)).query as string;
-      if (query.includes("query Initiatives")) {
+      if (query.includes("query Teams")) {
+        return new Response(
+          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+        );
+      }
+      if (query.includes("query TeamSettings")) {
         return new Response(
           JSON.stringify({
             data: {
-              initiatives: {
-                nodes: [
-                  { id: "i1", name: "Plotroom Fleet" },
-                  { id: "i2", name: "Plotroom Zero" },
-                ],
-                pageInfo: { hasNextPage: false, endCursor: null },
+              team: {
+                id: "t1",
+                key: "ENG",
+                name: "Engineering",
+                triageEnabled: true,
+                cyclesEnabled: false,
+                triageIssueState: { id: "triage-1", name: "Triage", type: "triage", position: 0 },
               },
             },
           }),
         );
       }
-      if (query.includes("query Teams")) {
-        return new Response(
-          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
-        );
+      if (query.includes("query TeamWorkflowStates")) {
+        const nodes = MANAGED_STATES.map((spec, index) => ({ id: `state-${index}`, name: spec.name, type: spec.type, position: spec.position, color: spec.color, description: spec.description }));
+        return new Response(JSON.stringify({ data: { team: { states: { nodes } } } }));
+      }
+      if (query.includes("query ProjectLabels")) {
+        return new Response(JSON.stringify({ data: { projectLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("query WorkspaceLabels")) {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
       }
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as typeof fetch;
 
     // Restored, not deleted: `bun test` shares one process across files, so
     // unconditionally dropping the variable leaks this test's setup into every
-    // later file that reads it (`foreman verify` reports it as the credential).
+    // later file that reads it (`foreman doctor` reports it as the credential).
     const ambientApiKey = process.env.LINEAR_API_KEY;
     try {
       process.env.LINEAR_API_KEY = "lin_api_test";
 
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.multiSelectResult = ["i1", "i2"];
 
       await runInit(baseOptions({ skipLinear: false }, home, "/repos/plotroom"), {
         prompter,
@@ -400,7 +418,7 @@ describe("runInit", () => {
 
       const config = readConfig(home);
       expect(config.repos).toEqual({
-        plotroom: { path: "/repos/plotroom", team: "ENG", initiatives: ["i1", "i2"] },
+        plotroom: { path: "/repos/plotroom", team: "ENG" },
       });
     } finally {
       if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
@@ -410,7 +428,7 @@ describe("runInit", () => {
     }
   });
 
-  it("falls back to manual initiative ids when no API key resolves", async () => {
+  it("falls back to a manual team key when no API key resolves", async () => {
     const home = makeTempHome();
     /*
      * The premise is "no key resolves", so the ambient variable has to go for
@@ -423,7 +441,7 @@ describe("runInit", () => {
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({ skipLinear: false }, home, "/repos/plotroom"), {
         prompter,
@@ -433,7 +451,7 @@ describe("runInit", () => {
 
       const config = readConfig(home);
       expect(config.repos).toEqual({
-        plotroom: { path: "/repos/plotroom", initiatives: ["i1"] },
+        plotroom: { path: "/repos/plotroom", team: "ENG" },
       });
     } finally {
       if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
@@ -456,13 +474,13 @@ describe("runInit", () => {
     }
   });
 
-  it("registers a fresh repo non-interactively via --initiative flags", async () => {
+  it("registers a fresh repo non-interactively via --app flags", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
       await runInit(
-        baseOptions({ initiatives: ["i1", "i2:apps/zero"], alias: "plotroom", team: "ENG" }, home, "/repos/plotroom"),
+        baseOptions({ apps: ["fleet", "zero"], alias: "plotroom", team: "ENG" }, home, "/repos/plotroom"),
         { prompter, git, log: () => {} },
       );
 
@@ -470,7 +488,7 @@ describe("runInit", () => {
         plotroom: {
           path: "/repos/plotroom",
           team: "ENG",
-          initiatives: ["i1", { id: "i2", path: "apps/zero" }],
+          apps: [{ name: "fleet" }, { name: "zero" }],
         },
       });
     } finally {
@@ -478,15 +496,15 @@ describe("runInit", () => {
     }
   });
 
-  it("rejects empty --initiative values", async () => {
+  it("rejects empty --app values", async () => {
     const home = makeTempHome();
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
 
       await expect(
-        runInit(baseOptions({ initiatives: [":subdir"] }, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
-      ).rejects.toThrow(/Invalid --initiative/);
+        runInit(baseOptions({ apps: [""], team: "ENG" }, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
+      ).rejects.toThrow(/Invalid --app/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -502,7 +520,7 @@ describe("runInit — omp plugin activation (project scope)", () => {
       seedGlobalLink(home, pluginDir);
       const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: () => {} });
 
@@ -527,11 +545,11 @@ describe("runInit — omp plugin activation (project scope)", () => {
       const git = new FakeGit(defaultGitResponses(repoRoot));
 
       const first = new ScriptedPrompter();
-      first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      first.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, home, repoRoot), { prompter: first, git, log: () => {} });
 
       const second = new ScriptedPrompter();
-      second.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      second.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
       await runInit(baseOptions({}, home, repoRoot), { prompter: second, git, log: (m) => logs.push(m) });
 
@@ -554,7 +572,7 @@ describe("runInit — omp plugin activation (project scope)", () => {
       seedGlobalLink(home, pluginDir);
       const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
 
       await runInit(baseOptions({ skipPlugin: true }, home, repoRoot), { prompter, git, log: () => {} });
 
@@ -573,7 +591,7 @@ describe("runInit — omp plugin activation (project scope)", () => {
       // No seedGlobalLink() call: `~/.foreman/plugin` does not exist.
       const git = new FakeGit(defaultGitResponses(repoRoot));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
 
       await runInit(baseOptions({}, home, repoRoot), { prompter, git, log: (m) => logs.push(m) });
@@ -581,10 +599,10 @@ describe("runInit — omp plugin activation (project scope)", () => {
       expect(logs.some((line) => line.includes("foreman setup"))).toBe(true);
       expect(existsSync(join(repoRoot, ".omp"))).toBe(false);
       const config = readConfig(home);
-      const repos = config.repos as Record<string, { path: string; initiatives: string[] }>;
+      const repos = config.repos as Record<string, { path: string; team: string }>;
       const [alias, entry] = Object.entries(repos)[0] ?? [];
       expect(alias).toBeDefined();
-      expect(entry).toEqual({ path: repoRoot, initiatives: ["i1"] });
+      expect(entry).toEqual({ path: repoRoot, team: "ENG" });
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(repoRoot, { recursive: true, force: true });
@@ -601,11 +619,11 @@ describe("runInit — omp plugin activation (project scope)", () => {
       const git = new FakeGit(defaultGitResponses(repoRoot));
 
       const first = new ScriptedPrompter();
-      first.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      first.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, home, repoRoot), { prompter: first, git, log: () => {} });
 
       const second = new ScriptedPrompter();
-      second.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      second.textAnswers["Linear team key for this repo"] = "ENG";
       await runInit(baseOptions({}, home, repoRoot), { prompter: second, git, log: () => {} });
 
       const excludeContents = readFileSync(join(repoRoot, ".git", "info", "exclude"), "utf8");
@@ -636,7 +654,7 @@ describe("runInit — GitHub App installation check", () => {
     try {
       const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
@@ -664,7 +682,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });
@@ -695,7 +713,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const opened: string[] = [];
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), {
@@ -731,7 +749,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       prompter.confirmAnswers["Open that install page in your browser now?"] = false;
       const opened: string[] = [];
       const logs: string[] = [];
@@ -769,7 +787,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const opened: string[] = [];
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), {
@@ -805,7 +823,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
 
       // No `openUrl` in deps at all — mirrors `main.ts` omitting it for `--yes`/piped runs.
@@ -837,7 +855,7 @@ describe("runInit — GitHub App installation check", () => {
         "gh repo view --json owner,name": JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }),
       });
       const prompter = new ScriptedPrompter();
-      prompter.textAnswers["Linear initiative id(s) this repo hosts (comma-separated)"] = "i1";
+      prompter.textAnswers["Linear team key for this repo"] = "ENG";
       const logs: string[] = [];
 
       await runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: (m) => logs.push(m) });

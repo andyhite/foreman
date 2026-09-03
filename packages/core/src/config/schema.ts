@@ -227,26 +227,17 @@ export const GitHubAppSettingsSchema = Type.Object(
 export type GitHubAppSettings = Static<typeof GitHubAppSettingsSchema>;
 
 /**
- * One initiative bound to a repo: a bare initiative ID, or an ID plus the
- * subdirectory hosting that app. The path hint feeds context assembly and
- * implement's initial reads, and only means anything for a monorepo binding
- * several initiatives (SPEC §3.10, §3.11).
- *
- * IDs, never names — grouping prefixes rename (SPEC §3.5 item 6).
+ * One app inside the repo. `name` becomes the `app:<name>` label. A repo
+ * with fewer than two apps needs no bindings.
  */
-export const InitiativeBindingSchema = Type.Union([
-  Type.String({ minLength: 1 }),
-  Type.Object(
-    {
-      id: Type.String({ minLength: 1 }),
-      /** Relative to the entry's `path`. */
-      path: Type.String({ minLength: 1 }),
-    },
-    { additionalProperties: false },
-  ),
-]);
+export const AppBindingSchema = Type.Object(
+  {
+    name: Type.String({ minLength: 1, pattern: "^[a-z0-9][a-z0-9-]*$" }),
+  },
+  { additionalProperties: false },
+);
 
-export type InitiativeBinding = Static<typeof InitiativeBindingSchema>;
+export type AppBinding = Static<typeof AppBindingSchema>;
 
 /**
  * One `repos` registry entry, keyed by alias (SPEC §3.10). The alias is the
@@ -267,10 +258,10 @@ export const RepoEntrySchema = Type.Composite(
       {
         /** Repo root. `~` expands. Matched against cwd to resolve the instance (SPEC §3.11). */
         path: Type.String({ minLength: 1 }),
-        /** Linear team key. Optional when the credential reaches exactly one team (SPEC §3.11). */
-        team: Type.Optional(Type.String({ minLength: 1 })),
-        /** One or more; a monorepo lists several. */
-        initiatives: Type.Array(InitiativeBindingSchema, { minItems: 1 }),
+        /** Linear team key. One team per repo, one repo per team — the scope boundary. */
+        team: Type.String({ minLength: 1 }),
+        /** Monorepo app bindings; empty or absent for a single-app repo. */
+        apps: Type.Optional(Type.Array(AppBindingSchema)),
       },
       { additionalProperties: false },
     ),

@@ -28,8 +28,12 @@ the issue's current state, and that issue's two-layer `Context` digest
 (product `Context` doc + project brief, Definition of Done included). Shared
 `context`: only what every entry has in common.
 
+Before the spawn the extension moves each issue to Refining and appends a
+`FOREMAN-PREV-STATE` line to its task text, so the extension can restore the
+prior state on a block. You add none of this yourself.
+
 ## After
 
 `RefineResult` → extension writes the description, sub-issues or spike, and
-moves the issue to Todo when ready for implementation. Nothing else changes
+moves the issue to Ready when ready for implementation. Nothing else changes
 state.

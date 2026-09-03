@@ -8,17 +8,14 @@
 
 import {
   all,
-  BLOCKED_FILTER,
   branchNameFor,
   type Confirmer,
-  DENY_CONFIRMER,
   type Dispatcher,
   encodeMarker,
-  ensureMaintenanceProjects,
-  FOREMAN_LABEL,
+  type ForemanStateKey,
   type GitHubClient,
   type GlobalConfig,
-  inInitiatives,
+  HUMAN_QUEUE_FILTER,
   inState,
   type Issue,
   latestMarker,
@@ -27,11 +24,12 @@ import {
   MARKER_KIND,
   type MergedRecord,
   nextProjectStatus,
+  notHandsOff,
   readLockComment,
   type ResolvedRepoEntry,
   resolveState,
   RUNNING_FILTER,
-  unlabeled,
+  FOREMAN_STATE,
   type WorkflowStateType,
   cleanupMergedWork,
 } from "@foreman/core";
@@ -53,16 +51,6 @@ export interface Invariant {
   name: string;
   select(ctx: ReconcileContext): Promise<Issue[]>;
   fix(issue: Issue, ctx: ReconcileContext): Promise<string>;
-}
-
-async function removeForemanLabel(linear: LinearWriter, issue: Issue, label: string): Promise<void> {
-  const target = issue.labels.find((candidate) => candidate.name === label || candidate.id === label);
-  if (!target) return;
-  // Clears the assignee in the same mutation: `staleRunning` hands an
-  // orphaned claim back from Foreman's own account, and `blockedAnswered`
-  // hands a resolved block back from the operator's — both mean "nobody's
-  // holding this anymore," so a fresh dispatch is free to claim it again.
-  await linear.updateIssue(issue.id, { removedLabelIds: [target.id], assigneeId: null });
 }
 
 /** Whether `issue` is actually merged: PR mode checks `gh`, direct-branch mode trusts the latest `merged` marker (when its authorship can be verified) or falls back to a branch-merge check. */
@@ -90,7 +78,7 @@ const staleRunning: Invariant = {
   name: "stale-running",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), RUNNING_FILTER),
+      filter: all(RUNNING_FILTER),
       includeComments: true,
     });
     return issues.filter((issue) => {
@@ -99,17 +87,18 @@ const staleRunning: Invariant = {
     });
   },
   async fix(issue, ctx) {
-    await removeForemanLabel(ctx.linear, issue, FOREMAN_LABEL.running);
     if (issue.state.type === "started") {
       const states = await ctx.linear.workflowStates(issue.team.id);
-      await ctx.linear.updateIssue(issue.id, { stateId: resolveState("todo", states).id });
+      await ctx.linear.updateIssue(issue.id, { stateId: resolveState("ready", states).id, assigneeId: null });
+    } else {
+      await ctx.linear.updateIssue(issue.id, { assigneeId: null });
     }
     const record = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined)?.data ?? null;
     const summary = record
       ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}). Worktree ${record.worktree ?? "none"} left standing for inspection — reconcile never deletes it.`
-      : `Foreman: removed \`${FOREMAN_LABEL.running}\` with no matching lock comment.`;
+      : "Foreman: released an orphaned lock with no matching lock comment.";
     await ctx.linear.createComment({ issueId: issue.id, body: summary });
-    return `removed ${FOREMAN_LABEL.running}${issue.state.type === "started" ? "; moved to Todo" : ""}`;
+    return issue.state.type === "started" ? `moved to ${FOREMAN_STATE.ready}` : "released orphaned lock";
   },
 };
 
@@ -117,7 +106,7 @@ const inProgressAbandoned: Invariant = {
   name: "in-progress-abandoned",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Progress"), unlabeled()),
+      filter: all(inState(FOREMAN_STATE.inProgress), notHandsOff(ctx.viewerId ?? "")),
       includeComments: true,
     });
     return issues.filter((issue) => {
@@ -131,7 +120,7 @@ const inProgressAbandoned: Invariant = {
     const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
     const pr = await ctx.github.prForBranch(ctx.entry.repoPath, branch);
     const states = await ctx.linear.workflowStates(issue.team.id);
-    const target = pr !== null ? resolveState("inReview", states) : resolveState("todo", states);
+    const target = pr !== null ? resolveState("inReview", states) : resolveState("ready", states);
     await ctx.linear.updateIssue(issue.id, { stateId: target.id });
     return `moved to ${target.name} (${pr !== null ? "open PR found" : "no PR found"})`;
   },
@@ -141,7 +130,7 @@ const mergedNotDone: Invariant = {
   name: "merged-not-done",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Review")),
+      filter: all(inState(FOREMAN_STATE.inReview)),
       includeComments: true,
       first: 250,
     });
@@ -171,7 +160,7 @@ const inReviewNoPr: Invariant = {
   name: "in-review-no-pr",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Review"), unlabeled()),
+      filter: all(inState(FOREMAN_STATE.inReview), notHandsOff(ctx.viewerId ?? "")),
     });
     const out: Issue[] = [];
     for (const issue of issues) {
@@ -185,8 +174,8 @@ const inReviewNoPr: Invariant = {
   },
   async fix(issue, ctx) {
     const states = await ctx.linear.workflowStates(issue.team.id);
-    await ctx.linear.updateIssue(issue.id, { stateId: resolveState("todo", states).id });
-    return "moved to Todo (no PR, branch not pushed)";
+    await ctx.linear.updateIssue(issue.id, { stateId: resolveState("ready", states).id });
+    return `moved to ${FOREMAN_STATE.ready} (no PR, branch not pushed)`;
   },
 };
 
@@ -195,11 +184,17 @@ async function branchPushed(ctx: ReconcileContext, branch: string): Promise<bool
   return ctx.github.refExists(ctx.entry.repoPath, `origin/${branch}`);
 }
 
+/** Where an answered human-block resumes, keyed by the state's own Linear name — mirrors `unblock.ts`'s `RESUME_STATE`. */
+const BLOCKED_ANSWERED_RESUME_STATE: Record<string, ForemanStateKey> = {
+  [FOREMAN_STATE.needsInput]: "backlog",
+  [FOREMAN_STATE.blocked]: "ready",
+};
+
 const blockedAnswered: Invariant = {
   name: "blocked-answered",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), BLOCKED_FILTER),
+      filter: all(HUMAN_QUEUE_FILTER),
       includeComments: true,
     });
     return issues.filter((issue) => {
@@ -215,7 +210,10 @@ const blockedAnswered: Invariant = {
     });
   },
   async fix(issue, ctx) {
-    await removeForemanLabel(ctx.linear, issue, FOREMAN_LABEL.blocked);
+    const resumeKey = BLOCKED_ANSWERED_RESUME_STATE[issue.state.name] ?? "ready";
+    const states = await ctx.linear.workflowStates(issue.team.id);
+    const target = resolveState(resumeKey, states);
+    await ctx.linear.updateIssue(issue.id, { stateId: target.id, assigneeId: null });
     const comments = issue.comments ?? [];
     const marker = latestMarker(MARKER_KIND.block, comments);
     const answeringComment = comments
@@ -230,7 +228,7 @@ const blockedAnswered: Invariant = {
       `auto: answered in comment ${answeringComment?.id ?? "unknown"}`,
     );
     await ctx.linear.createComment({ issueId: issue.id, body });
-    return `removed ${FOREMAN_LABEL.blocked}`;
+    return `moved to ${target.name}`;
   },
 };
 
@@ -253,7 +251,7 @@ async function reconcileProjectStatus(
 ): Promise<{ fixed: number; skipped: number }> {
   let fixed = 0;
   let skipped = 0;
-  const issues = await ctx.linear.issues({ filter: inInitiatives(ctx.entry.initiativeIds), first: 250 });
+  const issues = await ctx.linear.issues({ filter: {}, first: 250 });
   const byProject = new Map<string, WorkflowStateType[]>();
   for (const issue of issues) {
     if (!issue.project) continue;
@@ -261,30 +259,28 @@ async function reconcileProjectStatus(
     types.push(issue.state.type);
     byProject.set(issue.project.id, types);
   }
-  for (const initiativeId of ctx.entry.initiativeIds) {
-    for (const project of await ctx.linear.initiativeProjects(initiativeId)) {
-      const current = project.status?.type;
-      if (!current) continue;
-      const next = nextProjectStatus(current, byProject.get(project.id) ?? []);
-      if (next === null) continue;
-      const summary = `project-status ${project.name}: ${current} → ${next}`;
-      if (opts.dryRun) {
-        opts.log(`${summary}: would fix (dry run)`);
-        continue;
-      }
-      if (!(await ctx.confirmer.confirm({ kind: "reconcile-project-status", summary }))) {
-        opts.log(`${summary}: skipped (declined)`);
-        skipped += 1;
-        continue;
-      }
-      try {
-        await ctx.linear.updateProjectStatus({ projectId: project.id, type: next });
-        opts.log(summary);
-        fixed += 1;
-      } catch (error) {
-        opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
-        skipped += 1;
-      }
+  for (const project of await ctx.linear.projects(ctx.entry.team)) {
+    const current = project.status?.type;
+    if (!current) continue;
+    const next = nextProjectStatus(current, byProject.get(project.id) ?? []);
+    if (next === null) continue;
+    const summary = `project-status ${project.name}: ${current} → ${next}`;
+    if (opts.dryRun) {
+      opts.log(`${summary}: would fix (dry run)`);
+      continue;
+    }
+    if (!(await ctx.confirmer.confirm({ kind: "reconcile-project-status", summary }))) {
+      opts.log(`${summary}: skipped (declined)`);
+      skipped += 1;
+      continue;
+    }
+    try {
+      await ctx.linear.updateProjectStatus({ projectId: project.id, type: next });
+      opts.log(summary);
+      fixed += 1;
+    } catch (error) {
+      opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+      skipped += 1;
     }
   }
   return { fixed, skipped };
@@ -324,21 +320,6 @@ export async function reconcile(
   const statusResult = await reconcileProjectStatus(ctx, opts);
   fixed += statusResult.fixed;
   skipped += statusResult.skipped;
-
-  const teams = await ctx.linear.teams();
-  const team = ctx.entry.team !== null ? teams.find((candidate) => candidate.key === ctx.entry.team) : teams[0];
-  if (team) {
-    for (const report of await ensureMaintenanceProjects(ctx.linear, {
-      initiativeIds: ctx.entry.initiativeIds,
-      teamId: team.id,
-      confirmer: opts.dryRun ? DENY_CONFIRMER : ctx.confirmer,
-    })) {
-      if (report.created) opts.log(`maintenance ${report.initiativeName}: created project ${report.projectId}`);
-    }
-  } else {
-    opts.log(`maintenance: skipped, could not resolve team "${ctx.entry.team ?? "(sole accessible)"}"`);
-    skipped += 1;
-  }
 
   return { fixed, skipped };
 }

@@ -15,6 +15,7 @@ import type {
   ProjectRelationAnchor,
   ProjectRelationType,
   ProjectStatusType,
+  TeamSettings,
   WorkflowState,
 } from "../src/index.ts";
 import { applyRoadmap } from "../src/apply/roadmap.ts";
@@ -30,6 +31,7 @@ function makeProposedProject(overrides: Partial<ProposedProject> = {}): Proposed
     blockedByExisting: [],
     startDate: "2026-01-01",
     targetDate: "2026-01-15",
+    app: null,
     ...overrides,
   };
 }
@@ -37,23 +39,19 @@ function makeProposedProject(overrides: Partial<ProposedProject> = {}): Proposed
 /** Models only the surface `applyRoadmap` calls; every other member throws so an unexpected call fails loudly. */
 class FakeLinear implements LinearWriter {
   existingProjects = new Map<string, Project>();
-  createProjectCalls: Array<{ name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string }> = [];
-  addProjectToInitiativeCalls: Array<{ projectId: LinearId; initiativeId: LinearId }> = [];
+  createProjectCalls: Array<{ name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string; labelIds?: LinearId[] }> = [];
   createProjectRelationCalls: Array<{ projectId: LinearId; relatedProjectId: LinearId; type: ProjectRelationType; anchorType: ProjectRelationAnchor; relatedAnchorType: ProjectRelationAnchor }> = [];
-  failAddProjectToInitiativeFor = new Set<string>();
+  failCreateProjectFor = new Set<string>();
 
   async project(projectId: string): Promise<Project | null> {
     return this.existingProjects.get(projectId) ?? null;
   }
-  async createProject(input: { name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string }): Promise<ProjectRef> {
+  async createProject(input: { name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string; labelIds?: LinearId[] }): Promise<ProjectRef> {
     this.createProjectCalls.push(input);
-    return { id: `project-${this.createProjectCalls.length}`, name: input.name };
-  }
-  async addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void> {
-    this.addProjectToInitiativeCalls.push(input);
-    if (this.failAddProjectToInitiativeFor.has(input.projectId)) {
-      throw new Error(`simulated addProjectToInitiative failure for ${input.projectId}`);
+    if (this.failCreateProjectFor.has(input.name)) {
+      throw new Error(`simulated createProject failure for ${input.name}`);
     }
+    return { id: `project-${this.createProjectCalls.length}`, name: input.name };
   }
   async createProjectRelation(input: { projectId: LinearId; relatedProjectId: LinearId; type: ProjectRelationType; anchorType: ProjectRelationAnchor; relatedAnchorType: ProjectRelationAnchor }): Promise<void> {
     this.createProjectRelationCalls.push(input);
@@ -64,16 +62,15 @@ class FakeLinear implements LinearWriter {
   async issues(_query: IssueQuery): Promise<Issue[]> { throw new Error("not implemented in fake"); }
   async comments(): Promise<Comment[]> { throw new Error("not implemented in fake"); }
   async projectInitiatives(): Promise<never> { throw new Error("not implemented in fake"); }
-  async projectInitiative(): Promise<never> { throw new Error("not implemented in fake"); }
   async initiative(): Promise<never> { throw new Error("not implemented in fake"); }
-  async initiatives(): Promise<never> { throw new Error("not implemented in fake"); }
-  async initiativeProjects(): Promise<never> { throw new Error("not implemented in fake"); }
   async projectStatus(): Promise<never> { throw new Error("not implemented in fake"); }
   async projectRelations(): Promise<ProjectRelation[]> { throw new Error("not implemented in fake"); }
   async workflowStates(): Promise<WorkflowState[]> { throw new Error("not implemented in fake"); }
   async labels(): Promise<IssueLabel[]> { throw new Error("not implemented in fake"); }
   async teams(): Promise<never> { throw new Error("not implemented in fake"); }
   async projects(): Promise<never> { throw new Error("not implemented in fake"); }
+  async teamSettings(): Promise<TeamSettings> { throw new Error("not implemented in fake"); }
+  async projectLabels(): Promise<IssueLabel[]> { throw new Error("not implemented in fake"); }
   async viewerId(): Promise<string> { throw new Error("not implemented in fake"); }
   async userByEmail(): Promise<never> { throw new Error("not implemented in fake"); }
   async updateIssue(_id: string, _input: IssueMutation): Promise<Issue> { throw new Error("not implemented in fake"); }
@@ -85,19 +82,26 @@ class FakeLinear implements LinearWriter {
   async deleteProjectRelation(): Promise<void> { throw new Error("not implemented in fake"); }
   async createLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
   async ensureLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
+  async ensureWorkspaceLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
+  async ensureProjectLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
+  async createWorkflowState(): Promise<WorkflowState> { throw new Error("not implemented in fake"); }
+  async updateWorkflowState(): Promise<WorkflowState> { throw new Error("not implemented in fake"); }
+  async archiveWorkflowState(): Promise<void> { throw new Error("not implemented in fake"); }
+  async updateTeamSettings(): Promise<void> { throw new Error("not implemented in fake"); }
 }
 
 function makeRoadmapResult(overrides: Partial<RoadmapResult> = {}): RoadmapResult {
   return {
-    initiativeId: "initiative-1",
+    teamId: "team-1",
     proposedProjects: [makeProposedProject()],
+    sourceDocument: null,
     rationale: "Because.",
     ...overrides,
   };
 }
 
 describe("applyRoadmap — creation and relations", () => {
-  it("creates both projects, attaches both to the initiative, and creates one dependency relation for a sibling edge", async () => {
+  it("creates both projects and one dependency relation for a sibling edge", async () => {
     const linear = new FakeLinear();
     const result = makeRoadmapResult({
       proposedProjects: [
@@ -112,14 +116,10 @@ describe("applyRoadmap — creation and relations", () => {
       ],
     });
 
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
 
     expect(report.createdProjects).toHaveLength(2);
     expect(linear.createProjectCalls).toHaveLength(2);
-    expect(linear.addProjectToInitiativeCalls).toEqual([
-      { projectId: "project-1", initiativeId: "initiative-1" },
-      { projectId: "project-2", initiativeId: "initiative-1" },
-    ]);
     expect(report.relationsCreated).toEqual([{ blockerProjectId: "project-1", blockedProjectId: "project-2" }]);
     expect(linear.createProjectRelationCalls).toEqual([
       {
@@ -131,6 +131,32 @@ describe("applyRoadmap — creation and relations", () => {
       },
     ]);
     expect(report.problems).toEqual([]);
+  });
+
+  it("attaches the resolved app project label when the app name is in the caller's map", async () => {
+    const linear = new FakeLinear();
+    const result = makeRoadmapResult({
+      proposedProjects: [makeProposedProject({ key: "a", name: "Project A", app: "fleet" })],
+    });
+
+    await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: { fleet: "label-fleet" } });
+
+    expect(linear.createProjectCalls[0]?.labelIds).toEqual(["label-fleet"]);
+  });
+
+  it("reports an app name absent from the caller's map as a problem and still creates the project", async () => {
+    const linear = new FakeLinear();
+    const result = makeRoadmapResult({
+      proposedProjects: [makeProposedProject({ key: "a", name: "Project A", app: "unknown" })],
+    });
+
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
+
+    expect(linear.createProjectCalls[0]?.labelIds).toBeUndefined();
+    expect(report.createdProjects).toHaveLength(1);
+    expect(report.problems).toEqual([
+      { key: "a", error: 'project "Project A" names unknown app "unknown"; created without an app label' },
+    ]);
   });
 });
 
@@ -152,7 +178,7 @@ describe("applyRoadmap — date clamping", () => {
       ],
     });
 
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
 
     expect(report.dateAdjustments).toEqual([
       {
@@ -192,7 +218,7 @@ describe("applyRoadmap — date clamping", () => {
       ],
     });
 
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
 
     expect(report.dateAdjustments).toEqual([
       {
@@ -218,7 +244,7 @@ describe("applyRoadmap — problem isolation", () => {
       ],
     });
 
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
 
     expect(report.problems).toEqual([
       { key: "a", error: 'blockedByExisting project "missing-project" could not be resolved' },
@@ -231,11 +257,7 @@ describe("applyRoadmap — problem isolation", () => {
 
   it("reports a failed project creation without aborting the other entries", async () => {
     const linear = new FakeLinear();
-    const originalCreateProject = linear.createProject.bind(linear);
-    linear.createProject = async (input) => {
-      if (input.name === "Project A") throw new Error("simulated createProject failure");
-      return originalCreateProject(input);
-    };
+    linear.failCreateProjectFor.add("Project A");
     const result = makeRoadmapResult({
       proposedProjects: [
         makeProposedProject({ key: "a", name: "Project A" }),
@@ -243,23 +265,10 @@ describe("applyRoadmap — problem isolation", () => {
       ],
     });
 
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
 
-    expect(report.problems).toEqual([{ key: "a", error: "failed to create project: simulated createProject failure" }]);
+    expect(report.problems).toEqual([{ key: "a", error: "failed to create project: simulated createProject failure for Project A" }]);
     expect(report.createdProjects).toHaveLength(1);
     expect(report.createdProjects[0]?.key).toBe("b");
-  });
-
-  it("reports a failed addProjectToInitiative without discarding the created project", async () => {
-    const linear = new FakeLinear();
-    linear.failAddProjectToInitiativeFor.add("project-1");
-    const result = makeRoadmapResult();
-
-    const report = await applyRoadmap(linear, result, { teamId: "team-1" });
-
-    expect(report.createdProjects).toEqual([{ key: "a", projectId: "project-1", name: "Project A" }]);
-    expect(report.problems).toHaveLength(1);
-    expect(report.problems[0]?.key).toBe("a");
-    expect(report.problems[0]?.error).toContain("failed to attach it to initiative");
   });
 });

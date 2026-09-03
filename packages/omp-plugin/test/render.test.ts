@@ -254,6 +254,7 @@ describe("renderBlockComment", () => {
 
 describe("renderStatusConsole", () => {
   const state: StatusState = {
+    needsInput: [],
     blocked: [{ issueId: "ENG-7", excerpt: "Which cache backend?" }],
     running: [
       { issueId: "ENG-9", agent: "foreman-implement", dispatchId: "d-1", ageMs: 3 * 60 * 60 * 1000, pastTtl: true },
@@ -262,22 +263,22 @@ describe("renderStatusConsole", () => {
 
   it("leads with a bold summary line before every section", () => {
     const output = renderStatusConsole(state);
-    expect(output.startsWith("**1 blocked · 1 running (1 past TTL)**")).toBe(true);
+    expect(output.startsWith("**1 waiting on the operator (0 needs input, 1 blocked) · 1 running (1 past TTL)**")).toBe(true);
   });
 
-  it("puts the blocked queue first among the ## sections", () => {
+  it("puts the needs-input queue first among the ## sections", () => {
     const output = renderStatusConsole(state);
-    const blockedIndex = output.indexOf("## Blocked");
-    expect(blockedIndex).toBeGreaterThan(0);
-    expect(output.indexOf("##")).toBe(blockedIndex);
-    const nextSectionIndex = output.indexOf("##", blockedIndex + 1);
-    expect(nextSectionIndex).toBeGreaterThan(blockedIndex);
+    const needsInputIndex = output.indexOf("## Needs Input");
+    expect(needsInputIndex).toBeGreaterThan(0);
+    expect(output.indexOf("##")).toBe(needsInputIndex);
+    const nextSectionIndex = output.indexOf("##", needsInputIndex + 1);
+    expect(nextSectionIndex).toBeGreaterThan(needsInputIndex);
   });
 
   it("collapses empty sections to one line", () => {
-    const empty: StatusState = { blocked: [], running: [] };
+    const empty: StatusState = { needsInput: [], blocked: [], running: [] };
     const output = renderStatusConsole(empty);
-    expect(output.split("\n").filter((line) => line.includes("_none_")).length).toBeGreaterThan(0);
+    expect(output.split("\n").filter((line) => line.includes("_none")).length).toBeGreaterThan(0);
   });
 });
 

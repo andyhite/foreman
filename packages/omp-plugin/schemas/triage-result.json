@@ -36,6 +36,7 @@
                   "issueId",
                   "type",
                   "proposedPriority",
+                  "app",
                   "severityReasoning",
                   "destination",
                   "destinationProjectId",
@@ -82,6 +83,18 @@
                     "maximum": 4,
                     "description": "1 Urgent, 2 High, 3 Medium, 4 Low.",
                     "type": "integer"
+                  },
+                  "app": {
+                    "description": "App this issue belongs to, matching one of the repo's configured apps (the FOREMAN-APPS marker lists them). Null when the repo has no apps or the issue spans all of them.",
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "severityReasoning": {
                     "minLength": 1,
@@ -130,7 +143,7 @@
                         "required": [
                           "name",
                           "description",
-                          "initiativeId"
+                          "app"
                         ],
                         "properties": {
                           "name": {
@@ -141,9 +154,17 @@
                             "minLength": 1,
                             "type": "string"
                           },
-                          "initiativeId": {
-                            "minLength": 1,
-                            "type": "string"
+                          "app": {
+                            "description": "App label for the new project. Null when the repo has no apps.",
+                            "anyOf": [
+                              {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         }
                       },

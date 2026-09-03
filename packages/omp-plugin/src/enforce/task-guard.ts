@@ -13,13 +13,12 @@ import type { GateResult, GlobalConfig, Issue, LinearWriter } from "@foreman/cor
 import type { GitHubClient, EnsureWorktreeResult, ResolvedRepoEntry } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
-  FOREMAN_LABEL,
   assertIssueInScope,
   branchNameFor,
   diffRange,
-  foremanLabel,
   gateSummary,
   implementationGate,
+  isHandsOff,
   isPausedProjectStatus,
   isTerminalProjectStatus,
   lockState,
@@ -137,10 +136,10 @@ export function stageFor(agent: string): Stage | null {
  * §4.2b) — implement and review keep running, so a pause never strands
  * work already committed to Todo.
  */
-async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps): Promise<GateResult | null> {
+async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps, viewerId: string): Promise<GateResult | null> {
   if (stage !== "refine" && stage !== "implement") return null;
   const projectStatus = issue.project ? await deps.linear.projectStatus(issue.project.id) : null;
-  const result = stage === "refine" ? refinementGate(issue) : implementationGate(issue);
+  const result = stage === "refine" ? refinementGate(issue) : implementationGate(issue, viewerId);
   if (isTerminalProjectStatus(projectStatus)) {
     return {
       ok: false,
@@ -176,27 +175,20 @@ async function fetchIssue(linear: LinearWriter, identifier: string): Promise<Iss
   return issue;
 }
 
-async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateResult> {
-  if (foremanLabel(issue) !== FOREMAN_LABEL.running) return { ok: true, failures: [] };
+async function checkLockFree(deps: TaskGuardDeps, issue: Issue, viewerId: string | null): Promise<GateResult> {
   // The lock comment is trusted only when it was authored by this
   // credential's own Linear identity — otherwise any workspace user (or a
   // prompt-injected agent with comment access) could post a forged
   // `released: true` marker and let the guard claim on top of a live agent
   // (SPEC §11). `claimLock` already requires the viewer id to claim, so
   // failing closed here costs nothing extra on the happy path.
-  let viewerId: string | null;
-  try {
-    viewerId = await deps.linear.viewerId();
-  } catch {
-    viewerId = null;
-  }
   if (viewerId === null) {
     return {
       ok: false,
       failures: [
         {
           code: "agent-running",
-          message: `\`${FOREMAN_LABEL.running}\` held: could not resolve the credential's viewer id to verify the lock comment's authorship.`,
+          message: "Could not resolve the credential's viewer id to verify lock comment authorship.",
         },
       ],
     };
@@ -209,18 +201,18 @@ async function checkLockFree(deps: TaskGuardDeps, issue: Issue): Promise<GateRes
   if (state.held && !state.orphaned) {
     return {
       ok: false,
-      failures: [{ code: "agent-running", message: `\`${FOREMAN_LABEL.running}\` held: ${state.reason}` }],
+      failures: [{ code: "agent-running", message: `Lock held: ${state.reason}` }],
     };
   }
   return { ok: true, failures: [] };
 }
 
 /**
- * Claims the lock: applies `foreman:running`, assigns the issue to the
- * credential's own Linear identity, and writes the `foreman:lock` comment
- * in the same operation (SPEC §11 — the dispatcher claims, agents never
- * do). Assignee makes ownership visible in Linear's UI without a second
- * mutation; harmless when Foreman shares the operator's own account.
+ * Claims the lock: assigns the issue to the credential's own Linear
+ * identity and writes the `foreman:lock` comment in the same operation
+ * (SPEC §11 — the dispatcher claims, agents never do). Assignee makes
+ * ownership visible in Linear's UI without a second mutation; harmless when
+ * Foreman shares the operator's own account.
  */
 async function claimLock(
   linear: LinearWriter,
@@ -231,11 +223,8 @@ async function claimLock(
   now: Date,
   ttlMs: number,
 ): Promise<void> {
-  const [runningLabel, assigneeId] = await Promise.all([
-    linear.ensureLabel(FOREMAN_LABEL.running, issue.team.id),
-    linear.viewerId(),
-  ]);
-  await linear.updateIssue(issue.id, { addedLabelIds: [runningLabel.id], assigneeId });
+  const assigneeId = await linear.viewerId();
+  await linear.updateIssue(issue.id, { assigneeId });
   const comment = renderLockComment({
     dispatchId,
     agent,
@@ -324,7 +313,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   // cannot attribute to a dispatch, and nothing is ever written to Linear.
   if (stage === "triage" || stage === "plan" || stage === "roadmap") {
     let projectId: string | null = null;
-    let initiativeId: string | null = null;
+    let briefPath: string | null = null;
     if (stage === "plan") {
       projectId = lastMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task);
       if (!projectId) {
@@ -332,24 +321,27 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
       }
     }
     if (stage === "roadmap") {
-      initiativeId = lastMarkerValue(/^FOREMAN-INITIATIVE:\s*(\S+)\s*$/gm, item.task);
-      if (!initiativeId) {
-        throw new Error(`Missing "FOREMAN-INITIATIVE: <INITIATIVE-ID>" line in the task text for agent "${agent}".`);
-      }
+      // Optional: a repo-relative brief/PRD/spec document to decompose.
+      // Absent means the agent works from the repo's own docs.
+      briefPath = lastMarkerValue(/^FOREMAN-BRIEF:\s*(\S+)\s*$/gm, item.task);
     }
     // "batch" matches the subject the loop's own intake dispatch mints for
     // triage (`packages/loop/src/loops/plan.ts`'s `triageRule`), so an
     // inherited and a minted id read the same way in the log.
-    const dispatchId = takeDispatchId(deps, agent, projectId ?? initiativeId ?? "batch", deps.now());
+    const dispatchId = takeDispatchId(deps, agent, projectId ?? (stage === "roadmap" ? deps.entry.team : "batch"), deps.now());
     revised.task = appendMarkers(item.task, {
       "FOREMAN-DISPATCH": dispatchId,
       "FOREMAN-PROJECT": projectId ?? undefined,
-      "FOREMAN-INITIATIVE": initiativeId ?? undefined,
+      // The guard writes this itself from the resolved entry rather than
+      // parsing it from the command, so a dispatch cannot name a foreign team.
+      "FOREMAN-TEAM": stage === "roadmap" ? deps.entry.team : undefined,
+      "FOREMAN-BRIEF": briefPath ?? undefined,
+      "FOREMAN-APPS": deps.entry.appNames.join(",") || undefined,
     });
     // Roadmap has no single project to key a Context digest off — its
-    // command assembles the product `Context` doc plus the existing
-    // project roadmap itself (`initiative_roadmap` op) before dispatch, so
-    // there is nothing here for the guard to append.
+    // command assembles the product `Context` doc plus the repo's existing
+    // projects (`team_roadmap` op) before dispatch, so there is nothing
+    // here for the guard to append.
     return { item: revised, contextDigest: stage === "roadmap" ? null : await deps.contextDigest(projectId) };
   }
 
@@ -365,18 +357,26 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   // refine dispatch used to refuse an issue whose project belongs to zero
   // or several bound initiatives, and `evaluateGate` no longer fetches
   // `projectInitiatives` to catch that itself (SPEC §3.11).
-  await assertIssueInScope({ linear: deps.linear, entry: deps.entry }, issue);
+  assertIssueInScope(deps.entry, issue);
 
-  const held = foremanLabel(issue);
-  if (held && held !== FOREMAN_LABEL.running) {
-    throw new Error(`${identifier} carries \`${held}\`; dispatch refused.`);
+  let viewerId: string | null;
+  try {
+    viewerId = await deps.linear.viewerId();
+  } catch {
+    viewerId = null;
   }
-  const lockFree = await checkLockFree(deps, issue);
+
+  if (viewerId !== null && isHandsOff(issue, viewerId)) {
+    throw new Error(
+      `${identifier} is assigned to ${issue.assignee?.displayName ?? issue.assignee?.name}; dispatch refused.`,
+    );
+  }
+  const lockFree = await checkLockFree(deps, issue, viewerId);
   if (!lockFree.ok) {
     throw new Error(`${identifier}: ${gateSummary("implementation", lockFree)}`);
   }
 
-  const gate = await evaluateGate(stage, issue, deps);
+  const gate = await evaluateGate(stage, issue, deps, viewerId ?? "");
   if (gate && !gate.ok) {
     const gateName = stage === "refine" ? "refinement" : "implementation";
     throw new Error(`${identifier}: ${gateSummary(gateName, gate)}`);
@@ -402,6 +402,10 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     const teamStates = await deps.linear.workflowStates(issue.team.id);
     const inProgress = resolveState("inProgress", teamStates);
     await deps.linear.updateIssue(issue.id, { stateId: inProgress.id });
+  } else if (stage === "refine") {
+    const teamStates = await deps.linear.workflowStates(issue.team.id);
+    const refining = resolveState("refining", teamStates);
+    await deps.linear.updateIssue(issue.id, { stateId: refining.id });
   } else if (stage === "review") {
     const repoPath = deps.entry.repoPath;
     baseBranch = deps.entry.baseBranch;
@@ -423,12 +427,13 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     "FOREMAN-BRANCH": branch ?? undefined,
     "FOREMAN-DIFF": diffPath ?? undefined,
     "FOREMAN-BASE": baseBranch ?? undefined,
-    // Only implement dispatches move state (Todo → In Progress); refine and
-    // review never do, so there is nothing to restore for them and the
-    // marker is omitted. Read back by the extension at invalid-result
-    // handling time (Step 5 item 1) to avoid stranding the issue In
-    // Progress with no live agent and no retry.
-    "FOREMAN-PREV-STATE": stage === "implement" ? previousStateId : undefined,
+    "FOREMAN-APPS": deps.entry.appNames.join(",") || undefined,
+    // Implement and refine both move state (Ready → In Progress, Backlog →
+    // Refining); review never does, so there is nothing to restore for it
+    // and the marker is omitted. Read back by the extension at
+    // invalid-result handling time to avoid stranding the issue with no
+    // live agent and no retry.
+    "FOREMAN-PREV-STATE": stage === "implement" || stage === "refine" ? previousStateId : undefined,
   });
 
   return {
@@ -441,7 +446,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
       worktree: worktreePath,
       takenAt: now,
       ttlMs,
-      previousStateId: stage === "implement" ? previousStateId : null,
+      previousStateId: stage === "implement" || stage === "refine" ? previousStateId : null,
     },
   };
 }
@@ -455,9 +460,7 @@ async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGu
   await Promise.all(
     cleanups.map(async (cleanup) => {
       try {
-        const running = await deps.linear.ensureLabel(FOREMAN_LABEL.running, cleanup.issue.team.id);
         await deps.linear.updateIssue(cleanup.issue.id, {
-          removedLabelIds: [running.id],
           assigneeId: null,
           ...(cleanup.previousStateId ? { stateId: cleanup.previousStateId } : {}),
         });

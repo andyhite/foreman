@@ -17,6 +17,7 @@ import type {
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
+  TeamSettings,
   WorkflowState,
 } from "@foreman/core";
 
@@ -27,7 +28,6 @@ import type {
  * carry a Linear-shaped `name`/`parentId` pair the same way `filter()` did
  * for the tests seeding them) — good enough to keep each invariant's
  * `select` seeing only the issues a real server-side filter would return.
- * `project.initiatives` is untested here and always matches.
  */
 function matchesFilter(issue: Issue, filter: IssueFilter): boolean {
   const asRecord = filter as Record<string, unknown>;
@@ -47,34 +47,42 @@ function matchesFilter(issue: Issue, filter: IssueFilter): boolean {
 }
 
 function labelMatches(label: IssueLabel, match: Record<string, unknown>): boolean {
-  const nameEq = (match.name as { eq?: string } | undefined)?.eq;
-  if (nameEq !== undefined && label.name !== nameEq) return false;
-  const parentNameEq = (match.parent as { name?: { eq?: string } } | undefined)?.name?.eq;
-  if (parentNameEq !== undefined && label.parentId !== parentNameEq) return false;
-  return true;
+  const idEq = match.id as Record<string, unknown> | undefined;
+  const nameEq = match.name as Record<string, unknown> | undefined;
+  if (idEq?.eq !== undefined) return label.id === idEq.eq;
+  if (nameEq?.eq !== undefined) return label.name === nameEq.eq;
+  return false;
 }
 
 /**
  * Minimal in-memory `LinearWriter` for `reconcile.test.ts`. `issues()`
- * evaluates `query.filter` via `matchesFilter` so each invariant's `select`
- * sees only the issues a real server-side filter would return; every
- * mutation re-runs the same filter on the next `select`, so a fix that
- * moves an issue out of scope is invisible to the invariants that follow.
+ * filters the seeded set through `matchesFilter`; every other read/write
+ * method returns a fixture shape or throws `not implemented` when no test
+ * exercises it, matching the interface's full surface (SPEC §4 team-per-repo
+ * scope).
  */
 export class FakeLinear implements LinearWriter {
   issuesById = new Map<string, Issue>();
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
   commentCalls: Array<{ issueId: string; body: string }> = [];
   workflowStatesList: WorkflowState[];
+  projectsList: ProjectRef[];
 
-  constructor(issues: Issue[] = [], workflowStates?: WorkflowState[]) {
+  constructor(issues: Issue[] = [], workflowStates?: WorkflowState[], projects: ProjectRef[] = []) {
     for (const issue of issues) this.issuesById.set(issue.id, issue);
     this.workflowStatesList = workflowStates ?? [
-      { id: "state-todo", name: "Todo", type: "unstarted", position: 2 },
-      { id: "state-in-progress", name: "In Progress", type: "started", position: 3 },
-      { id: "state-in-review", name: "In Review", type: "started", position: 4 },
-      { id: "state-done", name: "Done", type: "completed", position: 5 },
+      { id: "state-backlog", name: "Backlog", type: "backlog", position: 0 },
+      { id: "state-refining", name: "Refining", type: "unstarted", position: 1 },
+      { id: "state-needs-input", name: "Needs Input", type: "unstarted", position: 2 },
+      { id: "state-ready", name: "Ready", type: "unstarted", position: 3 },
+      { id: "state-blocked", name: "Blocked", type: "started", position: 4 },
+      { id: "state-in-progress", name: "In Progress", type: "started", position: 5 },
+      { id: "state-in-review", name: "In Review", type: "started", position: 6 },
+      { id: "state-done", name: "Done", type: "completed", position: 7 },
+      { id: "state-canceled", name: "Canceled", type: "canceled", position: 8 },
+      { id: "state-duplicate", name: "Duplicate", type: "canceled", position: 9 },
     ];
+    this.projectsList = projects;
   }
 
   async issue(id: string): Promise<Issue | null> {
@@ -85,7 +93,6 @@ export class FakeLinear implements LinearWriter {
     const all = [...this.issuesById.values()];
     return query.filter ? all.filter((issue) => matchesFilter(issue, query.filter!)) : all;
   }
-
 
   async comments(issueId: string): Promise<Comment[]> {
     return this.issuesById.get(issueId)?.comments ?? [];
@@ -99,21 +106,8 @@ export class FakeLinear implements LinearWriter {
     return [];
   }
 
-  async projectInitiative(): Promise<InitiativeRef> {
-    throw new Error("not implemented");
-  }
-
   async initiative(id: string): Promise<Initiative | null> {
     return { id, name: "Initiative", documents: [] };
-  }
-
-  async initiatives(): Promise<InitiativeRef[]> {
-    return [];
-  }
-
-  /** Defaults to an already-existing `Maintenance` project so `ensureMaintenanceProjects` (SPEC §3.11) is a no-op unless a test overrides this. */
-  async initiativeProjects(_initiativeId?: string): Promise<ProjectRef[]> {
-    return [{ id: "maintenance-project", name: "Maintenance", status: null }];
   }
 
   async projectStatus(_projectId?: string): Promise<ProjectStatus | null> {
@@ -132,12 +126,20 @@ export class FakeLinear implements LinearWriter {
     return [];
   }
 
-  /** Defaults to one team keyed "ENG" so `reconcile`'s maintenance pass (SPEC §7.6a/§3.11) can resolve `entry.team` without every call site wiring a team fixture. */
+  /** Defaults to one team keyed "ENG" so tests can resolve `entry.team` without every call site wiring a team fixture. */
   async teams(): Promise<TeamRef[]> {
     return [{ id: "team-1", key: "ENG", name: "Engineering" }];
   }
 
-  async projects(): Promise<ProjectRef[]> {
+  async projects(_teamKey: string): Promise<ProjectRef[]> {
+    return this.projectsList;
+  }
+
+  async teamSettings(teamId: string): Promise<TeamSettings> {
+    return { id: teamId, key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
+  }
+
+  async projectLabels(): Promise<IssueLabel[]> {
     return [];
   }
 
@@ -165,6 +167,9 @@ export class FakeLinear implements LinearWriter {
         if (!issue.labels.some((label) => label.id === labelId)) issue.labels.push({ id: labelId, name: labelId, parentId: null });
       }
     }
+    if (input.assigneeId !== undefined) {
+      issue.assignee = input.assigneeId === null ? null : { id: input.assigneeId, name: input.assigneeId, displayName: null };
+    }
     return issue;
   }
 
@@ -173,10 +178,6 @@ export class FakeLinear implements LinearWriter {
   }
 
   async createProject(): Promise<ProjectRef> {
-    throw new Error("not implemented");
-  }
-
-  async addProjectToInitiative(): Promise<void> {
     throw new Error("not implemented");
   }
 
@@ -220,6 +221,30 @@ export class FakeLinear implements LinearWriter {
 
   async ensureLabel(name: string): Promise<IssueLabel> {
     return { id: name, name, parentId: null };
+  }
+
+  async ensureWorkspaceLabel(name: string): Promise<IssueLabel> {
+    return { id: name, name, parentId: null };
+  }
+
+  async ensureProjectLabel(name: string): Promise<IssueLabel> {
+    return { id: name, name, parentId: null };
+  }
+
+  async createWorkflowState(input: { teamId: LinearId; name: string; type: string; color: string; description?: string; position?: number }): Promise<WorkflowState> {
+    throw new Error(`not implemented: createWorkflowState(${input.name})`);
+  }
+
+  async updateWorkflowState(): Promise<WorkflowState> {
+    throw new Error("not implemented");
+  }
+
+  async archiveWorkflowState(): Promise<void> {
+    throw new Error("not implemented");
+  }
+
+  async updateTeamSettings(): Promise<void> {
+    throw new Error("not implemented");
   }
 }
 

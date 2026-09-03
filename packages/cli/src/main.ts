@@ -12,7 +12,7 @@
  *           the omp plugin active in that repo and nowhere else.
  *   deinit  per-repo — the exact inverse, so a repo can stop using Foreman
  *           without leaving a dangling plugin root behind.
- *   verify  verification and repair for both layers. The activation surface
+ *   doctor  verification and repair for both layers. The activation surface
  *           is two files and a symlink, so drift is silent; this is what
  *           turns "it should be installed" into an answer.
  *   update  pull, rebuild, then repair drift. There is no per-repo install
@@ -30,14 +30,14 @@ import { nodeRunner } from "@foreman/core";
 import { runBuild, runPlan, runReconcile } from "@foreman/loop";
 import { resolveCheckoutRoot } from "./checkout.ts";
 import { runDeinit } from "./deinit.ts";
+import { runDoctor } from "./doctor.ts";
 import { openUrl, processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
 import { runUpdate } from "./update.ts";
-import { runVerify } from "./verify.ts";
 import { runWizard } from "./wizard.ts";
 
-type Command = "setup" | "init" | "deinit" | "verify" | "update";
+type Command = "setup" | "init" | "deinit" | "doctor" | "update";
 interface ParsedArgs {
   command: Command | null;
   yes: boolean;
@@ -53,10 +53,10 @@ interface ParsedArgs {
   skipPull: boolean;
   /** Leave the `config.repos` entry in place; deinit-only. */
   keepRegistry: boolean;
-  /** Repair what it can instead of only reporting; verify-only. */
+  /** Repair what it can instead of only reporting; doctor-only. */
   fix: boolean;
   help: boolean;
-  initiatives: string[];
+  apps: string[];
   alias: string | null;
   team: string | null;
 }
@@ -69,14 +69,14 @@ Commands:
   setup                    Per-machine install: tool preflight, Linear credential, the global plugin link.
   init                     Per-repo: register this directory and activate the omp plugin for it.
   deinit                   Per-repo: deactivate the omp plugin here and drop the registry entry.
-  verify                   Verify the install — machine, plugin link, and every registered repo.
+  doctor                   Verify the install — machine, plugin link, and every registered repo.
   update                   Pull Foreman's source, rebuild, and repair any drift.
   plan                     Run the plan loop (triage/plan/refine); \`foreman plan --help\` for its flags.
   build                    Run the build loop (implement/review/merge); \`foreman build --help\` for its flags.
   reconcile                Repair Linear drift from the invariant table; \`foreman reconcile --help\` for its flags.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`plan\`/\`build\` per repo.
-The plugin is active only in repos that ran \`init\`; \`verify\` proves it.
+The plugin is active only in repos that ran \`init\`; \`doctor\` proves it.
 
 Options for setup:
   --link                     Dev mode: run the foreman CLI from this checkout's source (no rebuild to see changes).
@@ -85,9 +85,9 @@ Options for setup:
 
 Options for init:
   --path <dir>               Directory to register (default: the current directory).
-  --initiative <id>          Initiative to bind; repeat for multiple. Accepts <uuid> or <uuid>:<subdir>.
+  --app <name>               App in this repo; repeat for a monorepo.
   --alias <name>             Registry alias override (default: derived from the repo directory name).
-  --team <KEY>               Linear team key for this repo (default: prompted, or sole workspace team).
+  --team <KEY>               Linear team for this repo (required; prompted when omitted).
   --skip-plugin              Register the repo without activating the omp plugin in it.
   --skip-linear              Skip Linear API access.
 
@@ -95,7 +95,7 @@ Options for deinit:
   --path <dir>               Directory to deactivate (default: the current directory).
   --keep-registry            Deactivate the plugin but leave the \`repos\` entry in place.
 
-Options for verify:
+Options for doctor:
   --fix                      Repair what can be repaired instead of only reporting it.
   --checkout <path>          Path to the foreman checkout, for repairing the global link.
 
@@ -113,7 +113,7 @@ Options for all commands:
 /**
  * Rejects a flag aimed at the wrong command. Table-driven rather than a list
  * per command: several flags are deliberately shared by two or three of them —
- * `--checkout` by setup, verify, and update; `--skip-plugin` by init and
+ * \`--checkout\` by setup, doctor, and update; \`--skip-plugin\` by init and
  * update; `--path` by init and deinit — and silently accepting a misaimed flag
  * is how an operator ends up believing they skipped a step they didn't.
  */
@@ -123,16 +123,16 @@ function validateCommandFlags(parsed: ParsedArgs): void {
 
   const flags: { flag: string; supplied: boolean; commands: readonly Command[] }[] = [
     { flag: "--link", supplied: parsed.link, commands: ["setup"] },
-    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "verify", "update"] },
+    { flag: "--checkout", supplied: parsed.checkoutPath !== null, commands: ["setup", "doctor", "update"] },
     { flag: "--path", supplied: parsed.path !== null, commands: ["init", "deinit"] },
-    { flag: "--initiative", supplied: parsed.initiatives.length > 0, commands: ["init"] },
+    { flag: "--app", supplied: parsed.apps.length > 0, commands: ["init"] },
     { flag: "--alias", supplied: parsed.alias !== null, commands: ["init"] },
     { flag: "--team", supplied: parsed.team !== null, commands: ["init"] },
     { flag: "--skip-linear", supplied: parsed.skipLinear, commands: ["setup", "init"] },
     { flag: "--skip-plugin", supplied: parsed.skipPlugin, commands: ["init", "update"] },
     { flag: "--skip-pull", supplied: parsed.skipPull, commands: ["update"] },
     { flag: "--keep-registry", supplied: parsed.keepRegistry, commands: ["deinit"] },
-    { flag: "--fix", supplied: parsed.fix, commands: ["verify"] },
+    { flag: "--fix", supplied: parsed.fix, commands: ["doctor"] },
   ];
 
   for (const entry of flags) {
@@ -158,7 +158,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     keepRegistry: false,
     fix: false,
     help: false,
-    initiatives: [],
+    apps: [],
     alias: null,
     team: null,
   };
@@ -177,7 +177,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "setup":
       case "init":
       case "deinit":
-      case "verify":
+      case "doctor":
       case "update":
         setCommand(arg);
         break;
@@ -218,9 +218,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--skip-plugin":
         parsed.skipPlugin = true;
         break;
-      case "--initiative": {
-        if (argv[i + 1] === undefined) throw new Error("missing value for --initiative");
-        parsed.initiatives.push(argv[++i] as string);
+      case "--app": {
+        if (argv[i + 1] === undefined) throw new Error("missing value for --app");
+        parsed.apps.push(argv[++i] as string);
         break;
       }
       case "--alias": {
@@ -298,7 +298,7 @@ async function main(): Promise<void> {
           home,
           skipLinear: args.skipLinear,
           skipPlugin: args.skipPlugin,
-          initiatives: args.initiatives.length > 0 ? args.initiatives : undefined,
+          apps: args.apps.length > 0 ? args.apps : undefined,
           alias: args.alias ?? undefined,
           team: args.team ?? undefined,
         },
@@ -316,12 +316,12 @@ async function main(): Promise<void> {
     }
 
     /*
-     * `verify` takes the checkout path unresolved: a machine whose checkout
+     * `doctor` takes the checkout path unresolved: a machine whose checkout
      * has moved is precisely the drift it exists to diagnose, so failing to
      * resolve it here would turn the diagnosis into a crash.
      */
-    if (args.command === "verify") {
-      process.exitCode = await runVerify(
+    if (args.command === "doctor") {
+      process.exitCode = await runDoctor(
         { home, checkoutRoot: args.checkoutPath, fix: args.fix },
         { runner: processRunner, log },
       );
@@ -352,6 +352,7 @@ async function main(): Promise<void> {
         checkoutRoot: resolveCheckoutRoot(args.checkoutPath),
         linkCli: args.link,
         skipLinear: args.skipLinear,
+        yes: args.yes,
       },
       { prompter, runner: processRunner, log },
     );

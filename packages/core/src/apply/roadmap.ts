@@ -4,9 +4,9 @@
  *
  * `foreman-roadmap` proposes projects only; it never touches Linear itself
  * (SPEC §3.5 item 1, principle 9). This module is where those proposals
- * become real projects: created, attached to the initiative, dated, and
- * wired with native `dependency` relations, one entry at a time so a single
- * bad entry never hides the rest of the batch.
+ * become real projects: created, dated, and wired with native `dependency`
+ * relations, one entry at a time so a single bad entry never hides the rest
+ * of the batch.
  */
 
 import { latestTargetDate } from "../linear/project.ts";
@@ -128,19 +128,20 @@ function topoOrder(entries: readonly ProposedProject[]): string[] {
 }
 
 /**
- * Applies one `RoadmapResult`: creates every proposed project, attaches
- * each to `result.initiativeId`, clamps dates against resolved blockers,
- * and wires the `dependency` relations last so a forward reference (an
- * entry that lists a sibling created later in the batch) still resolves.
+ * Applies one `RoadmapResult`: creates every proposed project (optionally
+ * carrying one `app:` project label), clamps dates against resolved
+ * blockers, and wires the `dependency` relations last so a forward
+ * reference (an entry that lists a sibling created later in the batch)
+ * still resolves.
  *
- * Not atomic — each entry's create/attach/relate sequence is isolated in
- * its own try/catch, exactly as `applyProposal`/`runApplyPass` isolate a
- * triage candidate, so one bad entry never hides the rest of the roadmap.
+ * Not atomic — each entry's create/relate sequence is isolated in its own
+ * try/catch, exactly as `applyProposal`/`runApplyPass` isolate a triage
+ * candidate, so one bad entry never hides the rest of the roadmap.
  */
 export async function applyRoadmap(
   linear: LinearWriter,
   result: RoadmapResult,
-  input: { teamId: LinearId },
+  input: { teamId: LinearId; appLabelIds: Record<string, LinearId> },
 ): Promise<RoadmapApplyResult> {
   const problems: RoadmapProblem[] = [];
   const dateAdjustments: RoadmapDateAdjustment[] = [];
@@ -212,17 +213,25 @@ export async function applyRoadmap(
     computedDates.set(key, { startDate, targetDate });
   }
 
-  // Pass 2: create + attach each project. Two calls, unavoidably
-  // (`ProjectCreateInput` has no `initiativeId` field, SPEC §16 item 10,
-  // measured — the same hazard `ensureMaintenanceProjects` documents at
-  // `ensure.ts:96-104`). A failure between them leaves a project that
-  // exists but is attached to no initiative; that is reported as this
-  // entry's problem rather than retried automatically, because a second
-  // attempt cannot tell that orphan apart from an unrelated same-named
-  // project in another initiative.
+  // Pass 2: create each project. A project may optionally carry one `app:`
+  // project label, resolved by the caller into `input.appLabelIds`; an
+  // `app` naming a key absent from that map is reported as a problem on
+  // this entry, and the project is still created without the label.
   const createdIdByKey = new Map<string, LinearId>();
   for (const entry of result.proposedProjects) {
     const dates = computedDates.get(entry.key) ?? { startDate: entry.startDate, targetDate: entry.targetDate };
+    const labelIds: LinearId[] = [];
+    if (entry.app !== null) {
+      const labelId = input.appLabelIds[entry.app];
+      if (labelId) {
+        labelIds.push(labelId);
+      } else {
+        problems.push({
+          key: entry.key,
+          error: `project "${entry.name}" names unknown app "${entry.app}"; created without an app label`,
+        });
+      }
+    }
     let project: { id: LinearId; name: string };
     try {
       project = await linear.createProject({
@@ -232,6 +241,7 @@ export async function applyRoadmap(
         content: entry.brief,
         startDate: dates.startDate,
         targetDate: dates.targetDate,
+        ...(labelIds.length > 0 ? { labelIds } : {}),
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -240,18 +250,6 @@ export async function applyRoadmap(
     }
     createdProjects.push({ key: entry.key, projectId: project.id, name: project.name });
     createdIdByKey.set(entry.key, project.id);
-
-    try {
-      await linear.addProjectToInitiative({ projectId: project.id, initiativeId: result.initiativeId });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      problems.push({
-        key: entry.key,
-        error:
-          `created project ${project.id} ("${project.name}") but failed to attach it to initiative ` +
-          `${result.initiativeId}: ${reason} — the project exists but is unattached; link it or delete it by hand`,
-      });
-    }
   }
 
   // Pass 3: relations after every create, so an entry that names a sibling

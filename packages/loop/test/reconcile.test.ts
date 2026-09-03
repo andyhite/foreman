@@ -1,22 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import type { CommandRunner } from "@foreman/core";
-import { encodeMarker, FOREMAN_LABEL, GitHubClient, groupDisplayName, labelDisplayName, MARKER_KIND, renderLockComment } from "@foreman/core";
-import type { Comment, GlobalConfig, Issue, IssueLabel, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
+import { encodeMarker, GitHubClient, MARKER_KIND, renderLockComment } from "@foreman/core";
+import type { Comment, GlobalConfig, Issue, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { FakeLinear } from "./fake-linear.ts";
 import { reconcile, type ReconcileContext } from "../src/reconcile.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
-const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Progress", type: "started", position: 3 };
-const STATE_IN_REVIEW: WorkflowState = { id: "state-in-review", name: "In Review", type: "started", position: 4 };
-const STATE_DONE: WorkflowState = { id: "state-done", name: "Done", type: "completed", position: 5 };
-
-/** `id` keeps the canonical colon-form (what `removeForemanLabel` matches on); `name`/`parentId` mirror the display-name/group-name pair `FakeLinear`'s filter matcher expects, the same shape `LinearClient` reconstructs from the wire. */
-function label(canonicalId: string): IssueLabel {
-  const colon = canonicalId.indexOf(":");
-  const name = colon === -1 ? labelDisplayName(canonicalId) : labelDisplayName(canonicalId.slice(colon + 1));
-  const parentId = colon === -1 ? null : groupDisplayName(canonicalId.slice(0, colon));
-  return { id: canonicalId, name, parentId };
-}
+const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 0 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 3 };
+const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Progress", type: "started", position: 5 };
+const STATE_NEEDS_INPUT: WorkflowState = { id: "state-needs-input", name: "Needs Input", type: "unstarted", position: 2 };
+const STATE_BLOCKED: WorkflowState = { id: "state-blocked", name: "Blocked", type: "started", position: 4 };
+const STATE_IN_REVIEW: WorkflowState = { id: "state-in-review", name: "In Review", type: "started", position: 6 };
+const STATE_DONE: WorkflowState = { id: "state-done", name: "Done", type: "completed", position: 7 };
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
@@ -30,7 +25,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    state: STATE_TODO,
+    state: STATE_READY,
     labels: [],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
@@ -48,7 +43,8 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
     alias: "acme",
     repoPath: "/repos/acme",
     team: "ENG",
-    initiativeIds: ["initiative-1"],
+    apps: [],
+    appNames: [],
     baseBranch: "main",
     pr: { required: true, draft: false, ciRequired: true },
     merge: { strategy: "squash", deleteBranch: true },
@@ -128,7 +124,7 @@ function makeContext(overrides: Partial<ReconcileContext> = {}): ReconcileContex
 }
 
 describe("reconcile — stale-running", () => {
-  it("removes an orphaned running label, moves a started issue to Todo, and comments", async () => {
+  it("moves an orphaned Refining/In Progress issue to Ready, clears the assignee, and comments", async () => {
     const lockComment: Comment = {
       id: "c1",
       body: renderLockComment({
@@ -145,11 +141,7 @@ describe("reconcile — stale-running", () => {
       user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
       parentId: null,
     };
-    const issue = makeIssue({
-      state: STATE_IN_PROGRESS,
-      labels: [label(FOREMAN_LABEL.running)],
-      comments: [lockComment],
-    });
+    const issue = makeIssue({ state: STATE_IN_PROGRESS, comments: [lockComment] });
     const linear = new FakeLinear([issue]);
     const ctx = makeContext({ linear });
 
@@ -157,29 +149,28 @@ describe("reconcile — stale-running", () => {
 
     expect(summary.fixed).toBe(1);
     expect(summary.skipped).toBe(0);
-    expect(issue.labels.some((l) => l.name === FOREMAN_LABEL.running)).toBe(false);
-    expect(issue.state.id).toBe(STATE_TODO.id);
+    expect(issue.state.id).toBe(STATE_READY.id);
     expect(linear.commentCalls).toHaveLength(1);
     expect(linear.commentCalls[0]!.body).toContain("released orphaned lock");
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
   });
 
   it("a declined confirmation counts as skipped and performs no mutation", async () => {
-    const issue = makeIssue({ state: STATE_IN_PROGRESS, labels: [label(FOREMAN_LABEL.running)], comments: [] });
+    const issue = makeIssue({ state: STATE_IN_PROGRESS, comments: [] });
     const linear = new FakeLinear([issue]);
     const ctx = makeContext({ linear, confirmer: ALWAYS_DENY });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(0);
-    expect(summary.skipped).toBe(1);
-    expect(issue.labels.some((l) => l.id === FOREMAN_LABEL.running)).toBe(true);
+    expect(summary.skipped).toBe(2);
+    expect(issue.state.id).toBe(STATE_IN_PROGRESS.id);
     expect(linear.updateCalls).toHaveLength(0);
   });
 });
 
 describe("reconcile — in-progress-abandoned", () => {
-  it("moves to In Review when an open PR exists for the branch", async () => {
+  it("an orphaned In Progress issue is moved to Ready by stale-running before in-progress-abandoned's PR check runs, regardless of an open PR", async () => {
     const issue = makeIssue({ state: STATE_IN_PROGRESS, labels: [], comments: [] });
     const linear = new FakeLinear([issue]);
     const github = stubGitHub((argv) => {
@@ -198,10 +189,10 @@ describe("reconcile — in-progress-abandoned", () => {
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
-    expect(issue.state.id).toBe(STATE_IN_REVIEW.id);
+    expect(issue.state.id).toBe(STATE_READY.id);
   });
 
-  it("moves to Todo when no PR exists for the branch", async () => {
+  it("moves to Ready when no PR exists for the branch", async () => {
     const issue = makeIssue({ state: STATE_IN_PROGRESS, labels: [], comments: [] });
     const linear = new FakeLinear([issue]);
     const ctx = makeContext({ linear });
@@ -209,7 +200,7 @@ describe("reconcile — in-progress-abandoned", () => {
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
-    expect(issue.state.id).toBe(STATE_TODO.id);
+    expect(issue.state.id).toBe(STATE_READY.id);
   });
 });
 
@@ -238,7 +229,7 @@ describe("reconcile — merged-not-done", () => {
 });
 
 describe("reconcile — in-review-no-pr", () => {
-  it("moves to Todo when there is no PR and the branch was never pushed", async () => {
+  it("moves to Ready when there is no PR and the branch was never pushed", async () => {
     const issue = makeIssue({ state: STATE_IN_REVIEW, labels: [], comments: [recentLockComment()] });
     const linear = new FakeLinear([issue]);
     const github = stubGitHub((argv) => {
@@ -251,12 +242,12 @@ describe("reconcile — in-review-no-pr", () => {
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
-    expect(issue.state.id).toBe(STATE_TODO.id);
+    expect(issue.state.id).toBe(STATE_READY.id);
   });
 });
 
 describe("reconcile — blocked-answered", () => {
-  it("removes the blocked label and writes an unblock marker once the operator has replied", async () => {
+  it("moves a Needs Input issue to Backlog and writes an unblock marker once the operator has replied", async () => {
     const blockComment: Comment = {
       id: "block-1",
       body: encodeMarker(MARKER_KIND.block, { type: "needs-decision" }, "Need a decision"),
@@ -272,8 +263,7 @@ describe("reconcile — blocked-answered", () => {
       parentId: null,
     };
     const issue = makeIssue({
-      state: STATE_TODO,
-      labels: [label(FOREMAN_LABEL.blocked)],
+      state: STATE_NEEDS_INPUT,
       comments: [blockComment, replyComment],
     });
     const linear = new FakeLinear([issue]);
@@ -282,15 +272,44 @@ describe("reconcile — blocked-answered", () => {
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
-    expect(issue.labels.some((l) => l.name === FOREMAN_LABEL.blocked)).toBe(false);
+    expect(issue.state.id).toBe(STATE_BACKLOG.id);
     expect(linear.commentCalls.some((call) => call.body.includes("auto: answered in comment reply-1"))).toBe(true);
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
+  });
+
+  it("moves a Blocked issue to Ready and writes an unblock marker once the operator has replied", async () => {
+    const blockComment: Comment = {
+      id: "block-2",
+      body: encodeMarker(MARKER_KIND.block, { type: "needs-decision" }, "Need a decision"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+      parentId: null,
+    };
+    const replyComment: Comment = {
+      id: "reply-2",
+      body: "Go ahead with option A.",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      user: { id: "operator-1", name: "operator-1", displayName: "operator-1" },
+      parentId: null,
+    };
+    const issue = makeIssue({
+      state: STATE_BLOCKED,
+      comments: [blockComment, replyComment],
+    });
+    const linear = new FakeLinear([issue]);
+    const ctx = makeContext({ linear });
+
+    const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
+
+    expect(summary.fixed).toBe(1);
+    expect(issue.state.id).toBe(STATE_READY.id);
+    expect(linear.commentCalls.some((call) => call.body.includes("auto: answered in comment reply-2"))).toBe(true);
   });
 });
 
 describe("reconcile — dry run", () => {
   it("logs every fix without mutating or confirming", async () => {
-    const issue = makeIssue({ state: STATE_IN_PROGRESS, labels: [label(FOREMAN_LABEL.running)], comments: [] });
+    const issue = makeIssue({ state: STATE_IN_PROGRESS, comments: [] });
     const linear = new FakeLinear([issue]);
     let confirmCalls = 0;
     const confirmer = { confirm: async () => { confirmCalls += 1; return true; }, close: () => {} };

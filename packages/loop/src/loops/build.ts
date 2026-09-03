@@ -16,22 +16,22 @@ import {
   DISPATCH_COMMAND,
   findMarkers,
   implementationGate,
-  inInitiatives,
   inState,
-  inStateType,
+  isHandsOff,
   type Issue,
   latestMarker,
   MARKER_KIND,
+  notHandsOff,
   notInTerminalProject,
   reviewGate,
   type CiState,
   type ReviewResult,
-  unlabeled,
+  FOREMAN_STATE,
   worktreePathFor,
 } from "@foreman/core";
 import { byPriorityThenAge, type Candidate, type Escalation, type Loop, type Rule } from "../engine.ts";
 
-interface TodoEntry {
+interface ReadyEntry {
   issue: Issue;
   cwd: string;
   worktreePath: string;
@@ -49,19 +49,23 @@ interface ReviewEntry {
 }
 
 export interface BuildSnapshot {
-  todo: TodoEntry[];
+  ready: ReadyEntry[];
   inReview: ReviewEntry[];
   autoMerge: boolean;
   ciRequired: boolean;
   prRequired: boolean;
   reviewCycleCap: number;
+  /** Null when the credential's viewer id could not be resolved; every candidate is then excluded (fails closed, matching `checkLockFree`). */
+  viewerId: string | null;
 }
 
 const implementRule: Rule<BuildSnapshot> = {
   name: "implement",
   select(snapshot) {
-    const eligible = snapshot.todo
-      .filter((entry) => entry.issue.assignee === null && implementationGate(entry.issue).ok)
+    if (snapshot.viewerId === null) return [];
+    const viewerId = snapshot.viewerId;
+    const eligible = snapshot.ready
+      .filter((entry) => !isHandsOff(entry.issue, viewerId) && implementationGate(entry.issue, viewerId).ok)
       .sort((a, b) => byPriorityThenAge(a.issue, b.issue));
     return eligible.map(
       (entry): Candidate => ({
@@ -153,22 +157,20 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
       viewerId = null;
     }
 
-    const todoIssues = await ctx.linear.issues({
+    const readyIssues = await ctx.linear.issues({
       filter: all(
-        inInitiatives(ctx.entry.initiativeIds),
-        inStateType("unstarted"),
-        unlabeled(),
+        inState(FOREMAN_STATE.ready),
+        notHandsOff(viewerId ?? ""),
         notInTerminalProject(),
       ),
     });
-    const todo: TodoEntry[] = todoIssues.map((issue) => ({
+    const ready: ReadyEntry[] = readyIssues.map((issue) => ({
       issue,
       cwd: ctx.entry.repoPath,
       worktreePath: worktreePathFor(ctx.entry.worktreePattern, ctx.entry.repoPath, issue),
     }));
-
     const inReviewIssues = await ctx.linear.issues({
-      filter: all(inInitiatives(ctx.entry.initiativeIds), inState("In Review"), unlabeled()),
+      filter: all(inState(FOREMAN_STATE.inReview), notHandsOff(viewerId ?? "")),
       includeComments: true,
     });
     const inReview: ReviewEntry[] = [];
@@ -222,12 +224,13 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
     }
 
     return {
-      todo,
+      ready,
       inReview,
       autoMerge: ctx.config.loop.autoMerge,
       ciRequired: ctx.entry.pr.required && ctx.entry.pr.ciRequired,
       prRequired: ctx.entry.pr.required,
       reviewCycleCap: ctx.config.loop.reviewCycleCap,
+      viewerId,
     };
   },
   rules: [implementRule, reviewRule, mergeRule],

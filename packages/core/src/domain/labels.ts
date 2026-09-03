@@ -6,13 +6,13 @@
  */
 
 export const LABEL_GROUP = {
-  foreman: "foreman:",
   type: "type:",
+  app: "app:",
 } as const;
 
 export type LabelGroupName = keyof typeof LABEL_GROUP;
 
-/** `type:` ⊕ — informational classification, read by no gate or rule. */
+/** `type:` ⊕ — required on every issue that leaves Triage. */
 export const TYPE_LABEL = {
   bug: "type:bug",
   feature: "type:feature",
@@ -24,18 +24,23 @@ export const TYPE_LABEL = {
 export type TypeLabel = (typeof TYPE_LABEL)[keyof typeof TYPE_LABEL];
 export const TYPE_LABELS = Object.values(TYPE_LABEL) as TypeLabel[];
 
-/** `foreman:` ⊕ — the one managed group carrying what status cannot. */
-export const FOREMAN_LABEL = {
-  running: "foreman:running",
-  blocked: "foreman:blocked",
-  handsOff: "foreman:hands-off",
-} as const;
+/** Creation-time color per `type:` label — set on every create, workspace-wide. */
+export const TYPE_LABEL_COLOR: Record<TypeLabel, string> = {
+  "type:bug": "#eb5757",
+  "type:feature": "#4ea7fc",
+  "type:chore": "#95a2b3",
+  "type:spike": "#bb87fc",
+  "type:docs": "#f2c94c",
+};
 
-export type ForemanLabel = (typeof FOREMAN_LABEL)[keyof typeof FOREMAN_LABEL];
-export const FOREMAN_LABELS = Object.values(FOREMAN_LABEL) as ForemanLabel[];
+/** Creation-time color for every `app:<name>` label — one color, since app names are per-repo. */
+export const APP_LABEL_COLOR = "#26b5ce";
 
-/** Every label Foreman itself creates at install time. */
-export const MANAGED_LABELS: readonly string[] = [...TYPE_LABELS, ...FOREMAN_LABELS];
+/** Every label Foreman itself creates at install time (workspace-level). */
+export const MANAGED_LABELS: readonly string[] = [...TYPE_LABELS];
+
+/** Group parents `foreman setup` creates workspace-wide, ahead of any member — `app:` is deliberately absent: it has no unconditional members, and its group is created on demand by `ensureWorkspaceLabel`/`ensureProjectLabel` the first time a repo actually configures an app. */
+export const MANAGED_LABEL_GROUP_PREFIXES: readonly string[] = [LABEL_GROUP.type];
 
 /** Groups that Linear should enforce as mutually exclusive. */
 export const MANAGED_LABEL_GROUPS: ReadonlyArray<{
@@ -43,7 +48,7 @@ export const MANAGED_LABEL_GROUPS: ReadonlyArray<{
   members: readonly string[];
 }> = [
   { prefix: LABEL_GROUP.type, members: TYPE_LABELS },
-  { prefix: LABEL_GROUP.foreman, members: FOREMAN_LABELS },
+  { prefix: LABEL_GROUP.app, members: [] },
 ];
 
 export interface HasLabels {
@@ -62,7 +67,7 @@ export function hasAnyLabel(target: HasLabels, names: readonly string[]): boolea
   return target.labels.some((label) => names.includes(label.name));
 }
 
-/** All labels on `target` belonging to a group, e.g. `labelsInGroup(issue, "foreman:")`. */
+/** All labels on `target` belonging to a group, e.g. `labelsInGroup(issue, "type:")`. */
 export function labelsInGroup(target: HasLabels, prefix: string): string[] {
   return target.labels
     .map((label) => label.name)
@@ -73,8 +78,14 @@ export function typeLabel(target: HasLabels): string | null {
   return labelsInGroup(target, LABEL_GROUP.type)[0] ?? null;
 }
 
-export function foremanLabel(target: HasLabels): string | null {
-  return labelsInGroup(target, LABEL_GROUP.foreman)[0] ?? null;
+
+export function appLabel(target: HasLabels): string | null {
+  return labelsInGroup(target, LABEL_GROUP.app)[0] ?? null;
+}
+
+/** Composes the canonical `app:<name>` id — the one place that does, so callers cannot disagree. */
+export function appLabelId(name: string): string {
+  return `${LABEL_GROUP.app}${name}`;
 }
 
 /**

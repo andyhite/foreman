@@ -47,6 +47,9 @@ export const ProposedProject = Type.Object(
     }),
     startDate: TimelessDateSchema,
     targetDate: TimelessDateSchema,
+    app: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "App label for this project. Null when the repo has no apps.",
+    }),
   },
   { additionalProperties: false, title: "ProposedProject" },
 );
@@ -55,9 +58,9 @@ export type ProposedProject = Static<typeof ProposedProject>;
 
 export const RoadmapResult = Type.Object(
   {
-    initiativeId: Type.String({
+    teamId: Type.String({
       minLength: 1,
-      description: "The initiative every proposed project is attached to. One initiative per result.",
+      description: "The Linear team every proposed project is created under — this repo's team.",
     }),
     proposedProjects: Type.Array(ProposedProject, {
       minItems: 1,
@@ -65,6 +68,10 @@ export const RoadmapResult = Type.Object(
         "The projects to create, in no particular array order — `blockedBy` carries the " +
         "sequence, not position. The extension creates each one, attaches it to the " +
         "initiative, sets its dates, and wires its dependency edges.",
+    }),
+    sourceDocument: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description:
+        "Repo-relative path of the brief/PRD/spec you decomposed, or null when you worked from the repo's own docs.",
     }),
     rationale: Type.String({
       minLength: 1,

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { resolveRepoEntry, loadGlobalConfig } from "../src/config/index.ts";
 import { ConfigError } from "../src/config/load.ts";
 import { PRIORITY } from "../src/domain/priority.ts";
-import type { LinearReader } from "../src/linear/api.ts";
 import type { Issue, WorkflowState } from "../src/linear/types.ts";
 import { assertIssueInScope, issueScope } from "../src/repo.ts";
 
@@ -48,102 +47,49 @@ function writeGlobalConfig(home: string, contents: unknown): void {
 }
 
 describe("issueScope", () => {
-  it("is in scope when the issue's initiative is bound to the entry", async () => {
+  it("is in scope when the issue's team matches the entry's bound team", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
-      };
-      const verdict = await issueScope({ linear, entry }, makeIssue());
-      expect(verdict).toEqual({ inScope: true, reason: null, initiativeId: "init-1", message: null });
+      const verdict = issueScope(entry, makeIssue());
+      expect(verdict).toEqual({ inScope: true, reason: null, message: null });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("gives reason 'no-project' for a projectless issue", async () => {
+  it("is in scope for a projectless issue on the right team", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
-      };
-      const verdict = await issueScope({ linear, entry }, makeIssue({ project: null }));
-      expect(verdict.inScope).toBe(false);
-      expect(verdict.reason).toBe("no-project");
-      expect(verdict.message).toMatch(/ENG-1/);
+      const verdict = issueScope(entry, makeIssue({ project: null }));
+      expect(verdict).toEqual({ inScope: true, reason: null, message: null });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("gives reason 'initiative-unbound' when the issue's initiative is not in the entry's set", async () => {
+  it("gives reason 'team-mismatch' with a message naming both team keys when the issue's team differs", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "OPS" } },
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [{ id: "init-other", name: "Other" }],
-      };
-      const verdict = await issueScope({ linear, entry }, makeIssue());
+      const verdict = issueScope(entry, makeIssue({ team: { id: "team-1", key: "ENG", name: "Engineering" } }));
       expect(verdict.inScope).toBe(false);
-      expect(verdict.reason).toBe("initiative-unbound");
-      expect(verdict.initiativeId).toBe("init-other");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("gives reason 'project-no-initiative' instead of throwing when the project has no initiative", async () => {
-    const home = makeHome();
-    try {
-      writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
-      });
-      const { config } = loadGlobalConfig({ home });
-      const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [],
-      };
-      const verdict = await issueScope({ linear, entry }, makeIssue());
-      expect(verdict.inScope).toBe(false);
-      expect(verdict.reason).toBe("project-no-initiative");
-      expect(verdict.initiativeId).toBeNull();
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("gives reason 'project-multiple-initiatives' instead of throwing when the project belongs to several", async () => {
-    const home = makeHome();
-    try {
-      writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
-      });
-      const { config } = loadGlobalConfig({ home });
-      const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [
-          { id: "init-1", name: "Plotroom" },
-          { id: "init-2", name: "Second" },
-        ],
-      };
-      const verdict = await issueScope({ linear, entry }, makeIssue());
-      expect(verdict.inScope).toBe(false);
-      expect(verdict.reason).toBe("project-multiple-initiatives");
-      expect(verdict.initiativeId).toBeNull();
+      expect(verdict.reason).toBe("team-mismatch");
+      expect(verdict.message).toContain("ENG");
+      expect(verdict.message).toContain("OPS");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -151,41 +97,31 @@ describe("issueScope", () => {
 });
 
 describe("assertIssueInScope", () => {
-  it("throws ConfigError naming the issue when it has no project", async () => {
+  it("does not throw for an in-scope issue", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [{ id: "init-1", name: "Plotroom" }],
-      };
-      await expect(
-        assertIssueInScope({ linear, entry }, makeIssue({ project: null })),
-      ).rejects.toThrow(ConfigError);
-      await expect(
-        assertIssueInScope({ linear, entry }, makeIssue({ project: null })),
-      ).rejects.toThrow(/ENG-1/);
+      expect(() => assertIssueInScope(entry, makeIssue())).not.toThrow();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("throws ConfigError naming the entry when the issue's initiative is unbound", async () => {
+  it("throws ConfigError naming the entry and the issue's team when out of scope", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "OPS" } },
       });
       const { config } = loadGlobalConfig({ home });
       const entry = resolveRepoEntry(config, "plotroom", home);
-      const linear: Pick<LinearReader, "projectInitiatives"> = {
-        projectInitiatives: async () => [{ id: "init-other", name: "Other" }],
-      };
-      await expect(assertIssueInScope({ linear, entry }, makeIssue())).rejects.toThrow(ConfigError);
-      await expect(assertIssueInScope({ linear, entry }, makeIssue())).rejects.toThrow(/plotroom/);
+      const issue = makeIssue({ team: { id: "team-1", key: "ENG", name: "Engineering" } });
+      expect(() => assertIssueInScope(entry, issue)).toThrow(ConfigError);
+      expect(() => assertIssueInScope(entry, issue)).toThrow(/plotroom/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

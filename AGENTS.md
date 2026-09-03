@@ -19,7 +19,7 @@ measured against omp and Linear where the spec was wrong.
 | --- | --- |
 | `packages/core` | Domain (states, labels, priority), gates, output schemas + parsers, Linear/GitHub/git clients, config schema + loader, lock, markers |
 | `packages/loop` | The rule engine and the three loop CLIs — `foreman build`, `foreman plan`, `foreman reconcile` — plus dispatchers (`print`, `herdr`), in-flight tracking, escalation |
-| `packages/cli` | `foreman setup` / `init` / `deinit` / `verify` / `update`, plugin activation, wizard |
+| `packages/cli` | `foreman setup` / `init` / `deinit` / `doctor` / `update`, plugin activation, wizard |
 | `packages/omp-plugin` | The plugin omp loads: agents, skills, commands, rules, `src/extension.ts`. See its README |
 | `docs/` | `SPEC.md` (design, § references throughout the code), `VERIFIED.md` (measured answers) |
 

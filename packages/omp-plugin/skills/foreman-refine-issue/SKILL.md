@@ -1,6 +1,6 @@
 ---
 name: foreman-refine-issue
-description: Use when foreman-refine turns one prioritized Backlog or Todo issue into a fully specified, implementation-ready issue.
+description: Use when foreman-refine turns one prioritized Backlog or Ready issue into a fully specified, implementation-ready issue.
 ---
 
 # Foreman Refine Issue
@@ -16,7 +16,7 @@ description: Use when foreman-refine turns one prioritized Backlog or Todo issue
 
 ## Preconditions
 
-Priority ≠ `None`. Issue is in scope in either Backlog or Todo.
+Priority ≠ `None`. Issue is in scope in either Backlog or Ready.
 
 ## Required reads
 
@@ -43,7 +43,7 @@ Priority ≠ `None`. Issue is in scope in either Backlog or Todo.
 ## Output
 
 `RefineResult` (`schemas/refine-result.json`). The extension writes the
-description, creates sub-issues and the spike, and moves the issue to Todo
+description, creates sub-issues and the spike, and moves the issue to Ready
 when ready for implementation.
 
 ## Stop conditions

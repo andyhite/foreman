@@ -1,30 +1,36 @@
 /**
  * `/foreman:unblock <ISSUE-ID> <reply>` — SPEC §9: records the operator's
- * reply as a `foreman:unblock` marker comment and clears the `foreman:blocked`
- * label. That is normally all — the loop's next pass re-dispatches implement,
- * which lands in resume mode.
+ * reply as a `foreman:unblock` marker comment and moves the issue out of its
+ * human-interrupt state, back into the queue that stage resumes from:
+ * `Needs Input` (foreman-refine stalled) returns to `Backlog`, so the next
+ * refine dispatch picks it back up with the operator's answer in hand;
+ * `Blocked` (foreman-implement/foreman-review stalled) returns to `Ready`,
+ * so the next implement dispatch resumes from the worktree it left behind.
  *
  * One exception: when the latest `block` marker on the issue is a
  * `needs-decision` whose `recommendation` is `"cancel"` or `"duplicate"`
  * (triage's own park for those two dispositions — SPEC §7.1), and the
  * operator's trimmed, lower-cased reply is exactly that word, the issue is
- * also moved to the matching terminal state instead of being left in
- * Triage with no `foreman:` label, where it would otherwise be re-triaged
- * forever. Any other reply behaves exactly as before: label cleared, state
- * untouched.
+ * also moved to the matching terminal state instead. Any other reply behaves
+ * exactly as above.
  */
 
-import type { LinearWriter, ResolvedRepoEntry } from "@foreman/core";
+import type { ForemanStateKey, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
 import {
   assertIssueInScope,
   encodeMarker,
-  FOREMAN_LABEL,
-  foremanLabel,
+  FOREMAN_STATE,
   latestMarker,
   MARKER_KIND,
   resolveState,
   type BlockRecord,
 } from "@foreman/core";
+
+/** Where `/foreman:unblock` resumes each human-interrupt state, keyed by the state's own Linear name. */
+const RESUME_STATE: Record<string, ForemanStateKey> = {
+  [FOREMAN_STATE.needsInput]: "backlog",
+  [FOREMAN_STATE.blocked]: "ready",
+};
 
 export interface UnblockResult {
   ok: boolean;
@@ -42,7 +48,15 @@ export async function runUnblock(
 
   const issue = await linear.issue(issueId, { includeComments: true });
   if (!issue) return { ok: false, message: `Unknown issue "${issueId}".` };
-  if (entry) await assertIssueInScope({ linear, entry }, issue);
+  if (entry) assertIssueInScope(entry, issue);
+
+  const resumeKey = RESUME_STATE[issue.state.name];
+  if (!resumeKey) {
+    return {
+      ok: false,
+      message: `${issueId} is ${issue.state.name}, not ${FOREMAN_STATE.needsInput} or ${FOREMAN_STATE.blocked}; nothing to unblock.`,
+    };
+  }
 
   const recommendedTerminal = latestMarker<BlockRecord>(MARKER_KIND.block, issue.comments ?? [])?.data;
   const wantsTerminal =
@@ -50,31 +64,21 @@ export async function runUnblock(
     (recommendedTerminal.recommendation === "cancel" || recommendedTerminal.recommendation === "duplicate") &&
     reply.trim().toLowerCase() === recommendedTerminal.recommendation;
 
-  const held = foremanLabel(issue);
-  if (held !== FOREMAN_LABEL.blocked) {
-    return { ok: false, message: `${issueId} carries no \`${FOREMAN_LABEL.blocked}\` label; nothing to unblock.` };
-  }
-
-  const removedLabelIds = issue.labels.filter((label) => label.name === FOREMAN_LABEL.blocked).map((label) => label.id);
-  // Clear the block only after the reply is recorded: a failed comment
-  // leaves the safer blocked state instead of silently making work runnable
-  // while the operator's answer is lost.
+  // Post the reply before moving state: a failed comment leaves the issue
+  // blocked instead of silently making work runnable while the operator's
+  // answer is lost.
   const body = encodeMarker(MARKER_KIND.unblock, { reply }, `**Operator reply:** ${reply}`);
   await linear.createComment({ issueId: issue.id, body });
-  await linear.updateIssue(issue.id, { removedLabelIds, assigneeId: null });
 
-  if (wantsTerminal) {
-    const states = await linear.workflowStates(issue.team.id);
-    // `recommendedTerminal.recommendation` is triage's own literal ("cancel"
-    // | "duplicate"); `resolveState` keys on `ForemanStateKey`, which spells
-    // the canceled one "canceled". `resolveState` falls a bare "duplicate"
-    // back to the canceled state when the team has no dedicated Duplicate
-    // state (`domain/states.ts`).
-    const stateKey = recommendedTerminal.recommendation === "cancel" ? "canceled" : "duplicate";
-    const target = resolveState(stateKey, states);
-    await linear.updateIssue(issue.id, { stateId: target.id });
-    return { ok: true, message: `${issueId} unblocked and moved to ${target.name} (${recommendedTerminal.recommendation}).` };
-  }
+  const states = await linear.workflowStates(issue.team.id);
+  // `recommendedTerminal.recommendation` is triage's own literal ("cancel" |
+  // "duplicate"); `resolveState` keys on `ForemanStateKey`, which spells the
+  // canceled one "canceled". Both are provisioned states, so `resolveState`
+  // throws rather than falling back when either is missing from the team.
+  const target = wantsTerminal
+    ? resolveState(recommendedTerminal.recommendation === "cancel" ? "canceled" : "duplicate", states)
+    : resolveState(resumeKey, states);
+  await linear.updateIssue(issue.id, { stateId: target.id, assigneeId: null });
 
-  return { ok: true, message: `${issueId} unblocked; the loop will re-dispatch on its next pass.` };
+  return { ok: true, message: `${issueId} unblocked and moved to ${target.name}.` };
 }

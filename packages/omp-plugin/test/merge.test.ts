@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MARKER_KIND, PRIORITY, TYPE_LABEL, encodeMarker, ensureWorktree, worktreePathFor } from "@foreman/core";
-import type { Comment, CommandRunner, CreateIssueInput, GlobalConfig, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
+import type { Comment, CommandRunner, CreateIssueInput, GlobalConfig, Issue, IssueLabel, IssueMutation, LinearWriter, MergedRecord, Project, ProjectRef, ResolvedRepoEntry, TeamSettings, WorkflowState } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { runMerge } from "../src/commands/merge.ts";
 
@@ -48,7 +48,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
 class FakeLinear implements LinearWriter {
   issuesById = new Map<string, Issue>();
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
-  initiativesByProject = new Map<string, { id: string; name: string }[]>();
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -75,26 +74,16 @@ class FakeLinear implements LinearWriter {
   async projectStatus() {
     return null;
   }
-  async projectInitiatives(projectId: string) {
-    return this.initiativesByProject.get(projectId) ?? [{ id: "initiative-1", name: "Foreman" }];
-  }
-  async projectInitiative(projectId: string) {
-    const refs = await this.projectInitiatives(projectId);
-    return refs[0] ?? { id: "initiative-1", name: "Foreman" };
+  async projectInitiatives() {
+    return [];
   }
   async initiative() {
     return null;
   }
-  async initiatives() {
-    return [];
-  }
-  async initiativeProjects() {
-    return [];
-  }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_IN_REVIEW, STATE_DONE];
   }
-  async labels() {
+  async labels(): Promise<IssueLabel[]> {
     return [];
   }
   async teams() {
@@ -102,6 +91,12 @@ class FakeLinear implements LinearWriter {
   }
   async projects() {
     return [{ id: "project-1", name: "Foreman" }];
+  }
+  async teamSettings(): Promise<TeamSettings> {
+    return { id: "team-1", key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
+  }
+  async projectLabels(): Promise<IssueLabel[]> {
+    return [];
   }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
@@ -123,7 +118,6 @@ class FakeLinear implements LinearWriter {
   }): Promise<ProjectRef> {
     return { id: `project-created-${input.name}`, name: input.name };
   }
-  async addProjectToInitiative() {}
   async updateProjectStatus() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }): Promise<Comment> {
     return {
@@ -154,6 +148,20 @@ class FakeLinear implements LinearWriter {
   async ensureLabel(name: string, _teamId: string): Promise<IssueLabel> {
     return label(name);
   }
+  async ensureWorkspaceLabel(name: string): Promise<IssueLabel> {
+    return label(name);
+  }
+  async ensureProjectLabel(name: string): Promise<IssueLabel> {
+    return label(name);
+  }
+  async createWorkflowState(input: { teamId: string; name: string; type: string; color: string }): Promise<WorkflowState> {
+    return { id: `state-${input.name.toLowerCase()}`, name: input.name, type: input.type as WorkflowState["type"], position: 99 };
+  }
+  async updateWorkflowState(id: string, input: { name?: string; color?: string; description?: string }): Promise<WorkflowState> {
+    return { id, name: input.name ?? id, type: "started", position: 99 };
+  }
+  async archiveWorkflowState(): Promise<void> {}
+  async updateTeamSettings(): Promise<void> {}
 }
 
 function reviewComment(headSha: string) {
@@ -187,7 +195,8 @@ const entry: ResolvedRepoEntry = {
   alias: "test",
   repoPath: "/repo",
   team: "ENG",
-  initiativeIds: ["initiative-1"],
+  apps: [],
+  appNames: [],
   baseBranch: "main",
   pr: { required: true, draft: false, ciRequired: false },
   merge: { strategy: "squash", deleteBranch: true },

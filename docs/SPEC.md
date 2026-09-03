@@ -160,7 +160,7 @@ independently mutable things:
 | `foreman setup` | per-machine: tool preflight, the Linear credential, the one global plugin link at `~/.foreman/plugin` | `--link` (dev mode: run from this checkout's source, no rebuild to see changes), `--checkout <path>`, `--skip-linear` |
 | `foreman init` | per-repo: one `repos` entry, plus the two files that activate the plugin in that repo | `--path <dir>`, `--initiative <id>` (repeatable), `--alias <name>`, `--team <KEY>`, `--skip-plugin`, `--skip-linear` |
 | `foreman deinit` | per-repo: the exact inverse of `init` | `--path <dir>`, `--keep-registry` (deactivate the plugin but leave the `repos` entry in place) |
-| `foreman verify` | verification and repair for both layers | `--fix`, `--checkout <path>` |
+| `foreman doctor` | verification and repair for both layers | `--fix`, `--checkout <path>` |
 | `foreman update` | pull, rebuild, then repair drift | `--checkout <path>`, `--skip-pull`, `--skip-plugin` |
 
 All five also accept `-y`/`--yes` (accept defaults for every prompt,

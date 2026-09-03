@@ -30,13 +30,6 @@ export function refinementGate(issue: Issue): GateResult {
     });
   }
 
-  if (issue.project === null) {
-    failures.push({
-      code: "missing-project",
-      message: "Issue has no project.",
-    });
-  }
-
   if (issue.priority === PRIORITY.None) {
     failures.push({
       code: "priority-none",

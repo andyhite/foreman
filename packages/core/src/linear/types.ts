@@ -16,13 +16,17 @@ export type WorkflowStateType =
   | "unstarted"
   | "started"
   | "completed"
-  | "canceled";
+  | "canceled"
+  | "duplicate";
 
 export interface WorkflowState {
   id: LinearId;
   name: string;
   type: WorkflowStateType;
   position: number;
+  /** Present only on reads that ask for it (`workflowStates()`) — provisioning's own diff needs it, nothing else does. */
+  color?: string;
+  description?: string | null;
 }
 
 /**
@@ -60,11 +64,13 @@ export interface TeamRef {
 export interface ProjectRef {
   id: LinearId;
   name: string;
-  /** Present when fetched via `initiativeProjects`, folding a per-project status read into that one query. */
+  /** Present when fetched via `projects(teamKey)`, folding a per-project status read into that one query. */
   status?: ProjectStatus | null;
   /** `TimelessDate` (`YYYY-MM-DD`), not a timestamp. Present on the same reads that carry `status`. */
   startDate?: string | null;
   targetDate?: string | null;
+  /** Canonical colon-form ids (e.g. `app:fleet`), present on the same reads that carry `status`. */
+  labels?: IssueLabel[];
 }
 
 /**
@@ -190,6 +196,8 @@ export interface Project {
   startDate: string | null;
   targetDate: string | null;
   status: ProjectStatus | null;
+  /** Canonical colon-form ids (e.g. `app:fleet`). */
+  labels?: IssueLabel[];
   documents: LinearDocument[];
 }
 
@@ -202,4 +210,14 @@ export interface Initiative {
   id: LinearId;
   name: string;
   documents: LinearDocument[];
+}
+
+/** `Team.triageEnabled`/`cyclesEnabled` plus the triage state id, when Linear has created one. */
+export interface TeamSettings {
+  id: LinearId;
+  key: string;
+  name: string;
+  triageEnabled: boolean;
+  cyclesEnabled: boolean;
+  triageStateId: LinearId | null;
 }

@@ -6,7 +6,7 @@ import { FakeLinear } from "../fake-linear.ts";
 
 const STATE_TRIAGE: WorkflowState = { id: "state-triage", name: "Triage", type: "triage", position: 0 };
 const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 1 };
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 2 };
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
@@ -38,7 +38,8 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
     alias: "acme",
     repoPath: "/repos/acme",
     team: "ENG",
-    initiativeIds: ["initiative-1"],
+    apps: [],
+    appNames: [],
     baseBranch: "main",
     pr: { required: true, draft: false, ciRequired: true },
     merge: { strategy: "squash", deleteBranch: true },
@@ -49,21 +50,11 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
 }
 
 class PlanFakeLinear extends FakeLinear {
-  #projectsByInitiative: Record<string, ProjectRef[]>;
   #relationsByProject: Record<string, ProjectRelation[]>;
 
-  constructor(
-    issues: Issue[],
-    projectsByInitiative: Record<string, ProjectRef[]>,
-    relationsByProject: Record<string, ProjectRelation[]> = {},
-  ) {
-    super(issues);
-    this.#projectsByInitiative = projectsByInitiative;
+  constructor(issues: Issue[], projects: ProjectRef[], relationsByProject: Record<string, ProjectRelation[]> = {}) {
+    super(issues, undefined, projects);
     this.#relationsByProject = relationsByProject;
-  }
-
-  override async initiativeProjects(initiativeId: string): Promise<ProjectRef[]> {
-    return this.#projectsByInitiative[initiativeId] ?? [];
   }
 
   override async projectRelations(projectId: string): Promise<ProjectRelation[]> {
@@ -84,7 +75,7 @@ function makeCtx(linear: PlanFakeLinear, entry: ResolvedRepoEntry, triageBatch =
 describe("PLAN_LOOP — refine rule", () => {
   it("proposes a refine candidate for an unblocked, unassigned Backlog issue", async () => {
     const entry = makeEntry();
-    const linear = new PlanFakeLinear([makeIssue()], {});
+    const linear = new PlanFakeLinear([makeIssue()], []);
     const ctx = makeCtx(linear, entry);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
@@ -96,20 +87,20 @@ describe("PLAN_LOOP — refine rule", () => {
     expect(candidates[0]?.subject).toBe("ENG-1");
   });
 
-  it("proposes a refine candidate for a Todo issue that fails the implementation gate (the legacy funnel, label-free)", async () => {
+  it("proposes a refine candidate for a Ready issue that fails the implementation gate (the legacy funnel, label-free)", async () => {
     const entry = makeEntry();
-    const unrefinedTodo = makeIssue({
+    const unrefinedReady = makeIssue({
       id: "issue-legacy",
       identifier: "ENG-9",
-      state: STATE_TODO,
+      state: STATE_READY,
       description: null,
       estimate: null,
     });
-    const linear = new PlanFakeLinear([unrefinedTodo], {});
+    const linear = new PlanFakeLinear([unrefinedReady], []);
     const ctx = makeCtx(linear, entry);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
-    expect(snapshot.unrefinedTodo.map((issue) => issue.identifier)).toContain("ENG-9");
+    expect(snapshot.unrefinedReady.map((issue) => issue.identifier)).toContain("ENG-9");
     const refineRule = PLAN_LOOP.rules.find((rule) => rule.name === "refine")!;
     const candidates = refineRule.select(snapshot);
     expect(candidates.some((c) => c.subject === "ENG-9")).toBe(true);
@@ -120,7 +111,7 @@ describe("PLAN_LOOP — plan rule", () => {
   it("proposes a plan candidate for a Backlog project with no dependency blockers and no issues yet", async () => {
     const entry = makeEntry();
     const project: ProjectRef = { id: "project-1", name: "Foreman v2", status: { id: "status-backlog", name: "Backlog", type: "backlog" } };
-    const linear = new PlanFakeLinear([], { "initiative-1": [project] });
+    const linear = new PlanFakeLinear([], [project]);
     const ctx = makeCtx(linear, entry);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
@@ -143,7 +134,7 @@ describe("PLAN_LOOP — plan rule", () => {
       otherAnchor: "end",
       other: { id: "project-1", name: "Foreman v2", status: { id: "status-started", name: "In Progress", type: "started" } },
     };
-    const linear = new PlanFakeLinear([], { "initiative-1": [project] }, { "project-2": [relation] });
+    const linear = new PlanFakeLinear([], [project], { "project-2": [relation] });
     const ctx = makeCtx(linear, entry);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
@@ -155,18 +146,7 @@ describe("PLAN_LOOP — plan rule", () => {
     const entry = makeEntry();
     const project: ProjectRef = { id: "project-1", name: "Foreman v2", status: { id: "status-backlog", name: "Backlog", type: "backlog" } };
     const existingIssue = makeIssue({ id: "issue-existing", identifier: "ENG-5", project: { id: "project-1", name: "Foreman v2" } });
-    const linear = new PlanFakeLinear([existingIssue], { "initiative-1": [project] });
-    const ctx = makeCtx(linear, entry);
-
-    const snapshot = await PLAN_LOOP.fetch(ctx);
-    const planRule = PLAN_LOOP.rules.find((rule) => rule.name === "plan")!;
-    expect(planRule.select(snapshot)).toHaveLength(0);
-  });
-
-  it("never proposes a plan candidate for the standing Maintenance project, regardless of issue count", async () => {
-    const entry = makeEntry();
-    const maintenance: ProjectRef = { id: "project-maint", name: "Maintenance", status: { id: "status-backlog", name: "Backlog", type: "backlog" } };
-    const linear = new PlanFakeLinear([], { "initiative-1": [maintenance] });
+    const linear = new PlanFakeLinear([existingIssue], [project]);
     const ctx = makeCtx(linear, entry);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
@@ -182,7 +162,7 @@ describe("PLAN_LOOP — triage rule", () => {
       makeIssue({ id: "t1", identifier: "ENG-10", state: STATE_TRIAGE, project: null }),
       makeIssue({ id: "t2", identifier: "ENG-11", state: STATE_TRIAGE }),
     ];
-    const linear = new PlanFakeLinear(triageIssues, {});
+    const linear = new PlanFakeLinear(triageIssues, []);
     const ctx = makeCtx(linear, entry, 1);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);
@@ -192,7 +172,7 @@ describe("PLAN_LOOP — triage rule", () => {
     const candidates = triageRule.select(snapshot);
 
     expect(candidates).toHaveLength(1);
-    expect(candidates[0]?.subject).toBe("--initiatives initiative-1 ENG-10");
+    expect(candidates[0]?.subject).toBe("ENG-10");
     expect(candidates[0]?.key).toBe("triage:ENG-10");
   });
 
@@ -202,7 +182,7 @@ describe("PLAN_LOOP — triage rule", () => {
       makeIssue({ id: "t1", identifier: "ENG-20", state: STATE_TRIAGE }),
       makeIssue({ id: "t2", identifier: "ENG-10", state: STATE_TRIAGE }),
     ];
-    const linear = new PlanFakeLinear(triageIssues, {});
+    const linear = new PlanFakeLinear(triageIssues, []);
     const ctx = makeCtx(linear, entry, 10);
 
     const snapshot = await PLAN_LOOP.fetch(ctx);

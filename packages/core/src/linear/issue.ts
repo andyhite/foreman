@@ -23,6 +23,17 @@ export function blockingRelations(issue: Issue): IssueRelation[] {
 }
 
 /**
+ * True when a human operator, not this credential, is steering the issue —
+ * they assigned it to themselves directly, so agents leave it alone. The
+ * credential's own assignment (`claimLock`'s in-flight lock) is excluded by
+ * comparing against `viewerId`, the one signal that distinguishes "an agent
+ * is working this" from "the operator wants this to itself."
+ */
+export function isHandsOff(issue: { assignee: { id: string } | null }, viewerId: string): boolean {
+  return issue.assignee !== null && issue.assignee.id !== viewerId;
+}
+
+/**
  * Blockers that still block: their state has not reached a terminal category.
  * This is the check `IssueFilter.hasBlockedByRelations` cannot express on its
  * own (SPEC §16 assumption 5) — the filter can only narrow to "has any

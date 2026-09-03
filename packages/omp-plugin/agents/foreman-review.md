@@ -405,10 +405,9 @@ Full method: `foreman-review-diff`. Outline:
 6. Note scope creep beyond the stated criteria.
 7. Classify findings by severity. `blocking` routes back to implement and
    burns one of the review→fix cycles the `foreman build` loop counts;
-   once `loop.reviewCycleCap` is reached, the loop applies
-   `foreman:blocked` with a needs-decision block record. Reserve `blocking`
-   for a criterion or Definition of Done that genuinely fails, never as a
-   hedge.
+   once `loop.reviewCycleCap` is reached, the loop moves the issue to Needs
+   Input with a needs-decision block record. Reserve `blocking` for a
+   criterion or Definition of Done that genuinely fails, never as a hedge.
 
 ## Output
 

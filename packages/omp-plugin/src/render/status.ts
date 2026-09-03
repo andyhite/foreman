@@ -20,6 +20,7 @@ export interface RunningEntry {
 }
 
 export interface StatusState {
+  needsInput: BlockedEntry[];
   blocked: BlockedEntry[];
   running: RunningEntry[];
 }
@@ -31,23 +32,25 @@ function formatAge(ageMs: number): string {
   return `${hours}h${minutes % 60}m`;
 }
 
+function renderBlockedSection(heading: string, entries: readonly BlockedEntry[], emptyText: string): string {
+  const lines = entries.length > 0 ? entries.map((entry) => `- ${entry.issueId}: ${stripControlChars(entry.excerpt)}`).join("\n") : emptyText;
+  return `## ${heading}\n\n${lines}`;
+}
+
 /**
- * Two sections only, per the `foreman:` vocabulary: Blocked (`foreman:blocked`,
- * with the latest `block` marker excerpt) and Running (`foreman:running`,
- * with `lockState`).
+ * Three sections: Needs Input (foreman-refine stalled), Blocked
+ * (foreman-implement/foreman-review stalled — each with the latest `block`
+ * marker excerpt), and Running (with `lockState`).
  */
 export function renderStatusConsole(state: StatusState): string {
   const sections: string[] = [];
 
   const pastTtlCount = state.running.filter((entry) => entry.pastTtl).length;
-  sections.push(`**${state.blocked.length} blocked · ${state.running.length} running (${pastTtlCount} past TTL)**`);
+  const humanQueueCount = state.needsInput.length + state.blocked.length;
+  sections.push(`**${humanQueueCount} waiting on the operator (${state.needsInput.length} needs input, ${state.blocked.length} blocked) · ${state.running.length} running (${pastTtlCount} past TTL)**`);
 
-  sections.push("## Blocked");
-  sections.push(
-    state.blocked.length > 0
-      ? state.blocked.map((entry) => `- ${entry.issueId}: ${stripControlChars(entry.excerpt)}`).join("\n")
-      : "_none — nothing waiting on the operator_",
-  );
+  sections.push(renderBlockedSection("Needs Input", state.needsInput, "_none — nothing waiting on refinement_"));
+  sections.push(renderBlockedSection("Blocked", state.blocked, "_none — nothing waiting on implementation_"));
 
   sections.push("## Running");
   sections.push(

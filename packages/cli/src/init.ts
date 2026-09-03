@@ -22,38 +22,41 @@
 
 import {
   activateRepoPlugin,
+  type AppBinding,
   type CommandRunner,
+  ConfigError,
   ensureGitExclude,
   GitHubAppAuth,
   GitHubClient,
-  type InitiativeBinding,
-  type InitiativeRef,
   LinearApiError,
   LinearClient,
   PLUGIN_PACKAGE_NAME,
-  boundInitiativeIds,
   expandHome,
   loadGlobalConfig,
+  provisionTeam,
   resolveGitHubAppCredentials,
   resolveLinearApiKey,
+  type GlobalConfig,
   type RepoEntry,
+  teamIndex,
   type TeamRef,
 } from "@foreman/core";
 import { basename } from "node:path";
 import { readGlobalConfig, writeGlobalConfig } from "./global-config.ts";
-import type { CheckboxChoice, Prompter } from "./prompt.ts";
+import type { Prompter } from "./prompt.ts";
+import { promptConfirmer, printProvisionActions } from "./provision-report.ts";
 import { printSection, style } from "./tui.ts";
 
 export interface InitOptions {
   /** Directory being registered; the git repo root is resolved from it. */
   cwd: string;
   home: string;
-  /** Skip Linear entirely and take manual initiative ids. */
+  /** Skip Linear entirely: no team prompt against the API, no provisioning. */
   skipLinear: boolean;
   /** Skip activating the omp plugin for this repo. */
   skipPlugin: boolean;
-  /** Non-interactive initiative bindings (`<uuid>` or `<uuid>:<subdir>`). */
-  initiatives?: string[];
+  /** Non-interactive app bindings (app names). */
+  apps?: string[];
   /** Non-interactive registry alias override. */
   alias?: string;
   /** Non-interactive Linear team key. */
@@ -69,18 +72,14 @@ export interface InitDeps {
   openUrl?: (url: string) => void;
 }
 
-/** Parses `--initiative <uuid>` or `--initiative <uuid>:<subdir>`. */
-function parseInitiativeArg(raw: string): InitiativeBinding {
-  const colon = raw.indexOf(":");
-  if (colon === -1) {
-    const id = raw.trim();
-    if (id.length === 0) throw new Error(`Invalid --initiative "${raw}": initiative id is required.`);
-    return id;
+/** Parses `--app <name>`. */
+function parseAppArg(raw: string): AppBinding {
+  const name = raw.trim();
+  if (name.length === 0) throw new Error(`Invalid --app "${raw}": app name is required.`);
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    throw new Error(`Invalid --app "${raw}": app names are lowercase alphanumeric with hyphens.`);
   }
-  const id = raw.slice(0, colon).trim();
-  const subdir = raw.slice(colon + 1).trim();
-  if (id.length === 0) throw new Error(`Invalid --initiative "${raw}": missing id before ":".`);
-  return subdir.length > 0 ? { id, path: subdir } : id;
+  return { name };
 }
 
 /** `git rev-parse --show-toplevel`, so running from a subdirectory still registers the repo root. */
@@ -129,100 +128,121 @@ async function resolveConfiguredApiKey(options: InitOptions): Promise<string | n
   }
 }
 
-interface InitiativePick {
-  ids: string[];
-  /** id → name, when known (API path only) — lets prompts and summaries reference initiatives by name. */
-  names: Map<string, string>;
-  /** The workspace's sole team key, when the API path was used and unambiguous. */
-  soleTeamKey: string | null;
+/**
+ * Resolves the Linear team key for this repo: `--team` first, then an
+ * API-backed select (hinting a team already bound to a *different* alias —
+ * `assertTeamsUnique` rejects that combination at load time, so this warns
+ * at the prompt instead of letting the operator write a config that won't
+ * load), then a manual text prompt, then a hard failure. Never returns "".
+ */
+async function resolveTeam(
+  deps: InitDeps,
+  options: InitOptions,
+  apiKey: string | null,
+  existingEntry: RepoEntry | null,
+  boundElsewhere: Record<string, string>,
+): Promise<string> {
+  if (options.team !== undefined) {
+    const team = options.team.trim();
+    if (team.length === 0) {
+      throw new ConfigError("A Linear team is required", [
+        "pass --team <KEY>, or run `foreman setup` to configure a Linear credential",
+      ]);
+    }
+    return team;
+  }
+
+  const defaultTeam = existingEntry?.team ?? "";
+
+  if (apiKey) {
+    const client = new LinearClient({ apiKey });
+    try {
+      const teams: TeamRef[] = await client.teams();
+      if (teams.length > 0) {
+        const sorted = [...teams].sort((a, b) => a.key.localeCompare(b.key));
+        const choices = sorted.map((team) => {
+          const owner = boundElsewhere[team.key.toLowerCase()];
+          const hint = owner ? ` (bound to repos.${owner})` : "";
+          return { value: team.key, label: `${team.key} — ${team.name}${hint}` };
+        });
+        const fallbackDefault = defaultTeam.length > 0 ? defaultTeam : (sorted[0]?.key ?? "");
+        const selected = await deps.prompter.select("Linear team for this repo", choices, fallbackDefault);
+        const team = selected.trim();
+        if (team.length === 0) {
+          throw new ConfigError("A Linear team is required", [
+            "pass --team <KEY>, or run `foreman setup` to configure a Linear credential",
+          ]);
+        }
+        return team;
+      }
+    } catch (error) {
+      if (error instanceof ConfigError) throw error;
+      const message = error instanceof LinearApiError ? error.message : String(error);
+      deps.log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}) — falling back to manual entry.`);
+    }
+  }
+
+  const team = (await deps.prompter.text("Linear team key for this repo", defaultTeam)).trim();
+  if (team.length === 0) {
+    throw new ConfigError("A Linear team is required", [
+      "pass --team <KEY>, or run `foreman setup` to configure a Linear credential",
+    ]);
+  }
+  return team;
 }
 
-/** Manual fallback: a single comma-separated prompt, pre-filled from whatever's already bound. */
-async function pickInitiativeIdsManually(deps: InitDeps, boundIds: Set<string>): Promise<InitiativePick> {
-  deps.log(
-    style(
-      "gray",
-      "  initiative ids are UUIDs, e.g. a1b2c3d4-0000-0000-0000-000000000000 — find one in Linear's URL when viewing the initiative",
-    ),
+/** Non-interactive `--app` values, or one comma-separated prompt. Blank input omits `apps` entirely. */
+async function resolveApps(deps: InitDeps, options: InitOptions, existingEntry: RepoEntry | null): Promise<AppBinding[]> {
+  if (options.apps !== undefined) return options.apps.map(parseAppArg);
+
+  const existing = existingEntry?.apps ?? [];
+  const namesInput = await deps.prompter.text(
+    "Apps in this repo (comma-separated, blank for a single-app repo)",
+    existing.map((app) => app.name).join(", "),
   );
-  const manualInput = await deps.prompter.text(
-    "Linear initiative id(s) this repo hosts (comma-separated)",
-    [...boundIds].join(", "),
-  );
-  const ids = manualInput
+  const names = namesInput
     .split(",")
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
-  return { ids, names: new Map(), soleTeamKey: null };
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  if (names.length === 0) return [];
+
+  for (const name of names) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+      throw new Error(`Invalid app name "${name}": app names are lowercase alphanumeric with hyphens.`);
+    }
+  }
+  return names.map((name) => ({ name }));
 }
 
 /**
- * Fetches every initiative in the workspace and lets the operator check the
- * ones this repo hosts, pre-checking initiatives already bound to this
- * entry and hinting ones already bound to a *different* alias — binding one
- * initiative to two repos is rejected at load time by the uniqueness check
- * (SPEC §3.10), so this warns at the prompt rather than let the operator
- * write a config that won't load. Falls back to manual entry on any API
- * failure or an empty workspace, never dead-ending the command.
+ * Provisions this repo's Linear team — triage on, cycles off, the nine
+ * managed workflow states, and `app:*` labels for its configured apps.
+ * Mirrors `wizard.ts`'s `provisionLabels`: skipped without a credential,
+ * failures print and defer to `foreman doctor --fix` rather than failing init.
  */
-async function pickInitiativeIds(
+async function provisionTeamForRepo(
   deps: InitDeps,
+  options: InitOptions,
   apiKey: string,
-  boundIds: Set<string>,
-  boundElsewhere: Map<string, string>,
-): Promise<InitiativePick> {
+  team: string,
+  appNames: readonly string[],
+): Promise<boolean> {
+  printSection(deps.log, "Linear team provisioning");
+
   const client = new LinearClient({ apiKey });
-  let initiatives: InitiativeRef[];
-  let teams: TeamRef[];
-  try {
-    [initiatives, teams] = await Promise.all([client.initiatives(), client.teams()]);
-  } catch (error) {
-    const message = error instanceof LinearApiError ? error.message : String(error);
-    deps.log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}) — falling back to manual entry.`);
-    return pickInitiativeIdsManually(deps, boundIds);
-  }
-  if (initiatives.length === 0) {
-    deps.log(`  ${style("yellow", "!")} no initiatives found in this Linear workspace — falling back to manual entry.`);
-    return pickInitiativeIdsManually(deps, boundIds);
+  const teams = await client.teams();
+  const matched = teams.find((candidate) => candidate.key === team);
+  if (!matched) {
+    throw new ConfigError(`Linear team "${team}" does not exist in this workspace`, [
+      `available teams: ${teams.map((candidate) => candidate.key).join(", ") || "(none)"}`,
+    ]);
   }
 
-  const sorted = [...initiatives].sort((a, b) => a.name.localeCompare(b.name));
-  const names = new Map(sorted.map((initiative) => [initiative.id, initiative.name]));
-  const choices: Array<CheckboxChoice<string>> = sorted.map((initiative) => {
-    const elsewhereAlias = boundElsewhere.get(initiative.id);
-    return {
-      value: initiative.id,
-      label: initiative.name,
-      checked: boundIds.has(initiative.id),
-      hint: elsewhereAlias ? `already bound to repos.${elsewhereAlias}` : undefined,
-    };
-  });
-  const ids = await deps.prompter.multiSelect("Which Linear initiatives does this repo host?", choices);
-  const soleTeam = teams.length === 1 ? teams[0] : undefined;
-  return { ids, names, soleTeamKey: soleTeam?.key ?? null };
-}
+  const confirmer = promptConfirmer(deps.prompter, deps.log);
 
-/** Per-initiative optional subdirectory hint (SPEC §3.10) — blank writes the bare id, not `{ id, path: "" }`. */
-async function pickInitiativeBindings(
-  deps: InitDeps,
-  ids: string[],
-  existingEntry: RepoEntry | null,
-  names: Map<string, string>,
-): Promise<InitiativeBinding[]> {
-  const existingPathById = new Map<string, string>();
-  for (const binding of existingEntry?.initiatives ?? []) {
-    if (typeof binding !== "string" && binding.path) existingPathById.set(binding.id, binding.path);
-  }
-
-  const bindings: InitiativeBinding[] = [];
-  for (const id of ids) {
-    const subdir = await deps.prompter.text(
-      `Subdirectory for initiative "${names.get(id) ?? id}" (blank = repo root)`,
-      existingPathById.get(id) ?? "",
-    );
-    bindings.push(subdir.length > 0 ? { id, path: subdir } : id);
-  }
-  return bindings;
+  const actions = await provisionTeam(client, { teamId: matched.id, apps: appNames, confirmer });
+  const failed = printProvisionActions(deps.log, actions);
+  return failed;
 }
 
 /** `origin/HEAD`'s branch, then the current branch, then `fallback` (a repo with no commits has neither). */
@@ -376,52 +396,25 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
     deps.log(`  ${style("cyan", "i")} "${alias}" is already registered at ${existingEntry.path} — updating it.`);
   }
 
-  const boundIds = new Set(existingEntry ? boundInitiativeIds(existingEntry) : []);
-  const boundElsewhere = new Map<string, string>();
-  for (const [otherAlias, entry] of Object.entries(existing.repos)) {
+  // Every team already bound to a *different* alias, lowercased for the
+  // select prompt's case-insensitive hint — `assertTeamsUnique` rejects the
+  // collision at load/write time regardless, this just warns earlier.
+  const boundElsewhere: Record<string, string> = {};
+  for (const [teamKey, otherAlias] of Object.entries(teamIndex({ repos: existing.repos } as GlobalConfig))) {
     if (otherAlias === alias || otherAlias === existingByPath?.alias) continue;
-    for (const id of boundInitiativeIds(entry)) boundElsewhere.set(id, otherAlias);
+    boundElsewhere[teamKey.toLowerCase()] = otherAlias;
   }
+
   const apiKey = await resolveConfiguredApiKey(options);
-  const cliInitiatives = options.initiatives?.map(parseInitiativeArg) ?? null;
-  const picked = cliInitiatives
-    ? {
-        ids: cliInitiatives.map((binding) => (typeof binding === "string" ? binding : binding.id)),
-        names: new Map<string, string>(),
-        soleTeamKey: null,
-      }
-    : apiKey
-      ? await pickInitiativeIds(deps, apiKey, boundIds, boundElsewhere)
-      : await pickInitiativeIdsManually(deps, boundIds);
-
-  const bindings = cliInitiatives ?? (await pickInitiativeBindings(deps, picked.ids, existingEntry, picked.names));
-
-  /*
-   * An entry with no initiatives is rejected by the loader's own validation, so
-   * catching it here turns an opaque schema error into the actual problem:
-   * nothing was selected. A non-interactive run on a brand-new repo lands here
-   * every time, since there is no prior binding to pre-check.
-   */
-  if (bindings.length === 0) {
-    throw new Error(
-      `No initiatives selected, so "${alias}" would resolve to no Linear work. ` +
-        "Re-run `foreman init` and pick at least one initiative, " +
-        "pass one or more --initiative flags, or use --skip-linear to type the ids by hand.",
-    );
-  }
-
-  const defaultTeam = existingEntry?.team ?? picked.soleTeamKey ?? "";
-  const team =
-    options.team !== undefined
-      ? options.team.trim()
-      : (await deps.prompter.text("Linear team key for this repo (blank = resolve at runtime)", defaultTeam)).trim();
+  const team = await resolveTeam(deps, options, apiKey, existingEntry, boundElsewhere);
+  const apps = await resolveApps(deps, options, existingEntry);
 
   const baseBranch = await detectBaseBranch(repoRoot, deps.git, existing.effectiveBaseBranch);
 
   const entry: RepoEntry = {
     path: repoRoot,
-    initiatives: bindings,
-    ...(team.length > 0 ? { team } : {}),
+    team,
+    ...(apps.length > 0 ? { apps } : {}),
     // Writing today's inherited default back out would pin it forever the
     // next time repoDefaults.baseBranch changes underneath an untouched
     // entry — see global-config.ts's header comment. So the entry only
@@ -431,36 +424,42 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   };
 
   const removeRepos = existingByPath && existingByPath.alias !== alias ? [existingByPath.alias] : [];
-  const candidateRepos = { ...existing.repos, [alias]: entry };
-  for (const obsoleteAlias of removeRepos) delete candidateRepos[obsoleteAlias];
-  const initiativeOwners = new Map<string, string>();
-  for (const [repoAlias, candidate] of Object.entries(candidateRepos)) {
-    for (const initiativeId of boundInitiativeIds(candidate)) {
-      const owner = initiativeOwners.get(initiativeId);
-      if (owner) {
-        throw new Error(
-          `Linear initiative "${initiativeId}" would be registered to both "${owner}" and "${repoAlias}". ` +
-            "Each initiative must belong to exactly one repo.",
-        );
-      }
-      initiativeOwners.set(initiativeId, repoAlias);
-    }
-  }
 
   const configPath = writeGlobalConfig({ repos: { [alias]: entry }, removeRepos }, options.home);
   deps.log(`  wrote ${configPath}`);
   deps.log(`  ${style("green", "✓")} registered "${alias}" → ${repoRoot}`);
-  const nameList = bindings
-    .map((binding) => (typeof binding === "string" ? binding : binding.id))
-    .map((id) => picked.names.get(id) ?? id);
-  deps.log(`  bound initiative(s): ${nameList.join(", ")}`);
+  deps.log(`  team: ${team}`);
+  deps.log(`  app(s): ${apps.length > 0 ? apps.map((app) => app.name).join(", ") : "(none — single-app repo)"}`);
 
   activateProjectPlugin(deps, options, repoRoot);
 
   await checkGitHubAppInstall(deps, options, repoRoot);
 
+  let provisioningFailed = false;
+  if (options.skipLinear) {
+    printSection(deps.log, "Linear team provisioning");
+    deps.log("  skipped (--skip-linear).");
+  } else {
+    const provisionKey = apiKey ?? (await resolveConfiguredApiKey({ ...options, skipLinear: false }));
+    if (!provisionKey) {
+      printSection(deps.log, "Linear team provisioning");
+      deps.log("  skipped, no Linear credential — run `foreman setup` to configure one.");
+    } else {
+      provisioningFailed = await provisionTeamForRepo(
+        deps,
+        options,
+        provisionKey,
+        team,
+        apps.map((app) => app.name),
+      );
+    }
+  }
+
   printSection(deps.log, "Next step");
   deps.log(`  foreman plan ${alias} --once`);
   deps.log(`  foreman build ${alias} --once`);
-  deps.log("  foreman verify");
+  deps.log("  foreman doctor");
+  if (provisioningFailed) {
+    deps.log(`  ${style("yellow", "!")} some Linear provisioning steps weren't applied; re-run \`foreman doctor --fix\` to retry.`);
+  }
 }

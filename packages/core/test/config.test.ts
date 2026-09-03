@@ -4,11 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConfigError,
-  boundInitiativeIds,
   defaultAndValidateGlobalConfig,
   entryForCwd,
   expandHome,
-  initiativeIndex,
+  teamIndex,
   loadGlobalConfig,
   lockTtlMs,
   resolveLinearApiKey,
@@ -118,13 +117,13 @@ describe("loadGlobalConfig", () => {
     }
   });
 
-  it("throws ConfigError when an initiative is bound to two entries", () => {
+  it("throws ConfigError when a team is bound to two entries", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
         repos: {
-          plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] },
-          zero: { path: "~/code/zero", initiatives: ["init-1"] },
+          plotroom: { path: "~/code/plotroom", team: "ENG" },
+          zero: { path: "~/code/zero", team: "ENG" },
         },
       });
       try {
@@ -133,7 +132,7 @@ describe("loadGlobalConfig", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(ConfigError);
         const configError = error as ConfigError;
-        expect(configError.problems.some((p) => p.includes("init-1") && p.includes("plotroom") && p.includes("zero"))).toBe(true);
+        expect(configError.problems.some((p) => p.includes("ENG") && p.includes("plotroom") && p.includes("zero"))).toBe(true);
       }
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -229,7 +228,7 @@ describe("resolveRepoEntry", () => {
       writeGlobalConfig(home, {
         repoDefaults: { pr: { required: true, draft: false } },
         repos: {
-          plotroom: { path: "~/code/plotroom", initiatives: ["init-1"], pr: { draft: true } },
+          plotroom: { path: "~/code/plotroom", team: "ENG", pr: { draft: true } },
         },
       });
       const { config } = loadGlobalConfig({ home });
@@ -239,7 +238,7 @@ describe("resolveRepoEntry", () => {
       expect(resolved.pr.ciRequired).toBe(true);
       expect(resolved.repoPath).toBe(join(home, "code", "plotroom"));
       expect(resolved.alias).toBe("plotroom");
-      expect(resolved.initiativeIds).toEqual(["init-1"]);
+      expect(resolved.team).toBe("ENG");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -249,7 +248,7 @@ describe("resolveRepoEntry", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const resolved = resolveRepoEntry(config, "plotroom", home);
@@ -268,7 +267,7 @@ describe("resolveRepoEntry", () => {
         repos: {
           plotroom: {
             path: "~/code/plotroom",
-            initiatives: ["init-1"],
+            team: "ENG",
             merge: { strategy: "merge" },
           },
         },
@@ -292,6 +291,42 @@ describe("resolveRepoEntry", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("resolves apps and appNames from the entry", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: {
+          plotroom: {
+            path: "~/code/plotroom",
+            team: "ENG",
+            apps: [{ name: "fleet" }, { name: "zero" }],
+          },
+        },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const resolved = resolveRepoEntry(config, "plotroom", home);
+      expect(resolved.apps).toEqual([{ name: "fleet" }, { name: "zero" }]);
+      expect(resolved.appNames).toEqual(["fleet", "zero"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults apps/appNames to empty when the entry has none", () => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, {
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
+      });
+      const { config } = loadGlobalConfig({ home });
+      const resolved = resolveRepoEntry(config, "plotroom", home);
+      expect(resolved.apps).toEqual([]);
+      expect(resolved.appNames).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("entryForCwd", () => {
@@ -299,7 +334,7 @@ describe("entryForCwd", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const cwd = join(home, "code", "plotroom");
@@ -315,7 +350,7 @@ describe("entryForCwd", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const cwd = join(home, "code", "plotroom", "apps", "zero");
@@ -332,8 +367,8 @@ describe("entryForCwd", () => {
     try {
       writeGlobalConfig(home, {
         repos: {
-          outer: { path: "~/code/plotroom", initiatives: ["init-1"] },
-          inner: { path: "~/code/plotroom/apps/zero", initiatives: ["init-2"] },
+          outer: { path: "~/code/plotroom", team: "ENG" },
+          inner: { path: "~/code/plotroom/apps/zero", team: "ZERO" },
         },
       });
       const { config } = loadGlobalConfig({ home });
@@ -350,7 +385,7 @@ describe("entryForCwd", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const cwd = join(home, "somewhere", "else");
@@ -365,7 +400,7 @@ describe("entryForCwd", () => {
     const home = makeHome();
     try {
       writeGlobalConfig(home, {
-        repos: { plotroom: { path: "~/code/plotroom", initiatives: ["init-1"] } },
+        repos: { plotroom: { path: "~/code/plotroom", team: "ENG" } },
       });
       const { config } = loadGlobalConfig({ home });
       const cwd = join(home, "code", "plotroom");
@@ -378,26 +413,14 @@ describe("entryForCwd", () => {
   });
 });
 
-describe("initiativeIndex", () => {
-  it("indexes both bare-string and {id,path} bindings by alias", () => {
+describe("teamIndex", () => {
+  it("indexes each entry's team key by alias", () => {
     const entries: Record<string, RepoEntry> = {
-      plotroom: {
-        path: "~/code/plotroom",
-        initiatives: ["init-fleet", { id: "init-zero", path: "apps/zero" }],
-      },
+      plotroom: { path: "~/code/plotroom", team: "ENG" },
+      zero: { path: "~/code/zero", team: "ZERO" },
     };
     const config = { repos: entries } as unknown as GlobalConfig;
-    expect(initiativeIndex(config)).toEqual({ "init-fleet": "plotroom", "init-zero": "plotroom" });
-  });
-});
-
-describe("boundInitiativeIds", () => {
-  it("discards path hints and returns bare ids", () => {
-    const entry: RepoEntry = {
-      path: "~/code/plotroom",
-      initiatives: ["init-fleet", { id: "init-zero", path: "apps/zero" }],
-    } as RepoEntry;
-    expect(boundInitiativeIds(entry)).toEqual(["init-fleet", "init-zero"]);
+    expect(teamIndex(config)).toEqual({ ENG: "plotroom", ZERO: "zero" });
   });
 });
 

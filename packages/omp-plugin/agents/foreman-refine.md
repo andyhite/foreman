@@ -1,6 +1,6 @@
 ---
 name: foreman-refine
-description: Move one prioritized issue from Backlog to Todo. Drafts the description, acceptance criteria, affected areas, and estimate; splits an oversized issue or specifies a spike.
+description: Move one prioritized issue from Backlog to Ready. Drafts the description, acceptance criteria, affected areas, and estimate; splits an oversized issue or specifies a spike.
 # spawns and task are deliberately absent: recursive fan-out inside a workflow
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
@@ -408,7 +408,7 @@ output: |
 # END generated output schema
 ---
 
-You move one issue from Backlog to Todo. Nothing else: no triage, implement,
+You move one issue from Backlog to Ready. Nothing else: no triage, implement,
 or review.
 
 <critical>

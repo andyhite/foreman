@@ -4,23 +4,21 @@
 
 import {
   all,
-  any,
   DISPATCH_COMMAND,
   incompleteBlockers,
   incompleteProjectBlockers,
   implementationGate,
-  inInitiatives,
   INBOX_FILTER,
-  inStateType,
+  inState,
   isTerminalProjectStatus,
   type Issue,
-  MAINTENANCE_PROJECT_NAME,
+  notHandsOff,
   notInPausedProject,
   notInTerminalProject,
   prioritized,
   type ProjectRef,
   type ProjectRelation,
-  unlabeled,
+  FOREMAN_STATE,
 } from "@foreman/core";
 import { byPriorityThenAge, type Candidate, type Loop, type Rule } from "../engine.ts";
 
@@ -33,11 +31,10 @@ interface ProjectEntry {
 export interface PlanSnapshot {
   inbox: Issue[];
   backlog: Issue[];
-  unrefinedTodo: Issue[];
+  unrefinedReady: Issue[];
   projects: ProjectEntry[];
   cwd: string;
   triageBatch: number;
-  initiativeIds: readonly string[];
 }
 
 const triageRule: Rule<PlanSnapshot> = {
@@ -55,7 +52,7 @@ const triageRule: Rule<PlanSnapshot> = {
         key: `triage:${[...identifiers].sort().join(",")}`,
         agent: "foreman-triage",
         command: DISPATCH_COMMAND.triage,
-        subject: `--initiatives ${snapshot.initiativeIds.join(",")} ${identifiers.join(" ")}`,
+        subject: identifiers.join(" "),
         cwd: snapshot.cwd,
         worktree: null,
         reason: `dispatch foreman-triage for ${identifiers.join(", ")}`,
@@ -85,8 +82,7 @@ const planRule: Rule<PlanSnapshot> = {
 const refineRule: Rule<PlanSnapshot> = {
   name: "refine",
   select(snapshot) {
-    const eligible = [...snapshot.backlog, ...snapshot.unrefinedTodo]
-      .filter((issue) => issue.assignee === null && incompleteBlockers(issue).length === 0)
+    const eligible = [...snapshot.backlog, ...snapshot.unrefinedReady]
       .sort(byPriorityThenAge);
     return eligible.map(
       (issue): Candidate => ({
@@ -106,79 +102,70 @@ export const PLAN_LOOP: Loop<PlanSnapshot> = {
   name: "plan",
   concurrency: 1,
   async fetch(ctx) {
-    // A Triage issue with no project at all cannot match `inInitiatives`, whose
-    // `{ project: { initiatives: { some: … } } }` shape requires a project to exist —
-    // so the team-wide inbox needs the `{ project: { null: true } }` escape hatch too
-    // (measured against the live API, `docs/VERIFIED.md`), or the inbox is permanently
-    // empty and triage never fires.
+    let viewerId: string | null;
+    try {
+      viewerId = await ctx.linear.viewerId();
+    } catch {
+      viewerId = null;
+    }
+
     const inbox = await ctx.linear.issues({
-      filter: all(
-        any(inInitiatives(ctx.entry.initiativeIds), { project: { null: true } }),
-        INBOX_FILTER,
-        unlabeled(),
-      ),
+      filter: all(INBOX_FILTER, notHandsOff(viewerId ?? "")),
     });
 
     const backlog = await ctx.linear.issues({
       filter: all(
-        inInitiatives(ctx.entry.initiativeIds),
-        inStateType("backlog"),
-        unlabeled(),
+        inState(FOREMAN_STATE.backlog),
+        notHandsOff(viewerId ?? ""),
         prioritized(),
         notInTerminalProject(),
         notInPausedProject(),
       ),
     });
 
-    // The legacy funnel, re-expressed label-free: a pre-existing Todo issue that fails
+    // The legacy funnel, re-expressed label-free: a pre-existing Ready issue that fails
     // the implementation gate (no acceptance criteria, no estimate, …) is exactly what
     // the deleted `legacy` label used to mark. `refineRule` only reads `backlog`
-    // (inStateType "backlog"), so without this a Todo issue in that shape is stranded —
-    // refine cannot see it and implement drops it on the gate.
-    const unrefinedTodo = (
+    // (`inState(FOREMAN_STATE.backlog)`), so without this a Ready issue in that shape is
+    // stranded — refine cannot see it and implement drops it on the gate.
+    const unrefinedReady = (
       await ctx.linear.issues({
         filter: all(
-          inInitiatives(ctx.entry.initiativeIds),
-          inStateType("unstarted"),
-          unlabeled(),
+          inState(FOREMAN_STATE.ready),
+          notHandsOff(viewerId ?? ""),
           prioritized(),
           notInTerminalProject(),
           notInPausedProject(),
         ),
       })
-    ).filter((issue) => !implementationGate(issue).ok);
+    ).filter((issue) => viewerId !== null && !implementationGate(issue, viewerId).ok);
 
     // One issue query for the whole scope, then in-memory membership: a project's
     // native `status` never advances on its own (that is `reconcile`'s job now, SPEC
     // §7.6a), so testing `status?.type !== "backlog"` re-plans a populated Backlog
     // project on every poll. The real predicate is "has zero issues yet".
-    const scopeIssues = await ctx.linear.issues({ filter: inInitiatives(ctx.entry.initiativeIds) });
+    const scopeIssues = await ctx.linear.issues({ filter: {} });
     const projectsWithIssues = new Set(
       scopeIssues.map((issue) => issue.project?.id).filter((id): id is string => id != null),
     );
 
     const projects: ProjectEntry[] = [];
-    for (const initiativeId of ctx.entry.initiativeIds) {
-      // eslint-disable-next-line no-await-in-loop -- bounded by the small, fixed set of initiatives one repo entry binds.
-      const initiativeProjects = await ctx.linear.initiativeProjects(initiativeId);
-      for (const project of initiativeProjects) {
-        if (project.name.trim().toLowerCase() === MAINTENANCE_PROJECT_NAME.toLowerCase()) continue;
-        if (isTerminalProjectStatus(project.status)) continue;
-        if (projectsWithIssues.has(project.id)) continue;
-        // eslint-disable-next-line no-await-in-loop
-        const relations = await ctx.linear.projectRelations(project.id);
-        projects.push({ project, cwd: ctx.entry.repoPath, relations });
-      }
+    const teamProjects = await ctx.linear.projects(ctx.entry.team);
+    for (const project of teamProjects) {
+      if (isTerminalProjectStatus(project.status)) continue;
+      if (projectsWithIssues.has(project.id)) continue;
+      // eslint-disable-next-line no-await-in-loop -- bounded by the small, fixed set of projects one repo's team has.
+      const relations = await ctx.linear.projectRelations(project.id);
+      projects.push({ project, cwd: ctx.entry.repoPath, relations });
     }
 
     return {
       inbox,
       backlog,
-      unrefinedTodo,
+      unrefinedReady,
       projects,
       cwd: ctx.entry.repoPath,
       triageBatch: ctx.config.loop.triageBatch,
-      initiativeIds: ctx.entry.initiativeIds,
     };
   },
   rules: [triageRule, planRule, refineRule],

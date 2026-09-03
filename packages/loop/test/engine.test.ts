@@ -211,7 +211,7 @@ describe("runLoop", () => {
     expect(logs.some((line) => line.includes("gave up after 2 failed dispatches"))).toBe(true);
   });
 
-  it("escalates an issue-keyed candidate that has exhausted the retry cap: applies foreman:blocked and a block marker, exactly once", async () => {
+  it("escalates an issue-keyed candidate that has exhausted the retry cap: moves to Blocked and posts a block marker, exactly once", async () => {
     const dispatcher = new FakeDispatcher();
     const state = await InflightStore.load(tempStatePath(), dispatcher);
     state.recordFailure("issue:ENG-1");
@@ -223,13 +223,15 @@ describe("runLoop", () => {
     const fakeLinear = {
       issue: async () =>
         blocked
-          ? null // second poll: already-escalated issues drop out of the unlabeled() snapshot, so nothing re-fires
+          ? null // second poll: already-escalated issues drop out of the notHandsOff() snapshot, so nothing re-fires
           : {
               id: "id-1",
               identifier: "ENG-1",
               team: { id: "team-1" },
+              state: { id: "state-in-progress", name: "In Progress", type: "started", position: 3 },
               labels: [],
             },
+      workflowStates: async () => [{ id: "state-blocked", name: "Blocked", type: "started", position: 4 }],
       ensureLabel: async (name: string) => ({ id: `label-${name}`, name }),
       updateIssue: async (id: string, input: unknown) => {
         updateCalls.push({ id, input });

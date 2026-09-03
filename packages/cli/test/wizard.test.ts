@@ -1,4 +1,4 @@
-import { globalPluginLinkPath, PLUGIN_PACKAGE_NAME } from "@foreman/core";
+import { globalPluginLinkPath, groupDisplayName, MANAGED_LABEL_GROUP_PREFIXES, MANAGED_LABELS, PLUGIN_PACKAGE_NAME } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -8,6 +8,25 @@ import { cliBinDir } from "../src/cli-link.ts";
 import type { Runner } from "../src/exec.ts";
 import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
+
+/** A `WorkspaceLabels` response reporting every managed group and member already present, so `provisionWorkspaceLabels` creates nothing. */
+function existingWorkspaceLabelsResponse(): Response {
+  const nodes: Array<{ id: string; name: string; isGroup: boolean; parent: { id: string; name: string } | null }> = [];
+  for (const prefix of MANAGED_LABEL_GROUP_PREFIXES) {
+    const groupName = groupDisplayName(prefix);
+    nodes.push({ id: `group-${groupName}`, name: groupName, isGroup: true, parent: null });
+  }
+  for (const id of MANAGED_LABELS) {
+    const [prefix, child] = id.split(":") as [string, string];
+    const groupName = groupDisplayName(`${prefix}:`);
+    const childName = child
+      .split("-")
+      .map((word) => word[0]!.toUpperCase() + word.slice(1))
+      .join(" ");
+    nodes.push({ id: `label-${id}`, name: childName, isGroup: false, parent: { id: `group-${groupName}`, name: groupName } });
+  }
+  return new Response(JSON.stringify({ data: { issueLabels: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }));
+}
 
 class ScriptedPrompter implements Prompter {
   confirmCalls: string[] = [];
@@ -79,6 +98,7 @@ function baseOptions(overrides: Partial<WizardOptions>, home: string, checkoutRo
     checkoutRoot,
     linkCli: false,
     skipLinear: true,
+    yes: false,
     ...overrides,
   };
 }
@@ -230,6 +250,8 @@ describe("runWizard", () => {
   it("resolves the Linear API key from the environment without prompting, and writes no repos key", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => existingWorkspaceLabelsResponse()) as unknown as typeof fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
     process.env.LINEAR_API_KEY = "lin_api_test";
 
@@ -246,6 +268,7 @@ describe("runWizard", () => {
       expect(config.repos).toBeUndefined();
       expect(config.linear?.apiKeyFile ?? null).toBeNull();
     } finally {
+      globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = originalEnvKey;
       rmSync(home, { recursive: true, force: true });
@@ -314,6 +337,7 @@ describe("runWizard", () => {
           JSON.stringify({ data: { users: { nodes: [{ id: "user-1", name: "Andy", displayName: "Andy Hite", email: "andy@example.com" }] } } }),
         );
       }
+      if (query.includes("WorkspaceLabels")) return existingWorkspaceLabelsResponse();
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as typeof fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
@@ -344,7 +368,11 @@ describe("runWizard", () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     const checkoutRoot = makeCheckout();
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => new Response(JSON.stringify({ data: { users: { nodes: [] } } }))) as unknown as typeof fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("WorkspaceLabels")) return existingWorkspaceLabelsResponse();
+      return new Response(JSON.stringify({ data: { users: { nodes: [] } } }));
+    }) as unknown as typeof fetch;
     const originalEnvKey = process.env.LINEAR_API_KEY;
     process.env.LINEAR_API_KEY = "lin_api_test";
     try {

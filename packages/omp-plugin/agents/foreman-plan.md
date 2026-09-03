@@ -68,7 +68,8 @@ output: |
                     "description",
                     "acceptanceCriteria",
                     "proposedPriority",
-                    "proposedEstimate"
+                    "proposedEstimate",
+                    "app"
                   ],
                   "properties": {
                     "key": {
@@ -177,6 +178,18 @@ output: |
                               "type": "number"
                             }
                           ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "app": {
+                      "description": "App this issue belongs to, matching one of the repo's configured apps (the FOREMAN-APPS marker lists them). Null when the repo has no apps or the issue spans all of them.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
                         },
                         {
                           "type": "null"
@@ -378,7 +391,9 @@ output: |
 
 You turn one bare project's brief into its first slate of Backlog issues.
 Nothing else: no refine, implement, or review. A project reaches you once;
-the moment it carries an issue, the loop stops dispatching you against it.
+the moment it carries an issue, the loop stops dispatching you against it. A
+project MAY optionally belong to an initiative, whose brief arrives folded
+into the `Context` digest; it is background only and never a routing input.
 
 <critical>
 - NEVER write to Linear; the extension creates issues from your `PlanResult`.
@@ -403,8 +418,10 @@ Full method: `foreman-plan-project`. Outline:
 3. Draft each issue: `description` (`## Context` prose only, no headings),
    `type:` label, rough `proposedPriority` and `proposedEstimate`; a short
    stable `key`; `blockedBy` = sibling `key`s that MUST ship first. Leave
-   `blockedBy` empty for anything startable now. `foreman-refine` verifies
-   every draft against the code before Todo.
+   `blockedBy` empty for anything startable now. Set `app` from the
+   `FOREMAN-APPS` marker when the issue belongs to one configured app;
+   `null` when the repo has no apps or the issue spans all of them.
+   `foreman-refine` verifies every draft against the code before Ready.
 4. Record explicit non-goals in `outOfScope`, so a later planning pass never
    re-proposes them.
 5. Set `fullyPlanned` when `proposedIssues` + `outOfScope` cover the brief.

@@ -23,6 +23,7 @@ import type {
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
+  TeamSettings,
   UserRef,
   WorkflowState,
 } from "./types.ts";
@@ -39,10 +40,7 @@ import { LinearApiError, LinearPaginationError } from "./api.ts";
 import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
-  INITIATIVE_PROJECTS_QUERY,
   INITIATIVE_QUERY_SCALAR_CONTENT,
-  INITIATIVE_TO_PROJECT_CREATE_MUTATION,
-  INITIATIVES_QUERY,
   ISSUE_BY_ID_QUERY,
   ISSUE_CREATE_MUTATION,
   ISSUE_LABEL_CREATE_MUTATION,
@@ -52,6 +50,8 @@ import {
   ISSUES_QUERY,
   PROJECT_CREATE_MUTATION,
   PROJECT_INITIATIVES_QUERY,
+  PROJECT_LABEL_CREATE_MUTATION,
+  PROJECT_LABELS_QUERY,
   PROJECT_QUERY_SCALAR_CONTENT,
   PROJECT_RELATION_CREATE_MUTATION,
   PROJECT_RELATION_DELETE_MUTATION,
@@ -60,8 +60,13 @@ import {
   PROJECT_STATUSES_QUERY,
   PROJECT_UPDATE_MUTATION,
   PROJECTS_QUERY,
+  TEAM_SETTINGS_QUERY,
+  TEAM_UPDATE_MUTATION,
   TEAMS_QUERY,
   USER_BY_EMAIL_QUERY,
+  WORKFLOW_STATE_ARCHIVE_MUTATION,
+  WORKFLOW_STATE_CREATE_MUTATION,
+  WORKFLOW_STATE_UPDATE_MUTATION,
   WORKFLOW_STATES_QUERY,
   WORKSPACE_LABELS_QUERY,
 } from "./queries.ts";
@@ -100,6 +105,10 @@ interface WireProjectRef {
   startDate: string | null;
   targetDate: string | null;
   status: WireStateRef | null;
+}
+/** `PROJECTS_QUERY`'s row shape — `WireProjectRef` plus its labels connection. */
+interface WireTeamProjectRef extends WireProjectRef {
+  labels: { nodes: WireLabel[] };
 }
 /**
  * `type`, `anchorType`, and `relatedAnchorType` are all `String` on the wire —
@@ -216,13 +225,15 @@ export class LinearClient implements LinearWriter {
   private readonly endpoint: string;
   private readonly fetchImpl: FetchLike;
   private readonly teamScope: IssueFilter | null;
+  private readonly teamKeyOption: string | null;
   private readonly timeoutMs: number;
   private readonly onRequest: ((event: LinearRequestEvent) => void) | null;
   private static readonly CACHE_TTL_MS = 10 * 60_000;
   private readonly labelIdCache = new Map<string, { value: IssueLabel; at: number }>();
   private readonly labelGroupIdCache = new Map<string, LinearId>();
-  private readonly projectInitiativeCache = new Map<string, { value: InitiativeRef; at: number }>();
-  /** Every initiative a project belongs to, keyed by project id — same lifetime and invalidation (TTL) as `projectInitiativeCache`. */
+  private readonly projectLabelIdCache = new Map<string, { value: IssueLabel; at: number }>();
+  private readonly projectLabelGroupIdCache = new Map<string, LinearId>();
+  /** Every initiative a project belongs to, keyed by project id — TTL-invalidated. */
   private readonly projectInitiativesCache = new Map<string, { value: InitiativeRef[]; at: number }>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
   private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
@@ -233,8 +244,14 @@ export class LinearClient implements LinearWriter {
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.teamScope = options.team ? { team: { key: { eq: options.team } } } : null;
+    this.teamKeyOption = options.team ?? null;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.onRequest = options.onRequest ?? null;
+  }
+
+  /** The single team this client is scoped to, when configured (`LinearClientOptions.team`). */
+  get teamKey(): string | null {
+    return this.teamKeyOption;
   }
 
   /**
@@ -601,6 +618,7 @@ export class LinearClient implements LinearWriter {
         startDate: string | null;
         targetDate: string | null;
         status: WireStateRef | null;
+        labels: { nodes: WireLabel[] };
         documents: {
           nodes: Array<{
             id: string;
@@ -620,6 +638,7 @@ export class LinearClient implements LinearWriter {
       startDate: data.project.startDate ?? null,
       targetDate: data.project.targetDate ?? null,
       status: this.mapProjectStatus(data.project.status),
+      labels: this.mapLabels(data.project.labels.nodes),
       documents: data.project.documents.nodes.map((doc) => ({
         id: doc.id,
         title: doc.title,
@@ -632,6 +651,26 @@ export class LinearClient implements LinearWriter {
   private mapProjectStatus(status: WireStateRef | null | undefined): ProjectStatus | null {
     if (!status) return null;
     return { id: status.id, name: status.name, type: status.type as ProjectStatusType };
+  }
+
+  /** Reconstructs canonical colon-form label ids (SPEC §4.5) from Linear's group + own name. */
+  private mapLabels(labels: readonly WireLabel[]): IssueLabel[] {
+    return labels.map((label) => ({
+      id: label.id,
+      name: labelIdFromParts(label.name, label.parent?.name ?? null),
+      parentId: label.parent?.id ?? null,
+    }));
+  }
+
+  private mapProjectRef(project: WireTeamProjectRef): ProjectRef {
+    return {
+      id: project.id,
+      name: project.name,
+      status: this.mapProjectStatus(project.status),
+      startDate: project.startDate,
+      targetDate: project.targetDate,
+      labels: this.mapLabels(project.labels.nodes),
+    };
   }
 
   /**
@@ -688,59 +727,25 @@ export class LinearClient implements LinearWriter {
     };
   }
 
-  /**
-   * The wire row behind both public initiative lookups. Keeping the project's
-   * name here is what lets the exactly-one error name the project the operator
-   * has to go fix, rather than echoing a UUID back at them.
-   */
-  private async fetchProjectInitiatives(
-    projectId: string,
-  ): Promise<{ name: string; initiatives: InitiativeRef[] }> {
+  /** The wire row behind `projectInitiatives`. */
+  private async fetchProjectInitiatives(projectId: string): Promise<InitiativeRef[]> {
     const data = await this.request<{
-      project: { id: string; name: string; initiatives: { nodes: InitiativeRef[] } } | null;
+      project: { id: string; initiatives: { nodes: InitiativeRef[] } } | null;
     }>(PROJECT_INITIATIVES_QUERY, { projectId });
-    return {
-      name: data.project?.name ?? projectId,
-      initiatives: data.project?.initiatives.nodes ?? [],
-    };
+    return data.project?.initiatives.nodes ?? [];
   }
 
   /**
-   * Every initiative a project belongs to. Linear permits several (SPEC §4.0);
-   * this reports the raw truth so a gate can count without a rejection, while
-   * `projectInitiative` enforces the exactly-one rule for repo resolution.
+   * Every initiative a project belongs to, unfiltered — the context digest
+   * folds one in only when a project belongs to exactly one (SPEC-free: no
+   * routing decision depends on this).
    */
   async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
     const cached = this.projectInitiativesCache.get(projectId);
     if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
-    const { initiatives } = await this.fetchProjectInitiatives(projectId);
+    const initiatives = await this.fetchProjectInitiatives(projectId);
     this.projectInitiativesCache.set(projectId, { value: initiatives, at: Date.now() });
     return initiatives;
-  }
-
-  async projectInitiative(projectId: string): Promise<InitiativeRef> {
-    const cached = this.projectInitiativeCache.get(projectId);
-    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
-    const { name, initiatives } = await this.fetchProjectInitiatives(projectId);
-    const first = initiatives[0];
-    if (first === undefined) {
-      throw new LinearApiError(
-        `Project "${name}" has no initiative; a project must belong to exactly one initiative.`,
-        null,
-        null,
-      );
-    }
-    if (initiatives.length > 1) {
-      const names = initiatives.map((node) => node.name).join(", ");
-      throw new LinearApiError(
-        `Project "${name}" belongs to more than one initiative (${names}); a project must belong to exactly one initiative.`,
-        null,
-        null,
-      );
-    }
-    const ref: InitiativeRef = { id: first.id, name: first.name };
-    this.projectInitiativeCache.set(projectId, { value: ref, at: Date.now() });
-    return ref;
   }
 
   /** A project's current native status. Null when the project itself is absent. */
@@ -783,29 +788,6 @@ export class LinearClient implements LinearWriter {
     if (!data.projectUpdate.success) {
       throw new LinearApiError(`Failed to update project ${input.projectId} to status "${input.type}"`, null, null);
     }
-  }
-
-  /** Every initiative in the workspace — the setup wizard's picker (SPEC §3.10). */
-  async initiatives(): Promise<InitiativeRef[]> {
-    const results: InitiativeRef[] = [];
-    let after: string | undefined;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        initiatives: { nodes: InitiativeRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(INITIATIVES_QUERY, { after });
-      results.push(...data.initiatives.nodes);
-      if (!data.initiatives.pageInfo.hasNextPage || !data.initiatives.pageInfo.endCursor) break;
-      if (data.initiatives.pageInfo.endCursor === after) {
-        this.refusePartialPage("initiatives()", pages, results.length);
-      }
-      after = data.initiatives.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage("initiatives()", pages, results.length);
-      }
-    }
-    return results;
   }
 
   /** The Linear user id the API key belongs to, memoized for `CACHE_TTL_MS`. */
@@ -858,13 +840,15 @@ export class LinearClient implements LinearWriter {
 
   async workflowStates(teamId: string): Promise<WorkflowState[]> {
     const data = await this.request<{
-      team: { states: { nodes: Array<WireStateRef & { position: number }> } };
+      team: { states: { nodes: Array<WireStateRef & { position: number; color: string; description: string | null }> } };
     }>(WORKFLOW_STATES_QUERY, { teamId });
     return data.team.states.nodes.map((state) => ({
       id: state.id,
       name: state.name,
       type: state.type as WorkflowState["type"],
       position: state.position,
+      color: state.color,
+      description: state.description,
     }));
   }
 
@@ -911,11 +895,7 @@ export class LinearClient implements LinearWriter {
    */
   async labels(teamId?: string): Promise<IssueLabel[]> {
     const raw = await this.fetchRawLabels(teamId);
-    return raw.map((label) => ({
-      id: label.id,
-      name: labelIdFromParts(label.name, label.parent?.name ?? null),
-      parentId: label.parent?.id ?? null,
-    }));
+    return this.mapLabels(raw);
   }
 
   async teams(): Promise<TeamRef[]> {
@@ -940,15 +920,15 @@ export class LinearClient implements LinearWriter {
     return results;
   }
 
-  async projects(): Promise<ProjectRef[]> {
+  async projects(teamKey: string): Promise<ProjectRef[]> {
     const results: ProjectRef[] = [];
     let after: string | undefined;
     let pages = 0;
     for (;;) {
       const data = await this.request<{
-        projects: { nodes: ProjectRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(PROJECTS_QUERY, { after });
-      results.push(...data.projects.nodes);
+        projects: { nodes: WireTeamProjectRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(PROJECTS_QUERY, { teamKey, after });
+      results.push(...data.projects.nodes.map((node) => this.mapProjectRef(node)));
       if (!data.projects.pageInfo.hasNextPage || !data.projects.pageInfo.endCursor) break;
       if (data.projects.pageInfo.endCursor === after) {
         this.refusePartialPage("projects()", pages, results.length);
@@ -962,25 +942,12 @@ export class LinearClient implements LinearWriter {
     return results;
   }
 
-
-  /** An initiative's projects — used to check for the standing Maintenance project (SPEC §3.11). */
-  async initiativeProjects(initiativeId: string): Promise<ProjectRef[]> {
-    const data = await this.request<{
-      initiative: { projects: { nodes: ProjectRef[] } } | null;
-    }>(INITIATIVE_PROJECTS_QUERY, { initiativeId });
-    return data.initiative?.projects.nodes ?? [];
-  }
-
   /**
-   * `ProjectCreateInput` has exactly two non-null fields on the live API:
-   * `name: String!` and `teamIds: [String!]!` — a project cannot exist
-   * without a team, so `teamIds` is required here rather than optional.
-   * There is no `initiativeId`/`initiativeIds` field on the input at all
-   * (all 23 fields were dumped and checked); attaching a project to an
-   * initiative is a separate `initiativeToProjectCreate` mutation (measured
-   * against the live API this session; see SPEC §16 item 10), so a caller
-   * that needs both must call `addProjectToInitiative` afterward and handle
-   * the window between the two calls.
+   * `ProjectCreateInput` has exactly two non-null required fields on the live
+   * API: `name: String!` and `teamIds: [String!]!` (measured). There is no
+   * `initiativeId`/`initiativeIds` field on the input at all (SPEC §16 item
+   * 10, measured) — a project's optional initiative membership is out of
+   * this client's write surface entirely.
    */
   async createProject(input: {
     name: string;
@@ -989,6 +956,7 @@ export class LinearClient implements LinearWriter {
     content?: string;
     startDate?: string;
     targetDate?: string;
+    labelIds?: LinearId[];
   }): Promise<ProjectRef> {
     const data = await this.request<{
       projectCreate: { success: boolean; project: ProjectRef | null };
@@ -1000,20 +968,6 @@ export class LinearClient implements LinearWriter {
       throw new LinearApiError(`Failed to create project "${input.name}"`, null, null);
     }
     return data.projectCreate.project;
-  }
-
-  async addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void> {
-    const data = await this.request<{ initiativeToProjectCreate: { success: boolean } }>(
-      INITIATIVE_TO_PROJECT_CREATE_MUTATION,
-      { input },
-    );
-    if (!data.initiativeToProjectCreate.success) {
-      throw new LinearApiError(
-        `Failed to attach project ${input.projectId} to initiative ${input.initiativeId}`,
-        null,
-        null,
-      );
-    }
   }
 
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
@@ -1121,21 +1075,25 @@ export class LinearClient implements LinearWriter {
   }
 
   /**
-   * Resolves a canonical colon-form label id (e.g. `"foreman:running"`) to its
-   * Linear label, creating the label — and its nested parent group, e.g.
-   * "Foreman" -> "Running" (SPEC §4.5) — if either is absent. An ungrouped id
-   * (no colon) would be created flat, unchanged, though every label Foreman
-   * creates today belongs to `type:` or `foreman:`.
+   * Resolves a canonical colon-form label id (e.g. `"foreman:hands-off"`) to
+   * its Linear label, creating the label — and its nested parent group, e.g.
+   * "Foreman" -> "Hands Off" (SPEC §4.5) — if either is absent. An ungrouped
+   * id (no colon) would be created flat, unchanged. `teamId` undefined
+   * resolves and creates workspace-level.
    */
-  async ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel> {
-    const cacheKey = `${teamId}:${name}`;
+  private async ensureLabelIn(
+    name: string,
+    teamId: LinearId | undefined,
+    opts?: { color?: string; description?: string },
+  ): Promise<IssueLabel> {
+    const cacheKey = `${teamId ?? "workspace"}:${name}`;
     const cached = this.labelIdCache.get(cacheKey);
     if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
 
     const matches = (await this.labels(teamId)).filter((label) => label.name === name);
     if (matches.length > 1) {
       throw new LinearApiError(
-        `Label "${name}" matches ${matches.length} labels visible to team ${teamId} (team-owned and workspace-level); cannot resolve unambiguously.`,
+        `Label "${name}" matches ${matches.length} labels visible ${teamId ? `to team ${teamId}` : "workspace-wide"} (team-owned and workspace-level); cannot resolve unambiguously.`,
         null,
         null,
       );
@@ -1147,18 +1105,32 @@ export class LinearClient implements LinearWriter {
     }
 
     const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
-    const parentId = group ? await this.ensureLabelGroup(group.prefix, teamId) : undefined;
+    const parentId = group ? await this.ensureLabelGroupIn(group.prefix, teamId) : undefined;
     const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
 
-    const created = await this.createLabel({ name: childName, teamId, parentId });
+    const created = await this.createLabel({
+      name: childName,
+      teamId,
+      parentId,
+      color: opts?.color,
+      description: opts?.description,
+    });
     const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
     this.labelIdCache.set(cacheKey, { value: label, at: Date.now() });
     return label;
   }
 
-  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix, e.g. `"agent:"` -> "Agent". */
-  private async ensureLabelGroup(prefix: string, teamId: LinearId): Promise<LinearId> {
-    const cacheKey = `${teamId}:${prefix}`;
+  async ensureLabel(name: string, teamId: LinearId, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
+    return this.ensureLabelIn(name, teamId, opts);
+  }
+
+  async ensureWorkspaceLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
+    return this.ensureLabelIn(name, undefined, opts);
+  }
+
+  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix, e.g. `"agent:"` -> "Agent". `teamId` undefined resolves and creates workspace-level. */
+  private async ensureLabelGroupIn(prefix: string, teamId: LinearId | undefined): Promise<LinearId> {
+    const cacheKey = `${teamId ?? "workspace"}:${prefix}`;
     const cached = this.labelGroupIdCache.get(cacheKey);
     if (cached) return cached;
 
@@ -1174,5 +1146,187 @@ export class LinearClient implements LinearWriter {
     const created = await this.createLabel({ name: displayName, teamId, isGroup: true });
     this.labelGroupIdCache.set(cacheKey, created.id);
     return created.id;
+  }
+
+  /** Raw workspace `ProjectLabel`s, unmapped, paged to exhaustion — mirrors `fetchRawLabels` for the project-label surface. */
+  private async fetchRawProjectLabels(): Promise<WireLabel[]> {
+    const results: WireLabel[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const data = await this.request<{
+        projectLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      }>(PROJECT_LABELS_QUERY, { after });
+      results.push(...data.projectLabels.nodes);
+      if (!data.projectLabels.pageInfo.hasNextPage || !data.projectLabels.pageInfo.endCursor) break;
+      if (data.projectLabels.pageInfo.endCursor === after) {
+        this.refusePartialPage("fetchRawProjectLabels()", pages, results.length);
+      }
+      after = data.projectLabels.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        this.refusePartialPage("fetchRawProjectLabels()", pages, results.length);
+      }
+    }
+    return results;
+  }
+
+  /** Every workspace `ProjectLabel`, canonical colon-form ids reconstructed the same way `labels()` does for issue labels. */
+  async projectLabels(): Promise<IssueLabel[]> {
+    return this.mapLabels(await this.fetchRawProjectLabels());
+  }
+
+  private async createProjectLabel(input: {
+    name: string;
+    isGroup?: boolean;
+    parentId?: LinearId;
+    color?: string;
+    description?: string;
+  }): Promise<IssueLabel> {
+    const data = await this.request<{
+      projectLabelCreate: { success: boolean; projectLabel: { id: string; name: string; parent: { id: string } | null } | null };
+    }>(PROJECT_LABEL_CREATE_MUTATION, { input });
+    if (!data.projectLabelCreate.success || !data.projectLabelCreate.projectLabel) {
+      throw new LinearApiError(`Failed to create project label "${input.name}"`, null, null);
+    }
+    const label = data.projectLabelCreate.projectLabel;
+    return { id: label.id, name: label.name, parentId: label.parent?.id ?? null };
+  }
+
+  /** Resolve (creating if absent) the `isGroup: true` parent for a managed project-label prefix, workspace-level. */
+  private async ensureProjectLabelGroup(prefix: string): Promise<LinearId> {
+    const cached = this.projectLabelGroupIdCache.get(prefix);
+    if (cached) return cached;
+
+    const displayName = groupDisplayName(prefix);
+    const existing = (await this.fetchRawProjectLabels()).find(
+      (label) => label.isGroup === true && label.name === displayName,
+    );
+    if (existing) {
+      this.projectLabelGroupIdCache.set(prefix, existing.id);
+      return existing.id;
+    }
+
+    const created = await this.createProjectLabel({ name: displayName, isGroup: true });
+    this.projectLabelGroupIdCache.set(prefix, created.id);
+    return created.id;
+  }
+
+  /** Workspace-level project label; creates the parent group on demand, mirroring `ensureWorkspaceLabel`. */
+  async ensureProjectLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
+    const cached = this.projectLabelIdCache.get(name);
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
+
+    const matches = (await this.projectLabels()).filter((label) => label.name === name);
+    if (matches.length > 1) {
+      throw new LinearApiError(
+        `Project label "${name}" matches ${matches.length} labels; cannot resolve unambiguously.`,
+        null,
+        null,
+      );
+    }
+    const existing = matches[0];
+    if (existing) {
+      this.projectLabelIdCache.set(name, { value: existing, at: Date.now() });
+      return existing;
+    }
+
+    const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
+    const parentId = group ? await this.ensureProjectLabelGroup(group.prefix) : undefined;
+    const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
+
+    const created = await this.createProjectLabel({
+      name: childName,
+      parentId,
+      color: opts?.color,
+      description: opts?.description,
+    });
+    const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
+    this.projectLabelIdCache.set(name, { value: label, at: Date.now() });
+    return label;
+  }
+
+  async createWorkflowState(input: {
+    teamId: LinearId;
+    name: string;
+    type: string;
+    color: string;
+    description?: string;
+    position?: number;
+  }): Promise<WorkflowState> {
+    const data = await this.request<{
+      workflowStateCreate: {
+        success: boolean;
+        workflowState: { id: string; name: string; type: string; position: number } | null;
+      };
+    }>(WORKFLOW_STATE_CREATE_MUTATION, { input });
+    if (!data.workflowStateCreate.success || !data.workflowStateCreate.workflowState) {
+      throw new LinearApiError(`Failed to create workflow state "${input.name}"`, null, null);
+    }
+    const state = data.workflowStateCreate.workflowState;
+    return { id: state.id, name: state.name, type: state.type as WorkflowState["type"], position: state.position };
+  }
+
+  async updateWorkflowState(
+    id: LinearId,
+    input: { name?: string; color?: string; description?: string; position?: number },
+  ): Promise<WorkflowState> {
+    const data = await this.request<{
+      workflowStateUpdate: {
+        success: boolean;
+        workflowState: { id: string; name: string; type: string; position: number } | null;
+      };
+    }>(WORKFLOW_STATE_UPDATE_MUTATION, { id, input });
+    if (!data.workflowStateUpdate.success || !data.workflowStateUpdate.workflowState) {
+      throw new LinearApiError(`Failed to update workflow state ${id}`, null, null);
+    }
+    const state = data.workflowStateUpdate.workflowState;
+    return { id: state.id, name: state.name, type: state.type as WorkflowState["type"], position: state.position };
+  }
+
+  async archiveWorkflowState(id: LinearId): Promise<void> {
+    const data = await this.request<{ workflowStateArchive: { success: boolean } }>(WORKFLOW_STATE_ARCHIVE_MUTATION, {
+      id,
+    });
+    if (!data.workflowStateArchive.success) {
+      throw new LinearApiError(`Failed to archive workflow state ${id}`, null, null);
+    }
+  }
+
+  async teamSettings(teamId: string): Promise<TeamSettings> {
+    const data = await this.request<{
+      team: {
+        id: string;
+        key: string;
+        name: string;
+        triageEnabled: boolean;
+        cyclesEnabled: boolean;
+        triageIssueState: { id: string } | null;
+      } | null;
+    }>(TEAM_SETTINGS_QUERY, { teamId });
+    if (!data.team) {
+      throw new LinearApiError(`Team ${teamId} not found`, null, null);
+    }
+    return {
+      id: data.team.id,
+      key: data.team.key,
+      name: data.team.name,
+      triageEnabled: data.team.triageEnabled,
+      cyclesEnabled: data.team.cyclesEnabled,
+      triageStateId: data.team.triageIssueState?.id ?? null,
+    };
+  }
+
+  async updateTeamSettings(
+    teamId: LinearId,
+    input: { triageEnabled?: boolean; cyclesEnabled?: boolean },
+  ): Promise<void> {
+    const data = await this.request<{ teamUpdate: { success: boolean } }>(TEAM_UPDATE_MUTATION, {
+      id: teamId,
+      input,
+    });
+    if (!data.teamUpdate.success) {
+      throw new LinearApiError(`Failed to update team ${teamId} settings`, null, null);
+    }
   }
 }

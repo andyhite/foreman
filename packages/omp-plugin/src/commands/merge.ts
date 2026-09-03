@@ -40,7 +40,7 @@ export async function runMerge(
   if (!issue) return { merged: false, message: `Unknown issue "${issueId}".` };
   if (!issue.project) return { merged: false, message: `${issueId} has no project; cannot resolve its repo.` };
 
-  await assertIssueInScope({ linear, entry }, issue);
+  assertIssueInScope(entry, issue);
   const repoPath = entry.repoPath;
   const repoSettings = entry;
   const branch = issue.branchName;

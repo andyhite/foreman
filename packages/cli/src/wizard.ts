@@ -24,11 +24,12 @@
  * finishes with a usable config.
  */
 
-import { findUserScopeInstall, GitHubAppAuth, GitHubAppError, LinearApiError, LinearClient, removeUserScopeInstall, writeGlobalPluginLink } from "@foreman/core";
+import { findUserScopeInstall, GitHubAppAuth, GitHubAppError, LinearApiError, LinearClient, provisionWorkspaceLabels, removeUserScopeInstall, writeGlobalPluginLink, YOLO_CONFIRMER } from "@foreman/core";
 import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
 import { readGlobalConfig, writeGitHubAppPrivateKeyFile, writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import type { Prompter } from "./prompt.ts";
+import { promptConfirmer, printProvisionActions } from "./provision-report.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 
 export interface WizardOptions {
@@ -37,6 +38,8 @@ export interface WizardOptions {
   /** Link the foreman CLI itself to this checkout's source (no rebuild-to-see-changes). */
   linkCli: boolean;
   skipLinear: boolean;
+  /** Accept defaults for every prompt, including the Linear write confirmations `provisionWorkspaceLabels` asks. */
+  yes: boolean;
 }
 
 export interface WizardDeps {
@@ -229,7 +232,7 @@ async function configureGlobalConfig(
   log: (message: string) => void,
   home: string,
   skipLinear: boolean,
-): Promise<void> {
+): Promise<string | null> {
   printSection(log, "Linear API key (~/.foreman/config.json)");
 
   const { apiKey, apiKeyFile } = await resolveLinearApiKey(prompter, log, home, skipLinear);
@@ -250,6 +253,31 @@ async function configureGlobalConfig(
     home,
   );
   log(`  wrote ${configPath}`);
+  return apiKey;
+}
+
+/**
+ * Provisions the workspace-level `type:` labels — `foreman init` later
+ * provisions the per-team `app:` labels and states. Skipped outright
+ * without a Linear credential; failures print and defer to `foreman doctor
+ * --fix` rather than failing setup.
+ */
+async function provisionLabels(deps: WizardDeps, options: WizardOptions, apiKey: string | null): Promise<void> {
+  printSection(deps.log, "Linear labels (workspace)");
+
+  if (options.skipLinear || !apiKey) {
+    deps.log("  labels: skipped, no Linear credential");
+    return;
+  }
+
+  const client = new LinearClient({ apiKey });
+  const confirmer = options.yes ? YOLO_CONFIRMER : promptConfirmer(deps.prompter, deps.log);
+
+  const actions = await provisionWorkspaceLabels(client, { confirmer });
+  const failed = printProvisionActions(deps.log, actions);
+  if (failed) {
+    deps.log(`  ${style("yellow", "!")} some labels weren't provisioned; re-run \`foreman doctor --fix\` to retry.`);
+  }
 }
 
 /**
@@ -294,7 +322,8 @@ async function removeStrayUserScopeInstall(deps: WizardDeps, options: WizardOpti
 export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
   printBanner(deps.log);
   const { missingGh } = await preflight(deps);
-  await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
+  const apiKey = await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
+  await provisionLabels(deps, options, apiKey);
   await linkGlobalPlugin(deps, options);
   await removeStrayUserScopeInstall(deps, options);
 
@@ -312,7 +341,7 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   printSection(deps.log, "Done");
   deps.log(`  ${style("green", "✓")} Machine setup complete.`);
   deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it and activate the plugin there.`);
-  deps.log(`  ${style("cyan", "→")} Run \`foreman verify\` any time to verify the plugin link is healthy.`);
+  deps.log(`  ${style("cyan", "→")} Run \`foreman doctor\` any time to verify the plugin link is healthy.`);
   if (missingGh) {
     deps.log(`  ${style("yellow", "!")} gh not found — Foreman cannot open PRs until you install it: https://cli.github.com`);
   }

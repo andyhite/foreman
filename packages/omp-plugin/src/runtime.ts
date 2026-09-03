@@ -209,9 +209,9 @@ export function getGitHub(): GitHubClient {
  * brief. Either layer degrades to a stub rather than throwing — a new
  * product with a stub `Context` doc, or a project with no brief yet, is a
  * legitimate state the digest must still render usefully. An unresolvable
- * initiative (the project belongs to zero or more than one — the gate is
- * what rejects dispatch for that, not the digest) degrades the product
- * layer the same way a missing document does.
+ * initiative (the project belongs to zero or more than one — nothing gates
+ * on that any more) degrades the product layer the same way a missing
+ * document does.
  */
 export async function getContextDigest(projectId: string): Promise<string> {
   const rt = requireRuntime();
@@ -225,13 +225,8 @@ export async function getContextDigest(projectId: string): Promise<string> {
     return "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
   }
 
-  let initiative: Initiative | null = null;
-  try {
-    const ref = await linear.projectInitiative(projectId);
-    initiative = await linear.initiative(ref.id);
-  } catch {
-    initiative = null;
-  }
+  const refs = await linear.projectInitiatives(projectId);
+  const initiative = refs.length === 1 && refs[0] ? await linear.initiative(refs[0].id) : null;
 
   const digest = `${productDigest(initiative)}\n\n${projectBriefDigest(project)}`;
   rt.contextDigestCache.set(projectId, digest);

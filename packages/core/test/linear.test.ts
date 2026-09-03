@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
 import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
 import {
-  BLOCKED_FILTER,
   INBOX_FILTER,
+  NEEDS_INPUT_FILTER,
   RUNNING_FILTER,
   hasLabelNamed,
   inState,
@@ -12,7 +12,7 @@ import {
   notInTerminalProject,
   notTerminalState,
 } from "../src/linear/filters.ts";
-import { isPausedProjectStatus, isTerminal, isTerminalProjectStatus } from "../src/domain/states.ts";
+import { FOREMAN_STATE, isPausedProjectStatus, isTerminal, isTerminalProjectStatus } from "../src/domain/states.ts";
 import {
   acceptanceCriteria,
   hasAcceptanceCriteria,
@@ -114,115 +114,28 @@ describe("LinearClient workflowStates", () => {
 });
 
 describe("LinearClient projects", () => {
-  it("maps the projects connection into ProjectRef[]", async () => {
-    const fetchStub: FetchLike = async () =>
-      jsonResponse(200, {
-        data: { projects: { nodes: [{ id: "p1", name: "Plotroom" }, { id: "p2", name: "Herdr" }], pageInfo: { hasNextPage: false, endCursor: null } } },
-      });
-    const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
-    expect(await client.projects()).toEqual([
-      { id: "p1", name: "Plotroom" },
-      { id: "p2", name: "Herdr" },
-    ]);
-  });
-});
-
-describe("LinearClient projectInitiative", () => {
-  it("returns the single initiative for a project", async () => {
-    const fetchStub: FetchLike = async () =>
-      jsonResponse(200, {
-        data: {
-          project: { id: "proj-1", name: "Project", initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }] } },
-        },
-      });
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    expect(await client.projectInitiative("proj-1")).toEqual({ id: "init-1", name: "Q3 Push" });
-  });
-
-  it("throws naming the project when it has no initiative", async () => {
-    const fetchStub: FetchLike = async () =>
-      jsonResponse(200, {
-        data: { project: { id: "proj-1", name: "Project", initiatives: { nodes: [] } } },
-      });
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await expect(client.projectInitiative("proj-1")).rejects.toThrow(/Project "Project"/);
-  });
-
-  it("throws listing every initiative name when a project has more than one", async () => {
-    const fetchStub: FetchLike = async () =>
-      jsonResponse(200, {
-        data: {
-          project: {
-            id: "proj-1",
-            name: "Project",
-            initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }] },
-          },
-        },
-      });
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await expect(client.projectInitiative("proj-1")).rejects.toThrow(/Q3 Push.*Q4 Push/);
-  });
-
-  it("resolves from cache on a second call for the same project", async () => {
-    let calls = 0;
-    const fetchStub: FetchLike = async () => {
-      calls += 1;
-      return jsonResponse(200, {
-        data: {
-          project: { id: "proj-1", name: "Project", initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }] } },
-        },
-      });
-    };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await client.projectInitiative("proj-1");
-    await client.projectInitiative("proj-1");
-    expect(calls).toBe(1);
-  });
-});
-
-describe("LinearClient projectInitiatives (SPEC §17: avoid a serial GraphQL round-trip per issue)", () => {
-  it("caches the initiatives list per project, like projectInitiative does", async () => {
-    let calls = 0;
-    const fetchStub: FetchLike = async () => {
-      calls += 1;
-      return jsonResponse(200, {
-        data: {
-          project: {
-            id: "proj-1",
-            name: "Project",
-            initiatives: { nodes: [{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }] },
-          },
-        },
-      });
-    };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    const first = await client.projectInitiatives("proj-1");
-    const second = await client.projectInitiatives("proj-1");
-    expect(first).toEqual([{ id: "init-1", name: "Q3 Push" }, { id: "init-2", name: "Q4 Push" }]);
-    expect(second).toEqual(first);
-    expect(calls).toBe(1);
-  });
-
-  it("caches per project id independently", async () => {
-    let calls = 0;
+  it("maps a team's projects connection into ProjectRef[]", async () => {
+    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
     const fetchStub: FetchLike = async (_url, init) => {
-      calls += 1;
-      const body = JSON.parse(init.body as string) as { variables: { projectId: string } };
+      capturedBody = JSON.parse(init.body as string);
       return jsonResponse(200, {
         data: {
-          project: {
-            id: body.variables.projectId,
-            name: "Project",
-            initiatives: { nodes: [{ id: `init-${body.variables.projectId}`, name: "Push" }] },
+          projects: {
+            nodes: [
+              { id: "p1", name: "Plotroom", labels: { nodes: [] } },
+              { id: "p2", name: "Herdr", labels: { nodes: [] } },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
           },
         },
       });
     };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await client.projectInitiatives("proj-1");
-    await client.projectInitiatives("proj-2");
-    await client.projectInitiatives("proj-1");
-    expect(calls).toBe(2);
+    const client = new LinearClient({ apiKey: "lin_api_secret", fetch: fetchStub });
+    expect(await client.projects("ENG")).toEqual([
+      { id: "p1", name: "Plotroom", startDate: undefined, targetDate: undefined, status: null, labels: [] },
+      { id: "p2", name: "Herdr", startDate: undefined, targetDate: undefined, status: null, labels: [] },
+    ]);
+    expect(capturedBody?.variables).toMatchObject({ teamKey: "ENG" });
   });
 });
 
@@ -492,7 +405,8 @@ describe("LinearClient team scope", () => {
 });
 
 describe("terminal exclusion", () => {
-  const TERMINAL = ["completed", "canceled"];
+  const TERMINAL_STATES = ["completed", "canceled", "duplicate"];
+  const TERMINAL_PROJECT_STATUSES = ["completed", "canceled"];
 
   // The predicate every gate reads. `paused` is the interesting case: it is a
   // reversible operator hold, so treating it as terminal would make
@@ -517,7 +431,7 @@ describe("terminal exclusion", () => {
   });
 
   it("excludes terminal issues by state type", () => {
-    expect(notTerminalState()).toEqual({ state: { type: { nin: TERMINAL } } });
+    expect(notTerminalState()).toEqual({ state: { type: { nin: TERMINAL_STATES } } });
   });
 
   // Project-less issues must survive: they are out of scope for a more
@@ -525,22 +439,24 @@ describe("terminal exclusion", () => {
   // the operator needs to see instead of the issue silently vanishing.
   it("excludes terminal projects while keeping project-less issues", () => {
     expect(notInTerminalProject()).toEqual({
-      or: [{ project: { null: true } }, { project: { status: { type: { nin: TERMINAL } } } }],
+      or: [{ project: { null: true } }, { project: { status: { type: { nin: TERMINAL_PROJECT_STATUSES } } } }],
     });
   });
 
   // The human queue's *count* is the loop's backpressure signal (SPEC
-  // §17.7). A `blocked:` label stranded on a canceled issue used to hold
+  // §17.7). A `Needs Input` state stranded on a canceled issue used to hold
   // every worker stopped forever, with no operator remedy.
-  it("guards the blocked view whose count or contents drive a decision", () => {
-    expect(BLOCKED_FILTER.and).toContainEqual(notTerminalState());
+  it("guards the needs-input view against a terminal project", () => {
+    expect(NEEDS_INPUT_FILTER.and).toContainEqual(notInTerminalProject());
   });
 
   // A lock still held on an issue completed since it was taken is exactly
   // the stale lock the reaper exists to release (SPEC §11) — filtering it
   // out would strand the lock and hide it from the operator.
   it("leaves the running and inbox views unguarded on purpose", () => {
-    expect(RUNNING_FILTER).toEqual(hasLabelNamed("foreman:running"));
+    expect(RUNNING_FILTER).toEqual({
+      or: [inState(FOREMAN_STATE.refining), inState(FOREMAN_STATE.inProgress)],
+    });
     expect(INBOX_FILTER).toEqual(inStateType("triage"));
   });
 });
@@ -572,8 +488,8 @@ describe("paused hold", () => {
   // is not held by a pause — so a paused project's ready issues stay in the
   // count. Guarding it here would make refine chase a target it can never
   // reach, dispatching against projects it is allowed to touch forever.
-  it("leaves the blocked view unguarded against paused", () => {
-    expect(BLOCKED_FILTER.and).not.toContainEqual(notInPausedProject());
+  it("leaves the needs-input view unguarded against paused", () => {
+    expect(NEEDS_INPUT_FILTER.and).not.toContainEqual(notInPausedProject());
   });
 });
 
@@ -863,6 +779,7 @@ describe("LinearClient project documents", () => {
             targetDate: "2026-12-31",
             status: { id: "ps-1", name: "Backlog", type: "backlog" },
             documents: { nodes: [{ id: "doc-1", title: "Context", content: "hello", updatedAt: "" }] },
+            labels: { nodes: [] },
           },
         },
       });
@@ -1026,32 +943,6 @@ describe("LinearClient teams pagination", () => {
   });
 });
 
-describe("LinearClient initiativeProjects", () => {
-  it("maps an initiative's projects connection into ProjectRef[]", async () => {
-    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
-    const fetchStub: FetchLike = async (_url, init) => {
-      capturedBody = JSON.parse(init.body);
-      return jsonResponse(200, {
-        data: {
-          initiative: {
-            projects: { nodes: [{ id: "p1", name: "Maintenance" }] },
-          },
-        },
-      });
-    };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    expect(await client.initiativeProjects("init-1")).toEqual([{ id: "p1", name: "Maintenance" }]);
-    expect(capturedBody?.query).toContain("query InitiativeProjects");
-    expect(capturedBody?.variables).toEqual({ initiativeId: "init-1" });
-  });
-
-  it("returns an empty array when the initiative is absent", async () => {
-    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { initiative: null } });
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    expect(await client.initiativeProjects("missing")).toEqual([]);
-  });
-});
-
 describe("LinearClient createProject", () => {
   it("sends teamIds and maps the created project into a ProjectRef", async () => {
     let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
@@ -1088,32 +979,6 @@ describe("LinearClient createProject", () => {
     ).rejects.toThrow(/Failed to create project/);
   });
 });
-
-describe("LinearClient addProjectToInitiative", () => {
-  it("sends the projectId/initiativeId pair and resolves on success", async () => {
-    let capturedBody: { query: string; variables: Record<string, unknown> } | undefined;
-    const fetchStub: FetchLike = async (_url, init) => {
-      capturedBody = JSON.parse(init.body);
-      return jsonResponse(200, { data: { initiativeToProjectCreate: { success: true } } });
-    };
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await client.addProjectToInitiative({ projectId: "p1", initiativeId: "init-1" });
-    expect(capturedBody?.query).toContain("mutation InitiativeToProjectCreate");
-    expect(capturedBody?.variables).toEqual({
-      input: { projectId: "p1", initiativeId: "init-1" },
-    });
-  });
-
-  it("throws when success is false", async () => {
-    const fetchStub: FetchLike = async () =>
-      jsonResponse(200, { data: { initiativeToProjectCreate: { success: false } } });
-    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    await expect(
-      client.addProjectToInitiative({ projectId: "p1", initiativeId: "init-1" }),
-    ).rejects.toThrow(LinearApiError);
-  });
-});
-
 describe("acceptance criteria parsing", () => {
 
   it("returns no criteria when the description is missing entirely", () => {

@@ -132,7 +132,7 @@ describe("runDeinit", () => {
       mkdirSync(join(home, ".foreman"), { recursive: true });
       writeFileSync(
         join(home, ".foreman", "config.json"),
-        JSON.stringify({ repos: { plotroom: { path: repoRoot, initiatives: ["i1"] } } }),
+        JSON.stringify({ repos: { plotroom: { path: repoRoot, team: "ENG" } } }),
       );
 
       const git = new FakeGit(repoRoot);
@@ -154,7 +154,7 @@ describe("runDeinit", () => {
       mkdirSync(join(home, ".foreman"), { recursive: true });
       writeFileSync(
         join(home, ".foreman", "config.json"),
-        JSON.stringify({ repos: { plotroom: { path: repoRoot, initiatives: ["i1"] } } }),
+        JSON.stringify({ repos: { plotroom: { path: repoRoot, team: "ENG" } } }),
       );
 
       const git = new FakeGit(repoRoot);
@@ -162,7 +162,7 @@ describe("runDeinit", () => {
       await runDeinit(baseOptions({ keepRegistry: true }, home, repoRoot), { prompter, git, log: () => {} });
 
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
-      expect(config.repos.plotroom).toEqual({ path: repoRoot, initiatives: ["i1"] });
+      expect(config.repos.plotroom).toEqual({ path: repoRoot, team: "ENG" });
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(repoRoot, { recursive: true, force: true });

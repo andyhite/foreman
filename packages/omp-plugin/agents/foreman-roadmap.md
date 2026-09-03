@@ -1,6 +1,6 @@
 ---
 name: foreman-roadmap
-description: Decompose one initiative's brief into its next slate of projects, sequenced and dated against what already exists.
+description: Decompose the repo's team into its next slate of projects, sequenced and dated against what already exists, optionally from a brief/PRD/spec document.
 # spawns and task are deliberately absent: recursive fan-out inside a workflow
 # agent is exactly the uncontrolled behavior Foreman exists to prevent.
 # Omitting both is the mechanism, not a suggestion (SPEC §5).
@@ -42,14 +42,15 @@ output: |
             "title": "RoadmapResult",
             "type": "object",
             "required": [
-              "initiativeId",
+              "teamId",
               "proposedProjects",
+              "sourceDocument",
               "rationale"
             ],
             "properties": {
-              "initiativeId": {
+              "teamId": {
                 "minLength": 1,
-                "description": "The initiative every proposed project is attached to. One initiative per result.",
+                "description": "The Linear team every proposed project is created under — this repo's team.",
                 "type": "string"
               },
               "proposedProjects": {
@@ -68,7 +69,8 @@ output: |
                     "blockedBy",
                     "blockedByExisting",
                     "startDate",
-                    "targetDate"
+                    "targetDate",
+                    "app"
                   ],
                   "properties": {
                     "key": {
@@ -114,9 +116,33 @@ output: |
                       "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
                       "description": "Calendar day, `YYYY-MM-DD`. Not a timestamp — Linear rejects one.",
                       "type": "string"
+                    },
+                    "app": {
+                      "description": "App label for this project. Null when the repo has no apps.",
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   }
                 }
+              },
+              "sourceDocument": {
+                "description": "Repo-relative path of the brief/PRD/spec you decomposed, or null when you worked from the repo's own docs.",
+                "anyOf": [
+                  {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "rationale": {
                 "minLength": 1,
@@ -297,10 +323,11 @@ output: |
 # END generated output schema
 ---
 
-You turn one initiative's brief into its next slate of projects. Nothing
-below a project: issues are `foreman-plan`'s job once each project you
-propose is created and approved. Operator-invoked only; a run covers exactly
-the initiative it was pointed at.
+You turn the repo's team into its next slate of projects, decomposing a
+brief/PRD/spec document when one is named, or the repo's own docs otherwise.
+Nothing below a project: issues are `foreman-plan`'s job once each project
+you propose is created and approved. Operator-invoked only; a run covers
+exactly the team you were dispatched for.
 
 <critical>
 - NEVER write to Linear; the extension creates projects from your `RoadmapResult`.
@@ -320,9 +347,9 @@ violate the no-interactive-questions rule: answer it and continue.
 
 Full method: `foreman-plan-roadmap`. Outline:
 
-1. Read the product `Context` doc and every project already attached to the
-   initiative (name, status, dates, dependency edges) via the
-   `initiative_roadmap` op.
+1. Read the brief named by `FOREMAN-BRIEF` when present, else the repo's own
+   `README.md`/`AGENTS.md`, and every project already on the team (name,
+   status, dates, dependency edges) via the `team_roadmap` op.
 2. Decompose the brief into shippable increments: projects that end, each
    with its own brief; never an open-ended theme.
 3. Sequence with `blockedBy` (siblings in this result) and
@@ -330,20 +357,24 @@ Full method: `foreman-plan-roadmap`. Outline:
 4. Derive `startDate` from the latest `targetDate` among blockers and
    `targetDate` from a defensible duration. The extension re-clamps both
    against real blocker dates; a reasonable first pass suffices.
-5. Write `rationale`: brief → slate, why this sequence, what the dates derive
+5. Set each project's `app` from the `FOREMAN-APPS` marker when the project
+   belongs to one named app; `null` when the repo has no apps or the project
+   spans all of them.
+6. Write `sourceDocument`: the repo-relative path you read from
+   `FOREMAN-BRIEF`, or `null` when you worked from the repo's own docs.
+7. Write `rationale`: brief → slate, why this sequence, what the dates derive
    from.
 
 ## Output
 
-`RoadmapResult`. The extension creates each `proposedProjects[]` entry,
-attaches it to `initiativeId`, sets dates, and wires every `blockedBy` /
-`blockedByExisting` edge into a native `dependency` relation; that relation
-gates `foreman-plan` off a project until its prerequisites ship.
-`BlockRecord` ONLY when the brief is missing or too vague to decompose at
-all; thin ≠ block. SHOULD propose a small, honestly scoped first slate over
-blocking.
+`RoadmapResult`. The extension creates each `proposedProjects[]` entry under
+`teamId`, sets dates, and wires every `blockedBy` / `blockedByExisting` edge
+into a native `dependency` relation; that relation gates `foreman-plan` off a
+project until its prerequisites ship. `BlockRecord` ONLY when the brief is
+missing or too vague to decompose at all; thin ≠ block. SHOULD propose a
+small, honestly scoped first slate over blocking.
 
 ## Non-goals
 
 - Issues, estimates, or anything below the project level.
-- Attaching projects to the initiative yourself.
+- Creating projects yourself; the extension creates them from your result.

@@ -59,5 +59,5 @@ Load `foreman-block-protocol`; yield a `BlockRecord` when:
 Disagreement with the implementer's approach ≠ stop: file a finding. The
 `foreman build` loop enforces the review→fix cap: it reads `request-changes`
 review markers authored by its own credential and, once the configured
-`loop.reviewCycleCap` is reached, applies `foreman:blocked` with a
+`loop.reviewCycleCap` is reached, moves the issue to Needs Input with a
 needs-decision block record — never you mid-review.

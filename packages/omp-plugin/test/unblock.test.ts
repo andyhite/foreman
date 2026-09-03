@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { FOREMAN_LABEL, PRIORITY, TYPE_LABEL } from "@foreman/core";
-import type { Comment, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, ProjectRef, WorkflowState } from "@foreman/core";
+import { FOREMAN_STATE, PRIORITY, TYPE_LABEL } from "@foreman/core";
+import type { Comment, CreateIssueInput, Issue, IssueLabel, IssueMutation, LinearWriter, ProjectRef, TeamSettings, WorkflowState } from "@foreman/core";
 import { runUnblock } from "../src/commands/unblock.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: FOREMAN_STATE.backlog, type: "backlog", position: 0 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: FOREMAN_STATE.ready, type: "unstarted", position: 3 };
+const STATE_NEEDS_INPUT: WorkflowState = { id: "state-needs-input", name: FOREMAN_STATE.needsInput, type: "unstarted", position: 2 };
+const STATE_BLOCKED: WorkflowState = { id: "state-blocked", name: FOREMAN_STATE.blocked, type: "started", position: 4 };
+const STATE_CANCELED: WorkflowState = { id: "state-canceled", name: FOREMAN_STATE.canceled, type: "canceled", position: 8 };
+const STATE_DUPLICATE: WorkflowState = { id: "state-duplicate", name: FOREMAN_STATE.duplicate, type: "canceled", position: 9 };
+const KNOWN_STATES = [STATE_BACKLOG, STATE_READY, STATE_NEEDS_INPUT, STATE_BLOCKED, STATE_CANCELED, STATE_DUPLICATE];
 
 function label(name: string): IssueLabel {
   return { id: `label-${name}`, name, parentId: null };
@@ -21,8 +27,8 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    state: STATE_TODO,
-    labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.blocked)],
+    state: STATE_NEEDS_INPUT,
+    labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -67,20 +73,11 @@ class FakeLinear implements LinearWriter {
   async projectInitiatives() {
     return [];
   }
-  async projectInitiative() {
-    return { id: "initiative-1", name: "Foreman" };
-  }
   async initiative() {
     return null;
   }
-  async initiatives() {
-    return [];
-  }
-  async initiativeProjects() {
-    return [];
-  }
   async workflowStates(): Promise<WorkflowState[]> {
-    return [STATE_TODO];
+    return KNOWN_STATES;
   }
   async labels() {
     return [];
@@ -91,12 +88,18 @@ class FakeLinear implements LinearWriter {
   async projects() {
     return [];
   }
+  async teamSettings(): Promise<TeamSettings> {
+    return { id: "team-1", key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
+  }
+  async projectLabels(): Promise<IssueLabel[]> {
+    return [];
+  }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
     const issue = [...this.issuesById.values()].find((candidate) => candidate.id === id);
     if (!issue) throw new Error(`unknown issue id ${id}`);
-    if (input.removedLabelIds) {
-      issue.labels = issue.labels.filter((entry) => !input.removedLabelIds?.includes(entry.id));
+    if (input.stateId) {
+      issue.state = KNOWN_STATES.find((state) => state.id === input.stateId) ?? issue.state;
     }
     if (input.assigneeId !== undefined) {
       issue.assignee = input.assigneeId ? { id: input.assigneeId, name: input.assigneeId, displayName: input.assigneeId } : null;
@@ -109,7 +112,6 @@ class FakeLinear implements LinearWriter {
   async createProject(input: { name: string; teamIds: string[] }): Promise<ProjectRef> {
     return { id: `project-created-${input.name}`, name: input.name };
   }
-  async addProjectToInitiative() {}
   async updateProjectStatus() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }): Promise<Comment> {
     this.commentCalls.push(input);
@@ -128,21 +130,47 @@ class FakeLinear implements LinearWriter {
   async ensureLabel(name: string): Promise<IssueLabel> {
     return label(name);
   }
+  async ensureWorkspaceLabel(name: string): Promise<IssueLabel> {
+    return label(name);
+  }
+  async ensureProjectLabel(name: string): Promise<IssueLabel> {
+    return label(name);
+  }
+  async createWorkflowState(input: { teamId: string; name: string; type: string; color: string }): Promise<WorkflowState> {
+    return { id: `state-${input.name.toLowerCase()}`, name: input.name, type: input.type as WorkflowState["type"], position: 99 };
+  }
+  async updateWorkflowState(id: string, input: { name?: string; color?: string; description?: string }): Promise<WorkflowState> {
+    return { id, name: input.name ?? id, type: "started", position: 99 };
+  }
+  async archiveWorkflowState(): Promise<void> {}
+  async updateTeamSettings(): Promise<void> {}
 }
 
 describe("runUnblock", () => {
-  it("removes the blocked label, records the reply, and hands the issue back from the operator", async () => {
+  it("moves a Needs Input issue to Backlog, records the reply, and hands it back from the operator", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
 
     const result = await runUnblock(linear, "ENG-1", "Go ahead with option A.");
 
     expect(result.ok).toBe(true);
-    expect(issue.labels.some((entry) => entry.name === FOREMAN_LABEL.blocked)).toBe(false);
+    expect(result.message).toContain(FOREMAN_STATE.backlog);
+    expect(issue.state.id).toBe(STATE_BACKLOG.id);
     expect(linear.commentCalls).toHaveLength(1);
     expect(linear.commentCalls[0]?.body).toContain("Go ahead with option A.");
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
     expect(issue.assignee).toBeNull();
+  });
+
+  it("moves a Blocked issue to Ready, records the reply, and hands it back from the operator", async () => {
+    const issue = makeIssue({ state: STATE_BLOCKED });
+    const linear = new FakeLinear([issue]);
+
+    const result = await runUnblock(linear, "ENG-1", "Go ahead with option A.");
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain(FOREMAN_STATE.ready);
+    expect(issue.state.id).toBe(STATE_READY.id);
   });
 
   it("rejects an empty reply without touching Linear", async () => {
@@ -156,14 +184,15 @@ describe("runUnblock", () => {
     expect(linear.commentCalls).toHaveLength(0);
   });
 
-  it("refuses an issue with no foreman:blocked label", async () => {
-    const issue = makeIssue({ labels: [label(TYPE_LABEL.feature)] });
+  it("refuses an issue not in Needs Input or Blocked", async () => {
+    const issue = makeIssue({ state: STATE_READY, labels: [label(TYPE_LABEL.feature)] });
     const linear = new FakeLinear([issue]);
 
     const result = await runUnblock(linear, "ENG-1", "reply");
 
     expect(result.ok).toBe(false);
-    expect(result.message).toContain(FOREMAN_LABEL.blocked);
+    expect(result.message).toContain(FOREMAN_STATE.needsInput);
+    expect(result.message).toContain(FOREMAN_STATE.blocked);
     expect(linear.updateCalls).toHaveLength(0);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { renderLockComment, type LockRecord } from "@foreman/core";
-import { FOREMAN_LABEL, PRIORITY, TYPE_LABEL } from "@foreman/core";
+import { FOREMAN_STATE, PRIORITY, TYPE_LABEL } from "@foreman/core";
 import type {
   CreateIssueInput,
   GlobalConfig,
@@ -10,19 +10,22 @@ import type {
   LinearWriter,
   ProjectStatus,
   ResolvedRepoEntry,
+  TeamSettings,
   WorkflowState,
 } from "@foreman/core";
 import { GitHubClient } from "@foreman/core";
 import { prepareTaskCall, type TaskCallInput, type TaskGuardDeps } from "../src/enforce/task-guard.ts";
 import { extractDispatchInfo } from "../src/results/sink.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: FOREMAN_STATE.ready, type: "unstarted", position: 2 };
+const STATE_REFINING: WorkflowState = { id: "state-refining", name: FOREMAN_STATE.refining, type: "unstarted", position: 1 };
 const STATE_IN_PROGRESS: WorkflowState = {
   id: "state-in-progress",
-  name: "In Progress",
+  name: FOREMAN_STATE.inProgress,
   type: "started",
   position: 3,
 };
+const KNOWN_STATES = [STATE_READY, STATE_REFINING, STATE_IN_PROGRESS];
 
 function label(name: string): IssueLabel {
   return { id: `label-${name}`, name, parentId: null };
@@ -42,7 +45,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    state: STATE_TODO,
+    state: STATE_READY,
     labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
@@ -61,7 +64,6 @@ class FakeLinear implements LinearWriter {
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
   createCommentCalls: Array<{ issueId: string; body: string }> = [];
   labelsById = new Map<string, IssueLabel>();
-  initiativesByProject = new Map<string, { id: string; name: string }[]>();
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -89,34 +91,28 @@ class FakeLinear implements LinearWriter {
   async projectStatus(projectId: string): Promise<ProjectStatus | null> {
     return this.statusByProject.get(projectId) ?? null;
   }
-  async projectInitiatives(projectId: string) {
-    return this.initiativesByProject.get(projectId) ?? [{ id: "initiative-1", name: "Foreman" }];
-  }
-  async projectInitiative(projectId: string) {
-    const refs = await this.projectInitiatives(projectId);
-    const first = refs[0];
-    if (refs.length !== 1 || !first) throw new Error(`project ${projectId} has ${refs.length} initiatives`);
-    return first;
+  async projectInitiatives() {
+    return [];
   }
   async initiative() {
     return null;
   }
-  async initiatives() {
-    return [];
-  }
-  async initiativeProjects() {
-    return [];
-  }
   async workflowStates(): Promise<WorkflowState[]> {
-    return [STATE_TODO, STATE_IN_PROGRESS];
+    return KNOWN_STATES;
   }
   async labels(): Promise<IssueLabel[]> {
     return [...this.labelsById.values()];
   }
   async teams() {
-    return [];
+    return [{ id: "team-1", key: "ENG", name: "Engineering" }];
   }
   async projects() {
+    return [];
+  }
+  async teamSettings(): Promise<TeamSettings> {
+    return { id: "team-1", key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
+  }
+  async projectLabels(): Promise<IssueLabel[]> {
     return [];
   }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
@@ -133,17 +129,19 @@ class FakeLinear implements LinearWriter {
       issue.labels = issue.labels.filter((l) => !input.removedLabelIds?.includes(l.id));
     }
     if (input.stateId) {
-      issue.state = [STATE_TODO, STATE_IN_PROGRESS].find((s) => s.id === input.stateId) ?? issue.state;
+      issue.state = KNOWN_STATES.find((s) => s.id === input.stateId) ?? issue.state;
+    }
+    if (input.assigneeId !== undefined) {
+      issue.assignee = input.assigneeId ? { id: input.assigneeId, name: input.assigneeId, displayName: input.assigneeId } : null;
     }
     return issue;
   }
   async createIssue(input: CreateIssueInput): Promise<Issue> {
     return makeIssue({ id: `created-${input.title}`, title: input.title });
   }
-  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string }) {
+  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string; labelIds?: string[] }) {
     return { id: `project-created-${input.name}`, name: input.name };
   }
-  async addProjectToInitiative() {}
   async updateProjectStatus() {}
   async createComment(input: { issueId: string; body: string; parentId?: string }) {
     this.createCommentCalls.push(input);
@@ -166,6 +164,20 @@ class FakeLinear implements LinearWriter {
     if (existing) return existing;
     return this.createLabel({ name, teamId });
   }
+  async ensureWorkspaceLabel(name: string): Promise<IssueLabel> {
+    return this.ensureLabel(name, "");
+  }
+  async ensureProjectLabel(name: string): Promise<IssueLabel> {
+    return label(name);
+  }
+  async createWorkflowState(input: { teamId: string; name: string; type: string; color: string }): Promise<WorkflowState> {
+    return { id: `state-${input.name.toLowerCase()}`, name: input.name, type: input.type as WorkflowState["type"], position: 99 };
+  }
+  async updateWorkflowState(id: string, input: { name?: string; color?: string; description?: string }): Promise<WorkflowState> {
+    return { id, name: input.name ?? id, type: "started", position: 99 };
+  }
+  async archiveWorkflowState(): Promise<void> {}
+  async updateTeamSettings(): Promise<void> {}
 }
 
 function makeConfig(): GlobalConfig {
@@ -174,7 +186,6 @@ function makeConfig(): GlobalConfig {
       test: {
         path: "/repo",
         team: "ENG",
-        initiatives: ["initiative-1"],
       },
     },
     loop: {
@@ -220,7 +231,8 @@ function makeEntry(overrides: Partial<ResolvedRepoEntry> = {}): ResolvedRepoEntr
     alias: "test",
     repoPath: "/repo",
     team: "ENG",
-    initiativeIds: ["initiative-1"],
+    apps: [],
+    appNames: [],
     baseBranch: "main",
     pr: { required: true, draft: false, ciRequired: true },
     merge: { strategy: "squash", deleteBranch: true },
@@ -372,25 +384,32 @@ describe("prepareTaskCall — project and batch stages", () => {
     expect(decision.block).toBe(true);
     expect(decision.reason).toContain("FOREMAN-PROJECT");
   });
+
+  it("appends FOREMAN-TEAM, FOREMAN-BRIEF, and FOREMAN-APPS to a roadmap item", async () => {
+    const linear = new FakeLinear([]);
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [{ agent: "foreman-roadmap", task: "Decompose the brief.\n\nFOREMAN-BRIEF: docs/prd.md\n" }],
+    };
+    const decision = await prepareTaskCall(input, makeDeps(linear, { entry: makeEntry({ appNames: ["fleet", "zero"] }) }));
+    expect(decision.block).toBeUndefined();
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(task).toContain("FOREMAN-TEAM: ENG");
+    expect(task).toContain("FOREMAN-BRIEF: docs/prd.md");
+    expect(task).toContain("FOREMAN-APPS: fleet,zero");
+  });
 });
 
 describe("prepareTaskCall — refusals", () => {
-  it("blocks on foreman:hands-off", async () => {
-    const issue = makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.handsOff)] });
-    const linear = new FakeLinear([issue]);
-    const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
-    expect(decision.block).toBe(true);
-    expect(decision.reason).toContain(FOREMAN_LABEL.handsOff);
-  });
-
-  it("blocks on foreman:blocked", async () => {
+  it("blocks when the issue is assigned to a human operator", async () => {
     const issue = makeIssue({
-      labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.blocked)],
+      labels: [label(TYPE_LABEL.feature)],
+      assignee: { id: "operator-1", name: "Ada", displayName: "Ada" },
     });
     const linear = new FakeLinear([issue]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
-    expect(decision.reason).toContain(FOREMAN_LABEL.blocked);
+    expect(decision.reason).toContain("assigned to");
   });
 
   it("blocks on a failing gate, naming the gate's reason", async () => {
@@ -402,26 +421,13 @@ describe("prepareTaskCall — refusals", () => {
     expect(decision.reason).toContain("Estimate is unset");
   });
 
-  it("blocks on ambiguous-initiative when the project belongs to more than one initiative", async () => {
-    const issue = makeIssue();
-    const linear = new FakeLinear([issue]);
-    linear.initiativesByProject.set("project-1", [
-      { id: "initiative-1", name: "Foreman" },
-      { id: "initiative-2", name: "Other" },
-    ]);
-    const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
-    expect(decision.block).toBe(true);
-    expect(decision.reason).toContain("belongs to more than one initiative");
-  });
-
   it("refuses an out-of-scope issue instead of guessing (SPEC §3.11)", async () => {
-    const issue = makeIssue();
+    const issue = makeIssue({ team: { id: "team-2", key: "OPS", name: "Operations" } });
     const linear = new FakeLinear([issue]);
-    linear.initiativesByProject.set("project-1", [{ id: "initiative-2", name: "Other" }]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBe(true);
-    expect(decision.reason).toContain("initiative-2");
-    expect(decision.reason).toContain("not bound");
+    expect(decision.reason).toContain("OPS");
+    expect(decision.reason).toContain("ENG");
   });
 
   // The server-side terminal filters cannot reach this path: an operator
@@ -461,7 +467,7 @@ describe("prepareTaskCall — refusals", () => {
     expect(allowed.block).toBeUndefined();
 
     // Implement is deliberately out of reach: a pause withholds new
-    // commitment, it does not recall what is already in Todo.
+    // commitment, it does not recall what is already in Ready.
     const forImplement = new FakeLinear([makeIssue()]);
     forImplement.statusByProject.set("project-1", paused);
     const implement = await prepareTaskCall(implementTask(), makeDeps(forImplement));
@@ -470,20 +476,18 @@ describe("prepareTaskCall — refusals", () => {
 });
 
 describe("prepareTaskCall — lock claim and markers", () => {
-  it("claims the lock exactly once per item and appends every expected FOREMAN-* line", async () => {
+  it("claims the lock exactly once per item, moves to In Progress, and appends every expected FOREMAN-* line", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
     const decision = await prepareTaskCall(implementTask(), makeDeps(linear));
     expect(decision.block).toBeUndefined();
 
-    const runningAdds = linear.updateCalls.filter((call) =>
-      call.input.addedLabelIds?.some((id) => id === label(FOREMAN_LABEL.running).id),
-    );
-    expect(runningAdds.length).toBe(1);
     // The claim assigns the issue to the credential's own Linear identity
-    // (`viewerId()`) in the same mutation as the running label — visible
-    // ownership in Linear's UI, no second round trip.
-    expect(runningAdds[0]?.input.assigneeId).toBe("bot-1");
+    // (`viewerId()`) — visible ownership in Linear's UI.
+    const assignCalls = linear.updateCalls.filter((call) => call.input.assigneeId === "bot-1");
+    expect(assignCalls.length).toBe(1);
+    const stateCalls = linear.updateCalls.filter((call) => call.input.stateId === STATE_IN_PROGRESS.id);
+    expect(stateCalls.length).toBe(1);
     expect(linear.createCommentCalls.length).toBe(1);
 
     const task = decision.input?.tasks?.[0]?.task ?? "";
@@ -491,6 +495,19 @@ describe("prepareTaskCall — lock claim and markers", () => {
     expect(task).toContain("FOREMAN-WORKTREE:");
     expect(task).toContain("FOREMAN-BRANCH:");
     expect(task).toContain("FOREMAN-BASE:");
+    expect(task).toContain(`FOREMAN-PREV-STATE: ${STATE_READY.id}`);
+  });
+
+  it("moves a refine item to Refining and records FOREMAN-PREV-STATE", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const decision = await prepareTaskCall(refineTask(), makeDeps(linear));
+    expect(decision.block).toBeUndefined();
+
+    const stateCalls = linear.updateCalls.filter((call) => call.input.stateId === STATE_REFINING.id);
+    expect(stateCalls.length).toBe(1);
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(task).toContain(`FOREMAN-PREV-STATE: ${STATE_READY.id}`);
   });
 });
 
@@ -549,10 +566,14 @@ describe("prepareTaskCall — batch unwind", () => {
     const decision = await prepareTaskCall(input, makeDeps(linear));
 
     expect(decision.block).toBe(true);
-    expect(first.labels.some((item) => item.name === FOREMAN_LABEL.running)).toBe(false);
-    expect(first.state.id).toBe(STATE_TODO.id);
+    expect(first.state.id).toBe(STATE_READY.id);
+    expect(first.assignee).toBeNull();
     expect(linear.createCommentCalls).toHaveLength(2);
-    expect(linear.updateCalls.some((call) => call.id === first.id && call.input.removedLabelIds?.includes(label(FOREMAN_LABEL.running).id) && call.input.assigneeId === null)).toBe(true);
+    expect(
+      linear.updateCalls.some(
+        (call) => call.id === first.id && call.input.stateId === STATE_READY.id && call.input.assigneeId === null,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -580,14 +601,14 @@ describe("prepareTaskCall — lock provenance", () => {
       parentId: null,
     };
     const issue = makeIssue({
-      labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)],
+      labels: [label(TYPE_LABEL.feature)],
       comments: [held],
     });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
     const decision = await prepareTaskCall(implementTask(), deps);
     expect(decision.block).toBe(true);
-    expect(decision.reason).toMatch(/foreman:running.*held/);
+    expect(decision.reason).toMatch(/Lock held.*held/);
   });
 });
 
@@ -597,18 +618,18 @@ describe("prepareTaskCall — unwindPrepared releases the live-dispatch registra
     const second = makeIssue({ id: "issue-2", identifier: "ENG-2", labels: [label(TYPE_LABEL.feature)] });
     const linear = new FakeLinear([first, second]);
 
-    // Call #1 is the initial claim in `claimLock` (must succeed so item 1
-    // prepares); call #2 is `unwindPrepared`'s rollback for that same item,
-    // which this test forces to fail — `releaseLiveDispatch` must still run
-    // for it in a `finally`, not only on a clean rollback.
-    let ensureLabelCalls = 0;
+    // Call #1 is the initial claim's assignee/state mutation (must succeed
+    // so item 1 prepares); call #2 is `unwindPrepared`'s rollback for that
+    // same item, which this test forces to fail — `releaseLiveDispatch`
+    // must still run for it in a `finally`, not only on a clean rollback.
+    let updateIssueCalls = 0;
     const flakyLinear: LinearWriter = new Proxy(linear, {
       get(target, prop, receiver) {
-        if (prop === "ensureLabel") {
-          return async (name: string, teamId: string) => {
-            ensureLabelCalls += 1;
-            if (ensureLabelCalls === 2) throw new Error("transient Linear failure during rollback");
-            return (target as FakeLinear).ensureLabel(name, teamId);
+        if (prop === "updateIssue") {
+          return async (id: string, input: IssueMutation) => {
+            updateIssueCalls += 1;
+            if (updateIssueCalls === 3) throw new Error("transient Linear failure during rollback");
+            return (target as FakeLinear).updateIssue(id, input);
           };
         }
         return Reflect.get(target, prop, receiver);
@@ -631,9 +652,9 @@ describe("prepareTaskCall — unwindPrepared releases the live-dispatch registra
 
     expect(decision.block).toBe(true);
     // The rollback's own Linear call failed (caught inside `unwindPrepared`),
-    // so `first`'s label/state were never actually reverted here — that is
-    // exactly why the id must still be dropped from the live registry: a
-    // reaper sweep, not this in-process registry, is what recovers it.
+    // so `first`'s state was never actually reverted here — that is exactly
+    // why the id must still be dropped from the live registry: a reaper
+    // sweep, not this in-process registry, is what recovers it.
     expect(released).toEqual(["foreman-implement-ENG-1-dispatch-1"]);
   });
 });

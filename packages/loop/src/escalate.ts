@@ -4,7 +4,7 @@
  * loop writes to Linear directly, because there is no agent output to validate,
  * only the loop's own exhausted counter.
  */
-import { encodeMarker, FOREMAN_LABEL, foremanLabel, MARKER_KIND } from "@foreman/core";
+import { encodeMarker, FOREMAN_STATE, MARKER_KIND, resolveState } from "@foreman/core";
 import type { BlockRecord, LinearWriter } from "@foreman/core";
 
 export type EscalationKind = "retry-exhausted" | "review-cycle-exhausted";
@@ -16,11 +16,11 @@ export interface Escalation {
   detail: string;
 }
 
-/** Applies `foreman:blocked`, clears `foreman:running`, and posts a needs-decision block marker. Returns the log line. */
+/** Moves the issue to `Blocked` and posts a needs-decision block marker. Both escalation kinds come from the build loop's retry/review-cycle counters, so they land in the implementation-stage queue, not refine's `Needs Input`. Returns the log line. */
 export async function applyEscalation(linear: LinearWriter, escalation: Escalation): Promise<string> {
   const issue = await linear.issue(escalation.issueId, { includeComments: false });
   if (!issue) return `${escalation.issueId}: escalation skipped, issue not found`;
-  if (foremanLabel(issue) === FOREMAN_LABEL.blocked) return `${escalation.issueId}: already blocked`;
+  if (issue.state.name === FOREMAN_STATE.blocked) return `${escalation.issueId}: already ${FOREMAN_STATE.blocked}`;
 
   const whatINeed =
     escalation.kind === "retry-exhausted"
@@ -41,13 +41,9 @@ export async function applyEscalation(linear: LinearWriter, escalation: Escalati
     blockedByIssues: [],
   };
 
-  const label = await linear.ensureLabel(FOREMAN_LABEL.blocked, issue.team.id);
-  const running = issue.labels.find((candidate) => candidate.name === FOREMAN_LABEL.running);
-  await linear.updateIssue(issue.id, {
-    addedLabelIds: [label.id],
-    ...(running ? { removedLabelIds: [running.id] } : {}),
-    assigneeId: null,
-  });
+  const states = await linear.workflowStates(issue.team.id);
+  const target = resolveState("blocked", states);
+  await linear.updateIssue(issue.id, { stateId: target.id, assigneeId: null });
   await linear.createComment({ issueId: issue.id, body: encodeMarker(MARKER_KIND.block, block, whatINeed) });
-  return `${escalation.issueId}: escalated to ${FOREMAN_LABEL.blocked} (${escalation.kind})`;
+  return `${escalation.issueId}: escalated to ${FOREMAN_STATE.blocked} (${escalation.kind})`;
 }

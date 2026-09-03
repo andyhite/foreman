@@ -14,7 +14,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["setup"]).command).toBe("setup");
     expect(parseArgs(["init"]).command).toBe("init");
     expect(parseArgs(["deinit"]).command).toBe("deinit");
-    expect(parseArgs(["verify"]).command).toBe("verify");
+    expect(parseArgs(["doctor"]).command).toBe("doctor");
     expect(parseArgs(["update"]).command).toBe("update");
     expect(parseArgs([]).command).toBeNull();
   });
@@ -44,12 +44,12 @@ describe("parseArgs", () => {
 
   it("rejects setup-only flags on other commands", () => {
     expect(() => parseArgs(["init", "--link"])).toThrow(/--link applies to `foreman setup`/);
-    expect(() => parseArgs(["verify", "--link"])).toThrow(/--link applies to `foreman setup`/);
+    expect(() => parseArgs(["doctor", "--link"])).toThrow(/--link applies to `foreman setup`/);
   });
 
   it("rejects init-only flags on setup", () => {
     expect(() => parseArgs(["setup", "--path", "/tmp"])).toThrow(/--path applies to `foreman init`/);
-    expect(() => parseArgs(["setup", "--initiative", "i1"])).toThrow(/--initiative applies to `foreman init`/);
+    expect(() => parseArgs(["setup", "--app", "fleet"])).toThrow(/--app applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--alias", "mine"])).toThrow(/--alias applies to `foreman init`/);
     expect(() => parseArgs(["setup", "--team", "ENG"])).toThrow(/--team applies to `foreman init`/);
   });
@@ -58,12 +58,12 @@ describe("parseArgs", () => {
    * The flags several commands share are the ones most likely to be misaimed,
    * so the error has to name every owner rather than just the first.
    */
-  it("accepts --checkout on setup, verify, and update, and rejects it elsewhere", () => {
+  it("accepts --checkout on setup, doctor, and update, and rejects it elsewhere", () => {
     expect(parseArgs(["setup", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
-    expect(parseArgs(["verify", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
+    expect(parseArgs(["doctor", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
     expect(parseArgs(["update", "--checkout", "/tmp/c"]).checkoutPath).toBe("/tmp/c");
     expect(() => parseArgs(["init", "--checkout", "/tmp/c"])).toThrow(
-      /--checkout applies to `foreman setup` or `foreman verify` or `foreman update`/,
+      /--checkout applies to `foreman setup` or `foreman doctor` or `foreman update`/,
     );
   });
 
@@ -82,10 +82,10 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["init", "--keep-registry"])).toThrow(/--keep-registry applies to `foreman deinit`/);
   });
 
-  it("parses --fix for verify only", () => {
-    expect(parseArgs(["verify"]).fix).toBe(false);
-    expect(parseArgs(["verify", "--fix"]).fix).toBe(true);
-    expect(() => parseArgs(["update", "--fix"])).toThrow(/--fix applies to `foreman verify`/);
+  it("parses --fix for doctor only", () => {
+    expect(parseArgs(["doctor"]).fix).toBe(false);
+    expect(parseArgs(["doctor", "--fix"]).fix).toBe(true);
+    expect(() => parseArgs(["update", "--fix"])).toThrow(/--fix applies to `foreman doctor`/);
   });
 
   it("parses --skip-pull for update only", () => {
@@ -93,19 +93,19 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["setup", "--skip-pull"])).toThrow(/--skip-pull applies to `foreman update`/);
   });
 
-  it("parses repeatable --initiative, --alias, and --team for init", () => {
+  it("parses repeatable --app, --alias, and --team for init", () => {
     const args = parseArgs([
       "init",
-      "--initiative",
-      "i1",
-      "--initiative",
-      "i2:apps/zero",
+      "--app",
+      "fleet",
+      "--app",
+      "zero:apps/zero",
       "--alias",
       "plotroom",
       "--team",
       "ENG",
     ]);
-    expect(args.initiatives).toEqual(["i1", "i2:apps/zero"]);
+    expect(args.apps).toEqual(["fleet", "zero:apps/zero"]);
     expect(args.alias).toBe("plotroom");
     expect(args.team).toBe("ENG");
   });
@@ -181,6 +181,6 @@ describe("foreman plan/build stubs and reconcile delegation", () => {
     expect(await proc.exited).toBe(0);
     expect(stdout).toContain("Usage: foreman <command>");
     expect(stdout).toContain("deinit");
-    expect(stdout).toContain("verify");
+    expect(stdout).toContain("doctor");
   });
 });

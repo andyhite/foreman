@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { FOREMAN_LABEL, MARKER_KIND, PRIORITY, TYPE_LABEL, decodeMarker } from "@foreman/core";
+import { MARKER_KIND, PRIORITY, TYPE_LABEL, decodeMarker } from "@foreman/core";
 import type {
   BlockRecord,
   Comment,
@@ -21,7 +21,7 @@ import type {
 import { GitHubClient } from "@foreman/core";
 import { applyBlock, applyOutcome, type ApplyDeps } from "../src/results/apply.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 2 };
 const STATE_IN_REVIEW: WorkflowState = {
   id: "state-in-review",
   name: "In Review",
@@ -29,6 +29,8 @@ const STATE_IN_REVIEW: WorkflowState = {
   position: 4,
 };
 const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 1 };
+const STATE_NEEDS_INPUT: WorkflowState = { id: "state-needs-input", name: "Needs Input", type: "unstarted", position: 5 };
+const STATE_BLOCKED: WorkflowState = { id: "state-blocked", name: "Blocked", type: "started", position: 6 };
 
 function label(name: string): IssueLabel {
   return { id: `label-${name}`, name, parentId: null };
@@ -46,8 +48,8 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)],
-    state: STATE_TODO,
+    labels: [label(TYPE_LABEL.feature)],
+    state: STATE_READY,
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Foreman" },
     parent: null,
@@ -63,6 +65,7 @@ class FakeLinear implements LinearWriter {
   issuesById = new Map<string, Issue>();
   labelsById = new Map<string, IssueLabel>();
   projectsList: { id: string; name: string }[] = [];
+  projectLabelsById = new Map<string, IssueLabel>();
   projectRecord: Project | null = null;
   teamsList: TeamRef[] = [];
   updateCalls: Array<{ id: string; input: IssueMutation }> = [];
@@ -105,20 +108,11 @@ class FakeLinear implements LinearWriter {
   async projectInitiatives() {
     return [{ id: "initiative-1", name: "Foreman" }];
   }
-  async projectInitiative() {
-    return { id: "initiative-1", name: "Foreman" };
-  }
   async initiative() {
     return null;
   }
-  async initiatives() {
-    return [];
-  }
-  async initiativeProjects() {
-    return [];
-  }
   async workflowStates(): Promise<WorkflowState[]> {
-    return [STATE_TODO, STATE_IN_REVIEW, STATE_BACKLOG];
+    return [STATE_READY, STATE_IN_REVIEW, STATE_BACKLOG, STATE_NEEDS_INPUT, STATE_BLOCKED];
   }
   async labels(): Promise<IssueLabel[]> {
     return [...this.labelsById.values()];
@@ -128,6 +122,12 @@ class FakeLinear implements LinearWriter {
   }
   async projects() {
     return this.projectsList;
+  }
+  async teamSettings() {
+    return { id: "team-1", key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
+  }
+  async projectLabels(): Promise<IssueLabel[]> {
+    return [...this.projectLabelsById.values()];
   }
   async updateIssue(id: string, input: IssueMutation): Promise<Issue> {
     this.updateCalls.push({ id, input });
@@ -142,7 +142,7 @@ class FakeLinear implements LinearWriter {
       issue.labels = issue.labels.filter((entry) => !input.removedLabelIds?.includes(entry.id));
     }
     if (input.stateId) {
-      issue.state = [STATE_TODO, STATE_IN_REVIEW, STATE_BACKLOG].find((state) => state.id === input.stateId) ?? issue.state;
+      issue.state = [STATE_READY, STATE_IN_REVIEW, STATE_BACKLOG, STATE_NEEDS_INPUT, STATE_BLOCKED].find((state) => state.id === input.stateId) ?? issue.state;
     }
     return issue;
   }
@@ -153,10 +153,9 @@ class FakeLinear implements LinearWriter {
     this.issuesById.set(created.identifier, created);
     return created;
   }
-  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string }) {
+  async createProject(input: { name: string; teamIds: string[]; description?: string; content?: string; labelIds?: string[] }) {
     return { id: `project-created-${input.name}`, name: input.name };
   }
-  async addProjectToInitiative() {}
   async updateProjectStatus(input: { projectId: string; type: string }) {
     this.updateProjectStatusCalls.push(input);
   }
@@ -183,6 +182,24 @@ class FakeLinear implements LinearWriter {
     if (existing) return existing;
     return this.createLabel({ name });
   }
+  async ensureWorkspaceLabel(name: string): Promise<IssueLabel> {
+    return this.ensureLabel(name);
+  }
+  async ensureProjectLabel(name: string): Promise<IssueLabel> {
+    const existing = [...this.projectLabelsById.values()].find((entry) => entry.name === name);
+    if (existing) return existing;
+    const created = label(name);
+    this.projectLabelsById.set(created.id, created);
+    return created;
+  }
+  async createWorkflowState(input: { teamId: string; name: string; type: string; color: string }): Promise<WorkflowState> {
+    return { id: `state-${input.name.toLowerCase()}`, name: input.name, type: input.type as WorkflowState["type"], position: 99 };
+  }
+  async updateWorkflowState(id: string, input: { name?: string; color?: string; description?: string }): Promise<WorkflowState> {
+    return { id, name: input.name ?? id, type: "started", position: 99 };
+  }
+  async archiveWorkflowState(): Promise<void> {}
+  async updateTeamSettings(): Promise<void> {}
 }
 
 function makeDeps(linear: FakeLinear, entry?: Pick<ResolvedRepoEntry, "team" | "repoPath" | "branchPattern">, operatorUserId: string | null = null): ApplyDeps {
@@ -195,6 +212,7 @@ function makeTriageItem(overrides: Partial<TriageResult["items"][number]> = {}):
     items: [
       {
         issueId: "ENG-1",
+        app: null,
         type: TYPE_LABEL.feature,
         proposedPriority: PRIORITY.Medium,
         severityReasoning: "Seems fine.",
@@ -270,7 +288,7 @@ describe("applyOutcome — triage", () => {
     expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);
   });
 
-  it("cancel: leaves state untouched, applies foreman:blocked, writes a block marker", async () => {
+  it("cancel: moves to Needs Input, writes a block marker", async () => {
     const issue = makeIssue({ state: { id: "state-triage", name: "Triage", type: "triage", position: 0 } });
     const linear = new FakeLinear([issue]);
     await applyOutcome(makeDeps(linear), {
@@ -280,10 +298,7 @@ describe("applyOutcome — triage", () => {
     });
 
     expect(linear.commentCalls.length).toBe(1);
-    const addedLabelIds = linear.updateCalls.flatMap((call) => call.input.addedLabelIds ?? []);
-    const addedNames = addedLabelIds.map((id) => [...linear.labelsById.values()].find((l) => l.id === id)?.name);
-    expect(addedNames).toContain(FOREMAN_LABEL.blocked);
-    expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(false);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_NEEDS_INPUT.id)).toBe(true);
     // No operator configured: nothing to assign.
     expect(linear.updateCalls.some((call) => call.input.assigneeId !== undefined)).toBe(false);
   });
@@ -302,7 +317,7 @@ describe("applyOutcome — triage", () => {
 });
 
 describe("applyOutcome — refine", () => {
-  it("removes the foreman:running label and clears the assignee after a successful refine", async () => {
+  it("clears the assignee after a successful refine", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
     await applyOutcome(makeDeps(linear), {
@@ -310,7 +325,6 @@ describe("applyOutcome — refine", () => {
       agent: "foreman-refine",
       result: makeRefineResult({ readyForImplementation: false }),
     });
-    expect(issue.labels.some((l) => l.name === FOREMAN_LABEL.running)).toBe(false);
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
   });
 
@@ -358,34 +372,32 @@ describe("applyOutcome — refine", () => {
 });
 
 describe("applyBlock — dependency (Case A)", () => {
-  it("applies no foreman:blocked label but does create the relation, move to Todo, and release with no operator assignment", async () => {
+  it("creates the relation, moves to Ready, and releases with no operator assignment", async () => {
     const issue = makeIssue({ state: STATE_IN_REVIEW });
     const blocker = makeIssue({ id: "issue-2", identifier: "ENG-2" });
     const linear = new FakeLinear([issue, blocker]);
-    await applyBlock(makeDeps(linear, undefined, "operator-1"), "ENG-1", makeBlockRecord({ type: "dependency", blockedByIssues: ["ENG-2"] }));
+    await applyBlock(
+      makeDeps(linear, undefined, "operator-1"),
+      "ENG-1",
+      makeBlockRecord({ type: "dependency", blockedByIssues: ["ENG-2"] }),
+      "foreman-implement",
+    );
 
     expect(linear.relationCalls).toEqual([{ issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" }]);
-    const blockedLabelAdds = linear.updateCalls.filter((call) =>
-      call.input.addedLabelIds?.some((id) => [...linear.labelsById.values()].find((l) => l.id === id)?.name === FOREMAN_LABEL.blocked),
-    );
-    expect(blockedLabelAdds.length).toBe(0);
-    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_TODO.id)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_READY.id)).toBe(true);
     // Case A needs no human — the relation is the state, so releaseLock's
     // default clears the assignee even with an operator configured.
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
   });
 });
 
-describe("applyBlock — needs-decision (Case B)", () => {
-  it("applies the foreman:blocked label and returns to Todo when the issue was In Progress", async () => {
+describe("applyBlock — needs-decision (Case B), refine stage", () => {
+  it("moves the issue to Needs Input and releases the lock unassigned when no operator is configured", async () => {
     const issue = makeIssue({ state: STATE_IN_REVIEW });
     const linear = new FakeLinear([issue]);
-    await applyBlock(makeDeps(linear), "ENG-1", makeBlockRecord({ type: "needs-decision" }));
+    await applyBlock(makeDeps(linear), "ENG-1", makeBlockRecord({ type: "needs-decision" }), "foreman-refine");
 
-    const addedLabelIds = linear.updateCalls.flatMap((call) => call.input.addedLabelIds ?? []);
-    const addedNames = addedLabelIds.map((id) => [...linear.labelsById.values()].find((l) => l.id === id)?.name);
-    expect(addedNames).toContain(FOREMAN_LABEL.blocked);
-    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_TODO.id)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_NEEDS_INPUT.id)).toBe(true);
     // No operator configured: releases to unassigned.
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
   });
@@ -393,11 +405,31 @@ describe("applyBlock — needs-decision (Case B)", () => {
   it("assigns the issue to the configured operator instead of clearing it", async () => {
     const issue = makeIssue({ state: STATE_IN_REVIEW });
     const linear = new FakeLinear([issue]);
-    await applyBlock(makeDeps(linear, undefined, "operator-1"), "ENG-1", makeBlockRecord({ type: "needs-decision" }));
+    await applyBlock(makeDeps(linear, undefined, "operator-1"), "ENG-1", makeBlockRecord({ type: "needs-decision" }), "foreman-refine");
 
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === "operator-1")).toBe(true);
   });
 });
+
+describe("applyBlock — needs-decision (Case B), implementation stage", () => {
+  it("moves an implement-stage block to Blocked, not Needs Input", async () => {
+    const issue = makeIssue({ state: STATE_IN_REVIEW });
+    const linear = new FakeLinear([issue]);
+    await applyBlock(makeDeps(linear), "ENG-1", makeBlockRecord({ type: "needs-decision" }), "foreman-implement");
+
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BLOCKED.id)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_NEEDS_INPUT.id)).toBe(false);
+  });
+
+  it("moves a review-stage block to Blocked, not Needs Input", async () => {
+    const issue = makeIssue({ state: STATE_IN_REVIEW });
+    const linear = new FakeLinear([issue]);
+    await applyBlock(makeDeps(linear), "ENG-1", makeBlockRecord({ type: "needs-decision" }), "foreman-review");
+
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BLOCKED.id)).toBe(true);
+  });
+});
+
 
 describe("applyOutcome — implement", () => {
   it("files each discoveredWork item", async () => {
@@ -439,11 +471,10 @@ describe("applyOutcome — review", () => {
     const decoded = decodeMarker<ReviewResult>(MARKER_KIND.review, linear.commentCalls[0]?.body ?? "");
     expect(decoded?.reviewedSha).toBe("sha-clean");
     expect(linear.updateCalls.some((call) => call.input.stateId !== undefined)).toBe(false);
-    expect(issue.labels.some((l) => l.name === FOREMAN_LABEL.running)).toBe(false);
     expect(linear.updateCalls.some((call) => call.id === issue.id && call.input.assigneeId === null)).toBe(true);
   });
 
-  it("moves the issue to Todo and releases the lock when a finding is blocking", async () => {
+  it("moves the issue to Ready and releases the lock when a finding is blocking", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
     await applyOutcome(makeDeps(linear), {
@@ -459,8 +490,7 @@ describe("applyOutcome — review", () => {
     expect(linear.commentCalls.length).toBe(1);
     const decoded = decodeMarker<ReviewResult>(MARKER_KIND.review, linear.commentCalls[0]?.body ?? "");
     expect(decoded?.reviewedSha).toBe("sha-blocking");
-    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_TODO.id)).toBe(true);
-    expect(issue.labels.some((l) => l.name === FOREMAN_LABEL.running)).toBe(false);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_READY.id)).toBe(true);
   });
 });
 
@@ -585,6 +615,7 @@ function makePlanResult(overrides: Partial<PlanResult> = {}): PlanResult {
     proposedIssues: [
       {
         key: "search-index",
+        app: null,
         title: "Wire the search index",
         type: TYPE_LABEL.feature,
         description: "## Context\nBuild the index.",
@@ -656,6 +687,7 @@ describe("applyOutcome — plan", () => {
             key: "schema",
             title: "Define schema",
             type: TYPE_LABEL.feature,
+            app: null,
             description: "## Context\nSchema.",
             acceptanceCriteria: ["Schema exists"],
             proposedPriority: PRIORITY.Medium,
@@ -666,6 +698,7 @@ describe("applyOutcome — plan", () => {
             key: "api",
             title: "Build the API",
             type: TYPE_LABEL.feature,
+            app: null,
             description: "## Context\nAPI.",
             acceptanceCriteria: ["API responds"],
             proposedPriority: PRIORITY.Medium,
@@ -676,6 +709,7 @@ describe("applyOutcome — plan", () => {
             key: "ui",
             title: "Build the UI",
             type: TYPE_LABEL.feature,
+            app: null,
             description: "## Context\nUI.",
             acceptanceCriteria: ["UI renders"],
             proposedPriority: PRIORITY.Medium,
@@ -745,6 +779,58 @@ describe("applyOutcome — plan", () => {
     await expect(
       applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), { kind: "result", agent: "foreman-plan", result: makePlanResult() }),
     ).rejects.toThrow("unknown project");
+  });
+
+  it("resolves a proposedIssue's app to an existing workspace label id", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.labelsById.set("label-app-fleet", { id: "label-app-fleet", name: "app:fleet", parentId: null });
+    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+      kind: "result",
+      agent: "foreman-plan",
+      result: makePlanResult({ proposedIssues: [{ ...makePlanResult().proposedIssues[0]!, app: "fleet" }] }),
+    });
+
+    const call = linear.createIssueCalls[0];
+    expect(call?.labelIds).toContain("label-app-fleet");
+  });
+
+  it("reports an unknown app as a non-fatal problem and still creates the issue", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }),
+      {
+        kind: "result",
+        agent: "foreman-plan",
+        result: makePlanResult({ proposedIssues: [{ ...makePlanResult().proposedIssues[0]!, app: "ghost" }] }),
+      },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.createIssueCalls).toHaveLength(1);
+    expect(notices.some((notice) => notice.message.includes('unknown app "ghost"; applied no app label'))).toBe(true);
   });
 
   it("a blocked plan outcome with no issueId is a documented no-op, not a throw", async () => {

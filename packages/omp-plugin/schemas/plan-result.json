@@ -47,7 +47,8 @@
                   "description",
                   "acceptanceCriteria",
                   "proposedPriority",
-                  "proposedEstimate"
+                  "proposedEstimate",
+                  "app"
                 ],
                 "properties": {
                   "key": {
@@ -156,6 +157,18 @@
                             "type": "number"
                           }
                         ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "app": {
+                    "description": "App this issue belongs to, matching one of the repo's configured apps (the FOREMAN-APPS marker lists them). Null when the repo has no apps or the issue spans all of them.",
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "type": "string"
                       },
                       {
                         "type": "null"

@@ -1,11 +1,19 @@
-import { activateRepoPlugin, repoPluginLinkPath, writeGlobalPluginLink } from "@foreman/core";
+import {
+  activateRepoPlugin,
+  groupDisplayName,
+  MANAGED_LABEL_GROUP_PREFIXES,
+  MANAGED_LABELS,
+  MANAGED_STATES,
+  repoPluginLinkPath,
+  writeGlobalPluginLink,
+} from "@foreman/core";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
 import { writeGlobalConfig, writeLinearApiKeyFile } from "../src/global-config.ts";
-import { runVerify, type DoctorOptions } from "../src/verify.ts";
+import { runDoctor, type DoctorOptions } from "../src/doctor.ts";
 
 /** Always reports every probed binary as present, so tool checks never fail a test by accident. */
 class FakeRunner implements Runner {
@@ -28,6 +36,68 @@ class FakeRunner implements Runner {
   }
 }
 
+/** A `WorkspaceLabels` response reporting every managed group and member already present. */
+function existingWorkspaceLabelsResponse(): Response {
+  const nodes: Array<{ id: string; name: string; isGroup: boolean; parent: { id: string; name: string } | null }> = [];
+  for (const prefix of MANAGED_LABEL_GROUP_PREFIXES) {
+    const groupName = groupDisplayName(prefix);
+    nodes.push({ id: `group-${groupName}`, name: groupName, isGroup: true, parent: null });
+  }
+  for (const id of MANAGED_LABELS) {
+    const [prefix, child] = id.split(":") as [string, string];
+    const groupName = groupDisplayName(`${prefix}:`);
+    const childName = child
+      .split("-")
+      .map((word) => word[0]!.toUpperCase() + word.slice(1))
+      .join(" ");
+    nodes.push({ id: `label-${id}`, name: childName, isGroup: false, parent: { id: `group-${groupName}`, name: groupName } });
+  }
+  return new Response(JSON.stringify({ data: { issueLabels: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }));
+}
+
+/**
+ * Answers every `checkProvisioning` query as fully healthy for team `ENG`:
+ * every managed workspace label present, triage on/cycles off, every
+ * `MANAGED_STATES` name present, no `app:*` labels expected. Tests that
+ * register a repo use team `ENG` so this single mock covers them all.
+ */
+function fullyProvisionedFetch(): typeof fetch {
+  return (async (_url: string | URL | Request, init?: RequestInit) => {
+    const query = JSON.parse(String(init?.body ?? "{}")).query as string;
+    if (query.includes("query WorkspaceLabels")) return existingWorkspaceLabelsResponse();
+    if (query.includes("query Teams")) {
+      return new Response(
+        JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+      );
+    }
+    if (query.includes("query TeamSettings")) {
+      return new Response(
+        JSON.stringify({
+          data: {
+            team: {
+              id: "t1",
+              key: "ENG",
+              name: "Engineering",
+              triageEnabled: true,
+              cyclesEnabled: false,
+              triageIssueState: { id: "triage-1", name: "Triage", type: "triage", position: 0 },
+            },
+          },
+        }),
+      );
+    }
+    if (query.includes("query TeamWorkflowStates")) {
+      const nodes: Array<{ id: string; name: string; type: string; position: number; color: string; description: string | null }> = MANAGED_STATES.map((spec, index) => ({ id: `state-${index}`, name: spec.name, type: spec.type, position: spec.position, color: spec.color, description: spec.description }));
+      nodes.push({ id: "state-duplicate", name: "Duplicate", type: "duplicate", position: 8, color: "#95a2b3", description: null });
+      return new Response(JSON.stringify({ data: { team: { states: { nodes } } } }));
+    }
+    if (query.includes("query ProjectLabels")) {
+      return new Response(JSON.stringify({ data: { projectLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+    }
+    throw new Error(`unexpected query in verify.test.ts fetch mock: ${query}`);
+  }) as unknown as typeof fetch;
+}
+
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
@@ -35,7 +105,7 @@ function makeTempDir(prefix: string): string {
 /**
  * A temp home that already has a Linear credential configured.
  *
- * Every case below is about plugin activation, but `runVerify` also reports a
+ * Every case below is about plugin activation, but `runDoctor` also reports a
  * missing credential as a problem — so a home without one can never return 0
  * and the activation assertions would be measuring the wrong thing. Seeding it
  * here keeps each test's exit code attributable to what that test changed.
@@ -47,18 +117,25 @@ function makeHome(): string {
 }
 
 /*
- * `runVerify` reads `$LINEAR_API_KEY`, so an ambient key in the developer's
+ * `runDoctor` reads `$LINEAR_API_KEY`, so an ambient key in the developer's
  * shell would satisfy the credential check and hide a regression that CI —
  * where the variable is unset — would catch. Drop it for this file and put it
  * back afterwards, so the suite does not leak the change into other files.
+ *
+ * `checkProvisioning` now hits the Linear API on every `runDoctor` call once
+ * a credential resolves, so `fetch` is stubbed here too — real network calls
+ * are never exercised by this suite.
  */
 const ambientApiKey = process.env.LINEAR_API_KEY;
+const originalFetch = globalThis.fetch;
 beforeAll(() => {
   delete process.env.LINEAR_API_KEY;
+  globalThis.fetch = fullyProvisionedFetch();
 });
 afterAll(() => {
   if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
   else process.env.LINEAR_API_KEY = ambientApiKey;
+  globalThis.fetch = originalFetch;
 });
 
 /** Builds a fixture checkout: `<checkoutRoot>/packages/omp-plugin` with a package.json. */
@@ -84,14 +161,14 @@ function cleanup(...dirs: string[]): void {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 }
 
-describe("runVerify", () => {
+describe("runDoctor", () => {
   it("returns 0 when the machine is fully healthy and nothing is registered", async () => {
     const home = makeHome();
     const checkoutRoot = makeFixtureCheckout();
     writeGlobalPluginLink(checkoutRoot, home);
     const log: string[] = [];
 
-    const code = await runVerify(baseOptions(home, { checkoutRoot }), { runner: new FakeRunner(), log: (m) => log.push(m) });
+    const code = await runDoctor(baseOptions(home, { checkoutRoot }), { runner: new FakeRunner(), log: (m) => log.push(m) });
 
     expect(code).toBe(0);
     cleanup(home, checkoutRoot);
@@ -102,10 +179,10 @@ describe("runVerify", () => {
     const checkoutRoot = makeFixtureCheckout();
     const deps = { runner: new FakeRunner(), log: () => {} };
 
-    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot);
@@ -128,10 +205,10 @@ describe("runVerify", () => {
     );
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot);
@@ -143,15 +220,15 @@ describe("runVerify", () => {
     writeGlobalPluginLink(checkoutRoot, home);
     const repoRoot = makeGitRepo();
     activateRepoPlugin(repoRoot, home);
-    writeGlobalConfig({ repos: { fixture: { path: repoRoot, initiatives: ["INIT-1"] } } }, home);
+    writeGlobalConfig({ repos: { fixture: { path: repoRoot, team: "ENG" } } }, home);
 
     unlinkSync(repoPluginLinkPath(repoRoot));
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const before = await runVerify(baseOptions(home, { checkoutRoot }), deps);
+    const before = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
     expect(before).toBe(1);
 
-    const after = await runVerify(baseOptions(home, { checkoutRoot, fix: true }), deps);
+    const after = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
     expect(after).toBe(0);
 
     cleanup(home, checkoutRoot, repoRoot);
@@ -162,10 +239,10 @@ describe("runVerify", () => {
     const checkoutRoot = makeFixtureCheckout();
     writeGlobalPluginLink(checkoutRoot, home);
     const goneRoot = join(makeTempDir("foreman-doctor-gone-"), "does-not-exist");
-    writeGlobalConfig({ repos: { gone: { path: goneRoot, initiatives: ["INIT-1"] } } }, home);
+    writeGlobalConfig({ repos: { gone: { path: goneRoot, team: "ENG" } } }, home);
 
     const deps = { runner: new FakeRunner(), log: () => {} };
-    const code = await runVerify(baseOptions(home, { checkoutRoot }), deps);
+    const code = await runDoctor(baseOptions(home, { checkoutRoot }), deps);
 
     expect(code).toBe(1);
     cleanup(home, checkoutRoot);
@@ -176,7 +253,7 @@ describe("runVerify", () => {
     const checkoutRoot = makeFixtureCheckout();
     writeGlobalPluginLink(checkoutRoot, home);
 
-    const code = await runVerify(baseOptions(home, { checkoutRoot }), {
+    const code = await runDoctor(baseOptions(home, { checkoutRoot }), {
       runner: new FakeRunner(),
       log: () => {},
     });

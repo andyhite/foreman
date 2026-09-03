@@ -70,10 +70,8 @@ function makeTempHome(): string {
 function writeConfig(home: string, repos: Record<string, { path: string }>): void {
   const configDir = join(home, ".foreman");
   mkdirSync(configDir, { recursive: true });
-  const withInitiatives = Object.fromEntries(
-    Object.entries(repos).map(([alias, repo]) => [alias, { ...repo, initiatives: [`i-${alias}`] }]),
-  );
-  writeFileSync(join(configDir, "config.json"), JSON.stringify({ repos: withInitiatives }));
+  const withTeams = Object.fromEntries(Object.entries(repos).map(([alias, repo]) => [alias, { ...repo, team: alias.toUpperCase() }]));
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ repos: withTeams }));
 }
 
 function baseOptions(overrides: Partial<UpdateOptions>, home: string, checkoutRoot: string): UpdateOptions {

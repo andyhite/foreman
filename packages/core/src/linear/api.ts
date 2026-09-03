@@ -24,6 +24,7 @@ import type {
   ProjectStatus,
   ProjectStatusType,
   TeamRef,
+  TeamSettings,
   UserRef,
   WorkflowState,
 } from "./types.ts";
@@ -61,34 +62,30 @@ export interface LinearReader {
   /** The project and its attached documents, including `Context`. */
   project(projectId: string): Promise<Project | null>;
   /**
-   * Every initiative a project belongs to, unfiltered. A gate counts these to
-   * report `ambiguous-initiative` instead of throwing (SPEC §10).
+   * Every initiative a project belongs to, unfiltered. Consulted only for the
+   * optional initiative context folded into the plan/roadmap context digest —
+   * never a routing input.
    */
   projectInitiatives(projectId: string): Promise<InitiativeRef[]>;
-  /** The single initiative a project belongs to. Throws when zero or more than one is found. */
-  projectInitiative(projectId: string): Promise<InitiativeRef>;
   /** An initiative and its attached documents, by id. Null when absent. */
   initiative(initiativeId: string): Promise<Initiative | null>;
-  /** Every initiative in the workspace — the setup wizard's picker. */
-  initiatives(): Promise<InitiativeRef[]>;
-  /**
-   * Every project attached to an initiative — the ensure pass's existence
-   * check (SPEC §3.11). `Initiative.projects` is a direct edge, so this is one
-   * query, not a scan of `projects()` filtered by membership.
-   */
-  initiativeProjects(initiativeId: string): Promise<ProjectRef[]>;
-  /** A project's current native status (`backlog`/`planned`/.../`canceled`). Null when the project itself is absent. */
-  projectStatus(projectId: string): Promise<ProjectStatus | null>;
   /**
    * A project's dependency edges (SPEC §4.10a), both directions, merged and
    * reoriented so `anchor`/`otherAnchor` read from the queried project.
    * Empty when the project is absent or carries none.
    */
   projectRelations(projectId: string): Promise<ProjectRelation[]>;
+  /** A project's current native status (`backlog`/`planned`/.../`canceled`). Null when the project itself is absent. */
+  projectStatus(projectId: string): Promise<ProjectStatus | null>;
   workflowStates(teamId: string): Promise<WorkflowState[]>;
   labels(teamId?: string): Promise<IssueLabel[]>;
   teams(): Promise<TeamRef[]>;
-  projects(): Promise<ProjectRef[]>;
+  /** A team's projects (SPEC §4 team-per-repo scope). */
+  projects(teamKey: string): Promise<ProjectRef[]>;
+  /** Team settings that provisioning reads and asserts. */
+  teamSettings(teamId: string): Promise<TeamSettings>;
+  /** Workspace project labels, canonical colon-form ids. */
+  projectLabels(): Promise<IssueLabel[]>;
   /** The Linear user id the API key belongs to. Used to bind marker trust to the credential's own authorship. */
   viewerId(): Promise<string>;
   /** Resolves an operator's account by email — the setup wizard's `linear.operatorUserId` lookup. Null when no user has that email. */
@@ -127,9 +124,8 @@ export interface LinearWriter extends LinearReader {
   createIssue(input: CreateIssueInput): Promise<Issue>;
   /**
    * `teamIds` is required, not optional: Linear's `ProjectCreateInput` declares
-   * exactly two non-null fields, `name` and `teamIds` (SPEC §16 item 10,
-   * measured). This is why §3.11 says the ensure pass creates `Maintenance`
-   * "team-assigned" — the API permits nothing else.
+   * exactly two non-null fields, `name` and `teamIds` (measured). `labelIds`
+   * carries the project's `app:` label, resolved by the caller.
    */
   createProject(input: {
     name: string;
@@ -139,16 +135,8 @@ export interface LinearWriter extends LinearReader {
     /** `TimelessDate` (`YYYY-MM-DD`). Linear rejects a timestamp here. */
     startDate?: string;
     targetDate?: string;
+    labelIds?: LinearId[];
   }): Promise<ProjectRef>;
-  /**
-   * Attaches an existing project to an initiative.
-   *
-   * A separate mutation because `ProjectCreateInput` has no `initiativeId`
-   * field at all (SPEC §16 item 10, measured) — creating a project under an
-   * initiative is unavoidably two calls, so a caller that needs both must
-   * handle the window between them.
-   */
-  addProjectToInitiative(input: { projectId: LinearId; initiativeId: LinearId }): Promise<void>;
   /**
    * Advances a project's native status by semantic `type`, not a raw id —
    * callers never see `statusId`s, which are workspace-specific and would
@@ -189,8 +177,28 @@ export interface LinearWriter extends LinearReader {
     color?: string;
     description?: string;
   }): Promise<IssueLabel>;
-  /** Resolve a label name to its id, creating it when absent. */
-  ensureLabel(name: string, teamId: LinearId): Promise<IssueLabel>;
+  /** Resolve a team-scoped label name to its id, creating it (with `opts`, when given) when absent. */
+  ensureLabel(name: string, teamId: LinearId, opts?: { color?: string; description?: string }): Promise<IssueLabel>;
+  /** Workspace-level issue label (`teamId` omitted), creating its parent group on demand. */
+  ensureWorkspaceLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel>;
+  /** Workspace-level project label; creates the parent group on demand, like `ensureLabel`. */
+  ensureProjectLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel>;
+  createWorkflowState(input: {
+    teamId: LinearId;
+    name: string;
+    type: string;
+    color: string;
+    description?: string;
+    position?: number;
+  }): Promise<WorkflowState>;
+  /** `type` is immutable after creation and cannot be updated (SPEC: `WorkflowStateUpdateInput` has no `type`). */
+  updateWorkflowState(
+    id: LinearId,
+    input: { name?: string; color?: string; description?: string; position?: number },
+  ): Promise<WorkflowState>;
+  /** Only succeeds when every issue in the state has already been archived. */
+  archiveWorkflowState(id: LinearId): Promise<void>;
+  updateTeamSettings(teamId: LinearId, input: { triageEnabled?: boolean; cyclesEnabled?: boolean }): Promise<void>;
 }
 
 export class LinearApiError extends Error {

@@ -4,7 +4,7 @@
 
 MUST change before merge. Any outstanding `blocking` fails the review gate;
 zero must remain. Each costs one of the review→fix cycles the `foreman
-build` loop counts before it applies `foreman:blocked` with a
+build` loop counts before it moves the issue to Needs Input with a
 needs-decision block record once `loop.reviewCycleCap` is reached. Reserve
 for: a failed acceptance criterion, a Definition of Done violation, a
 correctness bug, a test that would not catch the regression it claims to

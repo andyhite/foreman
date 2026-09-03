@@ -17,9 +17,10 @@ labels, relations.
 
 ## Gate
 
-Implementation gate MUST hold: refinement gate satisfied, issue in Todo,
-no `foreman:*` label, no incomplete `blocked by` relation. Fails → do not
-dispatch; tell the operator which predicate failed.
+Implementation gate MUST hold: refinement gate satisfied, issue in Ready,
+unassigned or assigned only to the dispatching credential, no incomplete
+`blocked by` relation. Fails → do not dispatch; tell the operator which
+predicate failed.
 
 ## Dispatch
 
@@ -28,13 +29,13 @@ One `task` call, one `tasks[]` entry, `agent: foreman-implement`. Task text:
 and the two-layer `Context` digest (product `Context` doc + project brief,
 Definition of Done included).
 
-Before the spawn the extension claims the `foreman:running` lock, creates or
-reuses the worktree, moves the issue to In Progress, and appends
-`FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and `FOREMAN-BASE`
-lines to the task text. You add none of these yourself.
+Before the spawn the extension claims the lock (an issue comment, not a
+label), creates or reuses the worktree, moves the issue to In Progress, and
+appends `FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and
+`FOREMAN-BASE` lines to the task text. You add none of these yourself.
 
 ## After
 
 `ImplementResult` → extension moves the issue to In Review, releases the
 lock, files `discoveredWork` as Backlog issues. `BlockRecord` → extension
-labels and parks the issue. Nothing else changes state.
+moves the issue to Needs Input and parks it. Nothing else changes state.

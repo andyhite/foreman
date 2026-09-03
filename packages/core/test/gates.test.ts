@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { implementationGate, refinementGate, reviewGate } from "../src/gates/index.ts";
 import type { ReviewGateInput } from "../src/gates/review.ts";
-import { FOREMAN_LABEL, TYPE_LABEL } from "../src/domain/labels.ts";
+import { TYPE_LABEL } from "../src/domain/labels.ts";
 import { PRIORITY } from "../src/domain/priority.ts";
 import type { Issue, IssueLabel, IssueRelation, WorkflowState } from "../src/linear/types.ts";
 import type { ReviewResult } from "../src/schemas/review.ts";
 
-const STATE_TODO: WorkflowState = { id: "state-todo", name: "Todo", type: "unstarted", position: 2 };
+const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 2 };
 const STATE_STARTED: WorkflowState = {
   id: "state-started",
   name: "In Progress",
@@ -51,7 +51,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     branchName: "eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    state: STATE_TODO,
+    state: STATE_READY,
     labels: [label(TYPE_LABEL.feature)],
     team: { id: "team-1", key: "ENG", name: "Engineering" },
     project: { id: "project-1", name: "Milestone" },
@@ -110,11 +110,6 @@ describe("refinementGate", () => {
     expect(result.failures.map((f) => f.code)).toContain("estimate-too-large");
   });
 
-  it("fails missing-project when the issue has no project", () => {
-    const result = refinementGate(makeIssue({ project: null }));
-    expect(result.failures.map((f) => f.code)).toContain("missing-project");
-  });
-
   // The gate is what catches the operator-invoked path: `/foreman:refine
   // ENG-1` never passes through a saved view, so the server-side terminal
   // exclusion cannot help there (SPEC §4.2a).
@@ -126,60 +121,65 @@ describe("refinementGate", () => {
     }
   });
 
-  it("passes a non-terminal state that is not Todo", () => {
+  it("passes a non-terminal state that is not Ready", () => {
     expect(refinementGate(makeIssue({ state: STATE_STARTED })).ok).toBe(true);
   });
 });
 
 describe("implementationGate", () => {
+  const viewerId = "viewer-1";
+
   it("passes a dispatch-ready issue", () => {
-    const result = implementationGate(makeIssue());
+    const result = implementationGate(makeIssue(), viewerId);
     expect(result.ok).toBe(true);
   });
 
   it("folds refinement failures in", () => {
-    const result = implementationGate(makeIssue({ estimate: null }));
+    const result = implementationGate(makeIssue({ estimate: null }), viewerId);
     expect(result.failures.map((f) => f.code)).toContain("missing-estimate");
   });
 
-  it("passes a Todo issue with no foreman:* label", () => {
-    const result = implementationGate(makeIssue({ labels: [label(TYPE_LABEL.feature)] }));
+  it("passes a Ready issue unassigned", () => {
+    const result = implementationGate(makeIssue({ labels: [label(TYPE_LABEL.feature)] }), viewerId);
     expect(result.ok).toBe(true);
   });
 
-  it("fails foreman-label when the issue carries foreman:blocked", () => {
+  it("passes a Ready issue assigned to the dispatching credential itself", () => {
     const result = implementationGate(
-      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.blocked)] }),
+      makeIssue({ labels: [label(TYPE_LABEL.feature)], assignee: { id: viewerId, name: "Foreman", displayName: "Foreman" } }),
+      viewerId,
     );
-    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
+    expect(result.ok).toBe(true);
   });
 
-  it("fails foreman-label when the issue carries foreman:running", () => {
+  it("fails hands-off when the issue is assigned to a human operator", () => {
     const result = implementationGate(
-      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.running)] }),
+      makeIssue({
+        labels: [label(TYPE_LABEL.feature)],
+        assignee: { id: "operator-1", name: "Ada", displayName: "Ada" },
+      }),
+      viewerId,
     );
-    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
+    expect(result.failures.map((f) => f.code)).toContain("hands-off");
   });
 
-  it("fails foreman-label when the issue carries foreman:hands-off", () => {
-    const result = implementationGate(
-      makeIssue({ labels: [label(TYPE_LABEL.feature), label(FOREMAN_LABEL.handsOff)] }),
-    );
-    expect(result.failures.map((f) => f.code)).toContain("foreman-label");
+  it("fails missing-type-label when the issue has no type: label", () => {
+    const result = implementationGate(makeIssue({ labels: [] }), viewerId);
+    expect(result.failures.map((f) => f.code)).toContain("missing-type-label");
   });
 
-  it("fails not-in-todo for a Backlog issue", () => {
-    const result = implementationGate(makeIssue({ state: STATE_BACKLOG }));
-    expect(result.failures.map((f) => f.code)).toContain("not-in-todo");
+  it("fails wrong-state for a Backlog issue", () => {
+    const result = implementationGate(makeIssue({ state: STATE_BACKLOG }), viewerId);
+    expect(result.failures.map((f) => f.code)).toContain("wrong-state");
   });
 
   it("fails incomplete-blockers for a blocker still in progress", () => {
-    const result = implementationGate(makeIssue({ relations: [blockingRelation("started")] }));
+    const result = implementationGate(makeIssue({ relations: [blockingRelation("started")] }), viewerId);
     expect(result.failures.map((f) => f.code)).toContain("incomplete-blockers");
   });
 
   it("passes when the blocker is completed", () => {
-    const result = implementationGate(makeIssue({ relations: [blockingRelation("completed")] }));
+    const result = implementationGate(makeIssue({ relations: [blockingRelation("completed")] }), viewerId);
     expect(result.ok).toBe(true);
   });
 });

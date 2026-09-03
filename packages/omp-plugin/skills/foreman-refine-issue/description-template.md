@@ -16,7 +16,7 @@ The extension renders the stored body:
 <explicit non-goals — prevents implement-time scope creep>
 
 ## Open Questions
-<empty at Todo; anything here means it isn't refined>
+<empty at Ready; anything here means it isn't refined>
 ```
 
 You return the parts; the extension assembles them in exactly this order:

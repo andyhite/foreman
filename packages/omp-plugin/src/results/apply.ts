@@ -11,6 +11,8 @@ import type {
   GitHubClient,
   Issue,
   ImplementResult,
+  IssueLabel,
+  LinearId,
   LinearWriter,
   PlanResult,
   RefineResult,
@@ -23,16 +25,18 @@ import type {
   TriageResult,
 } from "@foreman/core";
 import {
+  appLabelId,
   applyRoadmap,
   branchNameFor,
   encodeMarker,
-  FOREMAN_LABEL,
   MARKER_KIND,
   resolveState,
   resolveTeamKey,
   sanitizeAgentText,
   stripControlChars,
   TYPE_LABEL,
+  TYPE_LABEL_COLOR,
+  type TypeLabel,
 } from "@foreman/core";
 import {
   renderBlockComment,
@@ -98,13 +102,9 @@ export interface ApplyDeps {
 }
 
 
-/** Releases the running-label lock; `assigneeId` sets the final owner in the same mutation (`null` clears it, the default). */
+/** Clears the lock; `assigneeId` sets the final owner in the same mutation (`null` clears it, the default). */
 async function releaseLock(deps: ApplyDeps, issue: Issue, assigneeId: string | null = null): Promise<void> {
-  const runningLabel = issue.labels.find((label) => label.name === FOREMAN_LABEL.running);
-  await deps.linear.updateIssue(issue.id, {
-    assigneeId,
-    ...(runningLabel ? { removedLabelIds: [runningLabel.id] } : {}),
-  });
+  await deps.linear.updateIssue(issue.id, { assigneeId });
 }
 
 async function moveToState(deps: ApplyDeps, issue: Issue, stateKey: Parameters<typeof resolveState>[0]): Promise<void> {
@@ -126,18 +126,54 @@ async function backlogStateId(deps: ApplyDeps, teamId: string): Promise<string> 
   return resolveState("backlog", states).id;
 }
 
+/** Per-apply memoization for the workspace/project label lists app resolution reads. */
+interface AppLabelCache {
+  issueLabels: Promise<IssueLabel[]> | null;
+  projectLabels: Promise<IssueLabel[]> | null;
+}
+
+function newAppLabelCache(): AppLabelCache {
+  return { issueLabels: null, projectLabels: null };
+}
+
+/**
+ * Resolves `app:<name>`'s issue-label id by lookup only, memoized per apply
+ * call — an app name is agent-supplied, so it is never created here, only
+ * looked up. A name absent from the workspace set is the caller's problem
+ * to report.
+ */
+async function resolveAppLabelId(deps: ApplyDeps, cache: AppLabelCache, appName: string): Promise<LinearId | null> {
+  cache.issueLabels ??= deps.linear.labels();
+  const labels = await cache.issueLabels;
+  return labels.find((label) => label.name === appLabelId(appName))?.id ?? null;
+}
+
+/** Resolves `app:<name>`'s project-label id the same lookup-only way. */
+async function resolveAppProjectLabelId(deps: ApplyDeps, cache: AppLabelCache, appName: string): Promise<LinearId | null> {
+  cache.projectLabels ??= deps.linear.projectLabels();
+  const labels = await cache.projectLabels;
+  return labels.find((label) => label.name === appLabelId(appName))?.id ?? null;
+}
+
 /**
  * One triage item: `backlog` moves the issue into a project and Backlog
  * with priority/description/estimate set and its `blockedBy` relations
- * wired; `new-project` reuses an existing same-named project under the
- * initiative when one exists, otherwise creates and attaches one, before
- * doing the same; `cancel` and `duplicate` leave the issue in Triage, park
- * it behind `foreman:blocked` with a `block` marker recording the operator
- * decision needed, and (for `duplicate`) wire the native `duplicate`
- * relation. Throws on any failure — the caller isolates one item's failure
- * from the rest of the batch.
+ * wired; `new-project` reuses an existing same-named project on the repo's
+ * team when one exists, otherwise creates one, before doing the same;
+ * `cancel` and `duplicate` leave the issue in Triage, move it to Needs
+ * Input with a `block` marker recording the operator decision needed, and
+ * (for `duplicate`) wire the native `duplicate` relation. Throws on any
+ * failure — the caller isolates one item's failure from the rest of the
+ * batch. An unresolvable `app` name is not such a failure: it is appended
+ * to `problems` and the rest of the item still applies.
  */
-async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: CreatedEntity[]): Promise<void> {
+async function applyTriageItem(
+  deps: ApplyDeps,
+  item: TriageItem,
+  created: CreatedEntity[],
+  problems: string[],
+  cache: AppLabelCache,
+): Promise<void> {
   const issue = await deps.linear.issue(item.issueId);
   if (!issue) throw new Error(`unknown issue "${item.issueId}"`);
 
@@ -149,19 +185,27 @@ async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: Creat
       // Idempotent: no durable dedupe marker survives a redelivered batch
       // any more (SPEC §17.7), so a second apply must reuse the project it
       // already created rather than creating a sibling with the same name.
-      const siblings = await deps.linear.initiativeProjects(newProject.initiativeId);
+      const siblings = await deps.linear.projects(issue.team.key);
       const existing = siblings.find(
         (candidate) => candidate.name.trim().toLowerCase() === newProject.name.trim().toLowerCase(),
       );
-      const project =
-        existing ??
-        (await deps.linear.createProject({
+      let project = existing;
+      if (!project) {
+        const labelIds: LinearId[] = [];
+        if (newProject.app !== null) {
+          const labelId = await resolveAppProjectLabelId(deps, cache, newProject.app);
+          if (labelId) {
+            labelIds.push(labelId);
+          } else {
+            problems.push(`${issue.identifier}: unknown app "${newProject.app}"; created project without an app label`);
+          }
+        }
+        project = await deps.linear.createProject({
           name: newProject.name,
           teamIds: [issue.team.id],
           description: newProject.description,
-        }));
-      if (!existing) {
-        await deps.linear.addProjectToInitiative({ projectId: project.id, initiativeId: newProject.initiativeId });
+          ...(labelIds.length > 0 ? { labelIds } : {}),
+        });
         const status = await deps.linear.projectStatus(project.id);
         if (status?.type !== "backlog") await deps.linear.updateProjectStatus({ projectId: project.id, type: "backlog" });
         created.push({ kind: "project", id: project.id, identifier: null, title: project.name, url: null });
@@ -170,13 +214,22 @@ async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: Creat
     }
     if (!projectId) throw new Error(`applyTriage: ${issue.identifier} is "backlog" with no destinationProjectId.`);
 
-    const typeLabel = await deps.linear.ensureLabel(item.type, issue.team.id);
+    const typeLabel = await deps.linear.ensureWorkspaceLabel(item.type, { color: TYPE_LABEL_COLOR[item.type as TypeLabel] });
+    const addedLabelIds = [typeLabel.id];
+    if (item.app !== null) {
+      const appId = await resolveAppLabelId(deps, cache, item.app);
+      if (appId) {
+        addedLabelIds.push(appId);
+      } else {
+        problems.push(`${issue.identifier}: unknown app "${item.app}"; applied no app label`);
+      }
+    }
     await deps.linear.updateIssue(issue.id, {
       priority: item.proposedPriority,
       description: item.draftDescription ?? undefined,
       estimate: item.proposedEstimate ?? undefined,
       projectId,
-      addedLabelIds: [typeLabel.id],
+      addedLabelIds,
     });
     await moveToState(deps, issue, "backlog");
 
@@ -236,11 +289,10 @@ async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: Creat
     costOfWrongGuess: "Applying a cancel/duplicate disposition without confirmation can silently drop real work.",
     blockedByIssues: [],
   };
-  const label = await deps.linear.ensureLabel(FOREMAN_LABEL.blocked, issue.team.id);
-  await deps.linear.updateIssue(issue.id, {
-    addedLabelIds: [label.id],
-    ...(deps.operatorUserId ? { assigneeId: deps.operatorUserId } : {}),
-  });
+  await moveToState(deps, issue, "needsInput");
+  if (deps.operatorUserId) {
+    await deps.linear.updateIssue(issue.id, { assigneeId: deps.operatorUserId });
+  }
   const body = encodeMarker(MARKER_KIND.block, block, renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue.id, body });
 }
@@ -255,20 +307,25 @@ async function applyTriageItem(deps: ApplyDeps, item: TriageItem, created: Creat
  */
 async function applyTriage(deps: ApplyDeps, result: TriageResult, notify?: Notify): Promise<AppliedFacts> {
   const created: CreatedEntity[] = [];
-  const problems: string[] = [];
+  const failures: string[] = [];
+  const notices: string[] = [];
+  const cache = newAppLabelCache();
   for (const item of result.items) {
     try {
-      await applyTriageItem(deps, item, created);
+      await applyTriageItem(deps, item, created, notices, cache);
     } catch (error) {
-      problems.push(`${item.issueId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${item.issueId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (problems.length > 0) {
-    notify?.(`Foreman could not triage ${problems.length} item(s): ${problems.join("; ")}`, "error");
+  if (failures.length > 0) {
+    notify?.(`Foreman could not triage ${failures.length} item(s): ${failures.join("; ")}`, "error");
+  }
+  if (notices.length > 0) {
+    notify?.(`Foreman triage: ${notices.join("; ")}`, "warn");
   }
   return {
     subject: null,
-    summary: `triaged ${result.items.length - problems.length} of ${result.items.length} issue(s)`,
+    summary: `triaged ${result.items.length - failures.length} of ${result.items.length} issue(s)`,
     created,
     movedTo: null,
   };
@@ -312,7 +369,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
       affectedAreas: [],
       outOfScope: [],
     });
-    const subTypeLabel = await deps.linear.ensureLabel(subIssue.type, issue.team.id);
+    const subTypeLabel = await deps.linear.ensureWorkspaceLabel(subIssue.type, { color: TYPE_LABEL_COLOR[subIssue.type as TypeLabel] });
     const child = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: subIssueTitle,
@@ -336,7 +393,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
     );
     if (!existingSpike) {
       const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
-      const spikeTypeLabel = await deps.linear.ensureLabel(TYPE_LABEL.spike, issue.team.id);
+      const spikeTypeLabel = await deps.linear.ensureWorkspaceLabel(TYPE_LABEL.spike, { color: TYPE_LABEL_COLOR[TYPE_LABEL.spike] });
       const spike = await deps.linear.createIssue({
         teamId: issue.team.id,
         title: spikeTitle,
@@ -354,14 +411,14 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
     }
   }
 
-  if (result.readyForImplementation) await moveToState(deps, issue, "todo");
+  if (result.readyForImplementation) await moveToState(deps, issue, "ready");
   await releaseLock(deps, issue);
   return {
     subject: issue.identifier,
     summary: `refined ${issue.identifier} (estimate ${result.estimate}, ` +
       `${result.readyForImplementation ? "ready" : "not ready"})`,
     created,
-    movedTo: result.readyForImplementation ? "todo" : null,
+    movedTo: result.readyForImplementation ? "ready" : null,
   };
 }
 
@@ -374,7 +431,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 
   const createdEntities: CreatedEntity[] = [];
   for (const discovered of result.discoveredWork) {
-    const discoveredTypeLabel = await deps.linear.ensureLabel(discovered.type, issue.team.id);
+    const discoveredTypeLabel = await deps.linear.ensureWorkspaceLabel(discovered.type, { color: TYPE_LABEL_COLOR[discovered.type as TypeLabel] });
     const created = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: stripControlChars(discovered.title),
@@ -415,9 +472,11 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 /**
  * SPEC §7.6: creates each `proposedIssue` as a new Backlog issue under the
  * project. Nothing else — plan never claims `foreman:running`, so there is
- * no lock to release, and it never touches an existing issue's state.
+ * no lock to release, and it never touches an existing issue's state. An
+ * unresolvable `app` name is not fatal: it is reported and the issue still
+ * applies without an app label, mirroring `applyTriageItem`.
  */
-async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFacts> {
+async function applyPlan(deps: ApplyDeps, result: PlanResult, notify?: Notify): Promise<AppliedFacts> {
   const project = await deps.linear.project(result.projectId);
   if (!project) throw new Error(`PlanResult references unknown project ${result.projectId}.`);
   if (result.proposedIssues.length === 0) {
@@ -425,6 +484,8 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFa
   }
 
   const teamRef = await resolveTeamRef(deps, "plan");
+  const cache = newAppLabelCache();
+  const problems: string[] = [];
 
   const backlog = await backlogStateId(deps, teamRef.id);
 
@@ -439,7 +500,16 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFa
       affectedAreas: [],
       outOfScope: result.outOfScope,
     });
-    const typeLabel = await deps.linear.ensureLabel(proposed.type, teamRef.id);
+    const typeLabel = await deps.linear.ensureWorkspaceLabel(proposed.type, { color: TYPE_LABEL_COLOR[proposed.type as TypeLabel] });
+    const labelIds = [typeLabel.id];
+    if (proposed.app !== null) {
+      const appId = await resolveAppLabelId(deps, cache, proposed.app);
+      if (appId) {
+        labelIds.push(appId);
+      } else {
+        problems.push(`${proposed.key}: unknown app "${proposed.app}"; applied no app label`);
+      }
+    }
     const created = await deps.linear.createIssue({
       teamId: teamRef.id,
       title: stripControlChars(proposed.title),
@@ -447,7 +517,7 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFa
       priority: proposed.proposedPriority,
       estimate: proposed.proposedEstimate ?? undefined,
       projectId: result.projectId,
-      labelIds: [typeLabel.id],
+      labelIds,
       stateId: backlog,
     });
     createdByKey.set(proposed.key, created);
@@ -473,6 +543,9 @@ async function applyPlan(deps: ApplyDeps, result: PlanResult): Promise<AppliedFa
   }
 
   await deps.linear.updateProjectStatus({ projectId: result.projectId, type: "planned" });
+  if (problems.length > 0) {
+    notify?.(`Foreman plan: ${problems.join("; ")}`, "warn");
+  }
   return {
     subject: project.name,
     summary: `planned "${project.name}": ${result.proposedIssues.length} issue(s)` +
@@ -512,7 +585,7 @@ async function submitGitHubReview(deps: ApplyDeps, issue: Issue, result: ReviewR
 /**
  * SPEC §13.4/§19: always comment the rendering and write a `review` marker
  * so `hasReviewForHead` detects completion. A `blocking` finding routes the
- * issue back to Todo for the fix cycle; a clean result leaves merging
+ * issue back to Ready for the fix cycle; a clean result leaves merging
  * entirely to the operator — no auto-merge, ever. The lock is released
  * either way: review is a terminal result.
  */
@@ -524,18 +597,18 @@ async function applyReview(deps: ApplyDeps, result: ReviewResult, notify?: Notif
   const body = encodeMarker(MARKER_KIND.review, result, human);
   await deps.linear.createComment({ issueId: issue.id, body });
   const blocking = result.findings.filter((finding) => finding.severity === "blocking");
-  if (blocking.length > 0) await moveToState(deps, issue, "todo");
+  if (blocking.length > 0) await moveToState(deps, issue, "ready");
   await submitGitHubReview(deps, issue, result, notify);
   await releaseLock(deps, issue);
   return {
     subject: issue.identifier,
     summary: `reviewed ${issue.identifier}: ${result.verdict}, ${blocking.length} blocking finding(s)`,
     created: [],
-    movedTo: blocking.length > 0 ? "todo" : null,
+    movedTo: blocking.length > 0 ? "ready" : null,
   };
 }
 
-/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no `foreman:blocked` label, back to Todo. */
+/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no state carried, back to Ready. */
 async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
   for (const blockerId of block.blockedByIssues) {
     const blocker = await deps.linear.issue(blockerId);
@@ -560,30 +633,32 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
   const body = sanitizeAgentText(renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue.id, body });
   await releaseLock(deps, issue);
-  await moveToState(deps, issue, "todo");
-  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: "todo" };
+  await moveToState(deps, issue, "ready");
+  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: "ready" };
 }
 
-/** SPEC §9 Case B: every other block type applies `foreman:blocked`, comments, releases the lock, and returns to Todo only if the issue was already In Progress. */
-async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
-  const label = await deps.linear.ensureLabel(FOREMAN_LABEL.blocked, issue.team.id);
-  await deps.linear.updateIssue(issue.id, { addedLabelIds: [label.id] });
+/** Which agent produced a `BlockRecord` decides the human-interrupt queue it lands in: refine stalls before implementation starts, so it reads `Needs Input`; implement/review stall mid-flight, so they read `Blocked`. */
+const IMPLEMENTATION_BLOCK_AGENTS: Record<string, true> = { "foreman-implement": true, "foreman-review": true };
+
+/** SPEC §9 Case B: every other block type moves the issue to Needs Input or Blocked (by stage), comments, and assigns the operator while releasing the lock. */
+async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord, agent: string): Promise<AppliedFacts> {
+  const stateKey = IMPLEMENTATION_BLOCK_AGENTS[agent] ? "blocked" : "needsInput";
+  await moveToState(deps, issue, stateKey);
   const body = encodeMarker(MARKER_KIND.block, block, renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue.id, body });
   await releaseLock(deps, issue, deps.operatorUserId ?? null);
-  if (issue.state.type === "started") await moveToState(deps, issue, "todo");
-  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: issue.state.type === "started" ? "todo" : null };
+  return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: stateKey };
 }
 
-/** Routes a `BlockRecord` through SPEC §9 instead of the normal result path. */
-export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord): Promise<AppliedFacts> {
+/** Routes a `BlockRecord` through SPEC §9 instead of the normal result path. `agent` picks the human-block queue (Needs Input vs Blocked). */
+export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord, agent: string): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(issueId);
   if (!issue) throw new Error(`Block references unknown issue ${issueId}.`);
 
   if (block.type === "dependency") {
     return applyDependencyBlock(deps, issue, block);
   }
-  return applyHumanBlock(deps, issue, block);
+  return applyHumanBlock(deps, issue, block, agent);
 }
 
 
@@ -619,7 +694,16 @@ async function applyRoadmapResult(
   notify?: Notify,
 ): Promise<AppliedFacts> {
   const teamRef = await resolveTeamRef(deps, "roadmap");
-  const report = await applyRoadmap(deps.linear, result, { teamId: teamRef.id });
+  const appNames = [...new Set(result.proposedProjects.map((entry) => entry.app).filter((app): app is string => app !== null))];
+  const appLabelIds: Record<string, LinearId> = {};
+  if (appNames.length > 0) {
+    const projectLabels = await deps.linear.projectLabels();
+    for (const name of appNames) {
+      const label = projectLabels.find((candidate) => candidate.name === appLabelId(name));
+      if (label) appLabelIds[name] = label.id;
+    }
+  }
+  const report = await applyRoadmap(deps.linear, result, { teamId: teamRef.id, appLabelIds });
 
   for (const adjustment of report.dateAdjustments) {
     notify?.(
@@ -669,12 +753,12 @@ export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notif
     if (!outcome.issueId) {
       return { subject: null, summary: `dropped a block from ${outcome.agent}: no issue to write it to`, created: [], movedTo: null };
     }
-    return applyBlock(deps, outcome.issueId, outcome.block);
+    return applyBlock(deps, outcome.issueId, outcome.block, outcome.agent);
   }
   if (outcome.agent === "foreman-triage") {
     return applyTriage(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-plan") {
-    return applyPlan(deps, outcome.result);
+    return applyPlan(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-roadmap") {
     return applyRoadmapResult(deps, outcome.result, notify);
   } else if (outcome.agent === "foreman-refine") {

@@ -19,6 +19,11 @@ export const TriageItem = Type.Object(
       maximum: 4,
       description: "1 Urgent, 2 High, 3 Medium, 4 Low.",
     }),
+    app: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description:
+        "App this issue belongs to, matching one of the repo's configured apps (the FOREMAN-APPS " +
+        "marker lists them). Null when the repo has no apps or the issue spans all of them.",
+    }),
     severityReasoning: Type.String({
       minLength: 1,
       description:
@@ -43,7 +48,9 @@ export const TriageItem = Type.Object(
           {
             name: Type.String({ minLength: 1 }),
             description: Type.String({ minLength: 1 }),
-            initiativeId: Type.String({ minLength: 1 }),
+            app: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+              description: "App label for the new project. Null when the repo has no apps.",
+            }),
           },
           { additionalProperties: false },
         ),

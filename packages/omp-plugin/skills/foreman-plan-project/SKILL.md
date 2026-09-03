@@ -16,7 +16,9 @@ description: Use when foreman-plan turns a bare project's brief into its first s
 
 Project is bare: zero issues in any state. Routing enforces this. No "top up"
 mode: a project reaches you exactly once, right after creation and approval,
-unless the operator later empties it.
+unless the operator later empties it. A project MAY optionally belong to an
+initiative, whose brief arrives folded into the `Context` digest; it is
+background only and never a routing input.
 
 ## Required reads
 
@@ -37,7 +39,7 @@ unless the operator later empties it.
    - `title`: short, specific, not a restatement of the brief.
    - `type`: the `type:` label.
    - `description`: `## Context` body only; prose, no headings. A draft:
-     `foreman-refine` verifies it against the code before Todo. NEVER
+     `foreman-refine` verifies it against the code before Ready. NEVER
      restate the Definition of Done.
    - `acceptanceCriteria`: draft observable behaviors. Rough and honest beats
      over-specified guess; refine sharpens them.
@@ -45,6 +47,9 @@ unless the operator later empties it.
      `None` only when you truly cannot tell. `None` parks the issue outside
      the refine funnel until the operator sets one.
    - `proposedEstimate`: rough Fibonacci, or `null`. Refine re-estimates.
+   - `app`: one name from the `FOREMAN-APPS` marker when the issue belongs
+     to a single configured app; `null` when the repo has no apps or the
+     issue spans all of them.
    - `blockedBy`: sibling `key`s whose work MUST exist first. Empty for
      anything startable now; at least one entry SHOULD be startable.
      Cannot reference an issue outside this result; a dependency on prior

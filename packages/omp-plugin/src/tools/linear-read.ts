@@ -8,31 +8,33 @@ import type { ExtensionAPI, ExtensionToolConfig, InferShape, ZodRawShape } from 
 import type { IssueFilter } from "@foreman/core";
 import {
   BLOCKED_FILTER,
+  FOREMAN_STATE,
   INBOX_FILTER,
+  NEEDS_INPUT_FILTER,
   RUNNING_FILTER,
   blockedByProjectRelations,
   blockingProjectRelations,
   inState,
-  inStateType,
 } from "@foreman/core";
-import { getContextDigest, getLinear } from "../runtime.ts";
+import { getContextDigest, getEntry, getLinear } from "../runtime.ts";
 
 const SAVED_VIEWS: Record<string, () => IssueFilter> = {
   inbox: () => INBOX_FILTER,
+  "needs-input": () => NEEDS_INPUT_FILTER,
   blocked: () => BLOCKED_FILTER,
   running: () => RUNNING_FILTER,
-  todo: () => inStateType("unstarted"),
-  "in-review": () => inState("In Review"),
+  ready: () => inState(FOREMAN_STATE.ready),
+  "in-review": () => inState(FOREMAN_STATE.inReview),
 };
 
-const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "initiative_roadmap", "view"] as const;
+const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "team_roadmap", "project_labels", "view"] as const;
 
 export function registerLinearReadTool(pi: ExtensionAPI): void {
   const shape = {
     op: pi.zod.enum(OPS).describe("Which read to perform."),
-    id: pi.zod.string().optional().describe("Issue identifier, project id, team id, or initiative id, depending on op."),
+    id: pi.zod.string().optional().describe("Issue identifier, project id, or team id, depending on op."),
     view: pi.zod
-      .enum(["inbox", "blocked", "running", "todo", "in-review"])
+      .enum(["inbox", "needs-input", "blocked", "running", "ready", "in-review"])
       .optional()
       .describe("Saved view name, required when op is \"view\"."),
     includeComments: pi.zod.boolean().optional().describe("Include comments on the returned issue(s)."),
@@ -95,13 +97,12 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
       if (params.op === "teams") {
         return jsonResult(await linear.teams());
       }
-      if (params.op === "initiative_roadmap") {
-        if (!params.id) return errorResult("op \"initiative_roadmap\" requires \"id\" (initiative id).");
-        const projects = await linear.initiativeProjects(params.id);
+      if (params.op === "team_roadmap") {
+        const projects = await linear.projects(getEntry().team);
         // One `projectRelations` call per project: nesting both relation
-        // connections under `initiative.projects(first: 250)` exceeds
-        // Linear's query-complexity ceiling (measured against the live
-        // API), so this is N+1 queries rather than one, by necessity.
+        // connections under a `projects(first: 250)` query exceeds Linear's
+        // query-complexity ceiling (measured against the live API), so this
+        // is N+1 queries rather than one, by necessity.
         const roadmap = await Promise.all(
           projects.map(async (project) => {
             const relations = await linear.projectRelations(project.id);
@@ -117,6 +118,9 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
           }),
         );
         return jsonResult({ projects: roadmap });
+      }
+      if (params.op === "project_labels") {
+        return jsonResult(await linear.projectLabels());
       }
 
       // op === "view"

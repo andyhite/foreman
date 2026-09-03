@@ -1,10 +1,12 @@
 /**
- * Workflow states (SPEC §4.2). Linear's native set; no custom states.
- *
- * State *names* are workspace-defined, so nothing resolves a state by name
- * alone: `resolveState` matches a Foreman state to a real team state by name
- * first and by category second, and a workspace missing `Duplicate` falls back
- * to its canceled state plus a duplicate relation.
+ * Workflow states (SPEC §4.2 rework). Eight states are provisioned per team
+ * by `foreman init` (see `provision.ts`), resolved by exact name — no
+ * category inference, no fallback chain. `Triage` and `Duplicate` are both
+ * Linear's own system-managed states: `Triage` is created when the team's
+ * triage setting is turned on, and `Duplicate` always exists natively
+ * (`workflowStateCreate` accepts neither `type: "triage"` nor
+ * `type: "duplicate"`). Both are resolved by category instead of name, since
+ * the operator may rename either.
  */
 
 import type { ProjectStatusType, WorkflowState, WorkflowStateType } from "../linear/types.ts";
@@ -12,8 +14,11 @@ import type { ProjectStatusType, WorkflowState, WorkflowStateType } from "../lin
 export const FOREMAN_STATE = {
   triage: "Triage",
   backlog: "Backlog",
-  todo: "Todo",
+  refining: "Refining",
+  needsInput: "Needs Input",
+  ready: "Ready",
   inProgress: "In Progress",
+  blocked: "Blocked",
   inReview: "In Review",
   done: "Done",
   canceled: "Canceled",
@@ -22,27 +27,112 @@ export const FOREMAN_STATE = {
 
 export type ForemanStateKey = keyof typeof FOREMAN_STATE;
 
-/** Category each Foreman state must land in, and the fallback when the name is absent. */
-const STATE_SPEC: Record<
-  ForemanStateKey,
-  { category: WorkflowStateType; fallback: ForemanStateKey | null }
-> = {
-  triage: { category: "triage", fallback: null },
-  backlog: { category: "backlog", fallback: null },
-  todo: { category: "unstarted", fallback: null },
-  inProgress: { category: "started", fallback: null },
-  inReview: { category: "started", fallback: "inProgress" },
-  done: { category: "completed", fallback: null },
-  canceled: { category: "canceled", fallback: null },
-  duplicate: { category: "canceled", fallback: "canceled" },
-};
+/** States Linear manages itself and never accepts on `workflowStateCreate`. */
+type SystemManagedStateKey = "triage" | "duplicate";
+
+/**
+ * Ascending board order. Linear renders columns grouped by `type`'s fixed
+ * category order (backlog, unstarted, started, completed, canceled) first,
+ * `position` second — a `started` state before an `unstarted` one still
+ * renders *after* it, and *within* a category the icon variant itself also
+ * follows `position` (each successive `started` state gets a more "advanced"
+ * icon). `Refining` and `Needs Input` are `unstarted`, not `started`: both
+ * happen before implementation work starts. `Blocked` stays `started` (it
+ * only exists once `In Progress` began) but sorts first among the started
+ * states, ahead of `In Progress`/`In Review`, so its icon doesn't wrongly
+ * read as further along than the work it interrupted. `position` is passed
+ * straight to `workflowStateCreate`.
+ */
+export interface ManagedStateSpec {
+  key: Exclude<ForemanStateKey, SystemManagedStateKey>;
+  name: string;
+  /** `WorkflowStateCreateInput.type`. */
+  type: Exclude<WorkflowStateType, "triage" | "duplicate">;
+  color: string;
+  description: string;
+  position: number;
+}
+export const MANAGED_STATES: readonly ManagedStateSpec[] = [
+  {
+    key: "backlog",
+    name: FOREMAN_STATE.backlog,
+    type: "backlog",
+    color: "#bec2c8",
+    description: "Prioritized, not yet refined.",
+    position: 0,
+  },
+  {
+    key: "refining",
+    name: FOREMAN_STATE.refining,
+    type: "unstarted",
+    color: "#f2c94c",
+    description: "foreman-refine is working on this.",
+    position: 1,
+  },
+  {
+    key: "needsInput",
+    name: FOREMAN_STATE.needsInput,
+    type: "unstarted",
+    color: "#eb5757",
+    description: "foreman-refine needs the operator; answer with /foreman:unblock.",
+    position: 2,
+  },
+  {
+    key: "ready",
+    name: FOREMAN_STATE.ready,
+    type: "unstarted",
+    color: "#e2e2e2",
+    description: "Refined and implementable.",
+    position: 3,
+  },
+  {
+    key: "blocked",
+    name: FOREMAN_STATE.blocked,
+    type: "started",
+    color: "#eb5757",
+    description: "foreman-implement or foreman-review needs the operator; answer with /foreman:unblock.",
+    position: 4,
+  },
+  {
+    key: "inProgress",
+    name: FOREMAN_STATE.inProgress,
+    type: "started",
+    color: "#f2994a",
+    description: "foreman-implement is working on this.",
+    position: 5,
+  },
+  {
+    key: "inReview",
+    name: FOREMAN_STATE.inReview,
+    type: "started",
+    color: "#26b5ce",
+    description: "PR open, awaiting review or merge.",
+    position: 6,
+  },
+  {
+    key: "done",
+    name: FOREMAN_STATE.done,
+    type: "completed",
+    color: "#5e6ad2",
+    description: "Shipped.",
+    position: 7,
+  },
+  {
+    key: "canceled",
+    name: FOREMAN_STATE.canceled,
+    type: "canceled",
+    color: "#95a2b3",
+    description: "Abandoned.",
+    position: 8,
+  },
+];
 
 export class StateResolutionError extends Error {
   constructor(key: ForemanStateKey, available: readonly WorkflowState[]) {
     super(
-      `No Linear workflow state matches Foreman state "${FOREMAN_STATE[key]}" ` +
-        `(category "${STATE_SPEC[key].category}"). Available: ` +
-        available.map((s) => `${s.name} [${s.type}]`).join(", "),
+      `No Linear workflow state named "${FOREMAN_STATE[key]}" on this team. ` +
+        `Available: ${available.map((s) => `${s.name} [${s.type}]`).join(", ")} — ` +
+        `run \`foreman doctor --fix\` to provision Foreman's states.`,
     );
     this.name = "StateResolutionError";
   }
@@ -51,28 +141,24 @@ export class StateResolutionError extends Error {
 /**
  * Resolve a Foreman state to one of a team's real states.
  *
- * Order: exact name, then declared category, then the declared fallback. A
- * team with two `started` states resolves `In Review` by name, and one with a
- * single `In Progress` resolves it through the fallback rather than throwing.
+ * `triage` and `duplicate` are the two exceptions: Linear manages both
+ * states itself (the operator may rename either), so both resolve by
+ * category instead of name.
  */
 export function resolveState(
   key: ForemanStateKey,
   states: readonly WorkflowState[],
 ): WorkflowState {
-  const spec = STATE_SPEC[key];
-  const wanted = FOREMAN_STATE[key];
+  if (key === "triage" || key === "duplicate") {
+    const byType = states.find((state) => state.type === key);
+    if (byType) return byType;
+    throw new StateResolutionError(key, states);
+  }
 
-  const byName = states.find(
-    (state) => state.name.toLowerCase() === wanted.toLowerCase(),
-  );
+  const wanted = FOREMAN_STATE[key];
+  const byName = states.find((state) => state.name.trim().toLowerCase() === wanted.toLowerCase());
   if (byName) return byName;
 
-  const byCategory = states
-    .filter((state) => state.type === spec.category)
-    .sort((a, b) => a.position - b.position)[0];
-  if (byCategory) return byCategory;
-
-  if (spec.fallback) return resolveState(spec.fallback, states);
   throw new StateResolutionError(key, states);
 }
 
@@ -81,7 +167,7 @@ export function resolveState(
  * here. Declared once and read by every terminal check, so "what counts as
  * finished" has exactly one definition (SPEC §4.2a).
  */
-export const TERMINAL_STATE_TYPES: readonly WorkflowStateType[] = ["completed", "canceled"];
+export const TERMINAL_STATE_TYPES: readonly WorkflowStateType[] = ["completed", "canceled", "duplicate"];
 
 /** True when a state means the work is finished, either shipped or abandoned. */
 export function isTerminal(state: { type: WorkflowStateType }): boolean {

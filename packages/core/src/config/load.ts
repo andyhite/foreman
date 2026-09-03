@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { GitHubAppCredentials } from "../github/app-auth.ts";
 import { Value } from "../typebox.ts";
 import {
+  type AppBinding,
   type GlobalConfig,
   GlobalConfigSchema,
   type RepoEntry,
@@ -38,9 +39,12 @@ export type ResolvedRepoEntry = RepoSettings & {
   alias: string;
   /** Absolute, `~`-expanded. */
   repoPath: string;
-  /** `null` when the entry defers team resolution to `--team` or the sole accessible team. */
-  team: string | null;
-  initiativeIds: string[];
+  /** Linear team key this repo is bound to. */
+  team: string;
+  /** Monorepo app bindings; empty for a single-app repo. */
+  apps: AppBinding[];
+  /** `apps.map(a => a.name)`, derived once. */
+  appNames: string[];
 };
 
 /**
@@ -73,22 +77,22 @@ function canonicalPath(p: string): string {
 }
 
 /**
- * Rejects an initiative bound in two registry entries (SPEC §3.10). The split
+ * Rejects a Linear team bound in two registry entries (SPEC §3.10). The split
  * per-repo files could not catch this — no single instance could see the
  * collision — so it is checked once, here, at load.
  */
-function assertInitiativesUnique(config: GlobalConfig, describeFor: string): void {
-  const ownerByInitiative: Record<string, string> = {};
+function assertTeamsUnique(config: GlobalConfig, describeFor: string): void {
+  const ownerByTeam: Record<string, string> = {};
   const problems: string[] = [];
   for (const alias of Object.keys(config.repos)) {
-    for (const id of boundInitiativeIds(config.repos[alias]!)) {
-      const owner = ownerByInitiative[id];
-      if (owner !== undefined) {
-        problems.push(`initiative ${id} is bound to both repos.${owner} and repos.${alias}`);
-        continue;
-      }
-      ownerByInitiative[id] = alias;
+    const team = config.repos[alias]!.team;
+    const key = team.toLowerCase();
+    const owner = ownerByTeam[key];
+    if (owner !== undefined) {
+      problems.push(`team ${team} is bound to both repos.${owner} and repos.${alias}`);
+      continue;
     }
+    ownerByTeam[key] = alias;
   }
   if (problems.length > 0) {
     throw new ConfigError(`Invalid global config at ${describeFor}`, problems);
@@ -131,6 +135,31 @@ function formatValidationErrors(schema: Parameters<typeof Value.Errors>[0], valu
   return problems;
 }
 
+/**
+ * Rejects a pre-team-per-repo config (SPEC §3.10): a `repos.<alias>` entry
+ * still carrying an `initiatives` key, or missing `team`, predates this
+ * mapping and cannot be auto-migrated — a repo's team must be chosen, not
+ * guessed. Runs on the raw parsed JSON, before `Value.Default`/`Value.Check`,
+ * so the operator sees this message instead of an opaque TypeBox error.
+ */
+function assertNotStaleConfig(value: unknown): void {
+  if (typeof value !== "object" || value === null) return;
+  const repos = (value as Record<string, unknown>).repos;
+  if (typeof repos !== "object" || repos === null) return;
+  for (const [alias, rawEntry] of Object.entries(repos as Record<string, unknown>)) {
+    if (typeof rawEntry !== "object" || rawEntry === null) continue;
+    const entry = rawEntry as Record<string, unknown>;
+    if ("initiatives" in entry || typeof entry.team !== "string") {
+      const path = typeof entry.path === "string" ? entry.path : alias;
+      throw new ConfigError(`repos.${alias} predates the team-per-repo mapping`, [
+        "a repo now binds exactly one Linear team and its apps, not initiatives",
+        `re-run \`foreman init\` in ${path} to rewrite the entry`,
+      ]);
+    }
+  }
+
+}
+
 function readJsonFile(path: string, describeFor: string): unknown {
   let raw: string;
   try {
@@ -154,6 +183,7 @@ function readJsonFile(path: string, describeFor: string): unknown {
  * patch produces a valid config before it touches disk (e.g. `foreman setup`).
  */
 export function defaultAndValidateGlobalConfig(value: unknown, describeFor: string): GlobalConfig {
+  assertNotStaleConfig(value);
   const defaulted = Value.Default(GlobalConfigSchema, value);
   if (!Value.Check(GlobalConfigSchema, defaulted)) {
     const problems = formatValidationErrors(GlobalConfigSchema, defaulted);
@@ -161,7 +191,7 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
   }
   const config = defaulted as GlobalConfig;
   assertRepoAliasesValid(config, describeFor);
-  assertInitiativesUnique(config, describeFor);
+  assertTeamsUnique(config, describeFor);
   return config;
 }
 
@@ -212,13 +242,6 @@ function mergeRepoSettings(base: RepoSettings, override: RepoSettingsOverride): 
   };
 }
 
-/**
- * Every initiative ID bound to `entry`, discarding the optional path hints.
- * Exported because it is the instance's scope set (SPEC §3.11).
- */
-export function boundInitiativeIds(entry: RepoEntry): string[] {
-  return entry.initiatives.map((binding) => (typeof binding === "string" ? binding : binding.id));
-}
 
 /**
  * Resolves the registry entry for `alias`: `config.repoDefaults` deep-merged
@@ -233,12 +256,14 @@ export function resolveRepoEntry(config: GlobalConfig, alias: string, home?: str
     ]);
   }
 
+  const apps = entry.apps ?? [];
   return {
     ...mergeRepoSettings(config.repoDefaults, entry),
     alias,
     repoPath: expandHome(entry.path, home),
-    team: entry.team ?? null,
-    initiativeIds: boundInitiativeIds(entry),
+    team: entry.team,
+    apps,
+    appNames: apps.map((app) => app.name),
   };
 }
 
@@ -273,16 +298,14 @@ export function entryForCwd(config: GlobalConfig, cwd: string, home?: string): R
 }
 
 /**
- * Inverts the registry into initiative ID → alias: the reverse lookup a
- * consumer needs to find which repo owns a given initiative, with no
- * filesystem scanning and no refresh interval.
+ * Inverts the registry into team key → alias: the reverse lookup a consumer
+ * needs to find which repo owns a given Linear team, with no filesystem
+ * scanning and no refresh interval.
  */
-export function initiativeIndex(config: GlobalConfig): Record<string, string> {
+export function teamIndex(config: GlobalConfig): Record<string, string> {
   const index: Record<string, string> = {};
   for (const alias of Object.keys(config.repos)) {
-    for (const id of boundInitiativeIds(config.repos[alias]!)) {
-      index[id] = alias;
-    }
+    index[config.repos[alias]!.team] = alias;
   }
   return index;
 }

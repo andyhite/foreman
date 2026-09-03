@@ -99,6 +99,7 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
       startDate
       targetDate
       status { id name type }
+      labels { nodes { id name parent { id name } } }
       documents {
         nodes { id title content updatedAt }
       }
@@ -106,7 +107,7 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
   }
 `;
 
-/** A project's initiatives — used to resolve the single initiative a project must belong to. */
+/** A project's initiatives — used to fold an optional initiative brief into the context digest. */
 export const PROJECT_INITIATIVES_QUERY = `
   query ProjectInitiatives($projectId: String!) {
     project(id: $projectId) {
@@ -142,7 +143,7 @@ export const WORKFLOW_STATES_QUERY = `
   query TeamWorkflowStates($teamId: String!) {
     team(id: $teamId) {
       states {
-        nodes { id name type position }
+        nodes { id name type position color description }
       }
     }
   }
@@ -176,34 +177,79 @@ export const USER_BY_EMAIL_QUERY = `
 `;
 
 export const PROJECTS_QUERY = `
-  query Projects($after: String) {
-    projects(first: 250, after: $after) {
-      nodes { id name }
-      pageInfo { hasNextPage endCursor }
-    }
-  }
-`;
-
-export const INITIATIVES_QUERY = `
-  query Initiatives($after: String) {
-    initiatives(first: 250, after: $after) {
-      nodes { id name }
-      pageInfo { hasNextPage endCursor }
-    }
-  }
-`;
-
-/**
- * An initiative's projects — used to check for the standing Maintenance
- * project (SPEC §3.11) and, via the embedded `status`, to let the
- * project-status worker skip a separate per-project status round trip.
- */
-export const INITIATIVE_PROJECTS_QUERY = `
-  query InitiativeProjects($initiativeId: String!) {
-    initiative(id: $initiativeId) {
-      projects(first: 250) {
-        nodes { id name startDate targetDate status { id name type } }
+  query TeamProjects($teamKey: String!, $after: String) {
+    projects(filter: { accessibleTeams: { some: { key: { eq: $teamKey } } } }, first: 250, after: $after) {
+      nodes {
+        id name startDate targetDate
+        status { id name type }
+        labels { nodes { id name parent { id name } } }
       }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+export const WORKFLOW_STATE_CREATE_MUTATION = `
+  mutation WorkflowStateCreate($input: WorkflowStateCreateInput!) {
+    workflowStateCreate(input: $input) {
+      success
+      workflowState { id name type position }
+    }
+  }
+`;
+
+export const WORKFLOW_STATE_UPDATE_MUTATION = `
+  mutation WorkflowStateUpdate($id: String!, $input: WorkflowStateUpdateInput!) {
+    workflowStateUpdate(id: $id, input: $input) {
+      success
+      workflowState { id name type position }
+    }
+  }
+`;
+
+export const WORKFLOW_STATE_ARCHIVE_MUTATION = `
+  mutation WorkflowStateArchive($id: String!) {
+    workflowStateArchive(id: $id) {
+      success
+    }
+  }
+`;
+
+export const TEAM_SETTINGS_QUERY = `
+  query TeamSettings($teamId: String!) {
+    team(id: $teamId) {
+      id
+      key
+      name
+      triageEnabled
+      cyclesEnabled
+      triageIssueState { id name type position }
+    }
+  }
+`;
+
+export const TEAM_UPDATE_MUTATION = `
+  mutation TeamUpdate($id: String!, $input: TeamUpdateInput!) {
+    teamUpdate(id: $id, input: $input) {
+      success
+    }
+  }
+`;
+
+export const PROJECT_LABELS_QUERY = `
+  query ProjectLabels($after: String) {
+    projectLabels(first: 250, after: $after) {
+      nodes { id name isGroup parent { id name } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+export const PROJECT_LABEL_CREATE_MUTATION = `
+  mutation ProjectLabelCreate($input: ProjectLabelCreateInput!) {
+    projectLabelCreate(input: $input) {
+      success
+      projectLabel { id name parent { id } }
     }
   }
 `;
@@ -299,22 +345,8 @@ export const PROJECT_UPDATE_MUTATION = `
   }
 `;
 
-export const INITIATIVE_TO_PROJECT_CREATE_MUTATION = `
-  mutation InitiativeToProjectCreate($input: InitiativeToProjectCreateInput!) {
-    initiativeToProjectCreate(input: $input) {
-      success
-    }
-  }
-`;
-
 /**
  * A project's dependency edges, both directions.
- *
- * Split from `INITIATIVE_PROJECTS_QUERY` rather than nested inside it: two
- * connections under `initiative.projects(first: 250)` puts the document over
- * Linear's complexity ceiling (measured — the API rejects it outright with
- * `Query too complex`), and the only caller narrows to bare projects first,
- * so the fan-out is bounded by however many projects have no issues at all.
  *
  * `anchorType`/`relatedAnchorType` are `String` on the wire and relative to
  * the row's own `project`/`relatedProject`, which is why the client reorients

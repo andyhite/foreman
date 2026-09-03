@@ -164,12 +164,12 @@ one entry. An issue whose project has no initiative, or whose initiative is
 bound to no entry, is skipped rather than guessed at. The key resolves from
 `$LINEAR_API_KEY`, else `linear.apiKeyFile`.
 
-### `foreman deinit`, `foreman verify`, `foreman update`
+### `foreman deinit`, `foreman doctor`, `foreman update`
 
 - `foreman deinit` (inside a repo) removes the plugin lock and symlink under
   `.omp/plugins/` and, unless `--keep-registry`, drops the repo's registry
   entry. `--path <dir>` targets another directory.
-- `foreman verify` checks the global plugin link and every registered repo's
+- `foreman doctor` checks the global plugin link and every registered repo's
   activation; a broken symlink or stale lock entry is a problem. `--fix`
   repairs what it can (re-runs the equivalent of `activateRepoPlugin` per
   affected repo); `--checkout <path>` overrides the expected checkout. Exits
@@ -182,7 +182,7 @@ bound to no entry, is skipped rather than guessed at. The key resolves from
 
 **Old machine-wide install?** Earlier `foreman setup` registered an omp
 marketplace and installed the plugin user-scoped, so it loaded in every omp
-session. `foreman verify` detects the leftover; `foreman verify --fix`
+session. `foreman doctor` detects the leftover; `foreman doctor --fix`
 removes it. Then `foreman init` in each repo that should have Foreman.
 
 ## Running the loop

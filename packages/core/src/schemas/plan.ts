@@ -56,6 +56,11 @@ export const ProposedIssue = Type.Object(
     proposedEstimate: Type.Union([RoughEstimateSchema, Type.Null()], {
       description: "Rough size, or null when genuinely unknown. `foreman-refine` re-estimates against the code.",
     }),
+    app: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description:
+        "App this issue belongs to, matching one of the repo's configured apps (the FOREMAN-APPS " +
+        "marker lists them). Null when the repo has no apps or the issue spans all of them.",
+    }),
   },
   { additionalProperties: false, title: "ProposedIssue" },
 );
