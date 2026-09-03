@@ -263,6 +263,11 @@ function activateProjectPlugin(deps: InitDeps, options: InitOptions, repoRoot: s
         ? `  ${style("green", "✓")} recorded "${PLUGIN_PACKAGE_NAME}" v${result.version} in ${result.lockPath}`
         : `  ${style("cyan", "i")} lock entry for "${PLUGIN_PACKAGE_NAME}" v${result.version} already up to date.`,
     );
+    deps.log(
+      result.installedPluginsChanged
+        ? `  ${style("green", "✓")} namespaced slash commands under "foreman:" in ${result.installedPluginsPath}`
+        : `  ${style("cyan", "i")} "foreman:" command namespace in ${result.installedPluginsPath} already up to date.`,
+    );
   } catch (error) {
     deps.log(
       `  ${style("yellow", "!")} ${error instanceof Error ? error.message : String(error)} The repo is still ` +

@@ -31,6 +31,7 @@ import {
   removeUserScopeInstall,
   repoPluginLinkPath,
   repoPluginLockPath,
+  repoPluginRoot,
   writeGlobalPluginLink,
 } from "../src/plugin-activation.ts";
 
@@ -345,6 +346,78 @@ describe("activateRepoPlugin", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+  it("also writes installed_plugins.json so commands namespace under \"foreman:\"", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const result = activateRepoPlugin(repo, home);
+      expect(result.installedPluginsChanged).toBe(true);
+
+      const registry = JSON.parse(readFileSync(result.installedPluginsPath, "utf8"));
+      expect(registry.version).toBe(1);
+      expect(registry.plugins["foreman@foreman"]).toHaveLength(1);
+      const entry = registry.plugins["foreman@foreman"][0];
+      expect(entry.installPath).toBe(result.linkPath);
+      expect(entry.version).toBe("1.2.3");
+      expect(entry.enabled).toBe(true);
+      expect(entry.scope).toBe("project");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent for installed_plugins.json too: a re-run changes nothing", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const first = activateRepoPlugin(repo, home);
+      const before = readFileSync(first.installedPluginsPath, "utf8");
+      const second = activateRepoPlugin(repo, home);
+      expect(second.installedPluginsChanged).toBe(false);
+      expect(readFileSync(first.installedPluginsPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("merges into an existing installed_plugins.json, preserving another plugin's entries", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const registryPath = join(repoPluginRoot(repo), "installed_plugins.json");
+      mkdirSync(dirname(registryPath), { recursive: true });
+      writeFileSync(
+        registryPath,
+        JSON.stringify({
+          version: 1,
+          plugins: {
+            "other@marketplace": [
+              { installPath: "/somewhere/else", version: "0.1.0", installedAt: "x", lastUpdated: "x", enabled: true, scope: "project" },
+            ],
+          },
+        }),
+        "utf8",
+      );
+      activateRepoPlugin(repo, home);
+      const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+      expect(registry.plugins["other@marketplace"]).toHaveLength(1);
+      expect(registry.plugins["foreman@foreman"]).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("inspectRepoActivation", () => {
@@ -466,6 +539,55 @@ describe("inspectRepoActivation", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+  it("reports the installed_plugins.json entry absent", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const linkPath = repoPluginLinkPath(repo);
+      mkdirSync(dirname(linkPath), { recursive: true });
+      symlinkSync(globalPluginLinkPath(home), linkPath);
+      const lockPath = repoPluginLockPath(repo);
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ plugins: { "@foreman/omp-plugin": { version: "1.2.3", enabledFeatures: null, enabled: true } }, settings: {} }),
+        "utf8",
+      );
+      const state = inspectRepoActivation(repo, home);
+      expect(state.active).toBe(false);
+      expect(state.linkHealthy).toBe(true);
+      expect(state.lockEntryEnabled).toBe(true);
+      expect(state.installedPluginsEntryPresent).toBe(false);
+      expect(state.problems.some((p) => p.includes("foreman:"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the installed_plugins.json entry disabled", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const result = activateRepoPlugin(repo, home);
+      const registry = JSON.parse(readFileSync(result.installedPluginsPath, "utf8"));
+      registry.plugins["foreman@foreman"][0].enabled = false;
+      writeFileSync(result.installedPluginsPath, JSON.stringify(registry), "utf8");
+      const state = inspectRepoActivation(repo, home);
+      expect(state.active).toBe(false);
+      expect(state.installedPluginsEntryPresent).toBe(true);
+      expect(state.installedPluginsEntryEnabled).toBe(false);
+      expect(state.problems.some((p) => p.includes("disabled"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("deactivateRepoPlugin", () => {
@@ -546,6 +668,50 @@ describe("deactivateRepoPlugin", () => {
       expect(result.lockRemoved).toBe(false);
       expect(result.prunedDirs).toEqual([]);
     } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+  it("also removes the installed_plugins.json entry and file", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const activation = activateRepoPlugin(repo, home);
+      const result = deactivateRepoPlugin(repo);
+      expect(result.installedPluginsEntryRemoved).toBe(true);
+      expect(result.installedPluginsRemoved).toBe(true);
+      expect(existsSync(activation.installedPluginsPath)).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps installed_plugins.json and another plugin's entry", () => {
+    const home = makeTmp("home");
+    const checkout = makeCheckout();
+    const repo = makeRepo();
+    try {
+      writeGlobalPluginLink(checkout, home);
+      const activation = activateRepoPlugin(repo, home);
+      const registry = JSON.parse(readFileSync(activation.installedPluginsPath, "utf8"));
+      registry.plugins["other@marketplace"] = [
+        { installPath: "/somewhere/else", version: "0.1.0", installedAt: "x", lastUpdated: "x", enabled: true, scope: "project" },
+      ];
+      writeFileSync(activation.installedPluginsPath, JSON.stringify(registry), "utf8");
+
+      const result = deactivateRepoPlugin(repo);
+      expect(result.installedPluginsEntryRemoved).toBe(true);
+      expect(result.installedPluginsRemoved).toBe(false);
+      expect(existsSync(activation.installedPluginsPath)).toBe(true);
+      const after = JSON.parse(readFileSync(activation.installedPluginsPath, "utf8"));
+      expect(after.plugins["foreman@foreman"]).toBeUndefined();
+      expect(after.plugins["other@marketplace"]).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
     }
   });

@@ -65,7 +65,11 @@ export async function runDeinit(options: DeinitOptions, deps: DeinitDeps): Promi
   const repoRoot = await resolveRepoRoot(options.cwd, deps.git);
   const deactivation = deactivateRepoPlugin(repoRoot);
 
-  if (!deactivation.linkRemoved && !deactivation.lockEntryRemoved) {
+  if (
+    !deactivation.linkRemoved &&
+    !deactivation.lockEntryRemoved &&
+    !deactivation.installedPluginsEntryRemoved
+  ) {
     deps.log(`  ${style("cyan", "i")} no plugin activation found at ${deactivation.linkPath} — nothing to remove.`);
   } else {
     if (deactivation.linkRemoved) deps.log(`  ${style("green", "✓")} removed symlink ${deactivation.linkPath}`);
@@ -73,6 +77,13 @@ export async function runDeinit(options: DeinitOptions, deps: DeinitDeps): Promi
       deps.log(`  ${style("green", "✓")} removed ${deactivation.lockPath} (held nothing else).`);
     } else if (deactivation.lockEntryRemoved) {
       deps.log(`  ${style("green", "✓")} removed the lock entry from ${deactivation.lockPath} (other plugins remain).`);
+    }
+    if (deactivation.installedPluginsRemoved) {
+      deps.log(`  ${style("green", "✓")} removed ${deactivation.installedPluginsPath} (held nothing else).`);
+    } else if (deactivation.installedPluginsEntryRemoved) {
+      deps.log(
+        `  ${style("green", "✓")} removed the "foreman:" command namespace entry from ${deactivation.installedPluginsPath} (other plugins remain).`,
+      );
     }
     if (deactivation.prunedDirs.length > 0) {
       deps.log(`  ${style("green", "✓")} pruned ${deactivation.prunedDirs.length} now-empty director${deactivation.prunedDirs.length === 1 ? "y" : "ies"}.`);

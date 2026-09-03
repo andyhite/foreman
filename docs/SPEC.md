@@ -83,16 +83,33 @@ project, and adds a *user*-scope entry to `~/.omp/plugins/omp-plugins.lock.json`
 the exact machine-wide leak this design exists to avoid.
 
 That is why activation is a direct filesystem write rather than an `omp
-plugin` call. A project plugin root is just two things, and omp discovers a
+plugin` call. A project plugin root is three things, and omp discovers a
 plugin from them with no marketplace, cache, or network involved — verified
 against omp 18.1.4 by probing a scratch repo over ACP:
 
 ```
 <repo>/.omp/plugins/omp-plugins.lock.json
+<repo>/.omp/plugins/installed_plugins.json
 <repo>/.omp/plugins/node_modules/@foreman/omp-plugin -> <plugin dir>
 ```
 
-`foreman init` writes exactly those two things, plus a `/.omp/plugins/` line
+The lock file makes the extension module, skills, rules, hooks, and tools
+load, and `commands/*.md` register under a bare file stem (`/refine`, not
+`/foreman:refine`) — omp's `omp-plugins` provider never namespaces a
+command by plugin. `installed_plugins.json` is a second, Claude-Code-shaped
+registry, keyed `"foreman@foreman"`, that only omp's `claude-plugins`
+provider reads; that provider is the one that prefixes a command with its
+plugin id, so this is what makes `/foreman:refine` (DISPATCH_COMMAND,
+§17.4) resolve to a real command instead of falling through as unexpanded
+literal text. Once `installed_plugins.json` names the same plugin realpath
+as the lock file, `listOmpExtensionRoots` excludes it from the `omp-plugins`
+provider's own root list to avoid double registration (verified against omp
+18.1.5: skills/rules/commands all then load exactly once, tagged
+`[claude-plugins]` by `omp ttsr list` and the ACP `available_commands_update`
+notification) — the extension module itself is unaffected, since it loads
+through the lock file directly rather than through that root list.
+
+`foreman init` writes all three of those, plus a `/.omp/plugins/` line
 in `.git/info/exclude` so the machine-local root never shows up in `git
 status`. `foreman deinit` is the exact inverse. Neither runs an `omp`
 subprocess, touches the network, or clones anything.

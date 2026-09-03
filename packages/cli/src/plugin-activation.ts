@@ -49,6 +49,26 @@
  * there is no separate "dev mode" install shape to drift from the real one.
  * omp resolves symlink chains, so repo -> `~/.foreman/plugin` -> checkout
  * loads identically to a direct link.
+ *
+ * ## Why there is a second registry file
+ *
+ * The two files above make the extension module, `skills/`, `rules/`, and
+ * `agents/` load, and make every `commands/*.md` file register under its
+ * bare stem (`/refine`, not `/foreman:refine`) — omp's `omp-plugins`
+ * provider never namespaces a command by plugin (verified against omp
+ * 18.1.5: `packages/omp-plugin/src/discovery` — no, `omp`'s own
+ * `discovery/omp-plugins.ts` `loadSlashCommands` uses the bare file stem
+ * unconditionally). Only the `claude-plugins` provider prefixes a command
+ * with its plugin id (`<plugin>:<file-stem>`), and it discovers plugins from
+ * a different file: `<repo>/.omp/plugins/installed_plugins.json`, keyed by a
+ * `<name>@<marketplace>` plugin id. `activateRepoPlugin` therefore also
+ * upserts a `"foreman@foreman"` entry there, pointing at the same symlink,
+ * so `DISPATCH_COMMAND` (`packages/core/src/domain/commands.ts`) resolves to
+ * a real, `foreman:`-namespaced command instead of falling through as
+ * unexpanded literal text that a dispatched session has to improvise around.
+ * Both registries stay in sync because both point at the same
+ * `node_modules/@foreman/omp-plugin` link: one plugin copy, discovered
+ * twice, on two different keys.
  */
 
 import {
@@ -76,6 +96,17 @@ const CHECKOUT_PLUGIN_SEGMENTS = ["packages", "omp-plugin"] as const;
 const REPO_PLUGIN_ROOT_SEGMENTS = [".omp", "plugins"] as const;
 const REPO_LINK_SEGMENTS = ["node_modules", "@foreman", "omp-plugin"] as const;
 const LOCK_BASENAME = "omp-plugins.lock.json";
+/** See the module docstring's "second registry file" section. */
+const INSTALLED_PLUGINS_BASENAME = "installed_plugins.json";
+
+/**
+ * The plugin id `installed_plugins.json` files Foreman's entry under. Needs a
+ * `<name>@<marketplace>` shape or omp's `claude-plugins` provider rejects it
+ * outright (`Invalid plugin ID format (missing @marketplace)`); the part
+ * before `@` becomes the slash-command namespace, so this is what makes
+ * `commands/refine.md` resolve as `/foreman:refine` rather than `/refine`.
+ */
+const INSTALLED_PLUGIN_ID = "foreman@foreman";
 
 /** The line `foreman init` adds to `.git/info/exclude`; the root is machine-local state. */
 const GIT_EXCLUDE_LINE = "/.omp/plugins/";
@@ -91,6 +122,22 @@ interface LockEntry {
 interface LockFile {
   plugins: Record<string, LockEntry>;
   settings: Record<string, unknown>;
+}
+
+/** One `installed_plugins.json` entry, in the shape omp's `claude-plugins` provider reads. */
+interface InstalledPluginEntry {
+  installPath: string;
+  version: string;
+  installedAt: string;
+  lastUpdated: string;
+  enabled: boolean;
+  scope: "project";
+}
+
+/** omp's Claude-Code-compatible plugin registry format (`installed_plugins.json`). */
+interface InstalledPluginsFile {
+  version: number;
+  plugins: Record<string, InstalledPluginEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +247,11 @@ export function repoPluginLockPath(repoRoot: string): string {
   return join(repoPluginRoot(repoRoot), LOCK_BASENAME);
 }
 
+/** `<repoRoot>/.omp/plugins/installed_plugins.json`. See the module docstring's "second registry file" section. */
+export function repoInstalledPluginsPath(repoRoot: string): string {
+  return join(repoPluginRoot(repoRoot), INSTALLED_PLUGINS_BASENAME);
+}
+
 /**
  * Reads `repoRoot`'s lock, preserving anything Foreman does not own.
  *
@@ -247,6 +299,48 @@ function writeLock(lockPath: string, lock: LockFile): void {
   renameSync(tmp, lockPath);
 }
 
+/**
+ * Reads `repoRoot`'s `installed_plugins.json`, preserving anything Foreman
+ * does not own. Mirrors `readLock`'s fail-loud-on-garbage behavior for the
+ * same reason: this file may carry another tool's plugin registrations.
+ */
+function readInstalledPlugins(path: string): InstalledPluginsFile {
+  if (!existsSync(path)) return { version: 1, plugins: {} };
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`Could not read ${path}: ${String(error)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `${path} is not valid JSON, so Foreman will not overwrite it — it may hold another tool's plugin ` +
+        "registrations. Fix or delete the file, then re-run.",
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${path} is not a JSON object, so Foreman will not overwrite it. Fix or delete the file.`);
+  }
+  const record = parsed as { version?: unknown; plugins?: unknown };
+  const version = typeof record.version === "number" ? record.version : 1;
+  const plugins =
+    typeof record.plugins === "object" && record.plugins !== null && !Array.isArray(record.plugins)
+      ? (record.plugins as Record<string, InstalledPluginEntry[]>)
+      : {};
+  return { version, plugins };
+}
+
+/** Atomic write, matching `writeLock`. */
+function writeInstalledPlugins(path: string, file: InstalledPluginsFile): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+  renameSync(tmp, path);
+}
+
 export interface ActivationResult {
   linkPath: string;
   /** Absolute path the repo's symlink now points at (the global indirection). */
@@ -256,6 +350,9 @@ export interface ActivationResult {
   lockChanged: boolean;
   /** Version recorded in the lock, read from the linked plugin package. */
   version: string;
+  installedPluginsPath: string;
+  /** True when the `installed_plugins.json` entry that namespaces slash commands under `foreman:` was written. */
+  installedPluginsChanged: boolean;
 }
 
 /**
@@ -313,7 +410,32 @@ export function activateRepoPlugin(repoRoot: string, home: string = homedir()): 
     writeLock(lockPath, lock);
   }
 
-  return { linkPath, target, linkChanged, lockPath, lockChanged, version };
+  const installedPluginsPath = repoInstalledPluginsPath(repoRoot);
+  const installedPlugins = readInstalledPlugins(installedPluginsPath);
+  const existingEntries = installedPlugins.plugins[INSTALLED_PLUGIN_ID];
+  const existingEntry = existingEntries?.[0];
+  const now = new Date().toISOString();
+  const desiredEntry: InstalledPluginEntry = {
+    installPath: linkPath,
+    version,
+    installedAt: existingEntry?.installedAt ?? now,
+    lastUpdated: now,
+    enabled: true,
+    scope: "project",
+  };
+  const installedPluginsChanged =
+    existingEntries === undefined ||
+    existingEntries.length !== 1 ||
+    existingEntry?.installPath !== desiredEntry.installPath ||
+    existingEntry?.version !== desiredEntry.version ||
+    existingEntry?.enabled !== desiredEntry.enabled ||
+    existingEntry?.scope !== desiredEntry.scope;
+  if (installedPluginsChanged) {
+    installedPlugins.plugins[INSTALLED_PLUGIN_ID] = [desiredEntry];
+    writeInstalledPlugins(installedPluginsPath, installedPlugins);
+  }
+
+  return { linkPath, target, linkChanged, lockPath, lockChanged, version, installedPluginsPath, installedPluginsChanged };
 }
 
 export interface DeactivationResult {
@@ -325,6 +447,11 @@ export interface DeactivationResult {
   lockEntryRemoved: boolean;
   /** True when the lock held nothing else and was deleted outright. */
   lockRemoved: boolean;
+  installedPluginsPath: string;
+  /** True when Foreman's `foreman@foreman` entry was removed from an existing `installed_plugins.json`. */
+  installedPluginsEntryRemoved: boolean;
+  /** True when `installed_plugins.json` held nothing else and was deleted outright. */
+  installedPluginsRemoved: boolean;
   /** Directories pruned because removing the link left them empty. */
   prunedDirs: string[];
 }
@@ -361,6 +488,24 @@ export function deactivateRepoPlugin(repoRoot: string): DeactivationResult {
     }
   }
 
+  const installedPluginsPath = repoInstalledPluginsPath(repoRoot);
+  let installedPluginsEntryRemoved = false;
+  let installedPluginsRemoved = false;
+  if (existsSync(installedPluginsPath)) {
+    const installedPlugins = readInstalledPlugins(installedPluginsPath);
+    if (installedPlugins.plugins[INSTALLED_PLUGIN_ID] !== undefined) {
+      delete installedPlugins.plugins[INSTALLED_PLUGIN_ID];
+      installedPluginsEntryRemoved = true;
+    }
+    const empty = Object.keys(installedPlugins.plugins).length === 0;
+    if (empty) {
+      unlinkSync(installedPluginsPath);
+      installedPluginsRemoved = true;
+    } else if (installedPluginsEntryRemoved) {
+      writeInstalledPlugins(installedPluginsPath, installedPlugins);
+    }
+  }
+
   // Prune innermost first, and only while empty, so a repo that keeps other
   // omp project config (`.omp/config.yml`, `.omp/skills/`) keeps it.
   const prunedDirs: string[] = [];
@@ -378,7 +523,17 @@ export function deactivateRepoPlugin(repoRoot: string): DeactivationResult {
     }
   }
 
-  return { linkPath, linkRemoved, lockPath, lockEntryRemoved, lockRemoved, prunedDirs };
+  return {
+    linkPath,
+    linkRemoved,
+    lockPath,
+    lockEntryRemoved,
+    lockRemoved,
+    installedPluginsPath,
+    installedPluginsEntryRemoved,
+    installedPluginsRemoved,
+    prunedDirs,
+  };
 }
 
 export interface ActivationState {
@@ -392,6 +547,11 @@ export interface ActivationState {
   linkHealthy: boolean;
   lockEntryPresent: boolean;
   lockEntryEnabled: boolean;
+  installedPluginsPath: string;
+  /** True when `installed_plugins.json` has a `foreman@foreman` entry. */
+  installedPluginsEntryPresent: boolean;
+  /** True when that entry is enabled — needed for `foreman:`-namespaced commands to expand. */
+  installedPluginsEntryEnabled: boolean;
   /** True when omp will load the full plugin in this repo. */
   active: boolean;
   /** Operator-facing description of every reason `active` is false. */
@@ -448,6 +608,26 @@ export function inspectRepoActivation(repoRoot: string, home: string = homedir()
     problems.push((error as Error).message);
   }
 
+  const installedPluginsPath = repoInstalledPluginsPath(repoRoot);
+  let installedPluginsEntryPresent = false;
+  let installedPluginsEntryEnabled = false;
+  try {
+    const installedPlugins = readInstalledPlugins(installedPluginsPath);
+    const entry = installedPlugins.plugins[INSTALLED_PLUGIN_ID]?.[0];
+    installedPluginsEntryPresent = entry !== undefined;
+    installedPluginsEntryEnabled = entry?.enabled === true;
+    if (!installedPluginsEntryPresent) {
+      problems.push(
+        `${installedPluginsPath} has no "${INSTALLED_PLUGIN_ID}" entry, so \`foreman:\`-namespaced commands ` +
+          "(e.g. /foreman:refine) will not expand.",
+      );
+    } else if (!installedPluginsEntryEnabled) {
+      problems.push(`"${INSTALLED_PLUGIN_ID}" is disabled in ${installedPluginsPath}.`);
+    }
+  } catch (error) {
+    problems.push((error as Error).message);
+  }
+
   return {
     linkPath,
     lockPath,
@@ -456,7 +636,10 @@ export function inspectRepoActivation(repoRoot: string, home: string = homedir()
     linkHealthy,
     lockEntryPresent,
     lockEntryEnabled,
-    active: linkHealthy && lockEntryEnabled,
+    installedPluginsPath,
+    installedPluginsEntryPresent,
+    installedPluginsEntryEnabled,
+    active: linkHealthy && lockEntryEnabled && installedPluginsEntryEnabled,
     problems,
   };
 }
