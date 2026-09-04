@@ -12,12 +12,13 @@ argument-hint: <PROJECT-ID>...
 
 ## Resolve
 
-Each project id in `$ARGUMENTS` via `foreman_linear_read`: brief, issue
-count.
+Each project id in `$ARGUMENTS` via `foreman_linear_read` `op:
+"project_context"` with `id`: the brief in `digest`, and `hasIssues` for the
+gate below.
 
 ## Gate (per project)
 
-Zero issues in any state. Plan is a one-shot bootstrap, never a top-up.
+`hasIssues` false. Plan is a one-shot bootstrap, never a top-up.
 Project already has issues → skip it, tell the operator, point them at
 `/foreman:refine` for individual issues; dispatch the rest.
 

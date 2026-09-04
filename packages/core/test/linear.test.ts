@@ -5,12 +5,15 @@ import {
   INBOX_FILTER,
   NEEDS_INPUT_FILTER,
   RUNNING_FILTER,
+  all,
   hasLabelNamed,
   inState,
   inStateType,
   notInPausedProject,
   notInTerminalProject,
   notTerminalState,
+  parseIdentifiers,
+  withIdentifiers,
 } from "../src/linear/filters.ts";
 import { FOREMAN_STATE, isPausedProjectStatus, isTerminal, isTerminalProjectStatus } from "../src/domain/states.ts";
 import {
@@ -495,6 +498,43 @@ describe("paused hold", () => {
   // reach, dispatching against projects it is allowed to touch forever.
   it("leaves the needs-input view unguarded against paused", () => {
     expect(NEEDS_INPUT_FILTER.and).not.toContainEqual(notInPausedProject());
+  });
+});
+
+describe("identifier dispatch", () => {
+  it("splits on a single space, the real dispatch shape", () => {
+    expect(parseIdentifiers("PLT-183 PLT-143 PLT-142")).toEqual(["PLT-183", "PLT-143", "PLT-142"]);
+  });
+
+  it("splits on commas and comma-plus-space, tolerating runs of whitespace, tabs, and newlines", () => {
+    expect(parseIdentifiers("PLT-183,PLT-143, PLT-142")).toEqual(["PLT-183", "PLT-143", "PLT-142"]);
+    expect(parseIdentifiers("PLT-183,\t PLT-143\n\nPLT-142")).toEqual(["PLT-183", "PLT-143", "PLT-142"]);
+  });
+
+  // This boundary decides whether a malformed id list errors out or, if a
+  // future caller ever let it fall through to `issues` unfiltered, silently
+  // dumps the whole team.
+  it("drops empty segments from stray separators and returns [] for blank input", () => {
+    expect(parseIdentifiers(" ,PLT-183,, PLT-143, ")).toEqual(["PLT-183", "PLT-143"]);
+    expect(parseIdentifiers("")).toEqual([]);
+    expect(parseIdentifiers("   \t\n  ")).toEqual([]);
+  });
+
+  it("removes duplicates while preserving first-seen order", () => {
+    expect(parseIdentifiers("PLT-183 PLT-143 PLT-183 PLT-142 PLT-143")).toEqual(["PLT-183", "PLT-143", "PLT-142"]);
+  });
+
+  it("builds an id-in filter for one or many identifiers, preserving order", () => {
+    expect(withIdentifiers(["PLT-183"])).toEqual({ id: { in: ["PLT-183"] } });
+    expect(withIdentifiers(["PLT-183", "PLT-143", "PLT-142"])).toEqual({
+      id: { in: ["PLT-183", "PLT-143", "PLT-142"] },
+    });
+  });
+
+  it("composes with other filter builders under `all`", () => {
+    expect(all(withIdentifiers(["PLT-183", "PLT-143"]), notTerminalState())).toEqual({
+      and: [{ id: { in: ["PLT-183", "PLT-143"] } }, { state: { type: { nin: ["completed", "canceled", "duplicate"] } } }],
+    });
   });
 });
 

@@ -95,11 +95,13 @@ interface ResolvedApiKey {
 }
 
 /**
- * `$LINEAR_API_KEY` wins over every prompt — it's already how the loop and
- * the extension resolve the key (README "Foreman reads the Linear personal
- * API key from `$LINEAR_API_KEY`, or from `linear.apiKeyFile`"), so a
- * present env var means the operator is already done configuring this and
- * asking again would just be noise.
+ * `$LINEAR_API_KEY` short-circuits the prompt — a present env var means the
+ * operator already has a working key and re-typing it would just be noise —
+ * but the key still has to land in `linear.apiKeyFile`. Loop dispatch scrubs
+ * every `LINEAR_*` env var from a dispatched agent's environment
+ * (`assertLoopDispatchCredential`), so an env-var-only credential leaves
+ * `foreman plan`/`foreman build` broken even though `foreman setup` reported
+ * success.
  */
 async function resolveLinearApiKey(
   prompter: Prompter,
@@ -110,7 +112,9 @@ async function resolveLinearApiKey(
   const envKey = process.env.LINEAR_API_KEY;
   if (envKey) {
     log(`  ${style("green", "✓")} using $LINEAR_API_KEY from the environment (${maskKey(envKey)})`);
-    return { apiKey: envKey, apiKeyFile: null };
+    const apiKeyFile = writeLinearApiKeyFile(envKey, home);
+    log(`  wrote ${apiKeyFile} (mode 0600) so loop dispatch can read it too`);
+    return { apiKey: envKey, apiKeyFile };
   }
   if (skipLinear) {
     log("  skipping — set $LINEAR_API_KEY, or linear.apiKeyFile in the config, before starting the loop.");

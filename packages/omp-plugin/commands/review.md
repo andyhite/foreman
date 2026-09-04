@@ -14,9 +14,9 @@ argument-hint: <ISSUE-ID or PR>...
 ## Resolve
 
 Each target in `$ARGUMENTS` (issue id or PR) → its issue via
-`foreman_linear_read`; its PR via `foreman_github_pr` `view` with `head` =
-the issue's branch. Head SHA: the PR head, or `git rev-parse <branch>` when
-`pr.required: false`.
+`foreman_linear_read` `op: "issue"` with `id:` the target; its PR via
+`foreman_github_pr` `view` with `head` = the issue's branch. Head SHA: the
+PR head, or `git rev-parse <branch>` when `pr.required: false`.
 
 ## Gate (per target)
 

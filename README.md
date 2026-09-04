@@ -103,9 +103,11 @@ It never touches repos, initiatives, or teams, and never activates the plugin
 anywhere; that is `foreman init`'s job.
 
 Key handling: `$LINEAR_API_KEY` already set → prompt skipped, nothing
-validated against Linear (runtime resolves the key the same way). No key or
-no network → setup writes none; set `$LINEAR_API_KEY` or `linear.apiKeyFile`
-before starting the loop. A pasted key always goes to
+validated against Linear (runtime resolves the key the same way), and the
+key is written to `~/.foreman/linear-api-key` anyway so loop dispatch (which
+scrubs `LINEAR_*` env vars from the dispatched agent) can still read it. No
+key or no network → setup writes none; set `$LINEAR_API_KEY` or
+`linear.apiKeyFile` before starting the loop. A pasted key always goes to
 `~/.foreman/linear-api-key`, mode `0600`.
 
 | Flag | Does |

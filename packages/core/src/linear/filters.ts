@@ -18,6 +18,31 @@ export function inStateType(type: string): IssueFilter {
 }
 
 /**
+ * Splits a caller-supplied identifier list on whitespace and/or commas.
+ * Dispatch subjects arrive space-separated (`"PLT-183 PLT-143"`) but an
+ * operator typing the command by hand reaches for commas, and either form
+ * has to resolve the same batch. Empties are dropped and duplicates removed
+ * first-seen, so a stray separator cannot widen the query.
+ */
+export function parseIdentifiers(raw: string): string[] {
+  const seen = new Set<string>();
+  for (const token of raw.split(/[\s,]+/)) {
+    if (token.length > 0) seen.add(token);
+  }
+  return [...seen];
+}
+
+/**
+ * Matches exactly the named issues. `IssueFilter.id` is an
+ * `IssueIDComparator` — "Comparator for issue identifiers" — so it accepts
+ * human identifiers (`PLT-183`), not just UUIDs, and `in` resolves a whole
+ * batch in one hop (docs/VERIFIED.md; measured against the live API).
+ */
+export function withIdentifiers(identifiers: readonly string[]): IssueFilter {
+  return { id: { in: [...identifiers] } };
+}
+
+/**
  * Linear's actual label `name` is the nested child's own display name (e.g.
  * "Ready"), never our canonical colon-form id — so a grouped id filters on
  * both the child name and its parent group's name (SPEC §4.5).

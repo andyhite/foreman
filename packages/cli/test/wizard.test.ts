@@ -241,7 +241,7 @@ describe("runWizard", () => {
     }
   });
 
-  it("resolves the Linear API key from the environment without prompting, and writes no repos key", async () => {
+  it("resolves the Linear API key from the environment without prompting, and writes it to apiKeyFile too", async () => {
     const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
     const checkoutRoot = makeCheckout();
     const originalFetch = globalThis.fetch;
@@ -260,7 +260,9 @@ describe("runWizard", () => {
       expect(prompter.confirmCalls).not.toContain("Do you have a Linear personal API key to configure now?");
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
       expect(config.repos).toBeUndefined();
-      expect(config.linear?.apiKeyFile ?? null).toBeNull();
+      const apiKeyFile = config.linear?.apiKeyFile ?? null;
+      expect(apiKeyFile).toBe(join(home, ".foreman", "linear-api-key"));
+      expect(readFileSync(apiKeyFile, "utf8")).toBe("lin_api_test\n");
     } finally {
       globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;

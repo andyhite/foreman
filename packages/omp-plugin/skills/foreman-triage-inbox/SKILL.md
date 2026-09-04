@@ -20,8 +20,14 @@ implementation gate downstream cares about `type:`, priority, and estimate.
 
 ## Required reads
 
-- Each item: title, description, comments, reporter.
-- The existing backlog, for dedupe (`foreman_linear_read`).
+- Each item's full text: already in your task text — NEVER re-fetch it.
+- Dedupe surface: `foreman_linear_read` `op: "view"` with `view: "backlog"`,
+  then `view: "ready"`. Both return compact rows (identifier, title, state,
+  labels, project) — cheap to scan. Drill into a shortlisted candidate's
+  full text with `op: "issues"` and its identifier. NEVER pull full rows
+  for the whole backlog to dedupe.
+- Candidate projects for `destinationProjectId`: `op: "team_roadmap"`. It
+  is the only surface carrying real project ids.
 - The repo, read-only, for repro: your cwd *is* the checkout for the team
   this batch was drawn from. An item whose code is not found there means
   repro is unavailable for that item, not an error.
@@ -42,7 +48,7 @@ Per item, in order:
 7. **`proposedBlockedBy`** where a dependency is evident.
 8. **`destination`**: `backlog` | `new-project` | `cancel` | `duplicate`.
 9. **Project**: `destinationProjectId` (real Linear id, read via
-   `foreman_linear_read`) when `destination` is `backlog` and an existing
+   `op: "team_roadmap"`) when `destination` is `backlog` and an existing
    project fits; `null` when the work has no ship moment (the `type:` label
    alone carries it). `newProject` (`name`, `description`, `app`) when
    `destination` is `new-project` and no existing project fits work that

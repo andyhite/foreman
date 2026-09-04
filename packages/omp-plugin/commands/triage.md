@@ -8,12 +8,20 @@ argument-hint: <ISSUE-ID...>
 - Triage exactly the issues named in `$ARGUMENTS`, never the whole Inbox view; the `plan` loop already selected this batch via `loop.triageBatch`.
 - NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
 - NEVER restate the triage procedure; `foreman-triage-inbox` is autoloaded.
+- NEVER attempt a project-scoped context read for a Triage item; Triage items have no project.
 </critical>
 
 ## Resolve
 
-`$ARGUMENTS`: space-separated issue ids (`ENG-101 ENG-102`). Resolve each
-via `foreman_linear_read`.
+`$ARGUMENTS`: space-separated issue ids (`ENG-101 ENG-102`). Resolve the
+whole batch in ONE call: `foreman_linear_read` `op: "issues"` with
+`id: "$ARGUMENTS"` and `includeComments: true`. A non-empty `missing` in
+the response means the loop named an issue that no longer exists: report
+those ids to the operator and triage the rest. NEVER call `op: "issue"`
+per id, and NEVER call `op: "issues"` without `id`.
+
+Also read `op: "team_roadmap"`: the candidate projects with their real
+ids, statuses, and dependency edges.
 
 ## Gate
 
@@ -22,9 +30,10 @@ None. Triage is read-only.
 ## Dispatch
 
 One entry, `agent: foreman-triage`. Task text: every resolved item in full.
-Shared `context`: the two-layer `Context` digest (product `Context` doc +
-project brief) for the items' projects; the extension appends nothing for
-triage.
+Shared `context`: the `team_roadmap` output (the candidate projects
+`destinationProjectId` must choose from) plus a note that Triage items
+carry no project, so there is no per-item project brief; the extension
+appends nothing for triage.
 
 ## After
 

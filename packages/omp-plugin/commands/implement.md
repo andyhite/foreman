@@ -12,8 +12,8 @@ argument-hint: <ISSUE-ID>
 
 ## Resolve
 
-`$1` via `foreman_linear_read`: description, acceptance criteria, estimate,
-labels, relations.
+`$1` via `foreman_linear_read` `op: "issue"` with `id: "$1"`: description,
+acceptance criteria, estimate, labels, relations.
 
 ## Gate
 

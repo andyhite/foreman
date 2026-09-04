@@ -12,8 +12,9 @@ argument-hint: <ISSUE-ID>...
 
 ## Resolve
 
-Each issue id in `$ARGUMENTS` via `foreman_linear_read`: description,
-priority, estimate, labels, relations.
+The whole batch in ONE call: `foreman_linear_read` `op: "issues"` with
+`id: "$ARGUMENTS"`. Read description, priority, estimate, labels, relations
+off each. A non-empty `missing` names an id that no longer resolves.
 
 ## Gate (per issue)
 
