@@ -24,6 +24,7 @@ import {
   lockTtlMs,
   resolveGitHubAppCredentials,
   resolveLinearApiKey,
+  sanitizeAgentText,
 } from "@foreman/core";
 
 /** Thrown by any accessor called before `initRuntime` has run at least once. */
@@ -73,7 +74,7 @@ let runtime: Runtime | null = null;
 function productDigest(documents: LinearDocument[], teamKey: string): string {
   const doc = documents.find((entry) => entry.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase());
   const body = doc?.content?.trim();
-  return `## Product Context (${teamKey})\n${body && body.length > 0 ? body : "_none_"}`;
+  return sanitizeAgentText(`## Product Context (${teamKey})\n${body && body.length > 0 ? body : "_none_"}`);
 }
 
 /*
@@ -85,7 +86,7 @@ function productDigest(documents: LinearDocument[], teamKey: string): string {
  */
 function projectBriefDigest(project: Project): string {
   const body = project.content?.trim() || project.description?.trim();
-  return `## Project Brief (${project.name})\n${body && body.length > 0 ? body : "_none_"}`;
+  return sanitizeAgentText(`## Project Brief (${project.name})\n${body && body.length > 0 ? body : "_none_"}`);
 }
 
 /**
@@ -102,7 +103,7 @@ function initiativeDigest(initiative: Initiative): string | null {
     .filter((doc) => doc.body.length > 0)
     .map((doc) => `### ${doc.title}\n${doc.body}`);
   if (sections.length === 0) return null;
-  return `## Initiative (${initiative.name})\n${sections.join("\n\n")}`;
+  return sanitizeAgentText(`## Initiative (${initiative.name})\n${sections.join("\n\n")}`);
 }
 
 /**

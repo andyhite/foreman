@@ -89,8 +89,33 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+/**
+ * Points `path` at `target` with no window where a concurrent actor can
+ * observe `path` absent or replace it between removal and creation:
+ * `symlinkSync` writes a uniquely-named sibling, then `renameSync` swaps it
+ * onto `path` atomically (POSIX `rename(2)`; Windows resolves the same way
+ * through `MoveFileEx`). A leftover temp entry from a crash between the two
+ * calls is harmless — it never gets read — but is best-effort cleaned up on
+ * failure so it does not linger.
+ */
+function atomicSymlink(target: string, path: string): void {
+  const tempPath = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  symlinkSync(target, tempPath);
+  try {
+    renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Best-effort; the original error is what the caller needs to see.
+    }
+    throw error;
+  }
+}
 
 /** The package name omp files the plugin under, from `packages/omp-plugin/package.json`. */
 export const PLUGIN_PACKAGE_NAME = "@foreman/omp-plugin";
@@ -184,7 +209,6 @@ export function writeGlobalPluginLink(checkoutRoot: string, home: string = homed
   const existing = lstatSync(path, { throwIfNoEntry: false });
   if (existing?.isSymbolicLink()) {
     if (readlinkSync(path) === target) return { path, target, changed: false };
-    unlinkSync(path);
   } else if (existing) {
     throw new Error(
       `${path} is a real ${existing.isDirectory() ? "directory" : "file"}, not the symlink \`foreman setup\` writes. ` +
@@ -193,7 +217,7 @@ export function writeGlobalPluginLink(checkoutRoot: string, home: string = homed
   }
 
   mkdirSync(dirname(path), { recursive: true });
-  symlinkSync(target, path);
+  atomicSymlink(target, path);
   return { path, target, changed: true };
 }
 
@@ -384,8 +408,6 @@ export function activateRepoPlugin(repoRoot: string, home: string = homedir()): 
   if (existing?.isSymbolicLink()) {
     if (readlinkSync(linkPath) === target) {
       linkChanged = false;
-    } else {
-      unlinkSync(linkPath);
     }
   } else if (existing) {
     throw new Error(
@@ -395,7 +417,7 @@ export function activateRepoPlugin(repoRoot: string, home: string = homedir()): 
   }
   if (linkChanged) {
     mkdirSync(dirname(linkPath), { recursive: true });
-    symlinkSync(target, linkPath);
+    atomicSymlink(target, linkPath);
   }
 
   // Read the version through the link so the lock records what is actually
