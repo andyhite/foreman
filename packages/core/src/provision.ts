@@ -131,7 +131,13 @@ export async function provisionWorkspaceLabels(
  */
 export async function provisionTeam(
   linear: LinearWriter,
-  input: { teamId: LinearId; apps: readonly string[]; confirmer: Confirmer },
+  input: {
+    teamId: LinearId;
+    apps: readonly string[];
+    confirmer: Confirmer;
+    /** Archiving a workflow state Foreman does not manage is irreversible; an unattended run must not do it. */
+    allowArchive: boolean;
+  },
 ): Promise<ProvisionAction[]> {
   const actions: ProvisionAction[] = [];
   const settings = await linear.teamSettings(input.teamId);
@@ -180,7 +186,7 @@ export async function provisionTeam(
     settingsChanges.length === 0 &&
     toCreate.length === 0 &&
     toUpdate.length === 0 &&
-    extraStates.length === 0 &&
+    (!input.allowArchive || extraStates.length === 0) &&
     missingIssueLabels.length === 0 &&
     missingProjectLabels.length === 0 &&
     !contextDocMissing;
@@ -193,7 +199,7 @@ export async function provisionTeam(
     }
     if (toCreate.length > 0) summaryParts.push(`create ${toCreate.length} workflow state(s)`);
     if (toUpdate.length > 0) summaryParts.push(`update ${toUpdate.length} state color/description`);
-    if (extraStates.length > 0) summaryParts.push(`remove ${extraStates.length} extra workflow state(s)`);
+    if (input.allowArchive && extraStates.length > 0) summaryParts.push(`remove ${extraStates.length} extra workflow state(s)`);
     const labelCount = missingIssueLabels.length + missingProjectLabels.length;
     if (labelCount > 0) summaryParts.push(`create ${labelCount} app label(s)`);
     if (contextDocMissing) summaryParts.push("create the product Context doc");
@@ -202,7 +208,7 @@ export async function provisionTeam(
       ...settingsChanges.map((change) => `${change.op === "enable" ? "+" : "-"} ${change.name}`),
       ...toCreate.map((spec) => `+ ${spec.name} (create, type ${spec.type})`),
       ...toUpdate.map((entry) => `~ ${entry.spec.name} (update color/description)`),
-      ...extraStates.map((state) => `- ${state.name} (remove; only succeeds with no active issues)`),
+      ...(input.allowArchive ? extraStates.map((state) => `- ${state.name} (remove; only succeeds with no active issues)`) : []),
       ...missingIssueLabels.map((name) => `+ ${appLabelId(name)} (issue label)`),
       ...missingProjectLabels.map((name) => `+ ${appLabelId(name)} (project label)`),
       ...(contextDocMissing ? [`+ ${CONTEXT_DOC_TITLE} (product Context doc, with the default Definition of Done)`] : []),
@@ -306,6 +312,16 @@ export async function provisionTeam(
   }
 
   for (const state of extraStates) {
+    if (!input.allowArchive) {
+      actions.push({
+        kind: "state",
+        name: state.name,
+        op: "archive",
+        changed: false,
+        detail: "skipped — re-run `foreman init` interactively to confirm removing a state Foreman does not manage",
+      });
+      continue;
+    }
     if (!proceed) {
       actions.push({ kind: "state", name: state.name, op: "archive", changed: false, detail: "declined" });
       continue;

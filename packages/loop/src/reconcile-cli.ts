@@ -27,7 +27,6 @@ import {
 } from "@foreman/core";
 import { nodeProcessProbe } from "./process-lock.ts";
 import { resolveDispatcher } from "./dispatch/resolve.ts";
-import { preflightLoopConfig } from "./preflight.ts";
 import { reconcile } from "./reconcile.ts";
 
 interface ParsedArgs {
@@ -114,10 +113,6 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
   };
 
   const apiKey = resolveLinearApiKey(config);
-  if (!preflightLoopConfig(config, "foreman-reconcile", args.homePath ?? undefined)) {
-    process.exitCode = 1;
-    return;
-  }
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
 
   let team: string;

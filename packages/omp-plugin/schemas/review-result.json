@@ -110,6 +110,7 @@
                 "type": "object",
                 "required": [
                   "severity",
+                  "severityRationale",
                   "file",
                   "line",
                   "description"
@@ -131,6 +132,11 @@
                         "type": "string"
                       }
                     ]
+                  },
+                  "severityRationale": {
+                    "minLength": 1,
+                    "description": "One sentence for why this severity and not the next one up or down. `blocking` must name the concrete failure it causes.",
+                    "type": "string"
                   },
                   "file": {
                     "minLength": 1,

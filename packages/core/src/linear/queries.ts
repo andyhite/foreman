@@ -106,6 +106,37 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
 `;
 
 /**
+ * A project's initiatives. Read for one reason only: to fold an optional
+ * initiative brief into the context digest when a project happens to belong
+ * to one (SPEC §4.7). Initiatives are not part of any routing, scope, or
+ * gate decision, and a project with none is the ordinary case.
+ */
+export const PROJECT_INITIATIVES_QUERY = `
+  query ProjectInitiatives($projectId: String!) {
+    project(id: $projectId) {
+      id
+      name
+      initiatives {
+        nodes { id name }
+      }
+    }
+  }
+`;
+
+/** An initiative's attached documents. `content` is a `String` (schema-validated). */
+export const INITIATIVE_QUERY_SCALAR_CONTENT = `
+  query InitiativeDocuments($initiativeId: String!) {
+    initiative(id: $initiativeId) {
+      id
+      name
+      documents {
+        nodes { id title content updatedAt }
+      }
+    }
+  }
+`;
+
+/**
  * The team's own documents — where the product `Context` doc lives (SPEC
  * §4.7). Filtered at the root rather than through `Team.documents`, which
  * Linear's `Team` does not have; `Document.team` and `DocumentFilter.team`

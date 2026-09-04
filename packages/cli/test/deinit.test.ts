@@ -1,6 +1,6 @@
 import { activateRepoPlugin, repoPluginLockPath, repoPluginRoot } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDeinit, type DeinitDeps, type DeinitOptions } from "../src/deinit.ts";
@@ -65,7 +65,7 @@ function seedGlobalLink(home: string, pluginDir: string): void {
 }
 
 function baseOptions(overrides: Partial<DeinitOptions>, home: string, cwd: string): DeinitOptions {
-  return { cwd, home, keepRegistry: false, ...overrides };
+  return { cwd, home, keepRegistry: false, revertLinear: false, yes: false, ...overrides };
 }
 
 describe("runDeinit", () => {
@@ -195,6 +195,166 @@ describe("runDeinit", () => {
       ).rejects.toThrow(/must be run inside a git repository/);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runDeinit — --revert-linear", () => {
+  function wireIssue(id: string, stateId: string, stateName: string): unknown {
+    return {
+      id,
+      identifier: `ENG-${id}`,
+      title: "An issue",
+      description: null,
+      priority: 0,
+      estimate: null,
+      url: `https://linear.app/issue/${id}`,
+      branchName: `eng-${id}`,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      state: { id: stateId, name: stateName, type: "backlog" },
+      labels: { nodes: [], pageInfo: { hasNextPage: false } },
+      project: null,
+      team: { id: "t1", key: "ENG", name: "Engineering" },
+      assignee: null,
+      parent: null,
+      children: { nodes: [], pageInfo: { hasNextPage: false } },
+      relations: { nodes: [], pageInfo: { hasNextPage: false } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
+    };
+  }
+
+  function seedRegistry(home: string, repoRoot: string): void {
+    mkdirSync(join(home, ".foreman"), { recursive: true });
+    writeFileSync(
+      join(home, ".foreman", "config.json"),
+      JSON.stringify({ repos: { plotroom: { path: repoRoot, team: "ENG" } } }),
+    );
+  }
+
+  function seedApiKey(home: string): void {
+    const keyPath = join(home, ".foreman", "linear-api-key");
+    mkdirSync(join(home, ".foreman"), { recursive: true });
+    writeFileSync(keyPath, "lin_api_test\n", { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+    const configPath = join(home, ".foreman", "config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.linear = { apiKeyFile: keyPath };
+    writeFileSync(configPath, JSON.stringify(config));
+  }
+
+  it("without --revert-linear, makes no Linear request", async () => {
+    const home = makeTempHome();
+    const repoRoot = makeTempRepo();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("no Linear request should be made without --revert-linear");
+    }) as unknown as typeof fetch;
+    try {
+      seedRegistry(home, repoRoot);
+      seedApiKey(home);
+
+      const git = new FakeGit(repoRoot);
+      const prompter = new ScriptedPrompter();
+      const logs: string[] = [];
+      await runDeinit(baseOptions({ keepRegistry: true, revertLinear: false }, home, repoRoot), {
+        prompter,
+        git,
+        log: (m) => logs.push(m),
+      });
+
+      expect(logs.some((line) => line.includes("skipped (pass --revert-linear"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("with --revert-linear and an empty managed state, archives it", async () => {
+    const home = makeTempHome();
+    const repoRoot = makeTempRepo();
+    const originalFetch = globalThis.fetch;
+    let archiveCalls = 0;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query Teams")) {
+        return new Response(JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("query TeamWorkflowStates")) {
+        return new Response(
+          JSON.stringify({ data: { team: { states: { nodes: [{ id: "s-backlog", name: "Backlog", type: "backlog", position: 0, color: "#000000", description: null }] } } } }),
+        );
+      }
+      if (query.includes("query Issues")) {
+        return new Response(JSON.stringify({ data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("mutation WorkflowStateArchive")) {
+        archiveCalls += 1;
+        return new Response(JSON.stringify({ data: { workflowStateArchive: { success: true } } }));
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedRegistry(home, repoRoot);
+      seedApiKey(home);
+
+      const git = new FakeGit(repoRoot);
+      const prompter = new ScriptedPrompter();
+      const logs: string[] = [];
+      await runDeinit(baseOptions({ keepRegistry: true, revertLinear: true, yes: true }, home, repoRoot), {
+        prompter,
+        git,
+        log: (m) => logs.push(m),
+      });
+
+      expect(archiveCalls).toBe(1);
+      expect(logs.some((line) => line.includes("Backlog"))).toBe(true);
+      expect(logs.some((line) => line.includes("Left in place"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("with --revert-linear and a state holding an issue, does not archive it and names the count", async () => {
+    const home = makeTempHome();
+    const repoRoot = makeTempRepo();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query Teams")) {
+        return new Response(JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("query TeamWorkflowStates")) {
+        return new Response(
+          JSON.stringify({ data: { team: { states: { nodes: [{ id: "s-backlog", name: "Backlog", type: "backlog", position: 0, color: "#000000", description: null }] } } } }),
+        );
+      }
+      if (query.includes("query Issues")) {
+        return new Response(JSON.stringify({ data: { issues: { nodes: [wireIssue("1", "s-backlog", "Backlog")], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+    try {
+      seedRegistry(home, repoRoot);
+      seedApiKey(home);
+
+      const git = new FakeGit(repoRoot);
+      const prompter = new ScriptedPrompter();
+      const logs: string[] = [];
+      await runDeinit(baseOptions({ keepRegistry: true, revertLinear: true, yes: true }, home, repoRoot), {
+        prompter,
+        git,
+        log: (m) => logs.push(m),
+      });
+
+      expect(logs.some((line) => line.includes("still holds 1 issue(s)"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 });

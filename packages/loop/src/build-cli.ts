@@ -207,14 +207,16 @@ export async function runBuild(argv: readonly string[]): Promise<void> {
   try {
     const ctx: LoopContext = { linear, github, entry, config, now: () => new Date() };
     const loop = { ...BUILD_LOOP, concurrency: config.loop.concurrency.build };
-    await runLoop(loop, ctx, {
+    const result = await runLoop(loop, ctx, {
       once: args.once,
       dispatcher,
       confirmer,
       state,
       log,
       pollMs: config.loop.pollSeconds * 1000,
+      logDir: `${stateDir}/${entry.alias}/logs`,
     });
+    if (args.once && result.failed > 0) process.exitCode = 1;
   } finally {
     lock.release();
     confirmer.close();

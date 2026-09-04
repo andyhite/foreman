@@ -11,6 +11,7 @@
  */
 
 import { branchNameFor, priorityRank, type Confirmer, type Dispatcher, type DispatchHandle, type DispatchRequest, type GitHubClient, type GlobalConfig, type Issue, type LinearWriter, type ResolvedRepoEntry } from "@foreman/core";
+import { mkdirSync, writeFileSync } from "node:fs";
 import nodeProcess from "node:process";
 import { isDispatcherBusy } from "./dispatch/index.ts";
 import { applyEscalation, type Escalation } from "./escalate.ts";
@@ -107,6 +108,27 @@ export interface RunLoopOptions {
   state: InflightStore;
   log: Logger;
   pollMs: number;
+  /**
+   * Directory for per-dispatch agent transcripts; `null` disables
+   * persistence (herdr shows its own pane). Files here are never pruned —
+   * they are the only record of what a dispatched agent did, and the
+   * operator owns `~/.foreman/state`.
+   */
+  logDir: string | null;
+}
+
+/** `<60s` → `"12s"`, else `"8m12s"`, else `"2h05m"`. */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60;
+    return `${totalMinutes}m${String(seconds).padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h${String(minutes).padStart(2, "0")}m`;
 }
 
 /** Shutdown drain budget: `drain()` waits at most this long for in-flight settles before giving up and letting the process exit anyway. */
@@ -143,6 +165,7 @@ async function offerCandidates<S>(
   declineLogged: Set<string>,
   settling: Promise<void>[],
   live: Map<string, DispatchHandle>,
+  failed: { count: number },
 ): Promise<{ dispatched: number; candidates: number }> {
   let dispatched = 0;
   let candidates = 0;
@@ -206,12 +229,35 @@ async function offerCandidates<S>(
         const settled = opts.dispatcher
           .settle(handle)
           .then((outcome) => {
-            if (outcome.status !== "settled" || outcome.exitCode !== 0) opts.state.recordFailure(candidate.key);
-            else opts.state.clearFailures(candidate.key);
+            const ms = Date.now() - Date.parse(handle.startedAt);
+            const ok = outcome.status === "settled" && outcome.exitCode === 0;
+            let logPath: string | null = null;
+            if (opts.logDir !== null && outcome.log.length > 0) {
+              try {
+                mkdirSync(opts.logDir, { recursive: true });
+                const path = `${opts.logDir}/${handle.dispatchId}.log`;
+                writeFileSync(path, outcome.log);
+                logPath = path;
+              } catch (error) {
+                opts.log(
+                  `${candidate.subject}: could not write the dispatch log (${error instanceof Error ? error.message : String(error)})`,
+                );
+              }
+            }
+            opts.log(
+              `${candidate.subject} ${candidate.agent} ${ok ? "✓" : "✗"} ${formatDuration(ms)}` +
+                (ok ? "" : ` (${outcome.status}${outcome.exitCode === null ? "" : `, exit ${outcome.exitCode}`})`) +
+                (logPath === null ? "" : ` · log: ${logPath}`),
+            );
+            if (!ok) {
+              opts.state.recordFailure(candidate.key);
+              failed.count += 1;
+            } else opts.state.clearFailures(candidate.key);
           })
           .catch((error: unknown) => {
             opts.log(`${candidate.key}: settle failed (${error instanceof Error ? error.message : String(error)})`);
             opts.state.recordFailure(candidate.key);
+            failed.count += 1;
           })
           .finally(() => {
             opts.state.remove(candidate.key);
@@ -232,9 +278,10 @@ async function offerCandidates<S>(
   return { dispatched, candidates };
 }
 
-export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopOptions): Promise<void> {
+export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopOptions): Promise<{ failed: number }> {
   const gaveUpLogged = new Set<string>();
   const declineLogged = new Set<string>();
+  const failed = { count: 0 };
   const settling: Promise<void>[] = [];
   const live = new Map<string, DispatchHandle>();
   let stop = false;
@@ -273,6 +320,7 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
     const wake = (): void => {
       wakeResolve?.();
     };
+    let lastSummary: string | null = null;
 
     for (;;) {
       let snapshot: S;
@@ -285,7 +333,7 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
           wakeResolve = resolve;
         });
         wakeResolve = null;
-        if (stop) return;
+        if (stop) return { failed: failed.count };
         continue;
       }
 
@@ -309,17 +357,20 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
         declineLogged,
         settling,
         live,
+        failed,
       );
-      opts.log(`${loop.name}: ${dispatched} dispatched, ${opts.state.inFlightCount()} in flight, ${candidates} eligible`);
+      const summary = `${loop.name}: ${dispatched} dispatched, ${opts.state.inFlightCount()} in flight, ${candidates} eligible`;
+      if (summary !== lastSummary || dispatched > 0) opts.log(summary);
+      lastSummary = summary;
 
       if (opts.once) {
         await Promise.all(settling);
-        return;
+        return { failed: failed.count };
       }
 
       if (stop) {
         await drain();
-        return;
+        return { failed: failed.count };
       }
 
       await sleep(opts.pollMs, (resolve) => {
@@ -329,7 +380,7 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
 
       if (stop) {
         await drain();
-        return;
+        return { failed: failed.count };
       }
     }
   } finally {

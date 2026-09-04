@@ -2,11 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "outDir": "dist-types"
+    "outDir": "dist-types",
+    "resolveJsonModule": true
   },
   "include": [
     "src/**/*.ts",
-    "test/**/*.ts"
+    "test/**/*.ts",
+    "package.json"
   ],
   "references": [
     {

@@ -43,8 +43,9 @@ import {
   getConfig,
   getEntry,
   getGitHub,
-  getLinear,
   getContextDigest,
+  getLinear,
+  getProductDigest,
   initRuntime,
   isRepoRegistered,
   liveDispatchIds,
@@ -93,7 +94,14 @@ function toGuardDeps(): TaskGuardDeps {
     },
     liveDispatchIds,
     releaseLiveDispatch,
-    contextDigest: async (projectId) => (projectId ? getContextDigest(projectId) : ""),
+    /*
+     * A missing project id is not a missing context: the product layer lives
+     * on the team (SPEC §4.7), so a triage batch and a project-less bug or
+     * chore still get the architectural decisions, vocabulary, non-goals, and
+     * Definition of Done they are judged against. Only the project-brief
+     * layer needs a project.
+     */
+    contextDigest: async (projectId) => (projectId ? getContextDigest(projectId) : getProductDigest()),
   };
 }
 

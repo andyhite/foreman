@@ -7,6 +7,8 @@
 
 import type {
   Comment,
+  Initiative,
+  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRef,
@@ -40,6 +42,7 @@ import {
   COMMENTS_QUERY,
   DOCUMENT_CREATE_MUTATION,
   DOCUMENT_UPDATE_MUTATION,
+  INITIATIVE_QUERY_SCALAR_CONTENT,
   ISSUE_BY_ID_QUERY,
   ISSUE_CREATE_MUTATION,
   ISSUE_LABEL_CREATE_MUTATION,
@@ -47,6 +50,7 @@ import {
   ISSUE_UPDATE_MUTATION,
   ISSUES_QUERY,
   PROJECT_CREATE_MUTATION,
+  PROJECT_INITIATIVES_QUERY,
   PROJECT_LABEL_CREATE_MUTATION,
   PROJECT_LABELS_QUERY,
   PROJECT_QUERY_SCALAR_CONTENT,
@@ -237,6 +241,8 @@ export class LinearClient implements LinearWriter {
   private readonly projectLabelGroupIdCache = new Map<string, { value: LinearId; at: number }>();
   /** The team's documents, keyed by team key — TTL-invalidated. Holds the product `Context` doc (SPEC §4.7). */
   private readonly teamDocumentsCache = new Map<string, { value: LinearDocument[]; at: number }>();
+  /** Every initiative a project belongs to, keyed by project id — TTL-invalidated. Usually an empty array. */
+  private readonly projectInitiativesCache = new Map<string, { value: InitiativeRef[]; at: number }>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
   private readonly projectStatusIdCache = new Map<ProjectStatusType, { value: LinearId; at: number }>();
   private viewerIdCache: { value: string; at: number } | null = null;
@@ -810,6 +816,50 @@ export class LinearClient implements LinearWriter {
     >("teamDocuments()", TEAM_DOCUMENTS_QUERY, { filter: { team: { key: { eq: teamKey } } }, first: 50 }, (data) => data.documents);
     this.teamDocumentsCache.set(teamKey, { value: documents, at: Date.now() });
     return documents;
+  }
+
+  /** The wire row behind `projectInitiatives`. */
+  private async fetchProjectInitiatives(projectId: string): Promise<InitiativeRef[]> {
+    const data = await this.request<{
+      project: { id: string; initiatives: { nodes: InitiativeRef[] } } | null;
+    }>(PROJECT_INITIATIVES_QUERY, { projectId });
+    return data.project?.initiatives.nodes ?? [];
+  }
+
+  /**
+   * Every initiative a project belongs to, unfiltered. Foreman never creates
+   * or requires one; this exists so the context digest can fold in an
+   * operator-maintained initiative brief when a project happens to have one
+   * (SPEC §4.7). An empty array is the ordinary case.
+   */
+  async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
+    const cached = this.projectInitiativesCache.get(projectId);
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
+    const initiatives = await this.fetchProjectInitiatives(projectId);
+    this.projectInitiativesCache.set(projectId, { value: initiatives, at: Date.now() });
+    return initiatives;
+  }
+
+  /** Same shape rule as `project()`: `Document.content` is a `String`, so there is one valid shape. */
+  async initiative(initiativeId: string): Promise<Initiative | null> {
+    const data = await this.request<{
+      initiative: {
+        id: string;
+        name: string;
+        documents: { nodes: Array<{ id: string; title: string; content: string | null; updatedAt: string }> };
+      } | null;
+    }>(INITIATIVE_QUERY_SCALAR_CONTENT, { initiativeId });
+    if (!data.initiative) return null;
+    return {
+      id: data.initiative.id,
+      name: data.initiative.name,
+      documents: data.initiative.documents.nodes.map((doc) => ({
+        id: doc.id,
+        title: doc.title,
+        content: doc.content,
+        updatedAt: doc.updatedAt,
+      })),
+    };
   }
 
   /** A project's current native status. Null when the project itself is absent. */

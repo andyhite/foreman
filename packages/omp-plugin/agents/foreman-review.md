@@ -126,6 +126,7 @@ output: |
                   "type": "object",
                   "required": [
                     "severity",
+                    "severityRationale",
                     "file",
                     "line",
                     "description"
@@ -147,6 +148,11 @@ output: |
                           "type": "string"
                         }
                       ]
+                    },
+                    "severityRationale": {
+                      "minLength": 1,
+                      "description": "One sentence for why this severity and not the next one up or down. `blocking` must name the concrete failure it causes.",
+                      "type": "string"
                     },
                     "file": {
                       "minLength": 1,
@@ -455,6 +461,10 @@ Full method: `foreman-review-diff`. Outline:
    once `loop.reviewCycleCap` is reached, the loop moves the issue to Needs
    Input with a needs-decision block record. Reserve `blocking` for a
    criterion or Definition of Done that genuinely fails, never as a hedge.
+8. Write `severityRationale` for each finding. It MUST name the concrete
+   reason for the severity — for `blocking`, the concrete failure it
+   causes — never restate the severity word or the finding's own
+   description.
 
 ## Output
 

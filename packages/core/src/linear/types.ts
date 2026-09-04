@@ -196,6 +196,23 @@ export interface Project {
   status: ProjectStatus | null;
 }
 
+/**
+ * A project's initiative membership, as it comes back from the project.
+ * Optional by design: most projects belong to none, and nothing in Foreman
+ * requires one (SPEC §4.0).
+ */
+export interface InitiativeRef {
+  id: LinearId;
+  name: string;
+}
+
+/** An initiative and its attached documents — read only to enrich a project's context digest (SPEC §4.7). */
+export interface Initiative {
+  id: LinearId;
+  name: string;
+  documents: LinearDocument[];
+}
+
 /** `Team.triageEnabled`/`cyclesEnabled` plus the triage state id, when Linear has created one. */
 export interface TeamSettings {
   id: LinearId;

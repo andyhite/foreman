@@ -11,7 +11,7 @@
  * load-time crash (SPEC §3.5 item 6).
  */
 
-import type { GlobalConfig, LinearDocument, LinearWriter, Project, WorkflowState } from "@foreman/core";
+import type { GlobalConfig, Initiative, LinearDocument, LinearReader, LinearWriter, Project, WorkflowState } from "@foreman/core";
 import type { ResolvedRepoEntry } from "@foreman/core";
 import {
   ConfigError,
@@ -86,6 +86,47 @@ function productDigest(documents: LinearDocument[], teamKey: string): string {
 function projectBriefDigest(project: Project): string {
   const body = project.content?.trim() || project.description?.trim();
   return `## Project Brief (${project.name})\n${body && body.length > 0 ? body : "_none_"}`;
+}
+
+/**
+ * The optional third digest layer (SPEC §4.7): an initiative's own document
+ * bodies, folded in only when a project belongs to exactly one initiative.
+ * `null` means "omit" — zero initiatives (the ordinary case), two or more
+ * (ambiguous, and no routing decision may pick one), a missing initiative,
+ * or one whose documents are all empty all collapse to the same "no layer"
+ * outcome, never a bare heading.
+ */
+function initiativeDigest(initiative: Initiative): string | null {
+  const sections = initiative.documents
+    .map((doc) => ({ title: doc.title, body: doc.content?.trim() ?? "" }))
+    .filter((doc) => doc.body.length > 0)
+    .map((doc) => `### ${doc.title}\n${doc.body}`);
+  if (sections.length === 0) return null;
+  return `## Initiative (${initiative.name})\n${sections.join("\n\n")}`;
+}
+
+/**
+ * Fetches the optional initiative layer for a project, or `null` to omit it.
+ * Wrapped in its own try/catch: the product and project layers carry the
+ * Definition of Done `foreman-review` grades against, so a flaky initiative
+ * read must never cost the caller its real context — an initiative is
+ * operator-maintained background, never load-bearing (SPEC §4.7).
+ *
+ * Exported as the test seam for that whole rule set. The reader arrives as a
+ * parameter, so every omission branch is reachable without standing up the
+ * module-global runtime (which would otherwise bind a test to whichever
+ * repos the developer running it happens to have registered).
+ */
+export async function fetchInitiativeDigest(linear: LinearReader, projectId: string): Promise<string | null> {
+  try {
+    const refs = await linear.projectInitiatives(projectId);
+    if (refs.length !== 1) return null;
+    const initiative = await linear.initiative(refs[0]!.id);
+    if (!initiative) return null;
+    return initiativeDigest(initiative);
+  } catch {
+    return null;
+  }
 }
 
 /** Rebuilds the runtime. Call from `session_start`; never throws on a missing API key. */
@@ -207,14 +248,17 @@ export function getGitHub(): GitHubClient {
 
 
 /**
- * Returns the cached two-layer Context digest for `projectId`, fetching and
- * caching it on first ask (SPEC §4.7): the product `Context` doc on the
- * repo's team, concatenated product-first with the project's own brief. The
- * product layer resolves through the team, not an initiative — a repo binds
- * exactly one team, and nothing attaches a created project to an initiative
- * any more. Either layer degrades to a stub rather than throwing — a new
- * team with a stub `Context` doc, or a project with no brief yet, is a
- * legitimate state the digest must still render usefully.
+ * Returns the cached Context digest for `projectId`, fetching and caching it
+ * on first ask (SPEC §4.7): the product `Context` doc on the repo's team,
+ * an optional initiative layer, and the project's own brief, concatenated in
+ * that order. The product layer resolves through the team, not an
+ * initiative — a repo binds exactly one team, and nothing attaches a
+ * created project to an initiative any more; the initiative layer is purely
+ * additive, folded in only when the project happens to sit under exactly
+ * one (SPEC §4.7). Every layer degrades to a stub or is omitted rather than
+ * throwing — a new team with a stub `Context` doc, a project with no brief
+ * yet, or an initiative read failing are all legitimate states the digest
+ * must still render usefully.
  */
 export async function getContextDigest(projectId: string): Promise<string> {
   const rt = requireRuntime();
@@ -228,7 +272,8 @@ export async function getContextDigest(projectId: string): Promise<string> {
     return "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
   }
 
-  const digest = `${await getProductDigest()}\n\n${projectBriefDigest(project)}`;
+  const layers = [await getProductDigest(), await fetchInitiativeDigest(linear, projectId), projectBriefDigest(project)];
+  const digest = layers.filter((layer): layer is string => layer !== null).join("\n\n");
   rt.contextDigestCache.set(projectId, digest);
   return digest;
 }

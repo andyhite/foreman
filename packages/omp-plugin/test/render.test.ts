@@ -128,9 +128,9 @@ describe("renderReviewComment", () => {
     dodChecklist: [{ item: "Tests pass", satisfied: true, evidence: "CI green" }],
     contextContradictions: [],
     findings: [
-      { severity: "nit", file: "src/a.ts", line: 10, description: "Rename variable." },
-      { severity: "blocking", file: "src/b.ts", line: 5, description: "Missing null check." },
-      { severity: "should-fix", file: "src/c.ts", line: null, description: "Consider extracting helper." },
+      { severity: "nit", severityRationale: "Cosmetic only.", file: "src/a.ts", line: 10, description: "Rename variable." },
+      { severity: "blocking", severityRationale: "Null deref crashes on save.", file: "src/b.ts", line: 5, description: "Missing null check." },
+      { severity: "should-fix", severityRationale: "Duplicated logic, not incorrect.", file: "src/c.ts", line: null, description: "Consider extracting helper." },
     ],
     projectOrganization: "No concerns.",
     scopeCreep: [],
@@ -150,10 +150,15 @@ describe("renderReviewComment", () => {
     expect(output.indexOf("src/a.ts:10")).toBeGreaterThan(nitIndex);
   });
 
+  it("carries each finding's severity rationale on a continuation line", () => {
+    const output = renderReviewComment(baseResult);
+    expect(output).toContain("_blocking: Null deref crashes on save._");
+  });
+
   it("states an empty severity group explicitly rather than omitting it", () => {
     const noBlocking: ReviewResult = {
       ...baseResult,
-      findings: [{ severity: "nit", file: "src/a.ts", line: 1, description: "x" }],
+      findings: [{ severity: "nit", severityRationale: "Cosmetic only.", file: "src/a.ts", line: 1, description: "x" }],
     };
     const output = renderReviewComment(noBlocking);
     const blockingSection = output.slice(
@@ -298,11 +303,24 @@ describe("renderStatusConsole", () => {
     running: [
       { issueId: "ENG-9", agent: "foreman-implement", dispatchId: "d-1", ageMs: 3 * 60 * 60 * 1000, pastTtl: true },
     ],
+    backlogCount: 0,
+    readyCount: 0,
+    loops: [],
   };
 
   it("leads with a bold summary line before every section", () => {
     const output = renderStatusConsole(state);
-    expect(output.startsWith("**1 waiting on the operator (0 needs input, 1 blocked) · 1 running (1 past TTL)**")).toBe(true);
+    expect(
+      output.startsWith(
+        "**1 waiting on the operator (0 needs input, 1 blocked) · 1 running (1 past TTL) · 0 ready · 0 backlog**",
+      ),
+    ).toBe(true);
+  });
+
+  it("includes ready and backlog counts in the headline", () => {
+    const output = renderStatusConsole({ ...state, backlogCount: 11, readyCount: 4 });
+    expect(output).toContain("4 ready");
+    expect(output).toContain("11 backlog");
   });
 
   it("puts the needs-input queue first among the ## sections", () => {
@@ -314,10 +332,30 @@ describe("renderStatusConsole", () => {
     expect(nextSectionIndex).toBeGreaterThan(needsInputIndex);
   });
 
-  it("collapses empty sections to one line", () => {
-    const empty: StatusState = { needsInput: [], blocked: [], running: [] };
+  it("collapses empty sections to one line and names the next action on a fully empty board", () => {
+    const empty: StatusState = {
+      needsInput: [],
+      blocked: [],
+      running: [],
+      backlogCount: 0,
+      readyCount: 0,
+      loops: [],
+    };
     const output = renderStatusConsole(empty);
     expect(output.split("\n").filter((line) => line.includes("_none")).length).toBeGreaterThan(0);
+    expect(output).toContain("Nothing queued.");
+    expect(output).toContain("build: not running");
+    expect(output).toContain("plan: not running");
+  });
+
+  it("shows a running loop's pid and uptime in the Loops section", () => {
+    const output = renderStatusConsole({
+      ...state,
+      loops: [{ name: "build", pid: 74665, startedAt: new Date(Date.now() - 60_000).toISOString() }],
+    });
+    const loopsSection = output.slice(output.indexOf("## Loops"));
+    expect(loopsSection).toContain("build: running (pid 74665");
+    expect(loopsSection).toContain("plan: not running");
   });
 });
 

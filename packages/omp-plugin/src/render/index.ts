@@ -14,4 +14,4 @@ export { renderImplementComment } from "./implement-comment.ts";
 export { renderBlockComment } from "./block-comment.ts";
 
 export { renderStatusConsole } from "./status.ts";
-export type { BlockedEntry, RunningEntry, StatusState } from "./status.ts";
+export type { BlockedEntry, LoopLiveness, RunningEntry, StatusState } from "./status.ts";

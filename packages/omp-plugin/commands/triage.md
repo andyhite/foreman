@@ -34,9 +34,10 @@ None. Triage is read-only.
 
 One entry, `agent: foreman-triage`. Task text: `FOREMAN-ISSUES: <ID>,<ID>,...`
 listing exactly the issues resolved above, then every resolved item in full.
-Shared `context`: the `context` op's digest, plus the `team_roadmap` output
-(the candidate projects `destinationProjectId` must choose from) plus a note
-that Triage items carry no project, so there is no per-item project brief.
+Shared `context`: the `team_roadmap` output (the candidate projects
+`destinationProjectId` must choose from). The extension appends the product
+`Context` doc to the shared `context` itself; Triage items carry no
+project, so there is no per-item project brief layer.
 
 ## After
 

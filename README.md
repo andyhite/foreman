@@ -17,11 +17,17 @@ flowchart LR
     N[New project, no issues] -->|foreman-plan| B[Backlog]
     T[Triage] -->|foreman-triage| B
     T -->|foreman-triage| X[Canceled / Duplicate]
-    B -->|foreman-refine| R[Todo]
-    R -->|claim at dispatch| P[In Progress]
+    B -->|foreman-refine| RF[Refining]
+    RF -->|foreman-refine| RE[Ready]
+    RF -->|foreman-refine, blocked| NI[Needs Input]
+    NI -->|/foreman:unblock| RF
+    RE -->|claim at dispatch| P[In Progress]
     P -->|foreman-implement| V[In Review]
+    P -->|blocked| BL[Blocked]
+    BL -->|/foreman:unblock| P
     V -->|foreman-review| D[Done]
     V -->|foreman-review| P
+    V -->|blocked| BL
 ```
 
 | Agent | Edge | Model | Produces |
@@ -29,7 +35,7 @@ flowchart LR
 | `foreman-triage` | Triage → Backlog / Canceled / Duplicate | `@default` | A priority, a `type:` label, dedupe findings |
 | `foreman-roadmap` | Initiative brief → sequenced projects | `@plan` | Projects with dependency edges and start/target dates |
 | `foreman-plan` | New project (zero issues) → Backlog | `@plan` | A first slate of draft issues from the project brief |
-| `foreman-refine` | Backlog → Todo | `@plan` | Acceptance criteria, a Fibonacci estimate, a split proposal |
+| `foreman-refine` | Backlog → Ready | `@plan` | Acceptance criteria, a Fibonacci estimate, a split proposal |
 | `foreman-implement` | In Progress → In Review | `@default` | A branch, tests, a PR, per-criterion evidence |
 | `foreman-review` | In Review → Done / In Progress | `@slow` | Findings by severity against the diff |
 | `foreman-context` | Team's product `Context` doc, in place — no issue or project transition | `@plan` | Proposed decisions, vocabulary, non-goals; the Definition of Done stays operator-only |
@@ -141,6 +147,14 @@ Resolves the repo root (`git rev-parse --show-toplevel`), then:
    `<repo>/.omp/plugins/node_modules/@foreman/omp-plugin` (a symlink to
    `~/.foreman/plugin`), plus a `.git/info/exclude` line so neither shows in
    `git status`. `--skip-plugin` skips this step.
+4. Provisions the repo's Linear team: enables Triage, disables Cycles,
+   creates the nine managed workflow states, creates `app:*` labels for the
+   repo's apps, and seeds the product `Context` doc. Confirmed once with an
+   itemized list of every change before anything is written, and
+   auto-approved under `--yes` — except archiving a workflow state Foreman
+   does not manage, which `--yes` always skips and reports rather than
+   applying. `foreman deinit --revert-linear` reverts the workflow states
+   this step created.
 
 `foreman init` never prompts for or writes the Linear API key.
 
@@ -179,7 +193,12 @@ entry. The key resolves from `$LINEAR_API_KEY`, else `linear.apiKeyFile`.
 
 - `foreman deinit` (inside a repo) removes the plugin lock and symlink under
   `.omp/plugins/` and, unless `--keep-registry`, drops the repo's registry
-  entry. `--path <dir>` targets another directory.
+  entry. `--path <dir>` targets another directory. `--revert-linear`
+  archives the empty workflow states `foreman init` created on the repo's
+  Linear team (a state still holding issues is left alone and reported);
+  Foreman has no delete for the `app:*`/`type:*` labels, the team's
+  triage/cycles settings, or the Context doc, so those are always left in
+  place and named in the output.
 - `foreman doctor` checks the global plugin link and every registered repo's
   activation; a broken symlink or stale lock entry is a problem. `--fix`
   repairs what it can — re-runs the equivalent of `activateRepoPlugin` per
@@ -232,7 +251,16 @@ Dispatching an agent requires `linear.apiKeyFile`: the loop scrubs every
 `$LINEAR_API_KEY`-only setup cannot pass the credential through and every
 loop refuses to start with a `loop dispatch requires linear.apiKeyFile`
 error. Run `foreman setup` to write the key to `~/.foreman/linear-api-key`
-and set `linear.apiKeyFile` to it.
+and set `linear.apiKeyFile` to it. `foreman reconcile` is exempt from this
+check — it applies fixes directly through the Linear client and never
+dispatches an agent.
+
+Every dispatch settle prints one line naming the issue, the agent, ✓ or ✗,
+and how long it ran, and — when the dispatcher captured a transcript —
+writes it to `~/.foreman/state/<alias>/logs/<dispatch-id>.log` and names
+that path on the line. Repeated idle polls collapse to a single summary
+line instead of one per poll. `--once` exits non-zero if any dispatch in
+that run failed, so a scheduler can tell a bad run from a quiet one.
 
 
 ## Operator surface
@@ -245,10 +273,10 @@ Slash commands inside any omp session:
 | `/foreman:roadmap` | Decompose the repo's team into its next slate of projects. `[DOCUMENT-PATH]` |
 | `/foreman:context` | Propose edits to the team's product `Context` doc (decisions, vocabulary, non-goals). Operator-invoked only. |
 | `/foreman:plan` | Seed a bare project's first Backlog issues. `<PROJECT-ID>...` |
-| `/foreman:refine` | Refine prioritized issues to Todo. `<ISSUE-ID>...` |
+| `/foreman:refine` | Refine prioritized issues to Ready. `<ISSUE-ID>...` |
 | `/foreman:implement` | Implement one ready issue and open its PR. `<ISSUE-ID>` |
 | `/foreman:review` | Cold-review in-review diffs. `<ISSUE-ID or PR>...` |
-| `/foreman:status` | Operator console: blocked queue, in-flight locks, and loop state. |
+| `/foreman:status` | Operator console: queue depth, blocked queue, in-flight locks, and loop state. |
 | `/foreman:merge` | Merge one issue's PR (or branch) once the review gate passes. `<ISSUE-ID>`. Operator-invoked only. |
 | `/foreman:unblock` | Record your reply to a blocked issue and return it to Backlog or Ready. `<ISSUE-ID> <reply>` |
 

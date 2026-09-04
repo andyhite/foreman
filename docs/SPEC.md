@@ -158,7 +158,7 @@ independently mutable things:
 | Command | Scope | Flags |
 | --- | --- | --- |
 | `foreman setup` | per-machine: tool preflight, the Linear credential, the one global plugin link at `~/.foreman/plugin` | `--link` (dev mode: run from this checkout's source, no rebuild to see changes), `--checkout <path>`, `--skip-linear` |
-| `foreman init` | per-repo: one `repos` entry, plus the two files that activate the plugin in that repo | `--path <dir>`, `--initiative <id>` (repeatable), `--alias <name>`, `--team <KEY>`, `--skip-plugin`, `--skip-linear` |
+| `foreman init` | per-repo: one `repos` entry, plus the two files that activate the plugin in that repo | `--path <dir>`, `--app <name>` (repeatable, monorepo app bindings), `--alias <name>`, `--team <KEY>` (the one team this repo binds), `--skip-plugin`, `--skip-linear` |
 | `foreman deinit` | per-repo: the exact inverse of `init` | `--path <dir>`, `--keep-registry` (deactivate the plugin but leave the `repos` entry in place) |
 | `foreman doctor` | verification and repair for both layers | `--fix`, `--checkout <path>` |
 | `foreman update` | pull, rebuild, then repair drift | `--checkout <path>`, `--skip-pull`, `--skip-plugin` |
@@ -367,7 +367,7 @@ which is the explicit kickoff surface for every step.
 | `/foreman:triage` | `foreman-triage` over the Inbox view, batched up to `loop.triageBatch` (§3.10) | none |
 | `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
 | `/foreman:plan` | `foreman-plan` — turns a bare project's brief into its first slate of issues | `<PROJECT-ID>` |
-| `/foreman:roadmap` | `foreman-roadmap` — decomposes an initiative's brief into its next slate of projects | `<INITIATIVE-ID>` |
+| `/foreman:roadmap` | `foreman-roadmap` — decomposes the repo's team into its next slate of projects, optionally from a brief | `[DOCUMENT-PATH]`, optional |
 | `/foreman:context` | `foreman-context` — proposes edits to the team's product `Context` doc's three agent-proposable sections (§4.7) | none, team-scoped like `/foreman:roadmap` |
 | `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` | `<ISSUE-ID>` or PR |
@@ -375,11 +375,14 @@ which is the explicit kickoff surface for every step.
 | `/foreman:unblock` | no agent — records the operator's reply, clears `foreman:blocked`, and returns the issue to Todo (§9) | `<ISSUE-ID>` |
 | `/foreman:status` | no agent — renders the operator console | none |
 
-Each dispatch command body must: resolve the target issue, assemble the shared
-`context` (the two-layer Context digest per §4.7 + the issue), state the agent to spawn,
-and state the gate that must hold. It must **not** restate the procedure — that
-lives in the autoloaded skill (§8). A command that duplicates its skill will
-drift from it.
+Each dispatch command body must: resolve the target issue, assemble the
+issue-specific half of the shared `context`, state the agent to spawn, and
+state the gate that must hold. It must **not** assemble the Context digest —
+the task guard appends that itself for every stage but `roadmap` and
+`context` (§4.7), so a command that re-reads it only burns the operator's
+turns and can dispatch with none of it. It must **not** restate the
+procedure — that lives in the autoloaded skill (§8). A command that
+duplicates its skill will drift from it.
 
 **These commands are also the loop's dispatch surface** (§17). The scheduler
 shells the same command the operator types, via print mode. One code path,
@@ -427,17 +430,14 @@ that must be real code:
    so there is nothing to apply and the yield is lost.
 6. **Config loader.** Reads and validates the global `~/.foreman/config.json`
    (§3.10) — including the `repos` registry: each entry's path, `team`, and
-   bound `initiatives` (**IDs**, not names — grouping prefixes rename), per
-   the instance model (§3.11). The instance's own entry is resolved by
-   matching cwd against registry paths. Scope check: issue → project → its
-   single product initiative (§4.0) → must be in this entry's bound set — the
-   loop skips misses, manual commands refuse with the reason. Validated on
-   `session_start` alongside the skill-name guard (§8) — including the
-   cross-repo initiative-uniqueness check (§3.10) — and the ensure pass
-   (§3.11) runs here too; an invalid config or unresolvable scope fails
-   loudly before any spawn. Per-project overrides are deliberately absent —
-   nothing needs one today, and the chain makes adding it a five-line change
-   when something does.
+   `apps`, per the instance model (§3.11). The instance's own entry is
+   resolved by matching cwd against registry paths. Scope check: issue →
+   team → must match this entry's bound team — the loop skips misses,
+   manual commands refuse with the reason. Validated on `session_start`
+   alongside the skill-name guard (§8); an invalid config or unresolvable
+   scope fails loudly before any spawn. Per-project overrides are
+   deliberately absent — nothing needs one today, and the chain makes
+   adding it a five-line change when something does.
 7. **Subagent lifecycle listeners.** `task:subagent:lifecycle`,
    `task:subagent:progress`, and `task:subagent:event` fire on the parent bus.
    Use them to keep `/foreman:status` live and to detect aborts — and only
@@ -508,7 +508,7 @@ Everything that is a *parameter* rather than an *invariant* lives in **one
 global config file**, loaded and schema-validated by `core` (TypeBox — the
 same machinery as the output schemas) and consumed by all three consumers. No
 per-repo config files: the `repos` registry inside the global file is the
-single table binding repos to teams and initiatives, which gives both
+single table binding repos to teams and their apps, which gives both
 consumers the same lookup — a loop instance resolves its scope from it by
 cwd. Per-repo settings deep-merge over `repoDefaults`, entry wins — sparse
 overrides only (`RepoSettingsOverrideSchema`), distinguishable from "inherit
@@ -576,9 +576,9 @@ is the source of truth):
     "plotroom": {                                         // alias: positional arg to `foreman build`/`plan`, state-dir segment
       "path": "~/Code/plotroom",
       "team": "PLT",                                      // optional if unambiguous
-      "initiatives": [                                    // one or more; monorepos list several
-        "<initiative-id>",
-        { "id": "<initiative-id>", "path": "apps/zero" }  // optional path hint, fed to context assembly and implement's initial reads
+      "apps": [                                           // omit entirely for a single-app repo
+        { "name": "fleet" },                              // each becomes an `app:<name>` label
+        { "name": "zero" }
       ]
       // plus any repoDefaults override, e.g. "pr": { "required": false }
     }
@@ -586,8 +586,10 @@ is the source of truth):
 }
 ```
 
-Registry validation: an initiative bound in two `repos` entries is a config
-error caught at load, not a runtime surprise.
+Registry validation: one repo binds exactly one team, and a team bound in two
+`repos` entries is a config error caught at load, not a runtime surprise. An
+entry still carrying the pre-team-mapping `initiatives` key is rejected with
+the migration message rather than silently ignored.
 
 **`pr.required: false` — direct-branch mode.** The workflow shape is unchanged
 (one issue → one worktree → one branch), but implement pushes the branch and
@@ -620,12 +622,12 @@ loop setting does not require a process restart.
 
 ### 3.11 Instance model — one loop pair per repo
 
-Foreman runs **in a repo, for that repo's initiatives**. There is no central
+Foreman runs **in a repo, for that repo's team**. There is no central
 daemon watching all of Linear; the unit of deployment is two long-running
 processes per repo — `foreman plan <alias>` and `foreman build <alias>`
-(§17.1) — each scoped to a team plus the initiatives bound to that repo in
-the global `repos` registry (§3.10). A monorepo binds several initiatives —
-the `plotroom` entry binds `Plotroom Fleet` and `Plotroom Zero`.
+(§17.1) — each scoped to the one team bound to that repo in the global
+`repos` registry (§3.10). A monorepo binds one team plus its `apps` —
+the `plotroom` entry binds team `PLT` with apps `fleet` and `zero`.
 
 **Invocation.** `foreman plan <alias>` / `foreman build <alias>`, run
 anywhere — the alias, not cwd, resolves the registry entry, since a loop
@@ -634,23 +636,10 @@ checkout. An unregistered alias fails loudly naming the fix (add an entry).
 Manual slash commands resolve the entry the same way `foreman init` does:
 from the session's cwd against registry paths.
 
-**Scope predicate.** An issue is in scope iff it belongs to the team AND its
-project's initiative is in this instance's bound set. Both loops silently
-skip out-of-scope issues (they belong to another instance); a manual command
-against an out-of-scope issue refuses with the reason, never guesses.
-
-**Ensure pass** (`packages/core/src/ensure.ts`, `ensureMaintenanceProjects`).
-On extension `session_start` and — indirectly, through the same function —
-available to the loop: verify each bound initiative exists (fail loudly,
-`ConfigError`, if it does not resolve — the registry binds ids and an
-unresolvable one means the binding itself is broken) and has its standing
-`Maintenance` project, creating one — team-assigned, since Linear's
-`ProjectCreateInput` requires `teamIds` and has no `initiativeId` — through
-the `Confirmer` (a Linear write) if missing. `foreman reconcile` also runs
-this pass every invocation (§17.6), so a Maintenance project created by hand
-outside Foreman is picked up, not duplicated — matched case-insensitively and
-trimmed by name. Milestone-sized projects come from `foreman-roadmap` (§7.6a)
-or the operator directly; the ensure pass itself creates only `Maintenance`.
+**Scope predicate.** An issue is in scope iff it belongs to this instance's
+bound team. Both loops silently skip out-of-scope issues (they belong to
+another instance); a manual command against an out-of-scope issue refuses
+with the reason, never guesses.
 
 **Concurrent instances are already safe.** The mutex is in Linear, not in any
 process: the task guard's lock-comment claim (§11, §17.4) prevents
@@ -690,8 +679,8 @@ any other Backlog issue.
 **One team for everything.** Teams are where Linear scopes the machinery:
 workflow states, estimate config, the Triage inbox, team labels, and the issue
 prefix are all per-team. Everything §4 configures exists exactly once only if
-there is exactly one team. Products are differentiated by initiative and
-project, never by team. The loop still takes an explicit team scope
+there is exactly one team. Products are differentiated by project, never by
+team. The loop still takes an explicit team scope
 (`--team`, §3.11) — one team is the recommended topology, not a hardcoded
 assumption. If a product ever outgrows this, Linear sub-teams can inherit
 workflow and labels from a parent — a migration path that doesn't fork
@@ -705,15 +694,15 @@ proposals, then permanently fail the refinement gate untyped. Set the team's
 default issue template to Triage status so everything enters through one
 funnel.
 
-**Initiatives on from day one, and load-bearing.** Initiative = the product
-(§4.1); the registry's repo bindings (§3.10, §3.11) hang off it. Portfolio groupings (e.g. the weekly micro-products practice) are
-naming-convention parents — `Micro-products > dontletitdie.lol` — since real
-sub-initiatives are Enterprise-gated. Grouping prefixes are review lenses only;
-no Foreman config attaches to them.
-
-**Exactly one initiative per project.** Linear allows a project under multiple
-initiatives; Foreman does not — repo and context resolution (§3.5, §4.7) must
-be unambiguous. Validator-enforced.
+**Initiatives are optional, operator-maintained, and never load-bearing.**
+Linear's Initiative object groups projects into a portfolio; Foreman reads
+one when a project happens to belong to it (§4.7) and never creates, writes,
+or requires one. The registry binds a repo to a team (§3.10, §3.11), never
+to an initiative — a repo with no initiative on any of its projects behaves
+identically to one with several. A project under two or more initiatives is
+ambiguous context, not an error: the digest simply declines to fold a layer
+in (§4.7), which is a rendering choice, never a constraint the workspace
+enforces.
 
 **A standing `Maintenance` project per product.** Foreman-touched issues must
 belong to a project (§10), because the project edge is the only path from an
@@ -726,15 +715,16 @@ pattern for work that should stay open indefinitely.
 | Level | Use |
 |---|---|
 | Team | **Exactly one.** Owns states, estimates, Triage, team labels, and the issue prefix (§4.0). Carries the product `Context` doc (§4.7). |
-| Initiative | **The product/app.** Never closes. Hosted by exactly one repo — a monorepo may host several initiatives; the global registry binds them (§3.10, §3.11). Naming-convention parents group a portfolio (§4.0). |
+| Initiative | **Optional portfolio grouping**, operator-maintained in Linear. Never closes; not bound by the registry, not required by any project. A project belonging to exactly one gets its documents folded into the project's digest (§4.7); Foreman never creates or writes one. |
 | Project | **A shippable increment** — a feature or milestone that ends — or the product's standing `Maintenance` project. Carries the project brief (§4.7). |
 | Issue | Unit of agent work. One issue = one worktree = one PR. |
 | Sub-issue | Product of `foreman-refine` splitting an oversized issue. |
 
-The definitional line between initiative and project is lifecycle, not size: an
-initiative is a container that never closes, a project is a thing that ships
-and closes. A micro-product is a product that happens to take a week — it gets
-an initiative like anything else, holding a single `Launch` project.
+The definitional line between an initiative and a project is lifecycle, not
+size: an initiative is a container that never closes, a project is a thing
+that ships and closes. A micro-product is a product that happens to take a
+week — a single `Launch` project that ships and closes, optionally grouped
+under an initiative like any other, or under none at all.
 
 A project's own path through this hierarchy now has a decomposition step:
 `foreman-plan` (§7.6) turns a bare, newly-approved project's brief into its
@@ -890,9 +880,33 @@ team, so there is exactly one product `Context` doc per repo.
 success criteria, nothing product-wide. For a micro-product's single `Launch`
 project the brief carries everything and the product doc can start as a stub.
 
-The task tool's required `context` parameter gets a digest of **both**,
+**Initiative documents — optional, folded in only when unambiguous.** A
+project that happens to belong to exactly one Linear initiative gets that
+initiative's documents rendered as an extra layer between the product and
+project layers. A project with none — the ordinary case — gets the product
+and project layers alone, and nothing degrades: no heading, no stub, no
+missing information the digest could have supplied. A project under two or
+more initiatives is ambiguous, so the layer is omitted the same way — folding
+in an arbitrarily-picked one would make context depend on iteration order,
+and no routing decision may hinge on which initiative got picked. A fetch
+failure omits the layer rather than failing the digest: the product and
+project layers are the contract, the initiative layer is a bonus.
+
+The task tool's required `context` parameter gets a digest of these layers,
 concatenated product-first, which omp renders into every spawned subagent's
 system prompt.
+
+The task guard appends it, not the command — so no stage can be dispatched
+without it by a session that skipped a read. Every stage receives it except
+`roadmap` and `context`, whose commands supply the live doc themselves and
+would otherwise hand the agent two versions of the document it is rewriting.
+An entity with no project (a triage batch, or a `type:bug`/`type:chore` issue
+with no ship moment) receives the product layer alone: the product layer
+hangs off the team, so it is always available, and it is the layer carrying
+the Definition of Done that `foreman-review` grades against. Items in one
+call that resolve to the same digest contribute it once — `context` is shared
+by every item in the call, so appending per item would repeat the whole
+document N times.
 
 **Two zones, split by who may write them.** `## Definition of Done` (§4.8)
 is operator-editable but agent-locked: `foreman-review` grades
@@ -991,8 +1005,8 @@ completeness is evaluated in code from the blocker's own project status —
 `completed` or `canceled` resolves it, anything else does not
 (`projectBlockerIsResolved`, `incompleteProjectBlockers`).
 
-Project relations are fetched **per project**, never nested under
-`initiative.projects(first: 250)`: querying both relation connections on
+Project relations are fetched **per project**, never nested under a
+`projects(first: 250)` page: querying both relation connections on
 every project inside that one page exceeds Linear's query-complexity
 ceiling (`Query too complex`), so a candidate project's relations are read
 in their own, separate call.
@@ -1047,7 +1061,7 @@ Sketch schemas — refine during build, but keep the shapes:
 TriageItem
   issueId, type, proposedPriority, severityReasoning,
   destination: "backlog" | "new-project" | "cancel" | "duplicate",
-  destinationProjectId?, newProject? { name, description, initiativeId },
+  destinationProjectId?, newProject? { name, description, app },
   duplicateOf?, proposedBlockedBy[], draftDescription?, proposedEstimate?,
   missingInfo[]
 TriageResult
@@ -1154,7 +1168,7 @@ to remove a label first.
 **Known gap — `destinationProjectId` resolution is the agent's job, not the
 extension's.** `foreman_linear_read` gives the agent the team's real projects
 to choose from, so an ambiguous "which `Maintenance` project" question
-(monorepo with two initiatives, §4.0) is resolved by the agent reading
+(a monorepo with two `apps`, §3.10) is resolved by the agent reading
 context, not by a post-hoc name match. An item the agent genuinely cannot
 place gets `destination: "backlog"` against the team's default
 `Maintenance` project and a `missingInfo` note — attaching an issue to the
@@ -1451,19 +1465,20 @@ schemaMode: strict
 
 | | |
 |---|---|
-| **Transition** | none — creates one or more new projects under an initiative; touches no existing project or issue |
+| **Transition** | none — creates one or more new projects under this repo's team; touches no existing project or issue |
 | **Trigger** | `/foreman:roadmap`, operator-invoked only. Never a loop worker, never called mid-flow by another agent — the same standing as `foreman-triage`'s intake pass. |
-| **Model role** | `plan` — sequencing a set of projects from a brief is a drafting task, the initiative-level analog of `foreman-plan`'s issue decomposition (§7.6), not a lookup |
+| **Model role** | `plan` — sequencing a set of projects from a brief is a drafting task, the team-level analog of `foreman-plan`'s issue decomposition (§7.6), not a lookup |
 
 `foreman-plan` turns one bare project into its issues; nothing before this
-section turned an initiative's brief into the *projects* that will
-eventually go bare. An operator who already has a roadmap in their head —
-"ship the schema, then the API, then the UI, landing by end of quarter" —
-had no way to get that structure into Linear except creating each project
-by hand and wiring relations one at a time.
+section turned a team's brief into the *projects* that will eventually go
+bare. An operator who already has a roadmap in their head — "ship the
+schema, then the API, then the UI, landing by end of quarter" — had no way
+to get that structure into Linear except creating each project by hand and
+wiring relations one at a time.
 
-**Per invocation:** read the initiative's brief and any existing sibling
-projects (for naming and dependency context), and draft each new increment
+**Per invocation:** read the brief (an operator-supplied document, or the
+repo's own docs when none was given) and any existing sibling projects (for
+naming and dependency context), and draft each new increment
 as a `ProposedProject` — `key`, `name`, `description`, and a `brief` in the
 same §4.7 shape `foreman-plan` later decomposes. `blockedBy` names sibling
 `key`s in this same result; `blockedByExisting` names already-created
@@ -1478,9 +1493,8 @@ the same authority class as `foreman-triage`'s direct-apply (§7.1) and
 project status (§7.6a) — the agent proposes, the extension is the sole
 writer (principle 9):
 
-1. Create each `proposedProjects[]` entry as a Linear project and attach it
-   to `initiativeId` (`initiativeToProjectCreate`, two mutations — the
-   window between them is the same one §4.0's ensure pass already tolerates).
+1. Create each `proposedProjects[]` entry as a Linear project under
+   `teamId` (`ProjectCreateInput`, a single mutation).
 2. Set `startDate`/`targetDate` from the proposal, as `TimelessDate`s.
 3. Create a native `dependency` `ProjectRelation` (`end` -> `start`, §4.10a)
    for every `blockedBy` and `blockedByExisting` edge, resolving `blockedBy`
@@ -1535,7 +1549,7 @@ from `removals`.
 |---|---|---|---|
 | `foreman-triage-inbox` | triage | `TriageResult` | Applies directly |
 | `foreman-plan-project` | plan | `PlanResult` | Creates issues under one bare project |
-| `foreman-plan-roadmap` | roadmap (operator-invoked) | `RoadmapResult` | Creates one or more projects under one initiative |
+| `foreman-plan-roadmap` | roadmap (operator-invoked) | `RoadmapResult` | Creates one or more projects under the repo's team |
 | `foreman-refine-issue` | refine | `RefineResult` | Applies to one prioritized issue |
 | `foreman-spike` | refine, operator | Findings + follow-up issues | Investigation only; no production code |
 | `foreman-implement-issue` | implement | `ImplementResult` | Full within acceptance criteria |
@@ -1895,16 +1909,22 @@ the `HERDR_BIN_PATH` runtime variable.
    workflow (§4.2); if not, the loop gains a small merge-detection worker.
 8. Frontmatter tool-name spellings (`search`, `dap`, `exec`) and whether
    `output: schemas/….json` resolves relative to the plugin root.
-9. Whether documents attach at the initiative level on the current plan
+9. ~~Whether documents attach at the initiative level on the current plan
    (§4.7). Fallback: the product `Context` doc lives pinned in the product's
-   `Maintenance` project.
+   `Maintenance` project.~~ **Resolved, then superseded** — they do (item 9 in
+   the table above, measured), but Foreman does not use that: per
+   `docs/VERIFIED.md`'s *"Verified the product Context doc resolves through
+   the team"*, `Document` carries a `team` field and `DocumentFilter` filters
+   on it, so the product `Context` doc attaches to the team. No pinned-project
+   fallback, and no initiative required — an initiative's own documents are
+   read only as §4.7's optional extra layer.
 10. ~~Linear project↔team semantics for the ensure pass (§3.11): whether
     creating a project under an initiative requires an explicit team
     association, and whether issues can be queried by team + initiative
     efficiently enough for the 5-minute cadence.~~ **Resolved** — see §3.11 and
-    `docs/VERIFIED.md` §16 item 10: project creation requires `teamIds`, and
-    issue-by-initiative filtering is a single query through
-    `NullableProjectFilter.initiatives`.
+    `docs/VERIFIED.md` §16 item 10: `ProjectCreateInput` requires `teamIds`
+    and has no initiative field at all, so Foreman creates projects under a
+    team and never attaches them to an initiative.
 
 ---
 
@@ -2178,12 +2198,12 @@ sessions, and a `yolo`-mode loop can dispatch agents pinned to a stricter
    two-file per-repo activation, `/reload-plugins` loop working. The `core` config
    loader with schema validation, layering, and defaults (§3.10). Workspace
    topology per §4.0: single team, default issue template → Triage,
-   initiatives enabled, one initiative per product (grouping prefixes where
-   wanted), the `repos` registry populated and the ensure pass
-   creating `Maintenance` projects (§3.10, §3.11). Then Linear
+   the `repos` registry populated and the ensure pass creating
+   `Maintenance` projects (§3.10, §3.11). Initiatives are not part of this —
+   they are optional and Foreman never creates one (§4.0). Then Linear
    states, the `foreman:` and `type:` label groups, six saved views, one
    worked product `Context` doc + project brief with a Definition of Done.
-   Resolve §16 items 5, 7, and 9. ~1 day.
+   Resolve §16 items 5 and 7. ~1 day.
 2. **Schemas + extension core + interrupt protocol.** The five result schemas
    and `BlockRecord` union first — everything downstream consumes them. Then
    typed Linear read tools, the result-application layer that makes the

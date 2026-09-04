@@ -25,6 +25,7 @@ import {
   type AppBinding,
   type CommandRunner,
   ConfigError,
+  describeLinearError,
   ensureGitExclude,
   GitHubAppAuth,
   GitHubClient,
@@ -44,7 +45,7 @@ import {
 import { basename } from "node:path";
 import { readGlobalConfig, writeGlobalConfig } from "./global-config.ts";
 import type { Prompter } from "./prompt.ts";
-import { promptConfirmer, printProvisionActions } from "./provision-report.ts";
+import { promptConfirmer, printProvisionActions, printProvisionLegend } from "./provision-report.ts";
 import { printSection, style } from "./tui.ts";
 
 export interface InitOptions {
@@ -239,11 +240,13 @@ async function resolveApps(deps: InitDeps, options: InitOptions, existingEntry: 
  */
 async function provisionTeamForRepo(
   deps: InitDeps,
+  options: InitOptions,
   apiKey: string,
   team: string,
   appNames: readonly string[],
 ): Promise<boolean> {
   printSection(deps.log, "Linear team provisioning");
+  printProvisionLegend(deps.log);
 
   const client = new LinearClient({ apiKey });
   const teams = await client.teams();
@@ -254,9 +257,14 @@ async function provisionTeamForRepo(
     ]);
   }
 
-  const confirmer = promptConfirmer(deps.prompter, deps.log);
+  const confirmer = promptConfirmer(deps.prompter, deps.log, options.nonInteractive ?? false);
 
-  const actions = await provisionTeam(client, { teamId: matched.id, apps: appNames, confirmer });
+  const actions = await provisionTeam(client, {
+    teamId: matched.id,
+    apps: appNames,
+    confirmer,
+    allowArchive: !options.nonInteractive,
+  });
   const failed = printProvisionActions(deps.log, actions);
   return failed;
 }
@@ -469,12 +477,13 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
       try {
         provisioningFailed = await provisionTeamForRepo(
           deps,
+          options,
           provisionKey,
           team,
           apps.map((app) => app.name),
         );
       } catch (error) {
-        deps.log(`  ${style("yellow", "!")} team provisioning failed: ${(error as Error).message}`);
+        deps.log(`  ${style("yellow", "!")} team provisioning failed: ${describeLinearError(error)}`);
         provisioningFailed = true;
       }
     }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Dispatcher, DispatchHandle, DispatchOutcome, DispatchRequest, DispatchStatus } from "@foreman/core";
@@ -57,7 +57,7 @@ class FakeDispatcher implements Dispatcher {
     await promise;
   }
 
-  finishSettle(dispatchId: string, exitCode: number): void {
+  finishSettle(dispatchId: string, exitCode: number, log = ""): void {
     const resolve = this.#resolvers.get(dispatchId);
     if (!resolve) throw new Error(`no pending settle for ${dispatchId}`);
     this.#resolvers.delete(dispatchId);
@@ -65,7 +65,7 @@ class FakeDispatcher implements Dispatcher {
       handle: { dispatchId, agent: "foreman-implement", issueId: null, startedAt: "", pid: null, herdr: null },
       status: "settled",
       exitCode,
-      log: "",
+      log,
     });
   }
 
@@ -153,6 +153,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 5,
+      logDir: null,
     });
 
     await dispatcher.untilDispatched(1);
@@ -188,6 +189,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 5000,
+      logDir: null,
     });
 
     await dispatcher.untilDispatched(3);
@@ -214,6 +216,7 @@ describe("runLoop", () => {
       state,
       log: (message) => logs.push(message),
       pollMs: 5000,
+      logDir: null,
     });
 
     expect(dispatcher.dispatched.length).toBe(0);
@@ -258,6 +261,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 5000,
+      logDir: null,
     });
 
     expect(dispatcher.dispatched.length).toBe(0);
@@ -303,6 +307,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 5000,
+      logDir: null,
     });
 
     expect(updateCalls.length).toBe(1);
@@ -321,6 +326,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 5000,
+      logDir: null,
     });
     await dispatcher.untilDispatched(1);
     dispatcher.finishSettle(dispatcher.dispatched[0]!.items[0]!.dispatchId, 0);
@@ -349,6 +355,7 @@ describe("runLoop", () => {
       state,
       log: (message) => logs.push(message),
       pollMs: 5000,
+      logDir: null,
     });
 
     expect(state.failures("issue:A")).toBe(0);
@@ -367,6 +374,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 60_000,
+      logDir: null,
     });
 
     await dispatcher.untilDispatched(1);
@@ -398,6 +406,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 60_000,
+      logDir: null,
     });
 
     // No candidates to dispatch, so the loop reaches its 60s poll sleep on
@@ -421,6 +430,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 60_000,
+      logDir: null,
     });
 
     await dispatcher.untilDispatched(1);
@@ -448,6 +458,7 @@ describe("runLoop", () => {
       state,
       log: () => {},
       pollMs: 10,
+      logDir: null,
     });
 
     await dispatcher.untilDispatched(1);
@@ -497,6 +508,7 @@ describe("runLoop", () => {
       state,
       log: (message) => logs.push(message),
       pollMs: 5,
+      logDir: null,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -506,5 +518,103 @@ describe("runLoop", () => {
     expect(linearWrites).toBe(0);
     const declineLines = logs.filter((line) => line.includes("escalation declined; still retry-exhausted"));
     expect(declineLines).toHaveLength(1);
+  });
+
+  it("logs a settle outcome line: ✓ with the subject on success, ✗ with the exit code on failure", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 3);
+    const logs: string[] = [];
+
+    const run = runLoop(loop, makeCtx(), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 5000,
+      logDir: null,
+    });
+    await dispatcher.untilDispatched(1);
+    dispatcher.finishSettle(dispatcher.dispatched[0]!.items[0]!.dispatchId, 0);
+    await run;
+
+    expect(logs.some((line) => line.includes("issue:A") && line.includes("✓"))).toBe(true);
+  });
+
+  it("logs a failing settle outcome with ✗ and the exit code, and resolves runLoop with the failure count", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 3);
+    const logs: string[] = [];
+
+    const runPromise = runLoop(loop, makeCtx(), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 5000,
+      logDir: null,
+    });
+    await dispatcher.untilDispatched(1);
+    dispatcher.finishSettle(dispatcher.dispatched[0]!.items[0]!.dispatchId, 1);
+    const result = await runPromise;
+
+    expect(logs.some((line) => line.includes("✗") && line.includes("exit 1"))).toBe(true);
+    expect(result).toEqual({ failed: 1 });
+  });
+
+  it("persists a non-empty settle log under logDir and names the file in the outcome line", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 3);
+    const logs: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "foreman-engine-logdir-"));
+    tempDirs.push(dir);
+
+    const run = runLoop(loop, makeCtx(), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 5000,
+      logDir: dir,
+    });
+    await dispatcher.untilDispatched(1);
+    const dispatchId = dispatcher.dispatched[0]!.items[0]!.dispatchId;
+    dispatcher.finishSettle(dispatchId, 0, "agent transcript output");
+    await run;
+
+    const logPath = join(dir, `${dispatchId}.log`);
+    expect(existsSync(logPath)).toBe(true);
+    expect(readFileSync(logPath, "utf8")).toBe("agent transcript output");
+    expect(logs.some((line) => line.includes(logPath))).toBe(true);
+  });
+
+  it("suppresses an unchanged idle poll summary, but the first poll always prints", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([], 3);
+    const logs: string[] = [];
+
+    const run = runLoop(loop, makeCtx(), {
+      once: false,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 10,
+      logDir: null,
+    });
+
+    // Three polls at 10ms apart, all with an identical (empty) candidate set.
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    process.emit("SIGINT" as never);
+    await run;
+
+    const summaryLines = logs.filter((line) => line.includes("dispatched") && line.includes("eligible"));
+    expect(summaryLines).toHaveLength(1);
   });
 });

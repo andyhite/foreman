@@ -24,6 +24,7 @@
             "issueId",
             "refinedDescription",
             "estimate",
+            "estimateRationale",
             "acceptanceCriteria",
             "affectedAreas",
             "outOfScope",
@@ -65,6 +66,11 @@
                   "type": "number"
                 }
               ]
+            },
+            "estimateRationale": {
+              "minLength": 1,
+              "description": "One sentence for why this number: the files or the one non-obvious decision that set it.",
+              "type": "string"
             },
             "acceptanceCriteria": {
               "description": "Observable behaviors, verifiable by someone who did not write the code. Empty only when this issue became a tracking parent.",

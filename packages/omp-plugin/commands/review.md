@@ -28,11 +28,12 @@ dispatching.
 ## Dispatch
 
 `agent: foreman-review` per entry. Task text: `FOREMAN-ISSUE: <ISSUE-ID>`,
-the head SHA, the issue's acceptance criteria and Out of Scope, and that
-issue's two-layer `Context` digest (product `Context` doc + project brief,
-Definition of Done included). The extension fetches the diff before the
-spawn and appends a `FOREMAN-DIFF: <path>` line; the agent reads the file
-itself. NEVER inline diff text.
+the head SHA, and the issue's acceptance criteria and Out of Scope. The
+extension appends that issue's two-layer `Context` digest (product
+`Context` doc + project brief, Definition of Done included) to the shared
+`context` itself. The extension also fetches the diff before the spawn and
+appends a `FOREMAN-DIFF: <path>` line; the agent reads the file itself.
+NEVER inline diff text.
 
 ## After
 

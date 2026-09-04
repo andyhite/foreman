@@ -85,7 +85,7 @@ export interface TaskGuardDeps {
   liveDispatchIds: () => readonly string[];
   /** Unregisters a dispatch id from the live registry — called for every claim `unwindPrepared` unwinds, even when the Linear rollback itself fails. */
   releaseLiveDispatch: (dispatchId: string) => void;
-  /** The two-layer product/project Context digest (SPEC §4.7) to append to the shared `context` string. */
+  /** The Context digest (SPEC §4.7) to append to the shared `context` string: product layer plus the project's brief, or the product layer alone for a null `projectId`. */
   contextDigest: (projectId: string | null) => Promise<string>;
 }
 
@@ -378,11 +378,13 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
       "FOREMAN-APPS": deps.entry.appNames.join(",") || undefined,
       "FOREMAN-ISSUES": batchIssueIds ?? undefined,
     });
-    // Roadmap and context have no single project to key a Context digest
-    // off — roadmap's command assembles the product `Context` doc plus the
+    // Roadmap and context are the two stages that must not receive this
+    // digest: roadmap's command assembles the product `Context` doc plus the
     // repo's existing projects (`team_roadmap` op) before dispatch, and
-    // context's command supplies the live doc itself — so there is nothing
-    // here for the guard to append.
+    // context's command supplies the live doc itself — appending a cached
+    // copy would give that agent two versions of the doc it is rewriting.
+    // Triage passes a null `projectId` (its items are unassigned by
+    // definition) and so gets the product layer alone.
     return {
       item: revised,
       contextDigest: stage === "roadmap" || stage === "context" ? null : await deps.contextDigest(projectId),
@@ -490,7 +492,16 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
 
   return {
     item: revised,
-    contextDigest: null,
+    /*
+     * Every issue-targeted stage is measured against this doc, so the guard
+     * appends it rather than trusting each command to have the dispatching
+     * session re-read it: `foreman-review` grades `dodSatisfied` against the
+     * Definition of Done, `foreman-implement` builds to it, and
+     * `foreman-refine` writes acceptance criteria that must not restate it
+     * (SPEC §4.7, §4.8). An issue with no project still gets the product
+     * layer — see the `contextDigest` wiring in `extension.ts`.
+     */
+    contextDigest: await deps.contextDigest(issue.project?.id ?? null),
     cleanup: {
       issue,
       dispatchId,
@@ -569,13 +580,21 @@ export async function prepareTaskCall(
     ];
 
     const revisedItems: TaskItemInput[] = [];
-    let contextAppend = "";
+    /*
+     * Keyed by digest text, not by item: a batch of N issues in one project
+     * resolves to N identical digests, and `context` is shared by every item
+     * in the call, so appending per item would repeat the whole product
+     * `Context` doc N times. Insertion order is stable, so a batch spanning
+     * two projects still reads product-first in dispatch order.
+     */
+    const digests = new Set<string>();
     for (const item of items) {
       const prepared = await prepareItem(item, deps);
       if (prepared.cleanup) cleanups.push(prepared.cleanup);
-      if (prepared.contextDigest) contextAppend += `\n\n${prepared.contextDigest}`;
+      if (prepared.contextDigest) digests.add(prepared.contextDigest);
       revisedItems.push(prepared.item);
     }
+    const contextAppend = [...digests].map((digest) => `\n\n${digest}`).join("");
 
     const first = revisedItems[0];
     const revisedInput: TaskCallInput = flat

@@ -24,7 +24,10 @@ project brief, the shared `local://` root.
 
 - The diff at the `FOREMAN-DIFF` path in your task.
 - The issue: acceptance criteria, Out of Scope.
-- The product `Context` doc and the project brief, Definition of Done included.
+- The product `Context` doc and the project brief: already in your system
+  prompt as the `Context` digest, Definition of Done included. The extension
+  appends it before every dispatch; NEVER spend a call re-fetching it. You
+  grade `dodSatisfied` against the Definition of Done exactly as it arrives.
 
 ## Procedure
 

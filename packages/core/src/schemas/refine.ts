@@ -76,6 +76,10 @@ export const RefineResult = Type.Object(
         "restate the Definition of Done. A refined issue leaves no open questions behind.",
     }),
     estimate: EstimateSchema,
+    estimateRationale: Type.String({
+      minLength: 1,
+      description: "One sentence for why this number: the files or the one non-obvious decision that set it.",
+    }),
     acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), {
       description:
         "Observable behaviors, verifiable by someone who did not write the code. " +

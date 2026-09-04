@@ -564,11 +564,13 @@ as an extra per-issue status read.
 ## Verified the product Context doc resolves through the team
 
 Introspected and executed against the live API while re-homing §4.7's product
-`Context` doc off the initiative layer (nothing attaches a created project to
-an initiative — `results/apply.ts` has no `initiativeToProjectCreate`,
-`provision.ts` dropped the per-initiative pass, and `config/load.ts` rejects a
-`repos.<alias>.initiatives` key — so the initiative-sourced layer could never
-populate).
+`Context` doc off the initiative layer. Foreman attaches nothing to an
+initiative — `results/apply.ts` has no `initiativeToProjectCreate`,
+`provision.ts` has no per-initiative pass, and `config/load.ts` rejects a
+`repos.<alias>.initiatives` key — so the product layer had to come from
+somewhere that always exists. It comes from the team. An initiative is now
+read only as §4.7's optional extra layer, for a project that happens to
+belong to exactly one.
 
 - **`Document` carries a `team` field and `DocumentFilter` has a `team`
   input, but `Team` has no `documents` field.** A team-scoped document is a
@@ -583,6 +585,15 @@ populate).
   `totalCount`.** A project's issue count cannot be read cheaply; "has any
   issue" is one `first: 1` probe, which is why `/foreman:plan`'s gate is a
   boolean rather than a count comparison.
+- **`Project.initiatives` and `initiative(id) { documents }` both validate
+  and execute, and this workspace has zero initiatives.** `bun run
+  schema:linear` validates 36 documents including both, and a live sweep of
+  all 12 `PLT` projects returned `0/12` with any initiative membership; a
+  root `initiatives(first: 10)` query returned an empty node list. So §4.7's
+  optional layer is exercised against real API shapes, but its populated
+  path cannot be smoke-tested until an operator creates an initiative by
+  hand — which is the point: it is optional, and the ordinary case is a
+  digest byte-identical to the two-layer output.
 - **`DocumentCreateInput` requires only `title`, and accepts `teamId` +
   `content`.** Seeding the team's `Context` doc is one mutation, which is why
   `provisionTeam` folds it into its existing single confirm rather than

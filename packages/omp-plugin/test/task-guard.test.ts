@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { renderLockComment, type LockRecord } from "@foreman/core";
 import { FOREMAN_STATE, PRIORITY, TYPE_LABEL } from "@foreman/core";
 import type {
+  CommandRunner,
   CreateIssueInput,
   GlobalConfig,
   Issue,
@@ -93,6 +94,12 @@ class FakeLinear implements LinearWriter {
   }
   async teamDocuments() {
     return [];
+  }
+  async projectInitiatives() {
+    return [];
+  }
+  async initiative() {
+    return null;
   }
   async createDocument(): Promise<never> {
     throw new Error("not implemented in fake");
@@ -448,6 +455,194 @@ describe("prepareTaskCall — project and batch stages", () => {
     expect(linear.createCommentCalls).toEqual([]);
     // No project to key a Context digest off; nothing appended to `context`.
     expect(decision.input?.context).toBe("shared context");
+  });
+});
+
+describe("prepareTaskCall — Context digest (SPEC §4.7)", () => {
+  function trackingDigest() {
+    const calls: (string | null)[] = [];
+    const digest = async (projectId: string | null) => {
+      calls.push(projectId);
+      if (projectId === null) return "## Product Context (ENG)\nProduct layer.";
+      return `## Project Brief (${projectId})\nProject layer.`;
+    };
+    return { digest, calls };
+  }
+
+  /** A `gh`/`git` stub: reports an open PR for any branch, so a `foreman-review` dispatch's `prForBranch` + `prDiff` calls never shell out for real. */
+  function stubGithub(): GitHubClient {
+    const runner: CommandRunner = {
+      async run(argv: string[]) {
+        if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "list") {
+          return {
+            stdout: JSON.stringify([
+              {
+                number: 7,
+                url: "https://github.com/org/repo/pull/7",
+                headRefOid: "abc123",
+                state: "OPEN",
+                isDraft: false,
+                mergeable: "MERGEABLE",
+                baseRefName: "main",
+              },
+            ]),
+            stderr: "",
+            code: 0,
+          };
+        }
+        if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "diff") {
+          return { stdout: "diff --git a/x b/x\n", stderr: "", code: 0 };
+        }
+        return { stdout: "", stderr: "", code: 0 };
+      },
+    };
+    return new GitHubClient({ runner });
+  }
+
+  function reviewTask(issueId = "ENG-1"): TaskCallInput {
+    return {
+      context: "shared context",
+      tasks: [{ agent: "foreman-review", task: `Review the diff.\n\nFOREMAN-ISSUE: ${issueId}\n` }],
+    };
+  }
+
+  // Previously `contextDigest(issue.project?.id ?? null)` returned `null` for
+  // an implement item, so nothing was ever appended: this is the regression
+  // that mattered most, because `foreman-implement` builds to the Definition
+  // of Done in this doc.
+  it("appends the digest to an implement dispatch's context and passes the issue's project id", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const { digest, calls } = trackingDigest();
+    const decision = await prepareTaskCall(implementTask(), makeDeps(linear, { contextDigest: digest }));
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual(["project-1"]);
+    expect(decision.input?.context).toBe("shared context\n\n## Project Brief (project-1)\nProject layer.");
+  });
+
+  // `foreman-review` grades `dodSatisfied` against this doc's Definition of
+  // Done — it must land in `context`, not get mixed into the task text.
+  it("appends the digest to a review dispatch's context, not the task text", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const { digest, calls } = trackingDigest();
+    const decision = await prepareTaskCall(
+      reviewTask(),
+      makeDeps(linear, { contextDigest: digest, github: stubGithub() }),
+    );
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual(["project-1"]);
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(task).not.toContain("Project Brief");
+    expect(decision.input?.context).toBe("shared context\n\n## Project Brief (project-1)\nProject layer.");
+  });
+
+  it("appends the digest to a refine dispatch's context and passes the issue's project id", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const { digest, calls } = trackingDigest();
+    const decision = await prepareTaskCall(refineTask(), makeDeps(linear, { contextDigest: digest }));
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual(["project-1"]);
+    expect(decision.input?.context).toBe("shared context\n\n## Project Brief (project-1)\nProject layer.");
+  });
+
+  // A project-less bug or chore must still get the product layer — that is
+  // the whole point of `extension.ts` falling back to `getProductDigest()`
+  // on a null project id instead of returning an empty string.
+  it("still fetches the product layer for a project-less issue, passing a null project id", async () => {
+    const issue = makeIssue({ project: null });
+    const linear = new FakeLinear([issue]);
+    const { digest, calls } = trackingDigest();
+    const decision = await prepareTaskCall(implementTask(), makeDeps(linear, { contextDigest: digest }));
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual([null]);
+    expect(decision.input?.context).toBe("shared context\n\n## Product Context (ENG)\nProduct layer.");
+  });
+
+  it("never calls contextDigest for roadmap or context stages — a second copy of the doc would confuse the agent rewriting it", async () => {
+    const linear = new FakeLinear([]);
+    const { digest, calls } = trackingDigest();
+    const deps = makeDeps(linear, { contextDigest: digest });
+
+    const roadmap = await prepareTaskCall(
+      {
+        context: "shared context",
+        tasks: [{ agent: "foreman-roadmap", task: "Decompose the brief.\n\nFOREMAN-BRIEF: docs/prd.md\n" }],
+      },
+      deps,
+    );
+    expect(roadmap.block).toBeUndefined();
+    expect(roadmap.input?.context).toBe("shared context");
+
+    const context = await prepareTaskCall(
+      { context: "shared context", tasks: [{ agent: "foreman-context", task: "Review the product Context doc." }] },
+      deps,
+    );
+    expect(context.block).toBeUndefined();
+    expect(context.input?.context).toBe("shared context");
+
+    expect(calls).toEqual([]);
+  });
+
+  it("calls contextDigest with a null project id for triage, appending the product layer to the batch's context", async () => {
+    const linear = new FakeLinear([]);
+    const { digest, calls } = trackingDigest();
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [{ agent: "foreman-triage", task: "FOREMAN-ISSUES: ENG-1,ENG-2\nTriage the inbox." }],
+    };
+    const decision = await prepareTaskCall(input, makeDeps(linear, { contextDigest: digest }));
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual([null]);
+    expect(decision.input?.context).toBe("shared context\n\n## Product Context (ENG)\nProduct layer.");
+  });
+
+  // A 5-issue review batch resolving to the same project must not repeat the
+  // whole product Context doc five times in one `context` string.
+  it("appends a digest shared by two batch items exactly once, not once per item", async () => {
+    const issueA = makeIssue({ id: "issue-a", identifier: "ENG-1", project: { id: "project-1", name: "Foreman" } });
+    const issueB = makeIssue({ id: "issue-b", identifier: "ENG-2", project: { id: "project-1", name: "Foreman" } });
+    const linear = new FakeLinear([issueA, issueB]);
+    const { digest, calls } = trackingDigest();
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [
+        { agent: "foreman-review", task: "Review.\n\nFOREMAN-ISSUE: ENG-1\n" },
+        { agent: "foreman-review", task: "Review.\n\nFOREMAN-ISSUE: ENG-2\n" },
+      ],
+    };
+    const decision = await prepareTaskCall(
+      input,
+      makeDeps(linear, { contextDigest: digest, github: stubGithub() }),
+    );
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual(["project-1", "project-1"]);
+    const context = decision.input?.context ?? "";
+    expect(context.match(/Project Brief \(project-1\)/g)).toHaveLength(1);
+  });
+
+  it("appends two distinct digests once each when a batch spans two projects", async () => {
+    const issueA = makeIssue({ id: "issue-a", identifier: "ENG-1", project: { id: "project-1", name: "Foreman" } });
+    const issueB = makeIssue({ id: "issue-b", identifier: "ENG-2", project: { id: "project-2", name: "Other" } });
+    const linear = new FakeLinear([issueA, issueB]);
+    const { digest, calls } = trackingDigest();
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [
+        { agent: "foreman-review", task: "Review.\n\nFOREMAN-ISSUE: ENG-1\n" },
+        { agent: "foreman-review", task: "Review.\n\nFOREMAN-ISSUE: ENG-2\n" },
+      ],
+    };
+    const decision = await prepareTaskCall(
+      input,
+      makeDeps(linear, { contextDigest: digest, github: stubGithub() }),
+    );
+    expect(decision.block).toBeUndefined();
+    expect(calls).toEqual(["project-1", "project-2"]);
+    const context = decision.input?.context ?? "";
+    expect(context.match(/Project Brief \(project-1\)/g)).toHaveLength(1);
+    expect(context.match(/Project Brief \(project-2\)/g)).toHaveLength(1);
   });
 });
 

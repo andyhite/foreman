@@ -77,6 +77,12 @@ class FakeLinear implements LinearWriter {
   async teamDocuments() {
     return [];
   }
+  async projectInitiatives() {
+    return [];
+  }
+  async initiative() {
+    return null;
+  }
   async createDocument(): Promise<never> {
     throw new Error("not implemented in fake");
   }

@@ -110,6 +110,12 @@ class FakeLinear implements LinearWriter {
   async teamDocuments(): Promise<LinearDocument[]> {
     return this.documentsList;
   }
+  async projectInitiatives() {
+    return [];
+  }
+  async initiative() {
+    return null;
+  }
   async createDocument(): Promise<never> {
     throw new Error("not implemented in fake");
   }
@@ -252,6 +258,7 @@ function makeRefineResult(overrides: Partial<RefineResult> = {}): RefineResult {
     issueId: "ENG-1",
     refinedDescription: "Body.",
     estimate: 2,
+    estimateRationale: "Two files, no non-obvious decisions.",
     acceptanceCriteria: ["Does the thing"],
     affectedAreas: [],
     outOfScope: [],
@@ -647,7 +654,7 @@ describe("applyOutcome — review", () => {
       result: makeReviewResult({
         reviewedSha: "sha-blocking",
         verdict: "request-changes",
-        findings: [{ severity: "blocking", file: "src/foo.ts", line: 12, description: "Broken." }],
+        findings: [{ severity: "blocking", severityRationale: "Crashes on save.", file: "src/foo.ts", line: 12, description: "Broken." }],
       }),
     });
 
@@ -714,7 +721,7 @@ describe("applyOutcome — review, GitHub submission", () => {
       agent: "foreman-review",
       result: makeReviewResult({
         verdict: "request-changes",
-        findings: [{ severity: "blocking", file: "src/foo.ts", line: 1, description: "Broken." }],
+        findings: [{ severity: "blocking", severityRationale: "Crashes on save.", file: "src/foo.ts", line: 1, description: "Broken." }],
       }),
     });
 

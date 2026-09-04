@@ -474,6 +474,82 @@ describe("runInit", () => {
     }
   });
 
+  it("under --yes, prints the legend and auto-approval disclosure, and never archives an unmanaged workflow state", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query Teams")) {
+        return new Response(
+          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+        );
+      }
+      if (query.includes("query TeamSettings")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              team: {
+                id: "t1",
+                key: "ENG",
+                name: "Engineering",
+                triageEnabled: true,
+                cyclesEnabled: false,
+                triageIssueState: { id: "triage-1", name: "Triage", type: "triage", position: 0 },
+              },
+            },
+          }),
+        );
+      }
+      if (query.includes("query TeamWorkflowStates")) {
+        const nodes = [
+          ...MANAGED_STATES.filter((spec) => spec.name !== "Refining").map((spec, index) => ({ id: `state-${index}`, name: spec.name, type: spec.type, position: spec.position, color: spec.color, description: spec.description })),
+          { id: "state-extra", name: "Staging", type: "started", position: 99, color: "#000000", description: null },
+        ];
+        return new Response(JSON.stringify({ data: { team: { states: { nodes } } } }));
+      }
+      if (query.includes("query ProjectLabels")) {
+        return new Response(JSON.stringify({ data: { projectLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("query WorkspaceLabels")) {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }));
+      }
+      if (query.includes("query TeamDocuments")) {
+        return new Response(
+          JSON.stringify({ data: { documents: { nodes: [{ id: "doc-1", title: "Context", content: "already filled in", updatedAt: "2026-01-01T00:00:00Z" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+        );
+      }
+      if (query.includes("mutation WorkflowStateCreate")) {
+        return new Response(JSON.stringify({ data: { workflowStateCreate: { success: true, workflowState: { id: "state-new", name: "Refining", type: "unstarted", position: 1 } } } }));
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+
+    const ambientApiKey = process.env.LINEAR_API_KEY;
+    try {
+      process.env.LINEAR_API_KEY = "lin_api_test";
+
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+      const logs: string[] = [];
+
+      await runInit(baseOptions({ skipLinear: false, nonInteractive: true, team: "ENG" }, home, "/repos/plotroom"), {
+        prompter,
+        git,
+        log: (message) => logs.push(message),
+      });
+
+      const output = logs.join("\n");
+      expect(output).toContain("approved automatically (--yes)");
+      expect(output).toContain("+ created   ~ updated   - archived   = already correct   ! failed or declined");
+      expect(output).toContain("Staging");
+    } finally {
+      if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = ambientApiKey;
+      globalThis.fetch = originalFetch;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("falls back to a manual team key when no API key resolves", async () => {
     const home = makeTempHome();
     /*

@@ -159,6 +159,12 @@ export const NEEDS_INPUT_FILTER: IssueFilter = all(
   notInTerminalProject(),
 );
 
+/** `Backlog` — prioritized work waiting on refinement. */
+export const BACKLOG_FILTER: IssueFilter = all(inState(FOREMAN_STATE.backlog), notInTerminalProject());
+
+/** `Ready` — refined work waiting on the build loop to pick it up. */
+export const READY_FILTER: IssueFilter = all(inState(FOREMAN_STATE.ready), notInTerminalProject());
+
 /** `Blocked` — the implementation-stage human interrupt queue: foreman-implement, foreman-review, or a build-loop escalation couldn't proceed. */
 export const BLOCKED_FILTER: IssueFilter = all(
   inState(FOREMAN_STATE.blocked),

@@ -17,6 +17,11 @@ export const FindingSeverity = Type.Union(
 export const Finding = Type.Object(
   {
     severity: FindingSeverity,
+    severityRationale: Type.String({
+      minLength: 1,
+      description:
+        "One sentence for why this severity and not the next one up or down. `blocking` must name the concrete failure it causes.",
+    }),
     file: Type.String({ minLength: 1 }),
     line: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
     description: Type.String({ minLength: 1 }),

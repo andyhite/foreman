@@ -25,14 +25,15 @@ predicate failed.
 ## Dispatch
 
 One `task` call, one `tasks[]` entry, `agent: foreman-implement`. Task text:
-`FOREMAN-ISSUE: $1`, the issue's description, acceptance criteria, estimate,
-and the two-layer `Context` digest (product `Context` doc + project brief,
-Definition of Done included).
+`FOREMAN-ISSUE: $1`, the issue's description, acceptance criteria, and
+estimate.
 
 Before the spawn the extension claims the lock (an issue comment, not a
 label), creates or reuses the worktree, moves the issue to In Progress, and
 appends `FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and
-`FOREMAN-BASE` lines to the task text. You add none of these yourself.
+`FOREMAN-BASE` lines to the task text, plus the issue's two-layer `Context`
+digest (product `Context` doc + project brief, Definition of Done included)
+to the shared `context`. You add none of these yourself.
 
 ## After
 

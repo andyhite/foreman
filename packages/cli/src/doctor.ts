@@ -22,12 +22,14 @@ import {
   type Confirmer,
   CONTEXT_DOC_TEMPLATE,
   CONTEXT_DOC_TITLE,
+  describeLinearError,
   ensureGitExclude,
   expandHome,
   findUserScopeInstall,
   type GlobalConfig,
   groupDisplayName,
   inspectRepoActivation,
+  isLinearAuthFailure,
   labelIdFromParts,
   LinearClient,
   loadGlobalConfig,
@@ -47,6 +49,7 @@ import {
 } from "@foreman/core";
 import { existsSync, statSync } from "node:fs";
 import { findCheckoutRoot, looksLikeForemanRoot } from "./checkout.ts";
+import { writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import type { Runner } from "./exec.ts";
 import { printSection, style, statusLine } from "./tui.ts";
 
@@ -175,6 +178,16 @@ function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: Pro
 
   if (envKey) {
     if (!fileConfigured) {
+      if (options.fix) {
+        try {
+          const written = writeLinearApiKeyFile(envKey, options.home);
+          writeGlobalConfig({ linear: { apiKeyFile: written } }, options.home);
+          deps.log(statusLine(true, `repaired: wrote ${written} (mode 0600) and set linear.apiKeyFile`));
+        } catch (error) {
+          report(deps, problems, `could not repair — ${(error as Error).message}`, false);
+        }
+        return;
+      }
       report(
         deps,
         problems,
@@ -190,13 +203,19 @@ function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: Pro
     return;
   }
   if (apiKeyFile) {
-    report(deps, problems, `linear.apiKeyFile is set to ${apiKeyFile}, but that file does not exist`);
+    report(
+      deps,
+      problems,
+      `linear.apiKeyFile is set to ${apiKeyFile}, but that file does not exist — run \`foreman setup\` to write it`,
+      false,
+    );
     return;
   }
   report(
     deps,
     problems,
     `no Linear credential found — set ${apiKeyEnv} or run \`foreman setup\` to configure linear.apiKeyFile`,
+    false,
   );
 }
 
@@ -391,6 +410,7 @@ async function checkRepoProvisioning(
   alias: string,
   entry: RepoEntry,
   confirmer: Confirmer | null,
+  allowArchive: boolean,
 ): Promise<void> {
   const team = teams.find((candidate) => candidate.key === entry.team);
   if (!team) {
@@ -403,7 +423,7 @@ async function checkRepoProvisioning(
 
   let issues = await teamProvisioningIssues(client, team.id, expectedApps);
   if (issues.length > 0 && confirmer) {
-    await provisionTeam(client, { teamId: team.id, apps: appNames, confirmer });
+    await provisionTeam(client, { teamId: team.id, apps: appNames, confirmer, allowArchive });
     issues = await teamProvisioningIssues(client, team.id, expectedApps);
   }
 
@@ -469,11 +489,11 @@ async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, probl
     for (const alias of aliases) {
       const entry = config.repos[alias];
       if (!entry) continue;
-      await checkRepoProvisioning(deps, problems, client, teams, alias, entry, confirmer);
+      await checkRepoProvisioning(deps, problems, client, teams, alias, entry, confirmer, !options.yes);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    report(deps, problems, `linear: could not verify provisioning (${message})`);
+    const message = describeLinearError(error);
+    report(deps, problems, `linear: could not verify provisioning (${message})`, !isLinearAuthFailure(error));
   } finally {
     confirmer?.close();
     // Only now is it known that a repair was wanted and could not be

@@ -9,15 +9,29 @@ import { groupDisplayName, labelDisplayName, type Confirmer, type ProvisionActio
 import type { Prompter } from "./prompt.ts";
 import { style } from "./tui.ts";
 
-/** Wraps a `Prompter` as a `Confirmer`: prints `detail` lines, then asks the summary as a plain yes/no — no added prefix, since `provision.ts` already composes a complete, imperative question. */
-export function promptConfirmer(prompter: Prompter, log: (message: string) => void): Confirmer {
+/** Wraps a `Prompter` as a `Confirmer`: prints `detail` lines, then asks the summary as a plain yes/no — no added prefix, since `provision.ts` already composes a complete, imperative question. `autoApprove` discloses that `--yes`/non-interactive approved the writes instead of silently applying them. */
+export function promptConfirmer(
+  prompter: Prompter,
+  log: (message: string) => void,
+  autoApprove = false,
+): Confirmer {
   return {
     confirm: async ({ summary, detail }) => {
       for (const line of detail ?? []) log(`    ${line}`);
+      if (autoApprove) {
+        log(`  ${summary} — approved automatically (--yes)`);
+        return true;
+      }
       return prompter.confirm(`${summary}?`, true);
     },
     close: () => {},
   };
+}
+
+/** Printed once before the first action list, so the `+ ~ - = !` column reads without guessing. */
+export function printProvisionLegend(log: (message: string) => void): void {
+  log("  + created   ~ updated   - archived   = already correct   ! failed or declined");
+  log("");
 }
 /** `"type:bug"` -> `"Type: Bug"`; a bare group name like `"Type"` passes through unchanged. */
 function formatLabelName(id: string): string {

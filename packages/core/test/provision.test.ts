@@ -120,6 +120,12 @@ class FakeLinear implements LinearWriter {
   async teamDocuments(): Promise<LinearDocument[]> {
     return this.documents;
   }
+  async projectInitiatives() {
+    return [];
+  }
+  async initiative() {
+    return null;
+  }
   async createDocument(input: { teamId: LinearId; title: string; content: string }): Promise<LinearDocument> {
     this.createDocumentCalls.push(input);
     const created: LinearDocument = { id: `doc-${input.title}`, title: input.title, content: input.content, updatedAt: "2026-01-01T00:00:00Z" };
@@ -219,7 +225,7 @@ describe("provisionTeam", () => {
   it("enables triage, creates the five missing states with the right types, prunes Todo, and creates app labels", async () => {
     const linear = new FakeLinear(stockStates(), stockSettings());
 
-    await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER });
+    await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.updateTeamSettingsCalls).toHaveLength(1);
     expect(linear.updateTeamSettingsCalls[0]).toEqual({ teamId: "t1", input: { triageEnabled: true } });
@@ -244,7 +250,7 @@ describe("provisionTeam", () => {
 
   it("is idempotent: a second call on the resulting state creates nothing and every action is unchanged", async () => {
     const linear = new FakeLinear(stockStates(), stockSettings());
-    await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER });
+    await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     linear.createWorkflowStateCalls = [];
     linear.updateWorkflowStateCalls = [];
@@ -253,7 +259,7 @@ describe("provisionTeam", () => {
     linear.ensureWorkspaceLabelCalls = [];
     linear.ensureProjectLabelCalls = [];
 
-    const actions = await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER });
+    const actions = await provisionTeam(linear, { teamId: "t1", apps: ["fleet", "zero"], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createWorkflowStateCalls).toHaveLength(0);
     expect(linear.updateWorkflowStateCalls).toHaveLength(0);
@@ -266,7 +272,7 @@ describe("provisionTeam", () => {
     states.push({ id: "s-ready-wrong-type", name: "Ready", type: "backlog", position: 6, color: "#000000", description: null });
     const linear = new FakeLinear(states, stockSettings());
 
-    const actions = await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+    const actions = await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createWorkflowStateCalls.some((c) => c.name === "Ready")).toBe(false);
     const readyAction = actions.find((action) => action.kind === "state" && action.name === "Ready");
@@ -279,7 +285,7 @@ describe("provisionTeam", () => {
     states.push({ id: "s-ready-stale", name: "Ready", type: "unstarted", position: 6, color: "#000000", description: "stale" });
     const linear = new FakeLinear(states, stockSettings());
 
-    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createWorkflowStateCalls.some((c) => c.name === "Ready")).toBe(false);
     expect(linear.updateWorkflowStateCalls).toEqual([
@@ -291,7 +297,7 @@ describe("provisionTeam", () => {
     const states = stockStates().filter((state) => state.type !== "duplicate");
     const linear = new FakeLinear(states, stockSettings());
 
-    const actions = await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+    const actions = await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createWorkflowStateCalls.some((c) => c.name === "Duplicate")).toBe(false);
     const duplicateAction = actions.find((action) => action.kind === "state" && action.name === "Duplicate");
@@ -312,6 +318,7 @@ describe("provisionTeam", () => {
         },
         close: () => {},
       },
+      allowArchive: true,
     });
 
     expect(confirmCalls).toBe(1);
@@ -324,7 +331,7 @@ describe("provisionTeam", () => {
   it("seeds the product Context doc when the team has none", async () => {
     const linear = new FakeLinear(stockStates(), stockSettings(), []);
 
-    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createDocumentCalls).toHaveLength(1);
     expect(linear.createDocumentCalls[0]?.title).toBe(CONTEXT_DOC_TITLE);
@@ -336,7 +343,7 @@ describe("provisionTeam", () => {
     const existing: LinearDocument = { id: "doc-1", title: " context ", content: "operator's own prose", updatedAt: "2026-01-01T00:00:00Z" };
     const linear = new FakeLinear(stockStates(), stockSettings(), [existing]);
 
-    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: true });
 
     expect(linear.createDocumentCalls).toHaveLength(0);
     expect(linear.documents).toEqual([existing]);
@@ -349,6 +356,7 @@ describe("provisionTeam", () => {
       teamId: "t1",
       apps: [],
       confirmer: { confirm: async () => false, close: () => {} },
+      allowArchive: true,
     });
 
     expect(linear.createDocumentCalls).toHaveLength(0);
@@ -371,11 +379,25 @@ describe("provisionTeam", () => {
         },
         close: () => {},
       },
+      allowArchive: true,
     });
 
     expect(confirmCalls).toBe(1);
     expect(linear.createDocumentCalls).toHaveLength(1);
     const documentAction = actions.find((action) => action.kind === "document");
     expect(documentAction?.changed).toBe(true);
+  });
+
+  it("with allowArchive false, skips archiving an extra state and never prompts about it", async () => {
+    const states = stockStates();
+    states.push({ id: "s-extra", name: "Staging", type: "started", position: 6, color: "#000000", description: null });
+    const linear = new FakeLinear(states, stockSettings());
+
+    const actions = await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER, allowArchive: false });
+
+    expect(linear.archiveWorkflowStateCalls).toHaveLength(0);
+    const extraAction = actions.find((action) => action.kind === "state" && action.name === "Staging");
+    expect(extraAction?.changed).toBe(false);
+    expect(extraAction?.detail).toContain("skipped");
   });
 });

@@ -41,6 +41,7 @@ output: |
               "issueId",
               "refinedDescription",
               "estimate",
+              "estimateRationale",
               "acceptanceCriteria",
               "affectedAreas",
               "outOfScope",
@@ -82,6 +83,11 @@ output: |
                     "type": "number"
                   }
                 ]
+              },
+              "estimateRationale": {
+                "minLength": 1,
+                "description": "One sentence for why this number: the files or the one non-obvious decision that set it.",
+                "type": "string"
               },
               "acceptanceCriteria": {
                 "description": "Observable behaviors, verifiable by someone who did not write the code. Empty only when this issue became a tracking parent.",
@@ -441,6 +447,9 @@ Full method: `foreman-refine-issue`. Outline:
    per-sub-issue estimates; the parent becomes a tracking issue.
 7. Genuine unknown blocks estimation → specify a spike via `foreman-spike`,
    set `spikeCreated`.
+8. Write `estimateRationale`. It MUST name the files or the one
+   non-obvious decision that set the number — never restate the number
+   itself or the estimate schema's generic description.
 
 ## Output
 

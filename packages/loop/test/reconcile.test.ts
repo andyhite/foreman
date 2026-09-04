@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CommandRunner } from "@foreman/core";
 import { encodeMarker, GitHubClient, MARKER_KIND, renderLockComment } from "@foreman/core";
 import type { Comment, GlobalConfig, Issue, ResolvedRepoEntry, WorkflowState } from "@foreman/core";
 import { FakeLinear } from "./fake-linear.ts";
 import { reconcile, type ReconcileContext } from "../src/reconcile.ts";
+import { runReconcile } from "../src/reconcile-cli.ts";
 
 const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 0 };
 const STATE_REFINING: WorkflowState = { id: "state-refining", name: "Refining", type: "started", position: 1 };
@@ -431,5 +435,66 @@ describe("reconcile — dry run", () => {
     expect(summary.skipped).toBe(0);
     expect(linear.updateCalls).toHaveLength(0);
     expect(logs.some((line) => line.includes("dry run"))).toBe(true);
+  });
+});
+
+describe("runReconcile — dispatch credential", () => {
+  it("reaches the reconcile body instead of exiting for a missing linear.apiKeyFile, given LINEAR_API_KEY", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-reconcile-cli-home-"));
+    mkdirSync(join(home, ".foreman"), { recursive: true });
+    writeFileSync(
+      join(home, ".foreman", "config.json"),
+      JSON.stringify({ repos: { acme: { path: "/tmp/acme", team: "ENG" } }, linear: { apiKeyFile: null } }),
+      "utf8",
+    );
+
+    const originalFetch = globalThis.fetch;
+    const originalEnv = process.env.LINEAR_API_KEY;
+    const originalExitCode = process.exitCode;
+    const originalConsoleError = console.error;
+    process.env.LINEAR_API_KEY = "lin_api_fixture";
+    // Every query the reconcile pass can issue (viewer lookup, then a
+    // `nodes: []` page for each invariant's `issues()` call) answered
+    // identically — this test only cares that execution got this far, not
+    // what any individual invariant found.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            viewer: { id: "bot-1" },
+            issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+          },
+        }),
+      )) as unknown as typeof fetch;
+    const errors: string[] = [];
+    const logs: string[] = [];
+    console.error = (message?: unknown) => {
+      errors.push(String(message));
+    };
+    const originalConsoleLog = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message));
+    };
+
+    try {
+      await runReconcile(["acme", "--dry-run", "--home", home]);
+
+      // The old dispatch-credential guard rejected before any network call,
+      // with this exact message and a nonzero exit. Reconcile actually
+      // running to completion instead proves the guard no longer runs
+      // ahead of it.
+      expect(errors.some((line) => line.includes("loop dispatch requires linear.apiKeyFile"))).toBe(false);
+      expect(logs.some((line) => line.includes("fixed=0 skipped=0"))).toBe(true);
+      expect(process.exitCode).toBe(0);
+    } finally {
+      console.error = originalConsoleError;
+      console.log = originalConsoleLog;
+      globalThis.fetch = originalFetch;
+      if (originalEnv === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnv;
+      process.exitCode = originalExitCode;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

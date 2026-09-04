@@ -5,7 +5,7 @@ const SEVERITY_ORDER = ["blocking", "should-fix", "nit"] as const;
 
 function renderFindingLine(finding: Finding): string {
   const location = finding.line !== null ? `${finding.file}:${finding.line}` : finding.file;
-  return `- ${location} — ${finding.description}`;
+  return `- ${location} — ${finding.description}\n  _${finding.severity}: ${finding.severityRationale}_`;
 }
 
 /**

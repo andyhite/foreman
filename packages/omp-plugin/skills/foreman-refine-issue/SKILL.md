@@ -22,24 +22,25 @@ Priority ≠ `None`. Issue is in scope in either Backlog or Ready.
 ## Required reads
 
 - The issue: title, description, comments, labels.
-- The product `Context` doc and the project brief, Definition of Done included.
+- The product `Context` doc and the project brief: already in your system
+  prompt as the `Context` digest, Definition of Done included. The extension
+  appends it before every dispatch; NEVER spend a call re-fetching it.
 
 ## Procedure
 
 1. Verify Priority ≠ `None`.
-2. Read the product `Context` doc and the project brief.
-3. Draft the `## Context` prose per `description-template.md` →
+2. Draft the `## Context` prose per `description-template.md` →
    `refinedDescription`.
-4. Acceptance criteria: observable behaviors, verifiable by someone who did
+3. Acceptance criteria: observable behaviors, verifiable by someone who did
    not write the code.
-5. Affected files and modules via `lsp`, not guesswork.
-6. Estimate on the scale in `description-template.md`. 5 → decompose:
+4. Affected files and modules via `lsp`, not guesswork.
+5. Estimate on the scale in `description-template.md`. 5 → decompose:
    `subIssues[]` with per-sub-issue estimates; parent becomes a tracking
    issue, parked via `readyForImplementation: false`. 8 → not an issue:
    recommend a project or a spike instead of estimating.
-7. Genuine unknown blocks estimation → `spikeCreated` (`type:spike`, native
+6. Genuine unknown blocks estimation → `spikeCreated` (`type:spike`, native
    `blocks` relation to this issue) per `foreman-spike`.
-8. Yield `RefineResult`.
+7. Yield `RefineResult`.
 
 ## Output
 

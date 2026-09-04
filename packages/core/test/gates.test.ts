@@ -241,7 +241,7 @@ describe("reviewGate", () => {
     const result = reviewGate(
       makeReviewInput({
         review: makeReview({
-          findings: [{ severity: "blocking", file: "src/thing.ts", line: 5, description: "bug" }],
+          findings: [{ severity: "blocking", severityRationale: "Crashes on save.", file: "src/thing.ts", line: 5, description: "bug" }],
         }),
       }),
     );

@@ -24,10 +24,10 @@ call, so filter before dispatching.
 
 ## Dispatch
 
-`agent: foreman-refine` per entry. Task text: `FOREMAN-ISSUE: <ISSUE-ID>`,
-the issue's current state, and that issue's two-layer `Context` digest
-(product `Context` doc + project brief, Definition of Done included). Shared
-`context`: only what every entry has in common.
+`agent: foreman-refine` per entry. Task text: `FOREMAN-ISSUE: <ISSUE-ID>` and
+the issue's current state. The extension appends that issue's two-layer
+`Context` digest (product `Context` doc + project brief) to the shared
+`context` itself. Shared `context`: only what every entry has in common.
 
 Before the spawn the extension moves each issue to Refining and appends a
 `FOREMAN-PREV-STATE` line to its task text, so the extension can restore the

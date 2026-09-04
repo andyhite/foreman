@@ -108,6 +108,12 @@ class FakeLinear implements LinearWriter {
   async teamDocuments() {
     return [];
   }
+  async projectInitiatives() {
+    return [];
+  }
+  async initiative() {
+    return null;
+  }
   async createDocument(): Promise<never> {
     throw new Error("not implemented in fake");
   }
@@ -226,6 +232,7 @@ function makeRefineResult(overrides: Partial<RefineResult> = {}): RefineResult {
     issueId: "ENG-1",
     refinedDescription: "Body.",
     estimate: 2,
+    estimateRationale: "Two files, no non-obvious decisions.",
     acceptanceCriteria: ["Does the thing"],
     affectedAreas: [],
     outOfScope: [],

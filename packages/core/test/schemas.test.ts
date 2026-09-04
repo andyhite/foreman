@@ -102,6 +102,7 @@ const validRefineResult = {
   issueId: "ENG-1",
   refinedDescription: "Search is slow because the index is unbounded.",
   estimate: 2,
+  estimateRationale: "One file, straightforward index rebuild.",
   acceptanceCriteria: ["Search returns results for a known query in under 200ms"],
   affectedAreas: ["src/search/index.ts"],
   outOfScope: ["Ranking tuning"],
@@ -181,7 +182,7 @@ describe("parseAgentOutput", () => {
       result: {
         ...validReviewResult,
         verdict: "approve",
-        findings: [{ severity: "blocking", file: "src/thing.ts", line: 1, description: "bug" }],
+        findings: [{ severity: "blocking", severityRationale: "Crashes on login.", file: "src/thing.ts", line: 1, description: "bug" }],
       },
       block: null,
     });

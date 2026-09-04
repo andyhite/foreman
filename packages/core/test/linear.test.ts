@@ -1,6 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
-import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
+import { describeLinearError, LinearApiError, type FetchLike } from "../src/linear/api.ts";
 import {
   INBOX_FILTER,
   NEEDS_INPUT_FILTER,
@@ -318,6 +318,39 @@ describe("LinearClient errors", () => {
       expect(error).toBeInstanceOf(LinearApiError);
       expect((error as LinearApiError).message).toBe("Entity not found; Bad input");
     }
+  });
+});
+
+describe("describeLinearError", () => {
+  it("names a 401 without dumping the GraphQL envelope", () => {
+    const body = JSON.stringify({
+      errors: [
+        {
+          message: "Authentication required, not authenticated",
+          extensions: {
+            type: "authentication error",
+            code: "AUTHENTICATION_ERROR",
+            statusCode: 401,
+            userPresentableMessage: "You need to authenticate to access this operation.",
+          },
+        },
+      ],
+    });
+    const error = new LinearApiError(`Linear API request failed with status 401: ${body}`, 401, body);
+
+    const message = describeLinearError(error);
+
+    expect(message).toBe("Linear rejected the API key (HTTP 401). Run `foreman setup` and paste a current key.");
+    expect(message).not.toContain("{");
+  });
+
+  it("names a 500 as unavailable rather than surfacing the body", () => {
+    const error = new LinearApiError("Linear API request failed with status 500: oops", 500, "oops");
+    expect(describeLinearError(error)).toBe("Linear is unavailable (HTTP 500). Try again shortly.");
+  });
+
+  it("falls back to the plain message for a non-Linear error", () => {
+    expect(describeLinearError(new Error("boom"))).toBe("boom");
   });
 });
 

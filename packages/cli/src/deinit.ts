@@ -16,9 +16,21 @@
  * risks clobbering their edits for a cosmetic cleanup that buys nothing.
  */
 
-import { type CommandRunner, deactivateRepoPlugin, expandHome, loadGlobalConfig, type RepoEntry } from "@foreman/core";
+import {
+  type CommandRunner,
+  deactivateRepoPlugin,
+  describeLinearError,
+  expandHome,
+  LinearClient,
+  loadGlobalConfig,
+  MANAGED_STATES,
+  resolveLinearApiKey,
+  type ProvisionAction,
+  type RepoEntry,
+} from "@foreman/core";
 import { writeGlobalConfig } from "./global-config.ts";
 import type { Prompter } from "./prompt.ts";
+import { printProvisionActions, printProvisionLegend, promptConfirmer } from "./provision-report.ts";
 import { printSection, style } from "./tui.ts";
 
 export interface DeinitOptions {
@@ -26,6 +38,10 @@ export interface DeinitOptions {
   home: string;
   /** Skip removing the repo's entry from `~/.foreman/config.json`. */
   keepRegistry: boolean;
+  /** Also archive the Foreman-managed workflow states `foreman init` created on this repo's Linear team. */
+  revertLinear: boolean;
+  /** Accept defaults for every prompt (non-interactive); also discloses auto-approval when archiving workflow states. */
+  yes: boolean;
 }
 
 export interface DeinitDeps {
@@ -91,25 +107,103 @@ export async function runDeinit(options: DeinitOptions, deps: DeinitDeps): Promi
 
   printSection(deps.log, "Registry (config.repos)");
 
-  if (options.keepRegistry) {
-    deps.log("  skipped (--keep-registry).");
-    return;
-  }
-
   const existing = loadGlobalConfig({ home: options.home }).config;
   const match = findEntryByPath(existing.repos, repoRoot, options.home);
-  if (!match) {
+
+  if (options.keepRegistry) {
+    deps.log("  skipped (--keep-registry).");
+  } else if (!match) {
     deps.log(`  ${style("cyan", "i")} no registry entry found for ${repoRoot} — nothing to remove.`);
+  } else {
+    const confirmed = await deps.prompter.confirm(`Remove "${match.alias}" (${repoRoot}) from the registry?`, true);
+    if (!confirmed) {
+      deps.log("  left the registry entry in place.");
+    } else {
+      const configPath = writeGlobalConfig({ removeRepos: [match.alias] }, options.home);
+      deps.log(`  wrote ${configPath}`);
+      deps.log(`  ${style("green", "✓")} removed "${match.alias}" from the registry.`);
+    }
+  }
+
+  printSection(deps.log, "Linear cleanup");
+
+  if (!options.revertLinear) {
+    deps.log("  skipped (pass --revert-linear to archive the workflow states init created).");
     return;
   }
 
-  const confirmed = await deps.prompter.confirm(`Remove "${match.alias}" (${repoRoot}) from the registry?`, true);
-  if (!confirmed) {
-    deps.log("  left the registry entry in place.");
+  if (!match) {
+    deps.log(`  ${style("cyan", "i")} skipped, no registry entry for ${repoRoot} — nothing to revert.`);
     return;
   }
 
-  const configPath = writeGlobalConfig({ removeRepos: [match.alias] }, options.home);
-  deps.log(`  wrote ${configPath}`);
-  deps.log(`  ${style("green", "✓")} removed "${match.alias}" from the registry.`);
+  let apiKey: string;
+  try {
+    apiKey = resolveLinearApiKey(existing, process.env, options.home);
+  } catch (error) {
+    deps.log(`  skipped, no Linear credential — ${describeLinearError(error)}`);
+    return;
+  }
+
+  const client = new LinearClient({ apiKey });
+  let team: { id: string; key: string } | undefined;
+  try {
+    const teams = await client.teams();
+    team = teams.find((candidate) => candidate.key === match.entry.team);
+  } catch (error) {
+    deps.log(`  ${style("yellow", "!")} could not look up team ${match.entry.team} — ${describeLinearError(error)}`);
+    return;
+  }
+  if (!team) {
+    deps.log(`  ${style("cyan", "i")} skipped, Linear team "${match.entry.team}" does not exist in this workspace.`);
+    return;
+  }
+
+  const managedNames = new Set(MANAGED_STATES.map((spec) => spec.name.toLowerCase()));
+  const states = await client.workflowStates(team.id);
+  const managedStates = states.filter((state) => managedNames.has(state.name.trim().toLowerCase()));
+
+  const counted: Array<{ id: string; name: string; issueCount: number }> = [];
+  for (const state of managedStates) {
+    const issues = await client.issues({ filter: { state: { id: { eq: state.id } } }, limit: 250 });
+    counted.push({ id: state.id, name: state.name, issueCount: issues.length });
+  }
+
+  const archivable = counted.filter((state) => state.issueCount === 0);
+  const holdingIssues = counted.filter((state) => state.issueCount > 0);
+
+  printProvisionLegend(deps.log);
+
+  let proceed = archivable.length === 0;
+  if (archivable.length > 0) {
+    const confirmer = promptConfirmer(deps.prompter, deps.log, options.yes);
+    proceed = await confirmer.confirm({
+      kind: "linear-write",
+      summary: `Archive ${archivable.length} Foreman workflow state(s) on team ${match.entry.team}`,
+      detail: archivable.map((state) => `- ${state.name}`),
+    });
+    confirmer.close();
+  }
+
+  const actions: ProvisionAction[] = [];
+  for (const state of archivable) {
+    if (!proceed) {
+      actions.push({ kind: "state", name: state.name, op: "archive", changed: false, detail: "declined" });
+      continue;
+    }
+    try {
+      await client.archiveWorkflowState(state.id);
+      actions.push({ kind: "state", name: state.name, op: "archive", changed: true, detail: null });
+    } catch (error) {
+      actions.push({ kind: "state", name: state.name, op: "archive", changed: false, detail: describeLinearError(error) });
+    }
+  }
+  for (const state of holdingIssues) {
+    actions.push({ kind: "state", name: state.name, op: "archive", changed: false, detail: `still holds ${state.issueCount} issue(s)` });
+  }
+
+  printProvisionActions(deps.log, actions);
+
+  deps.log(`  ${style("cyan", "i")} Left in place (Linear has no delete for these): the \`type:*\` and \`app:*\` labels,`);
+  deps.log("    the team's triage/cycles settings, and the product Context doc. Remove them in Linear if you want them gone.");
 }

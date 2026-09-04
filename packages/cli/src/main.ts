@@ -35,6 +35,7 @@ import { openUrl, processRunner } from "./exec.ts";
 import { runInit } from "./init.ts";
 import { InteractivePrompter, NonInteractivePrompter, type Prompter } from "./prompt.ts";
 import { runUpdate } from "./update.ts";
+import { renderVersion } from "./version.ts";
 import { runWizard } from "./wizard.ts";
 
 type Command = "setup" | "init" | "deinit" | "doctor" | "update";
@@ -53,62 +54,132 @@ interface ParsedArgs {
   skipPull: boolean;
   /** Leave the `config.repos` entry in place; deinit-only. */
   keepRegistry: boolean;
+  /** Also archive the workflow states `foreman init` created on this repo's Linear team; deinit-only. */
+  revertLinear: boolean;
   /** Repair what it can instead of only reporting; doctor-only. */
   fix: boolean;
   help: boolean;
+  version: boolean;
   apps: string[];
   alias: string | null;
   team: string | null;
 }
 
-const HELP_TEXT = `foreman — Foreman CLI
+/** One command's help content: the `Commands:` summary line, its `Usage:` argument shape, and its own options — everything `COMMAND_HELP` needs to render both the global listing and `foreman <command> --help`. */
+interface CommandHelp {
+  summary: string;
+  usage: string;
+  options: ReadonlyArray<readonly [flag: string, description: string]>;
+}
+
+const COMMAND_HELP: Record<Command, CommandHelp> = {
+  setup: {
+    summary: "Per-machine install: tool preflight, Linear credential, the global plugin link.",
+    usage: "setup [options]",
+    options: [
+      ["--link", "Dev mode: run the foreman CLI from this checkout's source (no rebuild to see changes)."],
+      ["--checkout <path>", "Path to the foreman checkout (default: auto-detected)."],
+      ["--skip-linear", "Skip Linear API access."],
+    ],
+  },
+  init: {
+    summary: "Per-repo: register this directory and activate the omp plugin for it.",
+    usage: "init [options]",
+    options: [
+      ["--path <dir>", "Directory to register (default: the current directory)."],
+      ["--app <name>", "App in this repo; repeat for a monorepo."],
+      ["--alias <name>", "Registry alias override (default: derived from the repo directory name)."],
+      ["--team <KEY>", "Linear team for this repo (required; prompted when omitted)."],
+      ["--skip-plugin", "Register the repo without activating the omp plugin in it."],
+      ["--skip-linear", "Skip Linear API access."],
+    ],
+  },
+  deinit: {
+    summary: "Per-repo: deactivate the omp plugin here and drop the registry entry.",
+    usage: "deinit [options]",
+    options: [
+      ["--path <dir>", "Directory to deactivate (default: the current directory)."],
+      ["--keep-registry", "Deactivate the plugin but leave the `repos` entry in place."],
+      ["--revert-linear", "Also archive the workflow states `foreman init` created on this repo's Linear team."],
+    ],
+  },
+  doctor: {
+    summary: "Verify the install — machine, plugin link, and every registered repo.",
+    usage: "doctor [options]",
+    options: [
+      ["--fix", "Repair what can be repaired instead of only reporting it."],
+      ["--checkout <path>", "Path to the foreman checkout, for repairing the global link."],
+    ],
+  },
+  update: {
+    summary: "Pull Foreman's source, rebuild, and repair any drift.",
+    usage: "update [options]",
+    options: [
+      ["--checkout <path>", "Path to the foreman checkout (default: auto-detected)."],
+      ["--skip-pull", "Rebuild and repair without touching git."],
+      ["--skip-plugin", "Update the checkout only; leave the plugin link and repos alone."],
+    ],
+  },
+};
+
+/** Shared by every command's own help text — `renderCommandHelp` appends this after the command's own options. */
+const SHARED_OPTIONS: ReadonlyArray<readonly [flag: string, description: string]> = [
+  ["-y, --yes", "Accept defaults for every prompt (non-interactive)."],
+  ["--home <path>", "Home directory for ~/.foreman (default: real home; test hook)."],
+  ["--help, -h", "Show this text."],
+];
+
+/** Global-only: `--version` applies to no single command, so it is appended to `SHARED_OPTIONS` only in `renderGlobalHelp`, never in a per-command render. */
+const GLOBAL_ONLY_OPTIONS: ReadonlyArray<readonly [flag: string, description: string]> = [
+  ["--version", "Print the installed version and checkout revision."],
+];
+
+/** Renders one `flag  description` line, padded to line up the description column across every entry rendered together. */
+function renderOptionLines(options: ReadonlyArray<readonly [flag: string, description: string]>): string {
+  const width = Math.max(...options.map(([flag]) => flag.length)) + 4;
+  return options.map(([flag, description]) => `  ${flag.padEnd(width)}${description}`).join("\n");
+}
+
+/** `foreman --help` / bare `foreman`: the command listing plus every command's own options, byte-identical to the pre-restructure `HELP_TEXT` constant. */
+export function renderGlobalHelp(): string {
+  const commandLines = (Object.keys(COMMAND_HELP) as Command[])
+    .map((name) => `  ${name.padEnd(26)}${COMMAND_HELP[name].summary}`)
+    .join("\n");
+  const perCommandSections = (Object.keys(COMMAND_HELP) as Command[])
+    .map((name) => `Options for ${name}:\n${renderOptionLines(COMMAND_HELP[name].options)}`)
+    .join("\n\n");
+
+  return `foreman — Foreman CLI
 
 Usage: foreman <command> [options]
 
 Commands:
-  setup                    Per-machine install: tool preflight, Linear credential, the global plugin link.
-  init                     Per-repo: register this directory and activate the omp plugin for it.
-  deinit                   Per-repo: deactivate the omp plugin here and drop the registry entry.
-  doctor                   Verify the install — machine, plugin link, and every registered repo.
-  update                   Pull Foreman's source, rebuild, and repair any drift.
-  plan                     Run the plan loop (triage/plan/refine); \`foreman plan --help\` for its flags.
-  build                    Run the build loop (implement/review/merge); \`foreman build --help\` for its flags.
-  reconcile                Repair Linear drift from the invariant table; \`foreman reconcile --help\` for its flags.
+${commandLines}
+  plan                      Run the plan loop (triage/plan/refine); \`foreman plan --help\` for its flags.
+  build                     Run the build loop (implement/review/merge); \`foreman build --help\` for its flags.
+  reconcile                 Repair Linear drift from the invariant table; \`foreman reconcile --help\` for its flags.
 
 Run \`setup\` once per machine, \`init\` once per repo, then \`plan\`/\`build\` per repo.
 The plugin is active only in repos that ran \`init\`; \`doctor\` proves it.
 
-Options for setup:
-  --link                     Dev mode: run the foreman CLI from this checkout's source (no rebuild to see changes).
-  --checkout <path>          Path to the foreman checkout (default: auto-detected).
-  --skip-linear              Skip Linear API access.
-
-Options for init:
-  --path <dir>               Directory to register (default: the current directory).
-  --app <name>               App in this repo; repeat for a monorepo.
-  --alias <name>             Registry alias override (default: derived from the repo directory name).
-  --team <KEY>               Linear team for this repo (required; prompted when omitted).
-  --skip-plugin              Register the repo without activating the omp plugin in it.
-  --skip-linear              Skip Linear API access.
-
-Options for deinit:
-  --path <dir>               Directory to deactivate (default: the current directory).
-  --keep-registry            Deactivate the plugin but leave the \`repos\` entry in place.
-
-Options for doctor:
-  --fix                      Repair what can be repaired instead of only reporting it.
-  --checkout <path>          Path to the foreman checkout, for repairing the global link.
-
-Options for update:
-  --checkout <path>          Path to the foreman checkout (default: auto-detected).
-  --skip-pull                Rebuild and repair without touching git.
-  --skip-plugin              Update the checkout only; leave the plugin link and repos alone.
+${perCommandSections}
 
 Options for all commands:
-  -y, --yes                  Accept defaults for every prompt (non-interactive).
-  --home <path>              Home directory for ~/.foreman (default: real home; test hook).
-  --help, -h                 Show this text.
+${renderOptionLines([...SHARED_OPTIONS, ...GLOBAL_ONLY_OPTIONS])}
 `;
+}
+
+/** `foreman <command> --help` — that command's own usage and options only, matching `foreman build --help`'s house style. */
+export function renderCommandHelp(command: Command): string {
+  const help = COMMAND_HELP[command];
+  return `foreman ${command} — ${help.summary}
+
+Usage: foreman ${help.usage}
+
+Options:
+${renderOptionLines([...help.options, ...SHARED_OPTIONS])}
+`;
+}
 
 /**
  * Rejects a flag aimed at the wrong command. Table-driven rather than a list
@@ -132,6 +203,7 @@ function validateCommandFlags(parsed: ParsedArgs): void {
     { flag: "--skip-plugin", supplied: parsed.skipPlugin, commands: ["init", "update"] },
     { flag: "--skip-pull", supplied: parsed.skipPull, commands: ["update"] },
     { flag: "--keep-registry", supplied: parsed.keepRegistry, commands: ["deinit"] },
+    { flag: "--revert-linear", supplied: parsed.revertLinear, commands: ["deinit"] },
     { flag: "--fix", supplied: parsed.fix, commands: ["doctor"] },
   ];
 
@@ -156,8 +228,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     skipPlugin: false,
     skipPull: false,
     keepRegistry: false,
+    revertLinear: false,
     fix: false,
     help: false,
+    version: false,
     apps: [],
     alias: null,
     team: null,
@@ -190,6 +264,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--keep-registry":
         parsed.keepRegistry = true;
+        break;
+      case "--revert-linear":
+        parsed.revertLinear = true;
         break;
       case "--fix":
         parsed.fix = true;
@@ -237,8 +314,14 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "-h":
         parsed.help = true;
         break;
+      case "--version":
+      case "-V":
+        parsed.version = true;
+        break;
       default:
-        if (arg.startsWith("-")) throw new Error(`Unrecognized argument: ${arg}`);
+        if (arg.startsWith("-")) {
+          throw new Error(`Unrecognized argument: ${arg}. Run \`foreman --help\` for the flag list.`);
+        }
         if (!parsed.command) {
           throw new Error(`Unknown command "${arg}". Run \`foreman --help\` for the command list.`);
         }
@@ -272,8 +355,16 @@ async function main(): Promise<void> {
   }
 
   const args = parseArgs(argv);
+  if (args.version) {
+    process.stdout.write(await renderVersion(args.checkoutPath));
+    return;
+  }
+  if (args.help && args.command) {
+    process.stdout.write(renderCommandHelp(args.command));
+    return;
+  }
   if (args.help || !args.command) {
-    process.stdout.write(HELP_TEXT);
+    process.stdout.write(renderGlobalHelp());
     process.exitCode = args.help ? 0 : 1;
     return;
   }
@@ -310,7 +401,7 @@ async function main(): Promise<void> {
 
     if (args.command === "deinit") {
       await runDeinit(
-        { cwd: args.path ?? process.cwd(), home, keepRegistry: args.keepRegistry },
+        { cwd: args.path ?? process.cwd(), home, keepRegistry: args.keepRegistry, revertLinear: args.revertLinear, yes: args.yes },
         { prompter, log, git: nodeRunner },
       );
       return;
@@ -348,7 +439,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    await runWizard(
+    process.exitCode = await runWizard(
       {
         home,
         checkoutRoot: resolveCheckoutRoot(args.checkoutPath),

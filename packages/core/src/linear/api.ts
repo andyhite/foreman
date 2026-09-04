@@ -10,6 +10,8 @@
 
 import type {
   Comment,
+  Initiative,
+  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRelationType,
@@ -62,11 +64,21 @@ export interface LinearReader {
   project(projectId: string): Promise<Project | null>;
   /**
    * The team's documents — the product `Context` doc among them (SPEC §4.7).
-   * The product layer of the context digest resolves through the team, not an
-   * initiative: a repo binds exactly one team, and nothing attaches a created
-   * project to an initiative any more.
+   * The product layer of the context digest resolves through the team, never
+   * an initiative: a repo binds exactly one team, and Foreman neither
+   * creates initiatives nor requires a project to have one.
    */
   teamDocuments(teamKey: string): Promise<LinearDocument[]>;
+  /**
+   * Every initiative a project belongs to — usually none. Read for exactly
+   * one purpose: folding an optional extra context layer into the digest
+   * when a project happens to sit under an initiative the operator maintains
+   * by hand (SPEC §4.7). No scope check, gate, or routing decision may
+   * consult this; an empty array is the ordinary case, never an error.
+   */
+  projectInitiatives(projectId: string): Promise<InitiativeRef[]>;
+  /** An initiative and its attached documents, by id. Null when absent — which callers treat as "no extra context", not a failure. */
+  initiative(initiativeId: string): Promise<Initiative | null>;
   /**
    * A project's dependency edges (SPEC §4.10a), both directions, merged and
    * reoriented so `anchor`/`otherAnchor` read from the queried project.
@@ -216,6 +228,57 @@ export class LinearApiError extends Error {
     super(message);
     this.name = "LinearApiError";
   }
+}
+
+/**
+ * One operator-readable line for a Linear failure. `LinearApiError.message`
+ * carries the entire response body, which for a 401 is a GraphQL envelope no
+ * operator should have to read — Linear's own `userPresentableMessage` is
+ * buried inside it. Every render of a Linear failure to a human MUST go
+ * through this.
+ */
+export function describeLinearError(error: unknown): string {
+  if (!(error instanceof LinearApiError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const { status } = error;
+  if (status === 401 || status === 403) {
+    return `Linear rejected the API key (HTTP ${status}). Run \`foreman setup\` and paste a current key.`;
+  }
+  if (status === 429) {
+    return "Linear rate-limited the request (HTTP 429). Try again shortly.";
+  }
+  if (status !== null && status >= 500) {
+    return `Linear is unavailable (HTTP ${status}). Try again shortly.`;
+  }
+  try {
+    const body: unknown = typeof error.errors === "string" ? JSON.parse(error.errors) : error.errors;
+    const presentable = firstPresentableMessage(body);
+    if (presentable !== null) return presentable;
+  } catch {
+    // fall through to the raw message below
+  }
+  return error.message;
+}
+
+/** Digs `errors[0].extensions.userPresentableMessage` out of a parsed GraphQL error envelope, or `null` when the shape doesn't hold it. */
+function firstPresentableMessage(body: unknown): string | null {
+  if (body === null || typeof body !== "object" || !("errors" in body)) return null;
+  const { errors } = body;
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+  const [first] = errors;
+  if (first === null || typeof first !== "object" || !("extensions" in first)) return null;
+  const { extensions } = first;
+  if (extensions === null || typeof extensions !== "object" || !("userPresentableMessage" in extensions)) return null;
+  const { userPresentableMessage } = extensions;
+  return typeof userPresentableMessage === "string" && userPresentableMessage.length > 0
+    ? userPresentableMessage
+    : null;
+}
+
+/** True when Linear refused the credential itself — a state no retry and no `--fix` can clear. */
+export function isLinearAuthFailure(error: unknown): boolean {
+  return error instanceof LinearApiError && (error.status === 401 || error.status === 403);
 }
 
 /** Raised when a paginated query still has a next page after the safety cap — partial data is never returned. */

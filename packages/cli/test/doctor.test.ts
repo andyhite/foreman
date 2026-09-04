@@ -10,7 +10,7 @@ import {
   writeGlobalPluginLink,
 } from "@foreman/core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../src/exec.ts";
@@ -508,6 +508,25 @@ describe("runDoctor", () => {
 
     expect(code).toBe(1);
     expect(log.some((line) => line.includes("linear.apiKeyFile is") && line.includes("cannot pass the credential"))).toBe(true);
+    cleanup(home, checkoutRoot);
+  });
+
+  it("repairs a missing linear.apiKeyFile under --fix when LINEAR_API_KEY is set", async () => {
+    const home = makeTempDir("foreman-doctor-home-");
+    const checkoutRoot = makeFixtureCheckout();
+    writeGlobalPluginLink(checkoutRoot, home);
+    process.env.LINEAR_API_KEY = "lin_api_from_env";
+
+    const log: string[] = [];
+    const code = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), { runner: new FakeRunner(), log: (m) => log.push(m) });
+
+    delete process.env.LINEAR_API_KEY;
+
+    expect(code).toBe(0);
+    const keyPath = join(home, ".foreman", "linear-api-key");
+    expect(existsSync(keyPath)).toBe(true);
+    expect(readFileSync(keyPath, "utf8").trim()).toBe("lin_api_from_env");
+    expect(log.some((line) => line.includes("repaired:") && line.includes("linear.apiKeyFile"))).toBe(true);
     cleanup(home, checkoutRoot);
   });
 

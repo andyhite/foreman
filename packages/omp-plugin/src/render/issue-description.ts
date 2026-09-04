@@ -8,6 +8,9 @@ import { contextBody, sanitizeAgentText } from "@foreman/core";
 
 export interface IssueDescriptionInput {
   context: string;
+  /** Rendered as a `## Estimate` section when present. Not every caller of this template has an estimate — plan/triage proposals do not. */
+  estimate?: number;
+  estimateRationale?: string;
   acceptanceCriteria: string[];
   affectedAreas: string[];
   outOfScope: string[];
@@ -40,10 +43,15 @@ function renderCriteria(items: string[]): string {
 export function renderIssueDescription(input: IssueDescriptionInput): string {
   const openQuestions = input.openQuestions ?? [];
   const context = (contextBody(input.context) ?? input.context).trim();
+  const estimateSection =
+    input.estimate !== undefined && input.estimateRationale !== undefined
+      ? ["", "## Estimate", `${input.estimate} — ${input.estimateRationale}`]
+      : [];
   return sanitizeAgentText(
     [
       "## Context",
       context.length > 0 ? context : "_none_",
+      ...estimateSection,
       "",
       "## Acceptance Criteria",
       renderCriteria(input.acceptanceCriteria),

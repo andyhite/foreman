@@ -24,12 +24,12 @@
  * finishes with a usable config.
  */
 
-import { findUserScopeInstall, GitHubAppAuth, GitHubAppError, LinearApiError, LinearClient, provisionWorkspaceLabels, removeUserScopeInstall, writeGlobalPluginLink, YOLO_CONFIRMER } from "@foreman/core";
+import { describeLinearError, findUserScopeInstall, GitHubAppAuth, GitHubAppError, isLinearAuthFailure, LinearApiError, LinearClient, provisionWorkspaceLabels, removeUserScopeInstall, writeGlobalPluginLink } from "@foreman/core";
 import { cliBinDir, writeCliBinLink } from "./cli-link.ts";
 import type { Runner } from "./exec.ts";
 import { readGlobalConfig, writeGitHubAppPrivateKeyFile, writeGlobalConfig, writeLinearApiKeyFile } from "./global-config.ts";
 import type { Prompter } from "./prompt.ts";
-import { promptConfirmer, printProvisionActions } from "./provision-report.ts";
+import { promptConfirmer, printProvisionActions, printProvisionLegend } from "./provision-report.ts";
 import { printBanner, printSection, style } from "./tui.ts";
 
 export interface WizardOptions {
@@ -267,16 +267,18 @@ async function configureGlobalConfig(
  * without a Linear credential; failures print and defer to `foreman doctor
  * --fix` rather than failing setup.
  */
-async function provisionLabels(deps: WizardDeps, options: WizardOptions, apiKey: string | null): Promise<void> {
+async function provisionLabels(deps: WizardDeps, options: WizardOptions, apiKey: string | null): Promise<boolean> {
   printSection(deps.log, "Linear labels (workspace)");
 
   if (options.skipLinear || !apiKey) {
     deps.log("  labels: skipped, no Linear credential");
-    return;
+    return false;
   }
 
+  printProvisionLegend(deps.log);
+
   const client = new LinearClient({ apiKey });
-  const confirmer = options.yes ? YOLO_CONFIRMER : promptConfirmer(deps.prompter, deps.log);
+  const confirmer = promptConfirmer(deps.prompter, deps.log, options.yes);
 
   try {
     const actions = await provisionWorkspaceLabels(client, { confirmer });
@@ -284,10 +286,12 @@ async function provisionLabels(deps: WizardDeps, options: WizardOptions, apiKey:
     if (failed) {
       deps.log(`  ${style("yellow", "!")} some labels weren't provisioned; re-run \`foreman doctor --fix\` to retry.`);
     }
+    return false;
   } catch (error) {
-    deps.log(
-      `  ${style("yellow", "!")} label provisioning failed (${(error as Error).message}); re-run \`foreman doctor --fix\` to retry.`,
-    );
+    const authFailed = isLinearAuthFailure(error);
+    const suffix = authFailed ? "." : "; re-run `foreman doctor --fix` to retry.";
+    deps.log(`  ${style("yellow", "!")} label provisioning failed (${describeLinearError(error)})${suffix}`);
+    return authFailed;
   }
 }
 
@@ -330,12 +334,12 @@ async function removeStrayUserScopeInstall(deps: WizardDeps, options: WizardOpti
   if (linkRemoved) deps.log(`  ${style("green", "✓")} removed the leftover symlink at ${install.linkPath}`);
 }
 
-export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<void> {
+export async function runWizard(options: WizardOptions, deps: WizardDeps): Promise<number> {
   printBanner(deps.log);
   const { missingGh } = await preflight(deps);
   const apiKey = await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
   await linkGlobalPlugin(deps, options);
-  await provisionLabels(deps, options, apiKey);
+  const linearAuthFailed = await provisionLabels(deps, options, apiKey);
   await removeStrayUserScopeInstall(deps, options);
 
   if (options.linkCli) {
@@ -350,10 +354,16 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   }
 
   printSection(deps.log, "Done");
-  deps.log(`  ${style("green", "✓")} Machine setup complete.`);
+  if (linearAuthFailed) {
+    deps.log(`  ${style("red", "✗")} Setup finished, but Linear rejected the API key — no labels were provisioned.`);
+    deps.log(`  ${style("cyan", "→")} Create a key at https://linear.app/settings/api, then re-run \`foreman setup\`.`);
+  } else {
+    deps.log(`  ${style("green", "✓")} Machine setup complete.`);
+  }
   deps.log(`  ${style("cyan", "→")} Then: cd into a repo and run \`foreman init\` to register it and activate the plugin there.`);
   deps.log(`  ${style("cyan", "→")} Run \`foreman doctor\` any time to verify the plugin link is healthy.`);
   if (missingGh) {
     deps.log(`  ${style("yellow", "!")} gh not found — Foreman cannot open PRs until you install it: https://cli.github.com`);
   }
+  return linearAuthFailed ? 1 : 0;
 }

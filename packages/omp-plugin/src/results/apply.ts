@@ -414,6 +414,8 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
 
   const description = renderIssueDescription({
     context: result.refinedDescription,
+    estimate: result.estimate,
+    estimateRationale: result.estimateRationale,
     acceptanceCriteria: result.acceptanceCriteria,
     affectedAreas: result.affectedAreas,
     outOfScope: result.outOfScope,

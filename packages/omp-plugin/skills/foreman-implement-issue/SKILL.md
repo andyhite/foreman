@@ -22,7 +22,9 @@ owns this issue.
 ## Required reads
 
 - The issue: description, acceptance criteria, Out of Scope.
-- The product `Context` doc and the project brief, Definition of Done included.
+- The product `Context` doc and the project brief: already in your system
+  prompt as the `Context` digest, Definition of Done included. The extension
+  appends it before every dispatch; NEVER spend a call re-fetching it.
 - On resume (step 2): the prior `BlockRecord` or review findings, and the operator's reply.
 
 ## Procedure
