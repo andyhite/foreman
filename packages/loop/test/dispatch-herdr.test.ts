@@ -336,6 +336,25 @@ describe("HerdrDispatcher.dispatch — one pane per dispatch", () => {
     expect(splitCall?.some((arg) => arg.startsWith("FOREMAN_DISPATCH_ID="))).toBe(false);
   });
 
+  it("scrubs configured credential env vars via --env NAME= on the split pane", async () => {
+    const { calls, runner } = loopDispatchRunner({ tabExists: false });
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner, scrubEnv: ["LINEAR_API_KEY"] });
+
+    await dispatcher.dispatch({
+      agent: "foreman-refine",
+      command: "/foreman:refine",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-1", subject: "ENG-1", dispatchId: "dispatch-1" })],
+    });
+
+    const splitCall = calls.find((call) => call.includes("split"));
+    expect(splitCall).toContain("--env");
+    expect(splitCall).toContain("LINEAR_API_KEY=");
+    // Scrubbing clears the value rather than omitting the var — no call embeds a live secret.
+    expect(splitCall?.some((arg) => /^LINEAR_API_KEY=.+/.test(arg))).toBe(false);
+  });
+
   it("closes the freshly created pane and rethrows when omp never reaches interactive readiness", async () => {
     const { calls, runner: baseRunner } = loopDispatchRunner({ tabExists: false });
     const runner = {

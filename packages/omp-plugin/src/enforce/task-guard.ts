@@ -306,7 +306,7 @@ interface PreparedItem {
  */
 async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<PreparedItem> {
   const agent = item.agent;
-  if (!agent || !agent.startsWith(FOREMAN_PREFIX)) return { item, contextDigest: null };
+  if (typeof agent !== "string" || !agent.startsWith(FOREMAN_PREFIX)) return { item, contextDigest: null };
 
   // Isolation is an allowlist, not a denylist: only the fields Foreman
   // itself needs (`name`, `agent`, `task`) survive onto a foreman-*

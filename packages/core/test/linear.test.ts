@@ -371,6 +371,14 @@ describe("LinearClient mutation payload guards", () => {
     );
   });
 
+  it("names the operation when createComment returns no comment", async () => {
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { commentCreate: { comment: null } } });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(client.createComment({ issueId: "issue-1", body: "hi" })).rejects.toThrow(
+      /Failed to create comment on issue issue-1/,
+    );
+  });
+
   it("rejects relation mutations when Linear reports failure", async () => {
     const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issueRelationCreate: { success: false } } });
     const client = new LinearClient({ apiKey: "key", fetch: fetchStub });

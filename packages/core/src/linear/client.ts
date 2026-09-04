@@ -1082,10 +1082,13 @@ export class LinearClient implements LinearWriter {
   }
 
   async createComment(input: { issueId: string; body: string; parentId?: LinearId }): Promise<Comment> {
-    const data = await this.request<{ commentCreate: { comment: WireComment } }>(
+    const data = await this.request<{ commentCreate: { comment: WireComment | null } }>(
       COMMENT_CREATE_MUTATION,
       { input },
     );
+    if (!data.commentCreate.comment) {
+      throw new LinearApiError(`Failed to create comment on issue ${input.issueId}: Linear returned no comment`, null, null);
+    }
     return this.mapComment(data.commentCreate.comment);
   }
 

@@ -317,6 +317,17 @@ describe("prepareTaskCall — schemaMode and isolation", () => {
     expect(tasks[1]?.isolated).toBe(true);
   });
 
+  it("does not crash on a malformed non-string agent field, treating it as non-Foreman", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const input = {
+      tasks: [{ agent: 0, task: "do a thing" }],
+    } as unknown as TaskCallInput;
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    expect(decision.block).toBeUndefined();
+    expect(decision.input?.tasks?.[0]?.agent as unknown).toBe(0);
+  });
+
   it("strips caller-supplied fields outside the allowlist (e.g. tools) on a foreman-* item", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);
