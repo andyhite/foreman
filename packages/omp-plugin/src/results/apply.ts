@@ -662,7 +662,7 @@ async function submitGitHubReview(deps: ApplyDeps, issue: Issue, result: ReviewR
     if (!pr) return;
     const event: ReviewEvent =
       result.verdict === "approve" ? "APPROVE" : result.verdict === "request-changes" ? "REQUEST_CHANGES" : "COMMENT";
-    await deps.github.createReview(deps.entry.repoPath, pr.number, { event, body: renderReviewComment(result) });
+    await deps.github.createReview(deps.entry.repoPath, pr.number, { event, body: sanitizeAgentText(renderReviewComment(result)) });
   } catch (error) {
     notify?.(
       `Couldn't submit the GitHub review for ${issue.identifier}: ${error instanceof Error ? error.message : String(error)}`,

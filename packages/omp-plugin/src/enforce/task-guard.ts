@@ -308,12 +308,18 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   const agent = item.agent;
   if (!agent || !agent.startsWith(FOREMAN_PREFIX)) return { item, contextDigest: null };
 
-  // schemaMode is forced to "strict" and isolated/outputSchema are stripped:
-  // the guard neither injects nor accepts a caller-supplied `outputSchema`
-  // (see the comment below on why the schema always comes from frontmatter).
-  const revised: TaskItemInput = { ...item, schemaMode: "strict" };
-  delete revised.isolated;
-  delete revised.outputSchema;
+  // Isolation is an allowlist, not a denylist: only the fields Foreman
+  // itself needs (`name`, `agent`, `task`) survive onto a foreman-*
+  // spawn. `TaskItemInput`/`TaskCallInput` accept arbitrary extra keys
+  // (`tools`, `isolated`, `outputSchema`, and any future `task`-tool
+  // field), so a spread-and-delete rewrite only ever blocks the keys it
+  // remembers to name — a caller could otherwise smuggle e.g. `tools` to
+  // grant a foreman-* agent capabilities its frontmatter never listed.
+  // schemaMode is forced to "strict"; isolated/outputSchema/tools/every
+  // other caller-supplied field is dropped (see the comment below on why
+  // the schema always comes from frontmatter, never a caller override).
+  const revised: TaskItemInput = { agent, task: item.task, schemaMode: "strict" };
+  if (item.name !== undefined) revised.name = item.name;
 
   const stage = stageFor(agent);
   // The schema is inlined in each agent's frontmatter `output:` key

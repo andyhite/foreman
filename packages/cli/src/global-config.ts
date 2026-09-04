@@ -9,10 +9,37 @@
  */
 
 import { defaultAndValidateGlobalConfig, type RepoEntry } from "@foreman/core";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { withFileLock } from "./file-lock.ts";
+
+/**
+ * Opens `path` for exclusive-write with `O_NOFOLLOW`, so a symlink planted
+ * at that path — before this call or in the TOCTOU window after an earlier
+ * `lstatSync` check — is refused atomically by the kernel rather than
+ * followed. `create`/`truncate`/`excl` select O_CREAT/O_TRUNC/O_EXCL.
+ */
+function openNoFollow(path: string, mode: number, options: { excl?: boolean } = {}): number {
+  const flags =
+    fsConstants.O_WRONLY |
+    fsConstants.O_CREAT |
+    fsConstants.O_NOFOLLOW |
+    (options.excl ? fsConstants.O_EXCL : fsConstants.O_TRUNC);
+  return openSync(path, flags, mode);
+}
 
 /**
  * A sparse slice of the global config. Both fields are optional because the two
@@ -136,8 +163,16 @@ export function writeGlobalConfig(patch: ConfigPatch, home: string = homedir()):
     defaultAndValidateGlobalConfig(structuredClone(merged), configPath);
 
     const payload = `${JSON.stringify(merged, null, 2)}\n`;
-    const tempPath = join(dir, `.config.json.tmp-${process.pid}`);
-    writeFileSync(tempPath, payload, { encoding: "utf8", mode: 0o600 });
+    // A random suffix (not just the pid) plus O_EXCL|O_NOFOLLOW rules out
+    // both a same-pid reuse collision and a pre-planted symlink at the temp
+    // path redirecting this write.
+    const tempPath = join(dir, `.config.json.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+    const fd = openNoFollow(tempPath, 0o600, { excl: true });
+    try {
+      writeSync(fd, payload, null, "utf8");
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tempPath, configPath);
     chmodSync(configPath, 0o600);
     return configPath;
@@ -149,8 +184,10 @@ export function writeLinearApiKeyFile(apiKey: string, home: string = homedir()):
   const dir = join(home, ".foreman");
   const keyPath = join(dir, "linear-api-key");
   mkdirSync(dirname(keyPath), { recursive: true });
-  // A pre-planted symlink here would redirect both the write and the chmod to
-  // whatever it points at. Refuse rather than follow.
+  // A pre-planted symlink here would redirect both the write and the chmod
+  // to whatever it points at. `lstatSync` gives a clear, friendly error for
+  // the common case; `openNoFollow`'s O_NOFOLLOW is what actually closes
+  // the TOCTOU window between this check and the write below.
   let existing;
   try {
     existing = lstatSync(keyPath);
@@ -160,7 +197,12 @@ export function writeLinearApiKeyFile(apiKey: string, home: string = homedir()):
   if (existing?.isSymbolicLink()) {
     throw new Error(`${keyPath} is a symlink; refusing to write the Linear API key through it. Remove it and re-run.`);
   }
-  writeFileSync(keyPath, `${apiKey.trim()}\n`, { mode: 0o600 });
+  const fd = openNoFollow(keyPath, 0o600);
+  try {
+    writeSync(fd, `${apiKey.trim()}\n`, null, "utf8");
+  } finally {
+    closeSync(fd);
+  }
   chmodSync(keyPath, 0o600);
   return keyPath;
 }
@@ -170,8 +212,10 @@ export function writeGitHubAppPrivateKeyFile(privateKey: string, home: string = 
   const dir = join(home, ".foreman");
   const keyPath = join(dir, "github-app-private-key.pem");
   mkdirSync(dirname(keyPath), { recursive: true });
-  // A pre-planted symlink here would redirect both the write and the chmod to
-  // whatever it points at. Refuse rather than follow.
+  // A pre-planted symlink here would redirect both the write and the chmod
+  // to whatever it points at. `lstatSync` gives a clear, friendly error for
+  // the common case; `openNoFollow`'s O_NOFOLLOW is what actually closes
+  // the TOCTOU window between this check and the write below.
   let existing;
   try {
     existing = lstatSync(keyPath);
@@ -182,7 +226,12 @@ export function writeGitHubAppPrivateKeyFile(privateKey: string, home: string = 
     throw new Error(`${keyPath} is a symlink; refusing to write the GitHub App private key through it. Remove it and re-run.`);
   }
   const trimmed = privateKey.trim();
-  writeFileSync(keyPath, trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`, { mode: 0o600 });
+  const fd = openNoFollow(keyPath, 0o600);
+  try {
+    writeSync(fd, trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`, null, "utf8");
+  } finally {
+    closeSync(fd);
+  }
   chmodSync(keyPath, 0o600);
   return keyPath;
 }

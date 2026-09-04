@@ -169,6 +169,46 @@ interface WireIssue {
   comments?: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 }
 
+/**
+ * Validates a wire `String` enum field against the fixed literal union
+ * `types.ts` declares for it, throwing `LinearApiError` instead of letting
+ * an `as`-cast lie. These fields (`WorkflowState.type`, `ProjectStatus.type`,
+ * relation `type`/anchor) drive gate decisions that move issues and merge
+ * PRs — an unrecognized value silently trusted as one of the known ones
+ * would corrupt that decision instead of failing loudly at the boundary
+ * where it actually went wrong (a malformed response or a Linear enum this
+ * client hasn't been taught yet).
+ */
+function assertKnownEnum<T extends string>(value: string, allowed: readonly T[], field: string): T {
+  if ((allowed as readonly string[]).includes(value)) return value as T;
+  throw new LinearApiError(
+    `Linear API returned unrecognized ${field} "${value}"; expected one of: ${allowed.join(", ")}`,
+    null,
+    null,
+  );
+}
+
+const WORKFLOW_STATE_TYPES = [
+  "triage",
+  "backlog",
+  "unstarted",
+  "started",
+  "completed",
+  "canceled",
+  "duplicate",
+] as const satisfies readonly WorkflowState["type"][];
+const PROJECT_STATUS_TYPES = [
+  "backlog",
+  "planned",
+  "started",
+  "paused",
+  "completed",
+  "canceled",
+] as const satisfies readonly ProjectStatusType[];
+const ISSUE_RELATION_TYPES = ["blocks", "duplicate", "related", "similar"] as const satisfies readonly IssueRelationType[];
+const PROJECT_RELATION_TYPES = ["dependency"] as const satisfies readonly ProjectRelationType[];
+const PROJECT_RELATION_ANCHORS = ["start", "end"] as const satisfies readonly ProjectRelationAnchor[];
+
 interface GraphQlErrorEntry {
   message: string;
 }
@@ -482,7 +522,7 @@ export class LinearClient implements LinearWriter {
 
 
   private mapStateRef(state: WireStateRef): { id: LinearId; name: string; type: WorkflowState["type"] } {
-    return { id: state.id, name: state.name, type: state.type as WorkflowState["type"] };
+    return { id: state.id, name: state.name, type: assertKnownEnum(state.type, WORKFLOW_STATE_TYPES, "WorkflowState.type") };
   }
 
   private mapIssueRef(ref: WireIssueRef): IssueRef {
@@ -506,7 +546,7 @@ export class LinearClient implements LinearWriter {
     const other = direction === "outgoing" ? relation.relatedIssue : relation.issue;
     return {
       id: relation.id,
-      type: relation.type as IssueRelationType,
+      type: assertKnownEnum(relation.type, ISSUE_RELATION_TYPES, "IssueRelation.type"),
       direction,
       other: this.mapIssueRef(other),
     };
@@ -723,7 +763,7 @@ export class LinearClient implements LinearWriter {
 
   private mapProjectStatus(status: WireStateRef | null | undefined): ProjectStatus | null {
     if (!status) return null;
-    return { id: status.id, name: status.name, type: status.type as ProjectStatusType };
+    return { id: status.id, name: status.name, type: assertKnownEnum(status.type, PROJECT_STATUS_TYPES, "ProjectStatus.type") };
   }
 
   /** Reconstructs canonical colon-form label ids (SPEC §4.5) from Linear's group + own name. */
@@ -788,10 +828,10 @@ export class LinearClient implements LinearWriter {
     const outgoing = direction === "outgoing";
     return {
       id: row.id,
-      type: row.type as ProjectRelationType,
+      type: assertKnownEnum(row.type, PROJECT_RELATION_TYPES, "ProjectRelation.type"),
       direction,
-      anchor: (outgoing ? row.anchorType : row.relatedAnchorType) as ProjectRelationAnchor,
-      otherAnchor: (outgoing ? row.relatedAnchorType : row.anchorType) as ProjectRelationAnchor,
+      anchor: assertKnownEnum(outgoing ? row.anchorType : row.relatedAnchorType, PROJECT_RELATION_ANCHORS, "ProjectRelation.anchorType"),
+      otherAnchor: assertKnownEnum(outgoing ? row.relatedAnchorType : row.anchorType, PROJECT_RELATION_ANCHORS, "ProjectRelation.anchorType"),
       other: {
         id: other.id,
         name: other.name,
@@ -880,6 +920,11 @@ export class LinearClient implements LinearWriter {
       {},
     );
     for (const status of data.projectStatuses.nodes) {
+      // Unlike the read paths that map one document into a typed result,
+      // this populates a cache keyed by every status type the workspace
+      // has — an unrecognized type here shouldn't abort resolving the
+      // ones this client does know; it's just never looked up.
+      if (!(PROJECT_STATUS_TYPES as readonly string[]).includes(status.type)) continue;
       this.projectStatusIdCache.set(status.type as ProjectStatusType, { value: status.id, at: Date.now() });
     }
     const resolved = this.projectStatusIdCache.get(type);
@@ -926,7 +971,7 @@ export class LinearClient implements LinearWriter {
     return data.team.states.nodes.map((state) => ({
       id: state.id,
       name: state.name,
-      type: state.type as WorkflowState["type"],
+      type: assertKnownEnum(state.type, WORKFLOW_STATE_TYPES, "WorkflowState.type"),
       position: state.position,
       color: state.color,
       description: state.description,
@@ -1268,7 +1313,12 @@ export class LinearClient implements LinearWriter {
       throw new LinearApiError(`Failed to create workflow state "${input.name}"`, null, null);
     }
     const state = data.workflowStateCreate.workflowState;
-    return { id: state.id, name: state.name, type: state.type as WorkflowState["type"], position: state.position };
+    return {
+      id: state.id,
+      name: state.name,
+      type: assertKnownEnum(state.type, WORKFLOW_STATE_TYPES, "WorkflowState.type"),
+      position: state.position,
+    };
   }
 
   async updateWorkflowState(
@@ -1285,7 +1335,12 @@ export class LinearClient implements LinearWriter {
       throw new LinearApiError(`Failed to update workflow state ${id}`, null, null);
     }
     const state = data.workflowStateUpdate.workflowState;
-    return { id: state.id, name: state.name, type: state.type as WorkflowState["type"], position: state.position };
+    return {
+      id: state.id,
+      name: state.name,
+      type: assertKnownEnum(state.type, WORKFLOW_STATE_TYPES, "WorkflowState.type"),
+      position: state.position,
+    };
   }
 
   async archiveWorkflowState(id: LinearId): Promise<void> {

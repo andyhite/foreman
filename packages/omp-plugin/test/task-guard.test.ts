@@ -317,6 +317,28 @@ describe("prepareTaskCall — schemaMode and isolation", () => {
     expect(tasks[1]?.isolated).toBe(true);
   });
 
+  it("strips caller-supplied fields outside the allowlist (e.g. tools) on a foreman-* item", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const input: TaskCallInput = {
+      tasks: [
+        {
+          agent: "foreman-implement",
+          task: "Implement.\n\nFOREMAN-ISSUE: ENG-1\n",
+          tools: ["some-eval-tool"],
+          spawns: true,
+          model: "slow",
+        },
+      ],
+    };
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    const task = decision.input?.tasks?.[0];
+    expect(task).not.toHaveProperty("tools");
+    expect(task).not.toHaveProperty("spawns");
+    expect(task).not.toHaveProperty("model");
+    expect(task?.agent).toBe("foreman-implement");
+  });
+
   it("leaves outputSchema unset (frontmatter carries it) but still blocks an unrecognized foreman-* agent", async () => {
     const issue = makeIssue();
     const linear = new FakeLinear([issue]);

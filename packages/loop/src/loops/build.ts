@@ -178,19 +178,20 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
     const inReview: ReviewEntry[] = [];
     for (const issue of inReviewIssues) {
       const branch = branchNameFor(ctx.entry.branchPattern, issue, ctx.entry.repoPath);
-      let pr = null;
-      let branchSha: string | null = null;
-      try {
-        // eslint-disable-next-line no-await-in-loop -- one GitHub read per In Review issue; this loop's own poll cadence bounds the cost.
-        pr = ctx.entry.pr.required
-          ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open", base: ctx.entry.baseBranch })
-          : null;
-        // eslint-disable-next-line no-await-in-loop
-        branchSha = ctx.entry.pr.required ? null : await ctx.github.revParse(ctx.entry.repoPath, `origin/${branch}`);
-      } catch {
-        pr = null;
-        branchSha = null;
-      }
+      // No try/catch here: `prForBranch`/`revParse` already return null for
+      // the legitimate "no PR yet"/"branch not pushed" cases without
+      // throwing, so a thrown error here is a real GitHub/network failure.
+      // Swallowing it into the same null would make a transient outage
+      // indistinguishable from "not ready yet" and silently stall every
+      // In Review issue with no operator-visible signal. Letting it
+      // propagate hits `runLoop`'s existing "fetch failed, retrying next
+      // poll" path instead.
+      // eslint-disable-next-line no-await-in-loop -- one GitHub read per In Review issue; this loop's own poll cadence bounds the cost.
+      const pr = ctx.entry.pr.required
+        ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open", base: ctx.entry.baseBranch })
+        : null;
+      // eslint-disable-next-line no-await-in-loop
+      const branchSha = ctx.entry.pr.required ? null : await ctx.github.revParse(ctx.entry.repoPath, `origin/${branch}`);
       const headSha = pr?.headSha ?? branchSha ?? "";
       const prOpen = ctx.entry.pr.required ? pr !== null : branchSha !== null;
 
@@ -207,12 +208,8 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
 
       let ciStatus: CiState = "none";
       if (ctx.entry.pr.required && ctx.entry.pr.ciRequired && headSha !== "") {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          ciStatus = await ctx.github.ciStatus(ctx.entry.repoPath, headSha);
-        } catch {
-          ciStatus = "none";
-        }
+        // eslint-disable-next-line no-await-in-loop
+        ciStatus = await ctx.github.ciStatus(ctx.entry.repoPath, headSha);
       }
 
       inReview.push({

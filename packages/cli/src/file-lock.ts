@@ -20,8 +20,10 @@ export function withFileLock<T>(lockPath: string, fn: () => T, staleMs = 30_000)
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
       let holderGone = false;
+      let holderText: string | null = null;
       try {
-        const holderPid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+        holderText = readFileSync(lockPath, "utf8");
+        const holderPid = Number.parseInt(holderText.trim(), 10);
         if (Number.isFinite(holderPid)) {
           try {
             process.kill(holderPid, 0);
@@ -36,12 +38,22 @@ export function withFileLock<T>(lockPath: string, fn: () => T, staleMs = 30_000)
         // below, or this loop spins forever with no output.
         if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
       }
-      if (holderGone) {
-        rmSync(lockPath, { force: true, recursive: true });
-        continue;
-      }
-      if (Date.now() > deadline) {
-        rmSync(lockPath, { force: true, recursive: true });
+      // Between the liveness check above and the removal below, another
+      // waiter can observe the same dead holder, reclaim the lock, and
+      // write its own live pid. Re-read immediately before unlinking; skip
+      // the removal only on a *confirmed* mismatch (a live process already
+      // reclaimed it) — if the re-read itself fails (e.g. the lock path is
+      // a directory, or it vanished), fall through to removing it, matching
+      // the original unconditional reclaim so an unreadable blocker can't
+      // wedge this loop forever.
+      if (holderGone || Date.now() > deadline) {
+        let stillMatches = true;
+        try {
+          stillMatches = readFileSync(lockPath, "utf8") === holderText;
+        } catch {
+          stillMatches = true;
+        }
+        if (stillMatches) rmSync(lockPath, { force: true, recursive: true });
         continue;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { GitHubAppCredentials } from "../github/app-auth.ts";
@@ -223,15 +223,41 @@ function assertEndpointHostAllowed(config: GlobalConfig): void {
   }
 }
 
-/** A credential file readable by anyone but its owner is a finding, not a preference: every dispatched agent runs as this user's other processes do. Skipped on win32, which has no POSIX mode bits. */
-function assertPrivateFileMode(path: string, settingName: string): void {
-  if (process.platform === "win32") return;
-  const mode = statSync(path).mode & 0o777;
-  if ((mode & 0o077) !== 0) {
-    throw new ConfigError(`${path} is mode ${mode.toString(8)}; it must not be readable by group or others`, [
-      `${settingName} points at this file`,
-      `run: chmod 600 ${path}`,
-    ]);
+/**
+ * A credential file readable by anyone but its owner is a finding, not a
+ * preference: every dispatched agent runs as this user's other processes
+ * do. Skipped on win32, which has no POSIX mode bits.
+ *
+ * Reads through one open file descriptor rather than the more obvious
+ * `existsSync` → `statSync` → `readFileSync` sequence: three separate
+ * path-based syscalls leave windows where a symlink swapped in between
+ * calls redirects a later step at a path that passed an earlier check.
+ * `openSync` resolves the path once; every check and the read itself
+ * operate on that resolved descriptor. Returns `null` for "does not
+ * exist" (the caller's cue to fall back or report), throws `ConfigError`
+ * for every other problem, including a permission mismatch.
+ */
+function readPrivateCredentialFile(path: string, settingName: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    if (process.platform !== "win32") {
+      const mode = fstatSync(fd).mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        throw new ConfigError(`${path} is mode ${mode.toString(8)}; it must not be readable by group or others`, [
+          `${settingName} points at this file`,
+          `run: chmod 600 ${path}`,
+        ]);
+      }
+    }
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -367,9 +393,8 @@ export function resolveLinearApiKey(
 
   if (config.linear.apiKeyFile !== null) {
     const path = expandHome(config.linear.apiKeyFile, home);
-    if (existsSync(path)) {
-      assertPrivateFileMode(path, "linear.apiKeyFile");
-      const contents = readFileSync(path, "utf8");
+    const contents = readPrivateCredentialFile(path, "linear.apiKeyFile");
+    if (contents !== null) {
       const firstLine = (contents.split("\n")[0] ?? "").trim();
       if (firstLine.length > 0) return firstLine;
     }
@@ -439,11 +464,11 @@ export function resolveGitHubAppCredentials(config: GlobalConfig, home?: string)
     ]);
   }
   const path = expandHome(privateKeyFile, home);
-  if (!existsSync(path)) {
+  const privateKey = readPrivateCredentialFile(path, "githubApp.privateKeyFile");
+  if (privateKey === null) {
     throw new ConfigError(`GitHub App private key not found at ${path}`, [
       `githubApp.privateKeyFile is ${privateKeyFile}`,
     ]);
   }
-  assertPrivateFileMode(path, "githubApp.privateKeyFile");
-  return { appId, privateKey: readFileSync(path, "utf8") };
+  return { appId, privateKey };
 }
