@@ -8,6 +8,7 @@ export type { IssueDescriptionInput } from "./issue-description.ts";
 export { renderSpikeIssue } from "./spike.ts";
 
 export { renderReviewComment } from "./review-comment.ts";
+export { renderImplementComment } from "./implement-comment.ts";
 
 
 export { renderBlockComment } from "./block-comment.ts";

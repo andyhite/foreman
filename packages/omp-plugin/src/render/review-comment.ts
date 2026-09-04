@@ -1,4 +1,5 @@
 import type { Finding, ReviewResult } from "@foreman/core";
+import { renderContextContradictionsSection } from "./context-contradictions.ts";
 
 const SEVERITY_ORDER = ["blocking", "should-fix", "nit"] as const;
 
@@ -36,6 +37,7 @@ export function renderReviewComment(result: ReviewResult): string {
   const scopeCreepBody = result.scopeCreep.length > 0
     ? result.scopeCreep.map((item) => `- ${item}`).join("\n")
     : "_none_";
+  const contradictionsSection = renderContextContradictionsSection(result.contextContradictions);
 
   return [
     `Reviewed \`${result.reviewedSha}\`. Verdict: **${result.verdict}**.`,
@@ -57,5 +59,6 @@ export function renderReviewComment(result: ReviewResult): string {
     "",
     "## Test Adequacy",
     result.testAdequacy,
+    ...(contradictionsSection !== null ? ["", contradictionsSection] : []),
   ].join("\n");
 }

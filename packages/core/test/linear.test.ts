@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { LinearClient } from "../src/linear/client.ts";
 import { LinearApiError, type FetchLike } from "../src/linear/api.ts";
 import {
@@ -6,7 +6,6 @@ import {
   NEEDS_INPUT_FILTER,
   RUNNING_FILTER,
   all,
-  hasLabelNamed,
   inState,
   inStateType,
   notInPausedProject,
@@ -20,7 +19,6 @@ import {
   acceptanceCriteria,
   hasAcceptanceCriteria,
   incompleteBlockers,
-  openQuestions,
 } from "../src/linear/issue.ts";
 import {
   blockingProjectRelations,
@@ -142,11 +140,168 @@ describe("LinearClient projects", () => {
   });
 });
 
-describe("LinearClient initiative", () => {
-  it("returns null for an unknown initiative id", async () => {
-    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { initiative: null } });
+describe("LinearClient teamDocuments", () => {
+  it("maps the wire rows into LinearDocument[]", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: {
+          documents: {
+            nodes: [{ id: "doc-1", title: "Context", content: "product context", updatedAt: "2026-09-01T00:00:00Z" }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
     const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
-    expect(await client.initiative("missing")).toBeNull();
+
+    expect(await client.teamDocuments("PLT")).toEqual([
+      { id: "doc-1", title: "Context", content: "product context", updatedAt: "2026-09-01T00:00:00Z" },
+    ]);
+  });
+
+  it("filters by team key", async () => {
+    let filter: unknown;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { variables: { filter?: unknown } };
+      filter = body.variables.filter;
+      return jsonResponse(200, {
+        data: { documents: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await client.teamDocuments("PLT");
+
+    expect(filter).toEqual({ team: { key: { eq: "PLT" } } });
+  });
+
+  it("returns [] when the team has no documents", async () => {
+    const fetchStub: FetchLike = async () =>
+      jsonResponse(200, {
+        data: { documents: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      });
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    expect(await client.teamDocuments("PLT")).toEqual([]);
+  });
+
+  it("serves the second call from the TTL cache", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(200, {
+        data: { documents: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await client.teamDocuments("PLT");
+    await client.teamDocuments("PLT");
+
+    expect(calls).toBe(1);
+  });
+
+  it("posts DocumentCreate with teamId, title, content and maps the response into a LinearDocument", async () => {
+    let variables: unknown;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { query: string; variables: unknown };
+      if (body.query.includes("DocumentCreate")) {
+        variables = body.variables;
+        return jsonResponse(200, {
+          data: {
+            documentCreate: {
+              success: true,
+              document: { id: "doc-2", title: "Context", content: "seed body", updatedAt: "2026-09-01T00:00:00Z" },
+            },
+          },
+        });
+      }
+      return jsonResponse(200, {
+        data: { team: { id: "team-1", key: "PLT", name: "Platform", triageEnabled: true, cyclesEnabled: false, triageIssueState: null } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    const created = await client.createDocument({ teamId: "team-1", title: "Context", content: "seed body" });
+
+    expect(variables).toEqual({ input: { teamId: "team-1", title: "Context", content: "seed body" } });
+    expect(created).toEqual({ id: "doc-2", title: "Context", content: "seed body", updatedAt: "2026-09-01T00:00:00Z" });
+  });
+
+  it("re-fetches teamDocuments after createDocument instead of serving the pre-create cached list", async () => {
+    let documentsCalls = 0;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { query: string };
+      if (body.query.includes("TeamDocuments")) {
+        documentsCalls += 1;
+        return jsonResponse(200, {
+          data: { documents: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+        });
+      }
+      if (body.query.includes("DocumentCreate")) {
+        return jsonResponse(200, {
+          data: {
+            documentCreate: {
+              success: true,
+              document: { id: "doc-3", title: "Context", content: "seed body", updatedAt: "2026-09-01T00:00:00Z" },
+            },
+          },
+        });
+      }
+      return jsonResponse(200, {
+        data: { team: { id: "team-1", key: "PLT", name: "Platform", triageEnabled: true, cyclesEnabled: false, triageIssueState: null } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    await client.teamDocuments("PLT");
+    await client.createDocument({ teamId: "team-1", title: "Context", content: "seed body" });
+    await client.teamDocuments("PLT");
+
+    expect(documentsCalls).toBe(2);
+  });
+
+  it("posts DocumentUpdate with id and content", async () => {
+    let variables: unknown;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { query: string; variables: unknown };
+      if (body.query.includes("DocumentUpdate")) {
+        variables = body.variables;
+        return jsonResponse(200, { data: { documentUpdate: { success: true } } });
+      }
+      return jsonResponse(200, { data: {} });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    await client.updateDocument({ documentId: "doc-3", content: "revised body" });
+
+    expect(variables).toEqual({ id: "doc-3", input: { content: "revised body" } });
+  });
+
+  it("re-fetches teamDocuments after updateDocument instead of serving the pre-update cached body", async () => {
+    let documentsCalls = 0;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { query: string };
+      if (body.query.includes("TeamDocuments")) {
+        documentsCalls += 1;
+        return jsonResponse(200, {
+          data: {
+            documents: {
+              nodes: [{ id: "doc-3", title: "Context", content: "stale body", updatedAt: "2026-09-01T00:00:00Z" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        });
+      }
+      if (body.query.includes("DocumentUpdate")) {
+        return jsonResponse(200, { data: { documentUpdate: { success: true } } });
+      }
+      return jsonResponse(200, { data: {} });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    await client.teamDocuments("PLT");
+    await client.updateDocument({ documentId: "doc-3", content: "revised body" });
+    await client.teamDocuments("PLT");
+
+    expect(documentsCalls).toBe(2);
   });
 });
 
@@ -218,6 +373,23 @@ describe("LinearClient retry", () => {
     await expect(
       client.createRelation({ issueId: "issue-1", relatedIssueId: "issue-2", type: "blocks" }),
     ).rejects.toThrow(LinearApiError);
+    expect(calls).toBe(1);
+  });
+
+  it("honours the request deadline during a transport-error retry sleep, not the full backoff delay", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      const error = new TypeError("fetch failed");
+      throw error;
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub, timeoutMs: 20 });
+    const startedAt = Date.now();
+    await expect(client.issue("ENG-1")).rejects.toThrow(/timed out/);
+    // The transport-error retry backs off 500ms on the first attempt; the
+    // 20ms deadline must cut that sleep short rather than let it run to
+    // completion, so the whole call resolves in well under 500ms.
+    expect(Date.now() - startedAt).toBeLessThan(300);
     expect(calls).toBe(1);
   });
 });
@@ -823,8 +995,6 @@ describe("LinearClient project documents", () => {
             startDate: "2026-09-01",
             targetDate: "2026-12-31",
             status: { id: "ps-1", name: "Backlog", type: "backlog" },
-            documents: { nodes: [{ id: "doc-1", title: "Context", content: "hello", updatedAt: "" }] },
-            labels: { nodes: [] },
           },
         },
       });
@@ -834,8 +1004,9 @@ describe("LinearClient project documents", () => {
 
     expect(calls).toBe(1);
     expect(document).not.toContain("content {");
+    expect(document).not.toContain("labels");
+    expect(document).not.toContain("documents");
     expect(project?.content).toBe("overview");
-    expect(project?.documents[0]?.content).toBe("hello");
     expect(project?.startDate).toBe("2026-09-01");
     expect(project?.status?.type).toBe("backlog");
   });
@@ -1022,6 +1193,43 @@ describe("LinearClient createProject", () => {
     await expect(
       client.createProject({ name: "Maintenance", teamIds: ["team-1"] }),
     ).rejects.toThrow(/Failed to create project/);
+  });
+});
+
+describe("LinearClient updateProjectStatus cache", () => {
+  it("refetches the status id once the cached entry is past CACHE_TTL_MS", async () => {
+    let statusQueryCalls = 0;
+    const fetchStub: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as { query: string };
+      if (body.query.includes("mutation ProjectUpdate")) {
+        return jsonResponse(200, { data: { projectUpdate: { success: true } } });
+      }
+      statusQueryCalls += 1;
+      return jsonResponse(200, {
+        data: { projectStatuses: { nodes: [{ id: `status-${statusQueryCalls}`, type: "started" }] } },
+      });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+
+    const nowSpy = spyOn(Date, "now");
+    try {
+      nowSpy.mockReturnValue(0);
+      await client.updateProjectStatus({ projectId: "p1", type: "started" });
+      expect(statusQueryCalls).toBe(1);
+
+      // Within the TTL: the cached id is reused, no refetch.
+      nowSpy.mockReturnValue(60_000);
+      await client.updateProjectStatus({ projectId: "p1", type: "started" });
+      expect(statusQueryCalls).toBe(1);
+
+      // Past CACHE_TTL_MS (10 minutes): a workspace status recreated with a
+      // new id must not keep serving the stale one.
+      nowSpy.mockReturnValue(10 * 60_000 + 1);
+      await client.updateProjectStatus({ projectId: "p1", type: "started" });
+      expect(statusQueryCalls).toBe(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 describe("acceptance criteria parsing", () => {

@@ -71,6 +71,88 @@ describe("InteractivePrompter", () => {
     prompter.close();
   });
 
+  it("secret() resolves the full paste when the end marker is split across data chunks", async () => {
+    const stdin = process.stdin;
+    const stdout = process.stdout;
+    const originalIsTTY = stdin.isTTY;
+    const originalIsRaw = stdin.isRaw;
+    const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+    const originalResume = stdin.resume.bind(stdin);
+    const originalWrite = stdout.write.bind(stdout);
+    const writes: string[] = [];
+
+    Object.defineProperty(stdin, "isTTY", { value: true, configurable: true });
+    stdin.setRawMode = ((mode: boolean) => {
+      Object.defineProperty(stdin, "isRaw", { value: mode, configurable: true });
+      return stdin;
+    }) as typeof stdin.setRawMode;
+    stdin.resume = () => stdin;
+    stdout.write = ((chunk: string | Uint8Array) => {
+      writes.push(chunk.toString());
+      return true;
+    }) as typeof stdout.write;
+
+    const secretText = "hello\u2026world";
+    const prompter = new InteractivePrompter({ log: () => {} });
+    const pending = prompter.secret("Paste something: ");
+
+    // The 6-byte end marker straddles two separate `data` events, as it can
+    // on a macOS pty for a large paste.
+    stdin.emit("data", Buffer.from(`\x1b[200~${secretText}\x1b[20`));
+    stdin.emit("data", Buffer.from("1~"));
+    stdin.emit("data", Buffer.from("\r"));
+
+    const answer = await pending;
+    expect(answer).toBe(secretText);
+
+    stdout.write = originalWrite;
+    if (originalSetRawMode) stdin.setRawMode = originalSetRawMode;
+    stdin.resume = originalResume;
+    Object.defineProperty(stdin, "isTTY", { value: originalIsTTY, configurable: true });
+    Object.defineProperty(stdin, "isRaw", { value: originalIsRaw, configurable: true });
+    prompter.close();
+  });
+
+  it("secret() resolves the full paste when the start marker is split across data chunks", async () => {
+    const stdin = process.stdin;
+    const stdout = process.stdout;
+    const originalIsTTY = stdin.isTTY;
+    const originalIsRaw = stdin.isRaw;
+    const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+    const originalResume = stdin.resume.bind(stdin);
+    const originalWrite = stdout.write.bind(stdout);
+    const writes: string[] = [];
+
+    Object.defineProperty(stdin, "isTTY", { value: true, configurable: true });
+    stdin.setRawMode = ((mode: boolean) => {
+      Object.defineProperty(stdin, "isRaw", { value: mode, configurable: true });
+      return stdin;
+    }) as typeof stdin.setRawMode;
+    stdin.resume = () => stdin;
+    stdout.write = ((chunk: string | Uint8Array) => {
+      writes.push(chunk.toString());
+      return true;
+    }) as typeof stdout.write;
+
+    const prompter = new InteractivePrompter({ log: () => {} });
+    const pending = prompter.secret("Paste something: ");
+
+    // The 6-byte start marker straddles two separate `data` events.
+    stdin.emit("data", Buffer.from("\x1b[200"));
+    stdin.emit("data", Buffer.from("~AAAA\nBBBB"));
+    stdin.emit("data", Buffer.from("\x1b[201~\r"));
+
+    const answer = await pending;
+    expect(answer).toBe("AAAA\nBBBB");
+
+    stdout.write = originalWrite;
+    if (originalSetRawMode) stdin.setRawMode = originalSetRawMode;
+    stdin.resume = originalResume;
+    Object.defineProperty(stdin, "isTTY", { value: originalIsTTY, configurable: true });
+    Object.defineProperty(stdin, "isRaw", { value: originalIsRaw, configurable: true });
+    prompter.close();
+  });
+
   it("secret() discards an arrow-key escape sequence instead of leaking it into the secret", async () => {
     const stdin = process.stdin;
     const stdout = process.stdout;

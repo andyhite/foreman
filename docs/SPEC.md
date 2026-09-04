@@ -180,15 +180,15 @@ packages/omp-plugin/
   package.json                  # omp.extensions declaration — the ONLY declared path
   agents/                       # auto-discovered (§3.2)
     foreman-triage.md  foreman-refine.md  foreman-plan.md  foreman-roadmap.md
-    foreman-implement.md  foreman-review.md
+    foreman-implement.md  foreman-review.md  foreman-context.md
   skills/                       # auto-discovered (§3.3); dir name is the skill name
     foreman-triage-inbox/SKILL.md   foreman-refine-issue/SKILL.md
     foreman-plan-project/SKILL.md   foreman-plan-roadmap/SKILL.md
     foreman-implement-issue/SKILL.md
     foreman-review-diff/SKILL.md    foreman-spike/SKILL.md
-    foreman-block-protocol/SKILL.md
+    foreman-context-doc/SKILL.md    foreman-block-protocol/SKILL.md
   commands/                     # auto-discovered; one per agent dispatch, `$1`-substituted
-    triage.md  refine.md  plan.md  roadmap.md  implement.md  review.md
+    triage.md  refine.md  plan.md  roadmap.md  implement.md  review.md  context.md
   rules/                        # auto-discovered (§15)
     foreman-no-interactive-questions.md
     foreman-no-scope-expansion.md
@@ -368,6 +368,7 @@ which is the explicit kickoff surface for every step.
 | `/foreman:refine` | `foreman-refine` | `<ISSUE-ID>` |
 | `/foreman:plan` | `foreman-plan` — turns a bare project's brief into its first slate of issues | `<PROJECT-ID>` |
 | `/foreman:roadmap` | `foreman-roadmap` — decomposes an initiative's brief into its next slate of projects | `<INITIATIVE-ID>` |
+| `/foreman:context` | `foreman-context` — proposes edits to the team's product `Context` doc's three agent-proposable sections (§4.7) | none, team-scoped like `/foreman:roadmap` |
 | `/foreman:implement` | `foreman-implement` | `<ISSUE-ID>` |
 | `/foreman:review` | `foreman-review` | `<ISSUE-ID>` or PR |
 | `/foreman:merge` | no agent — the extension merges via the configured strategy once the review gate passes (§10) | `<ISSUE-ID>` |
@@ -416,7 +417,8 @@ that must be real code:
 5. **Structured-output consumers.** Read `structuredOutput.data` off each
    `SingleResult` and drive every Linear mutation from validated objects —
    descriptions, labels, state moves, sub-issue and spike creation, discovered
-   work, comments, review renderings. This is where principle 9 lives.
+   work, comments, review renderings, and the product `Context` doc merge
+   (§4.7). This is where principle 9 lives.
    The `SingleResult` arrives on exactly one channel — the `task` tool's
    `tool_result`, whose `structuredOutput` is `{ source, mode, status, data }`
    (docs/VERIFIED.md) — and only for a synchronous spawn. Every workflow
@@ -658,7 +660,7 @@ same alias; nothing else needs coordinating.
 
 **Triage is a `plan`-loop rule**, not a separate process (§17.1, §17.5). The
 plan loop's `triage` rule batches up to `loop.triageBatch` Triage-state
-issues into one `/foreman:triage --initiatives <id>... <ISSUE-ID>...`
+issues into one `/foreman:triage <ISSUE-ID...>`
 dispatch per poll — one consumer of the shared inbox per repo instance, no
 separate scheduler and no proposal step: `foreman-triage`'s
 `TriageResult` is applied directly by the extension (§7.1).
@@ -704,8 +706,7 @@ default issue template to Triage status so everything enters through one
 funnel.
 
 **Initiatives on from day one, and load-bearing.** Initiative = the product
-(§4.1); the registry's repo bindings (§3.10, §3.11) and the product
-`Context` doc (§4.7) hang off it. Portfolio groupings (e.g. the weekly micro-products practice) are
+(§4.1); the registry's repo bindings (§3.10, §3.11) hang off it. Portfolio groupings (e.g. the weekly micro-products practice) are
 naming-convention parents — `Micro-products > dontletitdie.lol` — since real
 sub-initiatives are Enterprise-gated. Grouping prefixes are review lenses only;
 no Foreman config attaches to them.
@@ -724,8 +725,8 @@ pattern for work that should stay open indefinitely.
 
 | Level | Use |
 |---|---|
-| Team | **Exactly one.** Owns states, estimates, Triage, team labels, and the issue prefix (§4.0). |
-| Initiative | **The product/app.** Never closes. Hosted by exactly one repo — a monorepo may host several initiatives; the global registry binds them (§3.10, §3.11). Carries the product `Context` doc (§4.7). Naming-convention parents group a portfolio (§4.0). |
+| Team | **Exactly one.** Owns states, estimates, Triage, team labels, and the issue prefix (§4.0). Carries the product `Context` doc (§4.7). |
+| Initiative | **The product/app.** Never closes. Hosted by exactly one repo — a monorepo may host several initiatives; the global registry binds them (§3.10, §3.11). Naming-convention parents group a portfolio (§4.0). |
 | Project | **A shippable increment** — a feature or milestone that ends — or the product's standing `Maintenance` project. Carries the project brief (§4.7). |
 | Issue | Unit of agent work. One issue = one worktree = one PR. |
 | Sub-issue | Product of `foreman-refine` splitting an oversized issue. |
@@ -879,10 +880,11 @@ Fibonacci, read as *agent-session size*, not human time.
 
 Two layers, split by lifecycle:
 
-**Product `Context` doc — on the initiative.** Architectural decisions and
+**Product `Context` doc — on the team.** Architectural decisions and
 constraints, domain vocabulary, known non-goals, and the Definition of Done
 (§4.8). Stable across milestones — one copy per *project* would rot into N
-drifting copies of the same decisions.
+drifting copies of the same decisions, and a repo binds exactly one Linear
+team, so there is exactly one product `Context` doc per repo.
 
 **Project brief — on the project.** The increment's problem statement and
 success criteria, nothing product-wide. For a micro-product's single `Launch`
@@ -890,12 +892,44 @@ project the brief carries everything and the product doc can start as a stub.
 
 The task tool's required `context` parameter gets a digest of **both**,
 concatenated product-first, which omp renders into every spawned subagent's
-system prompt. Operator maintains them; agents may propose edits as comments
-but must not write to them.
+system prompt.
 
-**Verify during build:** documents attach at the initiative level on the
-current plan (§16). If not, the product `Context` doc lives pinned in the
-product's `Maintenance` project and resolution follows the same chain.
+**Two zones, split by who may write them.** `## Definition of Done` (§4.8)
+is operator-editable but agent-locked: `foreman-review` grades
+`ReviewResult.dodSatisfied` against it, so an agent able to rewrite its own
+bar would be grading itself. The lock is structural, not policed —
+`ContextResult` (§6) has no Definition-of-Done field under any spelling, so
+`mergeContextDoc` can only carry the live section through verbatim. Nothing
+checks this at runtime because nothing can express a change to it. The other
+three sections — `## Architectural decisions and constraints`, `## Domain
+vocabulary`, `## Known non-goals` — are agent-proposable through
+`/foreman:context` and `foreman-context` (§7.8), team-scoped like
+`/foreman:roadmap`: no lock, no issue, no project, operator-invoked only.
+`foreman-context` yields the same way every other agent does, and the
+extension applies it on yield (principle 9) — no separate operator-approval
+step beyond invoking the command.
+
+**No silent loss.** A `ContextResult` carries the full new body of each open
+section, not a delta. Every non-empty line present in the live section but
+missing from the proposal must appear in `removals` with a reason, or the
+extension refuses the entire result and writes nothing — `mergeContextDoc`
+reports the undeclared lines rather than guessing which were intentional.
+
+**Seeding.** `foreman init` and `foreman doctor --fix` create the doc from
+`CONTEXT_DOC_TEMPLATE` once, and never overwrite an existing one; `foreman
+doctor` reports it as missing or as an untouched stub otherwise.
+
+**Pruning is contradiction-only.** There is no sweep and no age timer. A
+recorded decision goes stale exactly when work contradicts it, not merely
+when it goes unmentioned: `foreman-implement` and `foreman-review` each
+surface that as a `ContextContradiction` on `ImplementResult` and
+`ReviewResult` (§7.3, §7.4) — a finding reported on the issue, not a doc
+write. The operator resolves the doc as part of that issue; a gap in the doc
+is not itself a contradiction and prunes nothing.
+
+**Resolved:** the doc is read through a root `documents(filter: { team: { key:
+{ eq } } })` query — `Team` has no `documents` field on Linear's schema, so
+the filter cannot be applied through the team itself. See `docs/VERIFIED.md`.
 
 ### 4.8 Definition of Done
 
@@ -974,10 +1008,10 @@ in prose.
 | Field | Behavior | Foreman policy |
 |---|---|---|
 | `tools` | Explicit allowlist. `hub` is force-added regardless. `exec` expands to `eval` + `bash`. `task` is auto-added if `spawns` is set. | The security boundary. Enumerate per agent (§7). No agent gets any Linear or GitHub mutation tool except implement's `foreman_github_pr` (principle 9). |
-| `spawns` | Grants the child the `task` tool so it can fan out further. | **`false` on all six.** Recursive fan-out inside a workflow agent is exactly the uncontrolled behavior Foreman exists to prevent. Set explicitly; do not rely on the depth gate. |
+| `spawns` | Grants the child the `task` tool so it can fan out further. | **`false` on all seven.** Recursive fan-out inside a workflow agent is exactly the uncontrolled behavior Foreman exists to prevent. Set explicitly; do not rely on the depth gate. |
 | `blocking` | `true` runs the spawn inline; default is a background job whose result is delivered into the parent conversation later. No bundled agent sets it. | `true` only for `foreman-refine` (short-lived; inline is right both when the operator invokes it and in the loop's print-mode parent). Everything else background. |
 | `thinking-level` | The agent's effort selector. `auto` does per-prompt classification. Per-spawn `effort` overrides it, but only when `task.enableEffort=true` (default off) — so in practice frontmatter is the real control. | Per agent, §7. Don't rely on `effort` unless you enable the setting. |
-| `output` | JSON Schema for structured output. Precedence: per-call `outputSchema` → frontmatter `output` → inherited parent schema. Pair with `schemaMode: strict`. | **Required on all six.** See §6. |
+| `output` | JSON Schema for structured output. Precedence: per-call `outputSchema` → frontmatter `output` → inherited parent schema. Pair with `schemaMode: strict`. | **Required on all seven.** See §6. |
 | `advisor` | Pairs the child with an advisor session that raises concerns and blockers mid-run. `on` / `off` / model pattern. Subagents default to none. | `on` for `foreman-refine` and `foreman-plan` — the two agents that draft, rather than verify against code, so a second opinion is cheap insurance. The advisor interrupts the *agent*, not the operator — it does not violate §9. |
 | `prewalk` | Starts on the normal model and hands off to a cheaper one at the first edit/write. | **`false` everywhere.** For `foreman-implement` the edits *are* the hard part; downgrading exactly when writing begins is backwards. |
 | `autoload-skills` | Skill names loaded **before the first assignment**, as CSV or a list. **Unknown names are silently ignored** — no error, no warning. | Bind each agent's procedure skill plus `foreman-block-protocol`. Guard against the silent-ignore failure mode (§8). |
@@ -1000,7 +1034,7 @@ Every agent returns a validated object. This is the largest single change from a
 prose-artifact design: gate checks become schema validation, and the extension
 drives Linear from `structuredOutput.data` instead of parsing markdown.
 
-Set `schemaMode: strict` on all six. Permissive mode defeats the purpose.
+Set `schemaMode: strict` on all seven. Permissive mode defeats the purpose.
 
 With principle 9, these objects are not just the return channel — they are the
 *complete* specification of every mutation the extension applies. Anything an
@@ -1461,6 +1495,38 @@ writer (principle 9):
 still `foreman-plan`'s job, run automatically the moment a created project
 goes bare (§7.6), the same funnel any other bare project falls into.
 
+### 7.8 `foreman-context`
+
+```yaml
+tools: [read, grep, glob, lsp, foreman_linear_read]
+spawns: false
+blocking: true
+model: "@plan"
+advisor: off
+prewalk: false
+autoload-skills: [foreman-context-doc, foreman-block-protocol]
+output: schemas/context-result.json
+schemaMode: strict
+```
+
+| | |
+|---|---|
+| **Transition** | none — updates the team's product `Context` doc in place; touches no issue or project |
+| **Trigger** | `/foreman:context`, operator-invoked only, one team per run — the same standing as `foreman-roadmap` (§7.7) |
+| **Model role** | `plan` — drafting decisions/vocabulary/non-goals prose from the repo's own docs, code, and existing projects, not a lookup |
+
+**Per invocation:** read the live doc (all four sections, Definition of Done
+included, via `foreman_linear_read` op `context`) plus the repo's own docs,
+code, and existing projects; draft the full new body of the three
+agent-proposable sections (§4.7) and any `removals` needed to keep the
+result honest.
+
+**Output:** a `ContextResult` — no Definition-of-Done field exists on it, by
+construction (§4.7). The extension applies it with `mergeContextDoc`,
+carrying the Definition of Done through verbatim, and refuses the whole
+result — writing nothing — if any line dropped from a section is missing
+from `removals`.
+
 ---
 
 ## 8. Skills
@@ -1474,7 +1540,8 @@ goes bare (§7.6), the same funnel any other bare project falls into.
 | `foreman-spike` | refine, operator | Findings + follow-up issues | Investigation only; no production code |
 | `foreman-implement-issue` | implement | `ImplementResult` | Full within acceptance criteria |
 | `foreman-review-diff` | review | `ReviewResult` | Advisory only |
-| `foreman-block-protocol` | all six | `BlockRecord` | — |
+| `foreman-context-doc` | context (operator-invoked) | `ContextResult` | Proposes the three agent-proposable sections (§4.7); Definition of Done is unreachable |
+| `foreman-block-protocol` | all seven | `BlockRecord` | — |
 
 Each skill defines: preconditions (the gate it enforces), required reads,
 ordered procedure, the output schema it fills, **stop conditions** (the
@@ -1486,7 +1553,7 @@ path, not an afterthought: detect existing worktree → read prior
 This is the path both `/foreman:unblock` fresh-spawn fallback (§9) and the
 review fix cycle (§7.4) depend on.
 
-`foreman-block-protocol` bound to all six via `autoload-skills` is what makes
+`foreman-block-protocol` bound to all seven via `autoload-skills` is what makes
 the interrupt contract guaranteed rather than discretionary — it is in context
 before the agent's first assignment, so there is no path where an agent
 improvises its blocking behavior because it didn't think to load the skill.

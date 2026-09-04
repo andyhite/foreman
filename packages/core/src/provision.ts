@@ -17,6 +17,7 @@
  */
 
 import type { Confirmer } from "./confirm.ts";
+import { CONTEXT_DOC_TEMPLATE, CONTEXT_DOC_TITLE } from "./domain/context-doc.ts";
 import {
   appLabelId,
   APP_LABEL_COLOR,
@@ -32,7 +33,7 @@ import type { LinearWriter } from "./linear/api.ts";
 import type { LinearId, WorkflowState } from "./linear/types.ts";
 
 export interface ProvisionAction {
-  kind: "label" | "project-label" | "state" | "team-setting";
+  kind: "label" | "project-label" | "state" | "team-setting" | "document";
   name: string;
   /** What kind of write this is (or would be) — drives how the CLI prints it. */
   op: "create" | "update" | "archive" | "enable" | "disable" | "none";
@@ -121,9 +122,12 @@ export async function provisionWorkspaceLabels(
  * icon-determining `type`), keeps every managed state's color and
  * description in sync even when it already existed, offers to archive any
  * workflow state that is neither managed nor system-owned (Triage,
- * Duplicate), and creates the `app:<name>` issue and project labels for the
- * repo's configured apps (plus `app:all` when two or more are configured).
- * Asks once, for everything this call would change together.
+ * Duplicate), creates the `app:<name>` issue and project labels for the
+ * repo's configured apps (plus `app:all` when two or more are configured),
+ * and seeds the product `Context` doc (SPEC §4.7) when the team has none.
+ * The Context doc is seeded only, never updated — its body is operator-owned
+ * prose that `foreman-review` grades against (SPEC §4.7/§4.8). Asks once,
+ * for everything this call would change together.
  */
 export async function provisionTeam(
   linear: LinearWriter,
@@ -164,13 +168,22 @@ export async function provisionTeam(
   const missingIssueLabels = appNames.filter((name) => !existingWorkspaceLabels.has(appLabelId(name)));
   const missingProjectLabels = appNames.filter((name) => !existingProjectLabels.has(appLabelId(name)));
 
+  // Detect only — never diff or update. An existing Context doc's body is
+  // operator-owned prose that `foreman-review` grades against; the one
+  // unrecoverable mistake here is clobbering it (SPEC §4.7).
+  const existingDocuments = await linear.teamDocuments(settings.key);
+  const contextDocMissing = !existingDocuments.some(
+    (doc) => doc.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase(),
+  );
+
   const nothingToDo =
     settingsChanges.length === 0 &&
     toCreate.length === 0 &&
     toUpdate.length === 0 &&
     extraStates.length === 0 &&
     missingIssueLabels.length === 0 &&
-    missingProjectLabels.length === 0;
+    missingProjectLabels.length === 0 &&
+    !contextDocMissing;
 
   let proceed = true;
   if (!nothingToDo) {
@@ -183,6 +196,7 @@ export async function provisionTeam(
     if (extraStates.length > 0) summaryParts.push(`remove ${extraStates.length} extra workflow state(s)`);
     const labelCount = missingIssueLabels.length + missingProjectLabels.length;
     if (labelCount > 0) summaryParts.push(`create ${labelCount} app label(s)`);
+    if (contextDocMissing) summaryParts.push("create the product Context doc");
 
     const detail = [
       ...settingsChanges.map((change) => `${change.op === "enable" ? "+" : "-"} ${change.name}`),
@@ -191,6 +205,7 @@ export async function provisionTeam(
       ...extraStates.map((state) => `- ${state.name} (remove; only succeeds with no active issues)`),
       ...missingIssueLabels.map((name) => `+ ${appLabelId(name)} (issue label)`),
       ...missingProjectLabels.map((name) => `+ ${appLabelId(name)} (project label)`),
+      ...(contextDocMissing ? [`+ ${CONTEXT_DOC_TITLE} (product Context doc, with the default Definition of Done)`] : []),
     ];
 
     proceed = await input.confirmer.confirm({
@@ -329,6 +344,19 @@ export async function provisionTeam(
       } catch (error) {
         actions.push({ kind: "project-label", name: id, op: "create", changed: false, detail: errorDetail(error) });
       }
+    }
+  }
+
+  if (!contextDocMissing) {
+    actions.push({ kind: "document", name: CONTEXT_DOC_TITLE, op: "none", changed: false, detail: null });
+  } else if (!proceed) {
+    actions.push({ kind: "document", name: CONTEXT_DOC_TITLE, op: "create", changed: false, detail: "declined" });
+  } else {
+    try {
+      await linear.createDocument({ teamId: input.teamId, title: CONTEXT_DOC_TITLE, content: CONTEXT_DOC_TEMPLATE });
+      actions.push({ kind: "document", name: CONTEXT_DOC_TITLE, op: "create", changed: true, detail: null });
+    } catch (error) {
+      actions.push({ kind: "document", name: CONTEXT_DOC_TITLE, op: "create", changed: false, detail: errorDetail(error) });
     }
   }
 

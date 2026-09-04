@@ -106,4 +106,13 @@ describe("InflightStore", () => {
     expect(store.failures("issue:ENG-1")).toBe(0);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("loads a file with null/wrong-typed fields to an empty store instead of throwing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "foreman-inflight-"));
+    const path = join(dir, "build.json");
+    await Bun.write(path, JSON.stringify({ inFlight: null, failures: 3 }));
+    const store = await InflightStore.load(path, new StatusDispatcher("running"));
+    expect(store.inFlightCount()).toBe(0);
+    expect(store.failures("issue:ENG-1")).toBe(0);
+  });
 });

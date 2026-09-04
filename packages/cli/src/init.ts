@@ -239,7 +239,6 @@ async function resolveApps(deps: InitDeps, options: InitOptions, existingEntry: 
  */
 async function provisionTeamForRepo(
   deps: InitDeps,
-  options: InitOptions,
   apiKey: string,
   team: string,
   appNames: readonly string[],
@@ -470,7 +469,6 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
       try {
         provisioningFailed = await provisionTeamForRepo(
           deps,
-          options,
           provisionKey,
           team,
           apps.map((app) => app.name),

@@ -2,12 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { MARKER_KIND, PRIORITY, TYPE_LABEL, decodeMarker } from "@foreman/core";
 import type {
   BlockRecord,
-  Comment,
+  ContextResult,
   CreateIssueInput,
   Issue,
   IssueLabel,
   IssueMutation,
   IssueRelationType,
+  LinearDocument,
   LinearWriter,
   PlanResult,
   Project,
@@ -73,7 +74,8 @@ class FakeLinear implements LinearWriter {
   commentCalls: Array<{ issueId: string; body: string }> = [];
   createIssueCalls: CreateIssueInput[] = [];
   relationCalls: Array<{ issueId: string; relatedIssueId: string; type: IssueRelationType }> = [];
-
+  documentsList: LinearDocument[] = [];
+  updateDocumentCalls: Array<{ documentId: string; content: string }> = [];
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
   }
@@ -105,11 +107,16 @@ class FakeLinear implements LinearWriter {
   async projectStatus() {
     return null;
   }
-  async projectInitiatives() {
-    return [{ id: "initiative-1", name: "Foreman" }];
+  async teamDocuments(): Promise<LinearDocument[]> {
+    return this.documentsList;
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(input: { documentId: string; content: string }): Promise<void> {
+    this.updateDocumentCalls.push(input);
+    const doc = this.documentsList.find((entry) => entry.id === input.documentId);
+    if (doc) doc.content = input.content;
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_READY, STATE_IN_REVIEW, STATE_BACKLOG, STATE_NEEDS_INPUT, STATE_BLOCKED];
@@ -263,6 +270,7 @@ function makeReviewResult(overrides: Partial<ReviewResult> = {}): ReviewResult {
     dodSatisfied: true,
     dodChecklist: [],
     findings: [],
+    contextContradictions: [],
     projectOrganization: "No concerns.",
     scopeCreep: [],
     testAdequacy: "Yes, tests would fail if reverted.",
@@ -296,6 +304,20 @@ describe("applyOutcome — triage", () => {
     expect(linear.updateCalls.some((call) => call.input.projectId === "project-1")).toBe(true);
     expect(linear.updateCalls.some((call) => call.input.priority === PRIORITY.Medium)).toBe(true);
     expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);
+  });
+
+  it("backlog: a project-less item moves to Backlog, adds the type label, and sends no projectId", async () => {
+    const issue = makeIssue({ state: { id: "state-triage", name: "Triage", type: "triage", position: 0 } });
+    const linear = new FakeLinear([issue]);
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
+      kind: "result",
+      agent: "foreman-triage",
+      result: makeTriageItem({ destinationProjectId: null }),
+    });
+
+    expect(linear.updateCalls.some((call) => "projectId" in call.input)).toBe(false);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);
+    expect(linear.updateCalls.some((call) => call.input.addedLabelIds?.includes(`label-${TYPE_LABEL.feature}`))).toBe(true);
   });
 
   it("cancel: moves to Needs Input, writes a block marker", async () => {
@@ -378,6 +400,40 @@ describe("applyOutcome — triage", () => {
     expect(linear.relationCalls).toHaveLength(0);
     expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);
     expect(notices.some((notice) => notice.message.includes("blocker OTHR-1 is out of scope"))).toBe(true);
+  });
+});
+
+describe("applyOutcome — triage is bound to its dispatched batch", () => {
+  it("an item naming an issue outside batchIssueIds is reported as a failure and mutates nothing", async () => {
+    const issue = makeIssue({ state: { id: "state-triage", name: "Triage", type: "triage", position: 0 } });
+    const linear = new FakeLinear([issue]);
+    const deps: ApplyDeps = { ...makeDeps(linear, TEST_ENTRY), batchIssueIds: ["ENG-9"] };
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      deps,
+      { kind: "result", agent: "foreman-triage", result: makeTriageItem() },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
+    expect(notices.some((notice) => notice.level === "error" && notice.message.includes("not part of this dispatch's batch"))).toBe(true);
+  });
+
+  it("an in-batch item whose issue is not in Triage is refused and mutates nothing", async () => {
+    const issue = makeIssue({ state: STATE_READY });
+    const linear = new FakeLinear([issue]);
+    const deps: ApplyDeps = { ...makeDeps(linear, TEST_ENTRY), batchIssueIds: ["ENG-1"] };
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      deps,
+      { kind: "result", agent: "foreman-triage", result: makeTriageItem() },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
+    expect(notices.some((notice) => notice.level === "error" && notice.message.includes("not Triage"))).toBe(true);
   });
 });
 
@@ -514,11 +570,54 @@ describe("applyOutcome — implement", () => {
           { title: "Found bug", description: "Noticed this.", type: TYPE_LABEL.bug, relation: "related" },
           { title: "Blocking gap", description: "Must fix first.", type: TYPE_LABEL.bug, relation: "blocks" },
         ],
+        contextContradictions: [],
         approachSummary: "Did the thing.",
       },
     });
     expect(linear.createIssueCalls.length).toBe(2);
     expect(linear.relationCalls.length).toBe(2);
+  });
+});
+
+describe("applyOutcome — implement is re-entrant", () => {
+  it("creates the discovered issue once across two applies of the same result", async () => {
+    const issue = makeIssue();
+    const linear = new FakeLinear([issue]);
+    const result = {
+      issueId: "ENG-1",
+      branch: "eng-1-do-the-thing",
+      prUrl: "https://github.com/org/repo/pull/1",
+      headSha: "abc123",
+      criteriaMet: [],
+      testsAdded: [],
+      discoveredWork: [
+        { title: "Found bug", description: "Noticed this.", type: TYPE_LABEL.bug, relation: "related" as const },
+      ],
+      contextContradictions: [],
+      approachSummary: "Did the thing.",
+    };
+    await applyOutcome(makeDeps(linear), { kind: "result", agent: "foreman-implement", result });
+    expect(linear.createIssueCalls.length).toBe(1);
+
+    // Simulates the retry's fresh fetch: a redelivery re-runs `applyImplement`
+    // from the top (`handleCaptured` un-marks the dispatch on failure), and
+    // the relation created by the first pass is now visible on the issue.
+    issue.relations = [
+      {
+        id: "relation-1",
+        type: "related",
+        direction: "outgoing",
+        other: {
+          id: "created-1",
+          identifier: "ENG-created-1",
+          title: "Found bug",
+          state: { id: "state-backlog", name: "Backlog", type: "backlog" },
+        },
+      },
+    ];
+
+    await applyOutcome(makeDeps(linear), { kind: "result", agent: "foreman-implement", result });
+    expect(linear.createIssueCalls.length).toBe(1);
   });
 });
 
@@ -705,7 +804,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -738,7 +836,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -808,7 +905,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -829,7 +925,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -857,7 +952,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -878,7 +972,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -903,7 +996,6 @@ describe("applyOutcome — plan", () => {
       name: "Search revamp",
       description: null,
       content: "Brief.",
-      documents: [],
       startDate: null,
       targetDate: null,
       status: null,
@@ -930,5 +1022,101 @@ describe("applyOutcome — plan", () => {
     await applyOutcome(makeDeps(linear), { kind: "blocked", agent: "foreman-plan", block: makeBlockRecord(), issueId: "" });
     expect(linear.updateCalls).toHaveLength(0);
     expect(linear.commentCalls).toHaveLength(0);
+  });
+});
+
+function makeContextResult(overrides: Partial<ContextResult> = {}): ContextResult {
+  return {
+    teamId: "team-1",
+    decisions: "- Use TypeBox for schemas",
+    vocabulary: "- Dispatch: one task-tool call to a foreman-* agent",
+    nonGoals: "- No auto-merge",
+    removals: [],
+    changeSummary: "Recorded the schema decision",
+    rationale: "Repeated agent re-derivation of this decision",
+    ...overrides,
+  };
+}
+
+const CONTEXT_DOC_LIVE = [
+  "## Architectural decisions and constraints",
+  "",
+  "- Use TypeBox for schemas",
+  "",
+  "## Domain vocabulary",
+  "",
+  "- Dispatch: one task-tool call to a foreman-* agent",
+  "",
+  "## Known non-goals",
+  "",
+  "- No auto-merge",
+  "",
+  "## Definition of Done",
+  "",
+  "- [ ] Tests written and passing",
+  "",
+].join("\n");
+
+describe("applyOutcome — context", () => {
+  function makeContextDeps(): { linear: FakeLinear; deps: ApplyDeps } {
+    const linear = new FakeLinear([]);
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.documentsList = [
+      { id: "doc-1", title: "Context", content: CONTEXT_DOC_LIVE, updatedAt: "2026-01-01T00:00:00.000Z" },
+    ];
+    return { linear, deps: makeDeps(linear, TEST_ENTRY) };
+  }
+
+  it("writes the merged body and leaves the live Definition of Done byte-identical", async () => {
+    const { linear, deps } = makeContextDeps();
+    await applyOutcome(deps, {
+      kind: "result",
+      agent: "foreman-context",
+      result: makeContextResult({ decisions: "- Use TypeBox for schemas\n- Never write `: any`" }),
+    });
+
+    expect(linear.updateDocumentCalls).toHaveLength(1);
+    const written = linear.updateDocumentCalls[0]!.content;
+    expect(written).toContain("- Never write `: any`");
+    const dodStart = written.indexOf("## Definition of Done");
+    expect(written.slice(dodStart)).toBe("## Definition of Done\n\n- [ ] Tests written and passing\n");
+  });
+
+  it("throws on an undeclared removal and writes nothing", async () => {
+    const { linear, deps } = makeContextDeps();
+    await expect(
+      applyOutcome(deps, {
+        kind: "result",
+        agent: "foreman-context",
+        result: makeContextResult({ decisions: "" }),
+      }),
+    ).rejects.toThrow(/declared removal/);
+    expect(linear.updateDocumentCalls).toHaveLength(0);
+  });
+
+  it("writes nothing and does not throw when the proposal matches the live doc", async () => {
+    const { linear, deps } = makeContextDeps();
+    await applyOutcome(deps, { kind: "result", agent: "foreman-context", result: makeContextResult() });
+    expect(linear.updateDocumentCalls).toHaveLength(0);
+  });
+
+  it("throws naming doctor --fix when the Context doc is missing", async () => {
+    const linear = new FakeLinear([]);
+    linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    const deps = makeDeps(linear, TEST_ENTRY);
+    await expect(
+      applyOutcome(deps, { kind: "result", agent: "foreman-context", result: makeContextResult() }),
+    ).rejects.toThrow(/doctor --fix/);
+  });
+
+  it("refuses a teamId outside the bound team", async () => {
+    const { deps } = makeContextDeps();
+    await expect(
+      applyOutcome(deps, {
+        kind: "result",
+        agent: "foreman-context",
+        result: makeContextResult({ teamId: "team-other" }),
+      }),
+    ).rejects.toThrow(/team/i);
   });
 });

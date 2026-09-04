@@ -4,11 +4,8 @@
   "private": true,
   "type": "module",
   "description": "foreman setup — installs the config file and the omp plugin",
-  "bin": {
-    "foreman": "./dist/main.js"
-  },
   "scripts": {
-    "build": "bun build ./src/main.ts --outdir ./dist --target bun --format esm",
+    "build": "bun build ./src/main.ts --outdir ./dist --target bun --format esm --sourcemap=linked",
     "start": "bun run ./src/main.ts"
   },
   "dependencies": {

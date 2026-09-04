@@ -105,6 +105,8 @@ export interface Dispatcher {
    * outlives every issue that passed through it.
    */
   cleanup?(issueId: string, repoPath: string, worktreePath: string | null): Promise<void>;
+  /** Best-effort: ask a live dispatch to stop. Optional — a dispatcher with no way to signal its agent (herdr, whose pane the operator may still want) simply omits it. */
+  abort?(handle: DispatchHandle): Promise<void>;
   /** True when this dispatcher's substrate is reachable right now. */
   available(): Promise<boolean>;
 }

@@ -25,6 +25,11 @@ export function writeCliBinLink(checkoutRoot: string, home: string): string {
   const dir = cliBinDir(home);
   const binPath = join(dir, "foreman");
   const entry = join(checkoutRoot, "packages", "cli", "src", "main.ts");
+  if (/["$`\\\n]/.test(entry)) {
+    throw new Error(
+      `refusing to write the foreman wrapper for a checkout path containing " $ \` \\ or a newline: ${checkoutRoot}`,
+    );
+  }
   mkdirSync(dir, { recursive: true });
   writeFileSync(binPath, `#!/usr/bin/env bash\nexec bun "${entry}" "$@"\n`, "utf8");
   chmodSync(binPath, 0o755);

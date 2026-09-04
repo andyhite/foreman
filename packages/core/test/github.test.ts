@@ -90,6 +90,95 @@ describe("GitHubClient.prForBranch", () => {
     expect(result?.state).toBe("MERGED");
     expect(calls[0]?.argv[calls[0]!.argv.indexOf("--state") + 1]).toBe("all");
   });
+
+  it("skips cross-repository PRs whose head ref name collides with the same-repo one", async () => {
+    const { runner } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          number: 9,
+          url: "https://github.com/fork/repo/pull/9",
+          headRefOid: "fork123",
+          state: "OPEN",
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          baseRefName: "main",
+          isCrossRepository: true,
+        },
+        {
+          number: 7,
+          url: "https://github.com/org/repo/pull/7",
+          headRefOid: "abc123",
+          state: "OPEN",
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          baseRefName: "main",
+          isCrossRepository: false,
+        },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    const result = await client.prForBranch("/repo", "eng-142-fix");
+    expect(result?.number).toBe(7);
+  });
+
+  it("throws when more than one same-repo PR matches the head ref", async () => {
+    const { runner } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          number: 7,
+          url: "https://github.com/org/repo/pull/7",
+          headRefOid: "abc123",
+          state: "OPEN",
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          baseRefName: "main",
+          isCrossRepository: false,
+        },
+        {
+          number: 8,
+          url: "https://github.com/org/repo/pull/8",
+          headRefOid: "def456",
+          state: "OPEN",
+          isDraft: false,
+          mergeable: "MERGEABLE",
+          baseRefName: "main",
+          isCrossRepository: false,
+        },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    await expect(client.prForBranch("/repo", "eng-142-fix")).rejects.toThrow(/#7.*#8/);
+  });
+
+  it("state: all still finds the same-repo merged PR when a cross-repo one is also merged", async () => {
+    const { runner } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          number: 9,
+          url: "https://github.com/fork/repo/pull/9",
+          headRefOid: "fork123",
+          state: "MERGED",
+          isDraft: false,
+          mergeable: "UNKNOWN",
+          baseRefName: "main",
+          isCrossRepository: true,
+        },
+        {
+          number: 7,
+          url: "https://github.com/org/repo/pull/7",
+          headRefOid: "abc123",
+          state: "MERGED",
+          isDraft: false,
+          mergeable: "UNKNOWN",
+          baseRefName: "main",
+          isCrossRepository: false,
+        },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    const result = await client.prForBranch("/repo", "eng-142-fix", { state: "all" });
+    expect(result?.number).toBe(7);
+  });
 });
 
 
@@ -159,6 +248,21 @@ describe("GitHubClient.ciStatus", () => {
     }));
     const client = new GitHubClient({ runner });
     expect(await client.ciStatus("/repo", "abc123")).toBe("failure");
+  });
+
+  it("treats a skipped or stale conclusion as not failing", async () => {
+    const { runner } = stubRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          check_runs: [
+            { status: "completed", conclusion: "success" },
+            { status: "completed", conclusion: "skipped" },
+          ],
+        },
+      ]),
+    }));
+    const client = new GitHubClient({ runner });
+    expect(await client.ciStatus("/repo", "abc123")).toBe("success");
   });
 });
 
@@ -307,6 +411,24 @@ describe("GitHubClient.mergeBranchLocally", () => {
     expect(argvs).toContainEqual(["git", "push", "upstream", "main"]);
     expect(argvs).toContainEqual(["git", "push", "upstream", "--delete", "eng-142-fix"]);
   });
+
+  it("returns the merge commit even when the remote branch delete fails, and never aborts the already-pushed merge", async () => {
+    const { runner, calls } = stubRunner((argv) => {
+      if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
+      if (argv[1] === "rev-parse" && argv[2] === "HEAD") return { stdout: "deadbeef\n" };
+      if (argv[1] === "push" && argv.includes("--delete")) {
+        throw new Error("remote ref does not exist");
+      }
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    const result = await client.mergeBranchLocally("/repo", "eng-142-fix", "main", "merge", true);
+    expect(result).toBe("deadbeef");
+    const argvs = calls.map((call) => call.argv);
+    expect(argvs).not.toContainEqual(["git", "merge", "--abort"]);
+    expect(argvs).not.toContainEqual(["git", "reset", "--hard"]);
+    expect(argvs).toContainEqual(["git", "branch", "-D", "eng-142-fix"]);
+  });
 });
 
 describe("GitHubClient.mergedBranches", () => {
@@ -362,10 +484,10 @@ describe("GitHubClient.createReview", () => {
   });
 
   it("with an appAuth configured, resolves repoSlug and overrides GH_TOKEN with the installation token", async () => {
-    const calls: Array<{ argv: string[]; env?: Record<string, string> }> = [];
+    const calls: Array<{ argv: string[]; extraEnv?: Record<string, string> }> = [];
     const runner: CommandRunner = {
       run(argv, options) {
-        calls.push({ argv, env: options.env });
+        calls.push({ argv, extraEnv: options.extraEnv });
         if (argv[0] === "gh" && argv[1] === "repo" && argv[2] === "view") {
           return Promise.resolve({ stdout: JSON.stringify({ owner: { login: "acme" }, name: "plotroom" }), stderr: "", code: 0 });
         }
@@ -390,6 +512,6 @@ describe("GitHubClient.createReview", () => {
       "-f",
       "body=Ship it.",
     ]);
-    expect(reviewCall?.env?.GH_TOKEN).toBe("token-for-acme-plotroom");
+    expect(reviewCall?.extraEnv?.GH_TOKEN).toBe("token-for-acme-plotroom");
   });
 });

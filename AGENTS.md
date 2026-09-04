@@ -11,6 +11,7 @@ measured against omp and Linear where the spec was wrong.
 - NEVER edit the generated `output:` block in `packages/omp-plugin/agents/*.md`. Edit `packages/core/src/schemas/*.ts`, run `bun run schemas`.
 - NEVER add a second Linear write path. `packages/core/src/linear/client.ts` behind the extension is the only one.
 - `bun run check` MUST pass before a PR: typecheck + tests + contract + build.
+- Required checks before merge: `check (ubuntu-latest)`, `check (macos-latest)`, `agent definition contract`.
 </critical>
 
 ## Layout

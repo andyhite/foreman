@@ -51,12 +51,13 @@ export function isDispatcherBusy(error: unknown): error is DispatcherBusyError {
 }
 
 interface HerdrRunner {
-  run(argv: string[]): Promise<{ stdout: string; stderr: string; code: number }>;
+  run(argv: string[], options?: { timeoutMs?: number }): Promise<{ stdout: string; stderr: string; code: number }>;
 }
 
 const nodeHerdrRunner: HerdrRunner = {
-  run(argv) {
+  run(argv, options) {
     const [command, ...args] = argv;
+    const timeoutMs = options?.timeoutMs ?? HERDR_EXEC_TIMEOUT_MS;
     const { promise, resolve, reject } = Promise.withResolvers<{
       stdout: string;
       stderr: string;
@@ -69,13 +70,13 @@ const nodeHerdrRunner: HerdrRunner = {
     execFile(
       command,
       args,
-      { maxBuffer: 16 * 1024 * 1024, timeout: HERDR_EXEC_TIMEOUT_MS, killSignal: "SIGKILL" },
+      { maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, killSignal: "SIGKILL" },
       (error, stdout, stderr) => {
         if (error) {
           if (error.killed || error.code === "ETIMEDOUT") {
             reject(
               new HerdrUnavailableError(
-                `herdr ${args.join(" ")} timed out after ${HERDR_EXEC_TIMEOUT_MS}ms`,
+                `herdr ${args.join(" ")} timed out after ${timeoutMs}ms`,
               ),
             );
             return;
@@ -167,8 +168,8 @@ export class HerdrDispatcher implements Dispatcher {
   }
 
   /** Runs an herdr command and throws with its stderr when it exits non-zero. */
-  async #runChecked(argv: string[]): Promise<{ stdout: string }> {
-    const { stdout, stderr, code } = await this.#runner.run(argv);
+  async #runChecked(argv: string[], options?: { timeoutMs?: number }): Promise<{ stdout: string }> {
+    const { stdout, stderr, code } = await this.#runner.run(argv, options);
     if (code !== 0) {
       throw new Error(`herdr ${argv.slice(1).join(" ")} failed (exit ${code}): ${stderr.trim()}`);
     }
@@ -479,37 +480,43 @@ export class HerdrDispatcher implements Dispatcher {
       // "ready for input" (SPEC §17.2). Start omp interactively — no
       // prompt, no `-p` — then hand it the actual command through
       // `agent prompt` once Herdr confirms it is idle.
-      await this.#runChecked([
-        this.#config.agent.herdrBin,
-        "agent",
-        "start",
-        agentName,
-        "--kind",
-        "omp",
-        "--pane",
-        paneId,
-        "--timeout",
-        "30000",
-        "--",
-        "--approval-mode",
-        this.#config.agent.approvalMode,
-        "--cwd",
-        worktreeItems[0]?.worktree?.path ?? request.cwd,
-      ]);
-      await this.#runChecked([
-        this.#config.agent.herdrBin,
-        "agent",
-        "prompt",
-        agentName,
-        promptText,
-        "--wait",
-        "--until",
-        "working",
-        "--until",
-        "done",
-        "--timeout",
-        "30000",
-      ]);
+      await this.#runChecked(
+        [
+          this.#config.agent.herdrBin,
+          "agent",
+          "start",
+          agentName,
+          "--kind",
+          "omp",
+          "--pane",
+          paneId,
+          "--timeout",
+          "30000",
+          "--",
+          "--approval-mode",
+          this.#config.agent.approvalMode,
+          "--cwd",
+          worktreeItems[0]?.worktree?.path ?? request.cwd,
+        ],
+        { timeoutMs: HERDR_EXEC_TIMEOUT_MS + 5_000 },
+      );
+      await this.#runChecked(
+        [
+          this.#config.agent.herdrBin,
+          "agent",
+          "prompt",
+          agentName,
+          promptText,
+          "--wait",
+          "--until",
+          "working",
+          "--until",
+          "done",
+          "--timeout",
+          "30000",
+        ],
+        { timeoutMs: HERDR_EXEC_TIMEOUT_MS + 5_000 },
+      );
 
       seqCounter += 1;
       const issueToken =
@@ -588,18 +595,21 @@ export class HerdrDispatcher implements Dispatcher {
       // An interactive omp session never exits when its turn ends — it goes
       // to `idle` — so `--until done` alone would never match a live agent;
       // `idle` is the normal "turn finished" signal for it.
-      const { code } = await this.#runner.run([
-        this.#config.agent.herdrBin,
-        "agent",
-        "wait",
-        handle.herdr.agentName,
-        "--until",
-        "idle",
-        "--until",
-        "done",
-        "--timeout",
-        String(timeoutMs),
-      ]);
+      const { code } = await this.#runner.run(
+        [
+          this.#config.agent.herdrBin,
+          "agent",
+          "wait",
+          handle.herdr.agentName,
+          "--until",
+          "idle",
+          "--until",
+          "done",
+          "--timeout",
+          String(timeoutMs),
+        ],
+        { timeoutMs: timeoutMs + HERDR_EXEC_TIMEOUT_MS },
+      );
       if (handle.agent !== "foreman-implement") {
         // Every dispatch now gets its own pane, so nothing is lost closing
         // it once settled. A writing dispatch's worktree pane stays open
@@ -620,6 +630,7 @@ export class HerdrDispatcher implements Dispatcher {
    * and returns an empty log, never scraping pane content. Every sibling
    * handle from the same `dispatch()` call shares one `agent wait` — they
    * carry the same pane and agent name — rather than starting N.
+   * No `abort`: the pane is deliberately left for the operator to attach to.
    */
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
     if (!handle.herdr) {
@@ -643,7 +654,7 @@ export class HerdrDispatcher implements Dispatcher {
    * by `settle()`, so there is nothing else to close here. A no-op when the
    * issue had no worktree or its workspace is already gone.
    */
-  async cleanup(issueId: string, repoPath: string, worktreePath: string | null): Promise<void> {
+  async cleanup(_issueId: string, _repoPath: string, worktreePath: string | null): Promise<void> {
     if (!worktreePath) return;
     const workspaceId = await this.#findWorkspaceId(worktreePath);
     if (!workspaceId) return;

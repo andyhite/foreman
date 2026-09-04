@@ -194,20 +194,6 @@ export interface Project {
   startDate: string | null;
   targetDate: string | null;
   status: ProjectStatus | null;
-  /** Canonical colon-form ids (e.g. `app:fleet`). */
-  labels?: IssueLabel[];
-  documents: LinearDocument[];
-}
-
-export interface InitiativeRef {
-  id: LinearId;
-  name: string;
-}
-
-export interface Initiative {
-  id: LinearId;
-  name: string;
-  documents: LinearDocument[];
 }
 
 /** `Team.triageEnabled`/`cyclesEnabled` plus the triage state id, when Linear has created one. */

@@ -1,14 +1,13 @@
 import type {
   Comment,
   CreateIssueInput,
-  Initiative,
-  InitiativeRef,
   Issue,
   IssueFilter,
   IssueLabel,
   IssueMutation,
   IssueQuery,
   IssueRelationType,
+  LinearDocument,
   LinearId,
   LinearWriter,
   Project,
@@ -127,12 +126,16 @@ export class FakeLinear implements LinearWriter {
     return null;
   }
 
-  async projectInitiatives(): Promise<InitiativeRef[]> {
+  async teamDocuments(): Promise<LinearDocument[]> {
     return [];
   }
 
-  async initiative(id: string): Promise<Initiative | null> {
-    return { id, name: "Initiative", documents: [] };
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+
+  async updateDocument(): Promise<void> {
+    throw new Error("not implemented in fake");
   }
 
   async projectStatus(_projectId?: string): Promise<ProjectStatus | null> {

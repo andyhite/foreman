@@ -38,9 +38,9 @@ interface CachedToken {
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 export class GitHubAppError extends Error {
-  readonly status?: number;
+  readonly status?: number | null;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number | null) {
     super(message);
     this.name = "GitHubAppError";
     this.status = status;
@@ -72,6 +72,7 @@ export function signAppJwt(credentials: GitHubAppCredentials, now: Date = new Da
 export interface GitHubAppAuthOptions {
   fetchImpl?: typeof fetch;
   apiBase?: string;
+  timeoutMs?: number;
 }
 
 /**
@@ -84,24 +85,35 @@ export class GitHubAppAuth {
   readonly #credentials: GitHubAppCredentials;
   readonly #fetchImpl: typeof fetch;
   readonly #apiBase: string;
+  readonly #timeoutMs: number;
   readonly #tokenCache = new Map<string, CachedToken>();
 
   constructor(credentials: GitHubAppCredentials, options?: GitHubAppAuthOptions) {
     this.#credentials = credentials;
     this.#fetchImpl = options?.fetchImpl ?? fetch;
     this.#apiBase = options?.apiBase ?? "https://api.github.com";
+    this.#timeoutMs = options?.timeoutMs ?? 30_000;
   }
 
   async #request(path: string, init?: { method?: string }): Promise<unknown> {
     const jwt = signAppJwt(this.#credentials);
-    const response = await this.#fetchImpl(`${this.#apiBase}${path}`, {
-      method: init?.method ?? "GET",
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
+    let response: Response;
+    try {
+      response = await this.#fetchImpl(`${this.#apiBase}${path}`, {
+        method: init?.method ?? "GET",
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(this.#timeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new GitHubAppError(`GitHub App API ${path} timed out after ${this.#timeoutMs}ms`, null);
+      }
+      throw error;
+    }
     if (!response.ok) {
       const body = await response.text();
       throw new GitHubAppError(`GitHub App API ${path} failed: ${response.status} ${body}`, response.status);

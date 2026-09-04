@@ -13,8 +13,17 @@ import { execFile } from "node:child_process";
 export interface CommandRunner {
   run(
     argv: string[],
-    options: { cwd: string; env?: Record<string, string>; timeoutMs?: number },
+    options: { cwd: string; extraEnv?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ stdout: string; stderr: string; code: number }>;
+}
+
+/** `process.env`, filtered to defined entries — `execFile`'s `env` option rejects `undefined` values, but plain `{ ...process.env }` types as possibly holding them. */
+export function definedProcessEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
 }
 
 /** Thrown by `nodeRunner` when a command exits non-zero. */
@@ -55,7 +64,11 @@ export const nodeRunner: CommandRunner = {
         // for the same reason). `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS` suppress
         // the interactive credential prompt that timeout alone would just
         // make slower to hit.
-        env: { ...(options.env ?? process.env), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "" },
+        //
+        // The caller's `extraEnv` is merged onto the full inherited
+        // environment, never used in place of it — replacing it silently
+        // drops PATH/HOME and anything else a runner needs.
+        env: { ...definedProcessEnv(), ...(options.extraEnv ?? {}), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "" },
         maxBuffer: 64 * 1024 * 1024,
         timeout: options.timeoutMs ?? 120_000,
         killSignal: "SIGKILL",

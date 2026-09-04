@@ -101,36 +101,41 @@ export const PROJECT_QUERY_SCALAR_CONTENT = `
       startDate
       targetDate
       status { id name type }
-      labels { nodes { id name parent { id name } } }
-      documents {
-        nodes { id title content updatedAt }
-      }
     }
   }
 `;
 
-/** A project's initiatives — used to fold an optional initiative brief into the context digest. */
-export const PROJECT_INITIATIVES_QUERY = `
-  query ProjectInitiatives($projectId: String!) {
-    project(id: $projectId) {
-      id
-      name
-      initiatives {
-        nodes { id name }
-      }
+/**
+ * The team's own documents — where the product `Context` doc lives (SPEC
+ * §4.7). Filtered at the root rather than through `Team.documents`, which
+ * Linear's `Team` does not have; `Document.team` and `DocumentFilter.team`
+ * both exist and this document executes (docs/VERIFIED.md). `content` is a
+ * `String`, the same single valid shape as a project's.
+ */
+export const TEAM_DOCUMENTS_QUERY = `
+  query TeamDocuments($filter: DocumentFilter, $after: String, $first: Int) {
+    documents(filter: $filter, after: $after, first: $first) {
+      nodes { id title content updatedAt }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
 
-/** Initiative documents. `content` is a `String` (schema-validated). */
-export const INITIATIVE_QUERY_SCALAR_CONTENT = `
-  query InitiativeDocuments($initiativeId: String!) {
-    initiative(id: $initiativeId) {
-      id
-      name
-      documents {
-        nodes { id title content updatedAt }
-      }
+/** `DocumentCreateInput` requires only `title`; `teamId` is what scopes the created document to a team (SPEC §4.7). */
+export const DOCUMENT_CREATE_MUTATION = `
+  mutation DocumentCreate($input: DocumentCreateInput!) {
+    documentCreate(input: $input) {
+      success
+      document { id title }
+    }
+  }
+`;
+
+/** `DocumentUpdateInput` accepts `content`; the caller carries the live Definition-of-Done section through verbatim (SPEC §4.7). */
+export const DOCUMENT_UPDATE_MUTATION = `
+  mutation DocumentUpdate($id: String!, $input: DocumentUpdateInput!) {
+    documentUpdate(id: $id, input: $input) {
+      success
     }
   }
 `;

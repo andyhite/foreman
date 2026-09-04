@@ -74,7 +74,7 @@ async function pullCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<boo
   const dirty = await deps.runner.capture("git", ["status", "--porcelain"], { cwd: checkoutRoot });
   if (dirty.stdout.trim().length > 0) {
     deps.log(`  ${WARN} uncommitted changes — skipped the pull. Commit or stash, then re-run.`);
-    return false;
+    return true;
   }
 
   const upstream = await deps.runner.capture("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {

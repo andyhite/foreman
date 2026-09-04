@@ -10,7 +10,7 @@
  * redundant dispatch.
  */
 
-import { branchNameFor, priorityRank, type Confirmer, type Dispatcher, type DispatchRequest, type GitHubClient, type GlobalConfig, type Issue, type LinearWriter, type ResolvedRepoEntry } from "@foreman/core";
+import { branchNameFor, priorityRank, type Confirmer, type Dispatcher, type DispatchHandle, type DispatchRequest, type GitHubClient, type GlobalConfig, type Issue, type LinearWriter, type ResolvedRepoEntry } from "@foreman/core";
 import nodeProcess from "node:process";
 import { isDispatcherBusy } from "./dispatch/index.ts";
 import { applyEscalation, type Escalation } from "./escalate.ts";
@@ -109,12 +109,29 @@ export interface RunLoopOptions {
   pollMs: number;
 }
 
+/** Shutdown drain budget: `drain()` waits at most this long for in-flight settles before giving up and letting the process exit anyway. */
+const SHUTDOWN_DRAIN_MS = 10_000;
+
+/** Sleeps `ms`, or until `register`'s resolver is called (the signal handler's wake). Always clears its timer, so a woken sleep leaves no referenced handle keeping the process alive. */
+async function sleep(ms: number, register: (resolve: () => void) => void): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  register(resolve);
+  const timer = setTimeout(resolve, ms);
+  try {
+    await promise;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Offers every rule's candidates once, in rule order, respecting the
  * concurrency cap and prior-failure gate; each dispatched candidate's
  * `settle()` runs in the background so the caller can move on to the next
  * poll (or, in `--once` mode, be awaited at the end for a deterministic
- * exit). Returns the settle promises it started.
+ * exit). Pushes into the caller's run-scoped `settling`/`live` trackers
+ * rather than returning its own, so a `stop` arriving during a later poll
+ * still awaits and can abort a dispatch started on an earlier one.
  */
 async function offerCandidates<S>(
   loop: Loop<S>,
@@ -123,8 +140,10 @@ async function offerCandidates<S>(
   opts: RunLoopOptions,
   wake: () => void,
   gaveUpLogged: Set<string>,
-): Promise<{ settling: Promise<void>[]; dispatched: number; candidates: number }> {
-  const settling: Promise<void>[] = [];
+  declineLogged: Set<string>,
+  settling: Promise<void>[],
+  live: Map<string, DispatchHandle>,
+): Promise<{ dispatched: number; candidates: number }> {
   let dispatched = 0;
   let candidates = 0;
   for (const rule of loop.rules) {
@@ -137,7 +156,6 @@ async function offerCandidates<S>(
       const failures = opts.state.failures(candidate.key);
       if (failures >= cap) {
         if (!gaveUpLogged.has(candidate.key)) {
-          gaveUpLogged.add(candidate.key);
           if (candidate.key.startsWith("issue:")) {
             const summary = `escalate ${candidate.subject} (retry-exhausted)`;
             // Confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
@@ -155,12 +173,18 @@ async function offerCandidates<S>(
                 // streak with it, or the issue is re-escalated the moment the operator
                 // returns it to the queue.
                 opts.state.clearFailures(candidate.key);
+                gaveUpLogged.add(candidate.key);
               } catch (error) {
                 opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
+                gaveUpLogged.add(candidate.key);
               }
+            } else if (!declineLogged.has(candidate.key)) {
+              declineLogged.add(candidate.key);
+              opts.log(`${candidate.key}: escalation declined; still retry-exhausted (${failures} failures)`);
             }
           } else {
             opts.log(`${candidate.key}: gave up after ${failures} failed dispatches; fix by hand.`);
+            gaveUpLogged.add(candidate.key);
           }
         }
         continue;
@@ -176,6 +200,7 @@ async function offerCandidates<S>(
         const handle = handles[0];
         if (!handle) continue;
         opts.state.record(candidate.key, handle);
+        live.set(candidate.key, handle);
         dispatched += 1;
 
         const settled = opts.dispatcher
@@ -190,6 +215,7 @@ async function offerCandidates<S>(
           })
           .finally(() => {
             opts.state.remove(candidate.key);
+            live.delete(candidate.key);
             if (!opts.once) wake();
           });
         settling.push(settled);
@@ -203,11 +229,14 @@ async function offerCandidates<S>(
       }
     }
   }
-  return { settling, dispatched, candidates };
+  return { dispatched, candidates };
 }
 
 export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopOptions): Promise<void> {
   const gaveUpLogged = new Set<string>();
+  const declineLogged = new Set<string>();
+  const settling: Promise<void>[] = [];
+  const live = new Map<string, DispatchHandle>();
   let stop = false;
   let wakeResolve: (() => void) | null = null;
   const signalHandler = (): void => {
@@ -225,6 +254,21 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
   signals.on("SIGINT", signalHandler);
   signals.on("SIGTERM", signalHandler);
 
+  const drain = async (): Promise<void> => {
+    // Release the signal listeners first: a second Ctrl-C during the drain
+    // must reach Node's default handler and terminate, rather than being
+    // swallowed by a handler that only sets an already-set flag.
+    signals.removeListener("SIGINT", signalHandler);
+    signals.removeListener("SIGTERM", signalHandler);
+    for (const handle of live.values()) {
+      await opts.dispatcher.abort?.(handle).catch(() => undefined);
+    }
+    await Promise.race([
+      Promise.all(settling),
+      new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS).unref?.()),
+    ]);
+  };
+
   try {
     const wake = (): void => {
       wakeResolve?.();
@@ -237,7 +281,10 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
       } catch (error) {
         if (opts.once) throw error;
         opts.log(`fetch failed, retrying next poll: ${error instanceof Error ? error.message : String(error)}`);
-        await new Promise<void>((res) => setTimeout(res, opts.pollMs));
+        await sleep(opts.pollMs, (resolve) => {
+          wakeResolve = resolve;
+        });
+        wakeResolve = null;
         if (stop) return;
         continue;
       }
@@ -252,7 +299,17 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
         }
       }
 
-      const { settling, dispatched, candidates } = await offerCandidates(loop, snapshot, ctx, opts, wake, gaveUpLogged);
+      const { dispatched, candidates } = await offerCandidates(
+        loop,
+        snapshot,
+        ctx,
+        opts,
+        wake,
+        gaveUpLogged,
+        declineLogged,
+        settling,
+        live,
+      );
       opts.log(`${loop.name}: ${dispatched} dispatched, ${opts.state.inFlightCount()} in flight, ${candidates} eligible`);
 
       if (opts.once) {
@@ -261,20 +318,17 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
       }
 
       if (stop) {
-        await Promise.all(settling);
+        await drain();
         return;
       }
 
-      const { promise: wakePromise, resolve } = Promise.withResolvers<void>();
-      wakeResolve = resolve;
-      await Promise.race([
-        wakePromise,
-        new Promise<void>((res) => setTimeout(res, opts.pollMs)),
-      ]);
+      await sleep(opts.pollMs, (resolve) => {
+        wakeResolve = resolve;
+      });
       wakeResolve = null;
 
       if (stop) {
-        await Promise.all(settling);
+        await drain();
         return;
       }
     }

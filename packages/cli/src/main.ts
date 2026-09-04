@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * `foreman` CLI entrypoint.
  *
@@ -323,7 +323,7 @@ async function main(): Promise<void> {
      */
     if (args.command === "doctor") {
       process.exitCode = await runDoctor(
-        { home, checkoutRoot: args.checkoutPath, fix: args.fix },
+        { home, checkoutRoot: args.checkoutPath, fix: args.fix, yes: args.yes },
         { runner: processRunner, log },
       );
       return;

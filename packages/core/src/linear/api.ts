@@ -10,11 +10,10 @@
 
 import type {
   Comment,
-  Initiative,
-  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRelationType,
+  LinearDocument,
   LinearId,
   Project,
   ProjectRef,
@@ -62,13 +61,12 @@ export interface LinearReader {
   /** The project and its attached documents, including `Context`. */
   project(projectId: string): Promise<Project | null>;
   /**
-   * Every initiative a project belongs to, unfiltered. Consulted only for the
-   * optional initiative context folded into the plan/roadmap context digest —
-   * never a routing input.
+   * The team's documents — the product `Context` doc among them (SPEC §4.7).
+   * The product layer of the context digest resolves through the team, not an
+   * initiative: a repo binds exactly one team, and nothing attaches a created
+   * project to an initiative any more.
    */
-  projectInitiatives(projectId: string): Promise<InitiativeRef[]>;
-  /** An initiative and its attached documents, by id. Null when absent. */
-  initiative(initiativeId: string): Promise<Initiative | null>;
+  teamDocuments(teamKey: string): Promise<LinearDocument[]>;
   /**
    * A project's dependency edges (SPEC §4.10a), both directions, merged and
    * reoriented so `anchor`/`otherAnchor` read from the queried project.
@@ -197,6 +195,16 @@ export interface LinearWriter extends LinearReader {
   /** Only succeeds when every issue in the state has already been archived. */
   archiveWorkflowState(id: LinearId): Promise<void>;
   updateTeamSettings(teamId: LinearId, input: { triageEnabled?: boolean; cyclesEnabled?: boolean }): Promise<void>;
+  /** Creates a team-scoped document (SPEC §4.7). Used only by `provisionTeam` to seed the product `Context` doc. */
+  createDocument(input: { teamId: LinearId; title: string; content: string }): Promise<LinearDocument>;
+  /**
+   * Updates the product `Context` doc — the only document Foreman ever
+   * updates (SPEC §4.7). Callers pass the full new body; the caller is
+   * responsible for carrying the live Definition-of-Done section through
+   * unchanged, since this method rewrites `content` wholesale and has no
+   * notion of the doc's section structure.
+   */
+  updateDocument(input: { documentId: LinearId; content: string }): Promise<void>;
 }
 
 export class LinearApiError extends Error {

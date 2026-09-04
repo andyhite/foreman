@@ -1,8 +1,9 @@
 /**
  * Foreman's omp extension factory (SPEC §3.5). Wires the two tools, the
  * three commands, and every event the extension owns: `session_start`
- * (config validation, skill guard), `tool_call` (the task guard),
- * `tool_result` and the three `task:subagent:*` events (result capture).
+ * (config validation, skill guard), `tool_call` (the task guard), and
+ * `tool_result` (result capture — see the comment at its handler for why
+ * the `task:subagent:*` events are not also subscribed).
  */
 
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallDecision, ToolCallEvent, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
-import type { BlockRecord, LinearWriter, ResolvedRepoEntry } from "@foreman/core";
+import type { BlockRecord, LinearWriter } from "@foreman/core";
 import {
   AGENT_OUTPUT_SCHEMAS,
   all,
@@ -36,8 +37,8 @@ import { renderStatus } from "./commands/status.ts";
 import { COMMAND_NAMES } from "./commands/names.ts";
 import { registerGitHubPrTool } from "./tools/github-pr.ts";
 import { registerLinearReadTool } from "./tools/linear-read.ts";
-import { applyOutcome, type ApplyDeps, type AgentOutcome, type AppliedFacts } from "./results/apply.ts";
-import { extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
+import { applyOutcome, releaseLock, type ApplyDeps, type AgentOutcome, type AppliedFacts } from "./results/apply.ts";
+import { extractDispatchIds, extractFromToolResult, sink, type AppliedTracker } from "./results/sink.ts";
 import {
   getConfig,
   getEntry,
@@ -50,6 +51,7 @@ import {
   registerLiveDispatch,
   releaseLiveDispatch,
   resetRuntime,
+  type RuntimeInitResult,
 } from "./runtime.ts";
 
 const appliedDispatchIds = new Set<string>();
@@ -67,7 +69,7 @@ export function __resetInFlightCapturesForTest(): void {
 }
 
 function toApplyDeps(): ApplyDeps {
-  return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry(), operatorUserId: getConfig().linear.operatorUserId };
+  return { linear: getLinear(), github: getGitHub(), now: () => new Date(), entry: getEntry(), operatorUserId: getConfig().linear.operatorUserId, batchIssueIds: null };
 }
 
 function toGuardDeps(): TaskGuardDeps {
@@ -123,14 +125,6 @@ function isForemanAgentName(agent: string): agent is ForemanAgentName {
   return agent in AGENT_OUTPUT_SCHEMAS;
 }
 
-/**
- * Resolves the Linear team id an entry's bound `team` key actually refers
- * to. `team` is required and non-nullable on every resolved entry.
- */
-async function resolveEntryTeamId(linear: LinearWriter, entry: ResolvedRepoEntry): Promise<string | null> {
-  const teams = await linear.teams();
-  return teams.find((team) => team.key === entry.team)?.id ?? null;
-}
 
 /**
  * SPEC §11, §17.6/§17.7: the `session_start` sibling of `reconcile`'s
@@ -209,6 +203,7 @@ export async function applyBoundResult(
       // agent and no retry.
       if (previousStateId && lockedIssue.state.id !== previousStateId) mutation.stateId = previousStateId;
       if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(lockedIssue.id, mutation);
+      await releaseLock(deps, lockedIssue);
     }
     notify(`Foreman rejected ${agent}'s result: it reported issue ${reported}, but this dispatch locked ${target}.`, "error");
     return {
@@ -236,6 +231,7 @@ export async function handleCaptured(
   aborted: boolean,
   lockedIssueId: string | null,
   previousStateId: string | null,
+  batchIssueIds: string | null,
   notify: (message: string, level: "warn" | "error") => void,
   deps: ApplyDeps = toApplyDeps(),
   tracker: AppliedTracker = markerAppliedTracker(),
@@ -248,6 +244,11 @@ export async function handleCaptured(
     await existing;
     return;
   }
+
+  const scopedDeps: ApplyDeps = {
+    ...deps,
+    batchIssueIds: batchIssueIds?.split(",").map((id) => id.trim()).filter(Boolean) ?? null,
+  };
 
   const work = (async () => {
     if (appliedDispatchIds.has(dispatchId)) return;
@@ -265,7 +266,7 @@ export async function handleCaptured(
         const truncated = isBudgetTruncation({ aborted, problems: parsed.problems });
         if (truncated) {
           if (target) {
-            await applyOutcome(deps, blockedOutcome(agent, {
+            await applyOutcome(scopedDeps, blockedOutcome(agent, {
               blocked: true, type: "budget", whatIWasDoing: "Producing a validated agent result",
               whatINeed: "Increase the dispatch budget or narrow the task before retrying.",
               options: null, recommendation: null, stateLeftBehind: { worktree: null, branch: null, pushed: false, commits: [], notes: "Output was truncated before validation." },
@@ -275,16 +276,20 @@ export async function handleCaptured(
             notify(`Foreman dropped a budget-truncated ${agent} result: no issue was locked for this dispatch, so there is nothing to mark blocked.`, "error");
           }
         } else {
-          const issue = target ? await deps.linear.issue(target, { includeComments: true }) : null;
+          const issue = target ? await scopedDeps.linear.issue(target, { includeComments: true }) : null;
           if (issue) {
-            await deps.linear.createComment({ issueId: issue.id, body: `Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}` });
+            await scopedDeps.linear.createComment({
+              issueId: issue.id,
+              body: sanitizeAgentText(`Foreman could not validate this dispatch result:\n${parsed.problems.map((problem) => `- ${problem}`).join("\n")}`),
+            });
             const mutation: { stateId?: string } = {};
             // The guard already moved this issue to In Progress or Refining;
             // restore the dispatch's recorded pre-claim state so the issue
             // does not strand there with no live agent and no retry — a
             // no-op for review, which never moves state.
             if (previousStateId && issue.state.id !== previousStateId) mutation.stateId = previousStateId;
-            if (Object.keys(mutation).length > 0) await deps.linear.updateIssue(issue.id, mutation);
+            if (Object.keys(mutation).length > 0) await scopedDeps.linear.updateIssue(issue.id, mutation);
+            await releaseLock(scopedDeps, issue);
           }
           notify(`Foreman rejected ${agent}'s invalid result: ${parsed.problems.join("; ")}`, "error");
         }
@@ -296,9 +301,9 @@ export async function handleCaptured(
         appliedDispatchIds.add(dispatchId);
         return;
       }
-      await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId }, tracker, async (captured) => {
+      await sink({ dispatchId, agent, data, aborted, issueId: lockedIssueId, previousStateId, batchIssueIds }, tracker, async (captured) => {
         const outcome: AgentOutcome = parsed.kind === "blocked" ? blockedOutcome(agent, parsed.block, target) : { kind: "result", agent, result: parsed.result } as AgentOutcome;
-        await applyBoundResult(deps, agent, outcome, target, previousStateId, notify);
+        await applyBoundResult(scopedDeps, agent, outcome, target, previousStateId, notify);
         void captured;
       });
       // Recorded only after the sink callback (`applyOutcome`) resolves: if
@@ -402,7 +407,21 @@ export default function createForemanExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     resetRuntime();
-    const init = initRuntime();
+    let init: RuntimeInitResult;
+    try {
+      init = initRuntime();
+    } catch (error) {
+      // loadGlobalConfig throws for an unreadable, unparseable, schema-invalid
+      // or pre-team-migration config — the single most likely misconfiguration,
+      // and the one the operator must be told about.
+      ctx.ui.notify(
+        error instanceof ConfigError
+          ? `Invalid Foreman config: ${error.message}`
+          : `Foreman failed to initialize: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+      return;
+    }
     if (init.missingApiKey) {
       ctx.ui.notify(
         "No Linear API key resolved for this repo. Foreman's Linear tools and commands will fail until one is configured.",
@@ -410,15 +429,6 @@ export default function createForemanExtension(pi: ExtensionAPI) {
       );
     }
     for (const warning of init.warnings) ctx.ui.notify(warning, "warn");
-
-    try {
-      getConfig();
-    } catch (error) {
-      if (error instanceof ConfigError) {
-        ctx.ui.notify(`Invalid Foreman config: ${error.message}`, "error");
-      }
-      return;
-    }
 
     if (existsSync(join(PLUGIN_ROOT, "agents"))) {
       const problems = checkSkillAutoload({ pluginRoot: PLUGIN_ROOT, cwd: ctx.cwd });
@@ -467,9 +477,21 @@ export default function createForemanExtension(pi: ExtensionAPI) {
   // tool result rather than in a background job's `async-result` delivery.
   pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (event.toolName !== "task") return;
-    for (const item of extractFromToolResult(event)) {
-      try { await handleCaptured(item.dispatchId, item.agent, item.data, item.aborted, item.issueId, item.previousStateId, ctx.ui.notify); }
-      catch (error) { reportFailure(ctx)(error); }
+    const items = extractFromToolResult(event);
+    for (const item of items) {
+      try {
+        await handleCaptured(item.dispatchId, item.agent, item.data, item.aborted, item.issueId, item.previousStateId, item.batchIssueIds, ctx.ui.notify);
+      } catch (error) {
+        reportFailure(ctx)(error);
+      }
+    }
+    // A dispatch that never produces a captured `structuredOutput` (agent
+    // crash, harness kill, tool error) would otherwise stay registered as
+    // live for the rest of the session, so every later lock/orphan check on
+    // its issue reads it as "still running".
+    const captured = new Set(items.map((item) => item.dispatchId));
+    for (const id of extractDispatchIds(event)) {
+      if (!captured.has(id)) releaseLiveDispatch(id);
     }
   });
 

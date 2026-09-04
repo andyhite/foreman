@@ -64,6 +64,11 @@ export function assertSafeRef(ref: string, label: string): void {
   if (ref.startsWith("-")) {
     throw new Error(`refusing to pass "${label}" starting with "-" to git: ${ref}`);
   }
+  // Refs also reach URL paths (`GitHubClient.ciStatus`), where `..` or a
+  // space would retarget the request rather than name a ref.
+  if (/(^|\/)\.\.(\/|$)|\s/.test(ref)) {
+    throw new Error(`refusing to pass "${label}" containing ".." or whitespace to git: ${ref}`);
+  }
 }
 
 /** Expand a `branchPattern` (SPEC §3.10) against an issue and its repository. */

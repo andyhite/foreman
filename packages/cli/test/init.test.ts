@@ -1,7 +1,7 @@
 import { ConfigError, loadGlobalConfig, MANAGED_STATES, repoPluginLinkPath, repoPluginLockPath } from "@foreman/core";
 import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runInit, type InitDeps, type InitOptions } from "../src/init.ts";
@@ -689,6 +689,7 @@ describe("runInit — GitHub App installation check", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const keyPath = join(home, ".foreman", "github-app-private-key.pem");
     writeFileSync(keyPath, privateKey.export({ type: "pkcs1", format: "pem" }).toString());
+    chmodSync(keyPath, 0o600);
     writeFileSync(
       join(home, ".foreman", "config.json"),
       JSON.stringify({ githubApp: { appId: "999", privateKeyFile: keyPath } }),

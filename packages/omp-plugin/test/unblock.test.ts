@@ -70,11 +70,14 @@ class FakeLinear implements LinearWriter {
   async projectStatus() {
     return null;
   }
-  async projectInitiatives() {
+  async teamDocuments() {
     return [];
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return KNOWN_STATES;

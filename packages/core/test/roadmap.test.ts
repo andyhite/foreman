@@ -7,6 +7,7 @@ import type {
   IssueMutation,
   IssueQuery,
   IssueRelationType,
+  LinearDocument,
   LinearId,
   LinearWriter,
   Project,
@@ -65,8 +66,7 @@ class FakeLinear implements LinearWriter {
   async issue(): Promise<Issue | null> { throw new Error("not implemented in fake"); }
   async issues(_query: IssueQuery): Promise<Issue[]> { throw new Error("not implemented in fake"); }
   async comments(): Promise<Comment[]> { throw new Error("not implemented in fake"); }
-  async projectInitiatives(): Promise<never> { throw new Error("not implemented in fake"); }
-  async initiative(): Promise<never> { throw new Error("not implemented in fake"); }
+  async teamDocuments(): Promise<LinearDocument[]> { throw new Error("not implemented in fake"); }
   async projectStatus(): Promise<never> { throw new Error("not implemented in fake"); }
   async projectRelations(): Promise<ProjectRelation[]> { throw new Error("not implemented in fake"); }
   async workflowStates(): Promise<WorkflowState[]> { throw new Error("not implemented in fake"); }
@@ -90,6 +90,8 @@ class FakeLinear implements LinearWriter {
   async updateWorkflowState(): Promise<WorkflowState> { throw new Error("not implemented in fake"); }
   async archiveWorkflowState(): Promise<void> { throw new Error("not implemented in fake"); }
   async updateTeamSettings(): Promise<void> { throw new Error("not implemented in fake"); }
+  async createDocument(): Promise<LinearDocument> { throw new Error("not implemented in fake"); }
+  async updateDocument(): Promise<void> { throw new Error("not implemented in fake"); }
 }
 
 function makeRoadmapResult(overrides: Partial<RoadmapResult> = {}): RoadmapResult {
@@ -207,7 +209,6 @@ describe("applyRoadmap — date clamping", () => {
       startDate: "2025-12-01",
       targetDate: "2026-01-10",
       status: null,
-      documents: [],
     });
     const result = makeRoadmapResult({
       proposedProjects: [

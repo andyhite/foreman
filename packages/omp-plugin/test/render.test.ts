@@ -2,12 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { acceptanceCriteria, openQuestions } from "@foreman/core";
 import {
   renderBlockComment,
+  renderImplementComment,
   renderIssueDescription,
   renderReviewComment,
   renderSpikeIssue,
   renderStatusConsole,
 } from "../src/render/index.ts";
-import type { BlockRecord, SpikeSpec, ReviewResult } from "@foreman/core";
+import type { BlockRecord, ContextContradiction, ImplementResult, SpikeSpec, ReviewResult } from "@foreman/core";
 import type { StatusState } from "../src/render/status.ts";
 
 describe("renderIssueDescription", () => {
@@ -125,6 +126,7 @@ describe("renderReviewComment", () => {
     criteriaVerification: [{ criterion: "Logs out", satisfied: true, evidence: "auth.ts:40" }],
     dodSatisfied: true,
     dodChecklist: [{ item: "Tests pass", satisfied: true, evidence: "CI green" }],
+    contextContradictions: [],
     findings: [
       { severity: "nit", file: "src/a.ts", line: 10, description: "Rename variable." },
       { severity: "blocking", file: "src/b.ts", line: 5, description: "Missing null check." },
@@ -166,6 +168,73 @@ describe("renderReviewComment", () => {
     expect(output).toContain("deadbeef");
     expect(output).toContain("## Project Organization");
     expect(output).toContain("No concerns.");
+  });
+
+
+  it("renders a Context Doc Contradictions section with section, quoted claim, and evidence when present", () => {
+    const contradictions: ContextContradiction[] = [
+      {
+        section: "decisions",
+        recorded: "We only support Postgres.",
+        evidence: "src/db/mysql-adapter.ts:12",
+      },
+    ];
+    const output = renderReviewComment({ ...baseResult, contextContradictions: contradictions });
+    expect(output).toContain("## Context Doc Contradictions");
+    expect(output).toContain("decisions");
+    expect(output).toContain('"We only support Postgres."');
+    expect(output).toContain("src/db/mysql-adapter.ts:12");
+  });
+
+  it("omits the Context Doc Contradictions heading entirely when there are none", () => {
+    const output = renderReviewComment(baseResult);
+    expect(output).not.toContain("## Context Doc Contradictions");
+  });
+});
+
+describe("renderImplementComment", () => {
+  const baseResult: ImplementResult = {
+    issueId: "ENG-1",
+    branch: "eng-1-fix-auth",
+    prUrl: "https://github.com/acme/repo/pull/42",
+    headSha: "cafef00d",
+    criteriaMet: [{ criterion: "Logs out", evidence: "auth.test.ts:12" }],
+    testsAdded: [{ path: "auth.test.ts", covers: "Logs out" }],
+    discoveredWork: [],
+    contextContradictions: [],
+    approachSummary: "Cleared the session cookie on logout.",
+  };
+
+  it("names the branch, PR, and approach", () => {
+    const output = renderImplementComment(baseResult);
+    expect(output).toContain("**Branch:** eng-1-fix-auth");
+    expect(output).toContain("**PR:** https://github.com/acme/repo/pull/42");
+    expect(output).toContain("**Approach:** Cleared the session cookie on logout.");
+  });
+
+  it("states no PR in direct-branch mode", () => {
+    const output = renderImplementComment({ ...baseResult, prUrl: "" });
+    expect(output).toContain("**PR:** none (direct-branch mode)");
+  });
+
+  it("renders a Context Doc Contradictions section with section, quoted claim, and evidence when present", () => {
+    const contradictions: ContextContradiction[] = [
+      {
+        section: "vocabulary",
+        recorded: "A \"lock\" is per-issue.",
+        evidence: "src/lock.ts:30",
+      },
+    ];
+    const output = renderImplementComment({ ...baseResult, contextContradictions: contradictions });
+    expect(output).toContain("## Context Doc Contradictions");
+    expect(output).toContain("vocabulary");
+    expect(output).toContain('"A "lock" is per-issue."');
+    expect(output).toContain("src/lock.ts:30");
+  });
+
+  it("omits the Context Doc Contradictions heading entirely when there are none", () => {
+    const output = renderImplementComment(baseResult);
+    expect(output).not.toContain("## Context Doc Contradictions");
   });
 });
 

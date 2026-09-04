@@ -194,6 +194,7 @@ function makeReview(overrides: Partial<ReviewResult> = {}): ReviewResult {
     dodSatisfied: true,
     dodChecklist: [{ item: "Tests pass", satisfied: true, evidence: "ci" }],
     findings: [],
+    contextContradictions: [],
     projectOrganization: "no concerns",
     scopeCreep: [],
     testAdequacy: "yes",

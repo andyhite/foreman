@@ -43,6 +43,7 @@ output: |
               "dodSatisfied",
               "dodChecklist",
               "findings",
+              "contextContradictions",
               "projectOrganization",
               "scopeCreep",
               "testAdequacy",
@@ -87,7 +88,7 @@ output: |
                 }
               },
               "dodSatisfied": {
-                "description": "The per-product Definition of Done from the product `Context` doc.",
+                "description": "The per-product Definition of Done from the product `Context` doc. That section is agent-locked: you grade against it here but cannot propose changes to it — the other three sections are proposable via `/foreman:context`.",
                 "type": "boolean"
               },
               "dodChecklist": {
@@ -164,6 +165,49 @@ output: |
                     },
                     "description": {
                       "minLength": 1,
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "contextContradictions": {
+                "type": "array",
+                "items": {
+                  "additionalProperties": false,
+                  "title": "ContextContradiction",
+                  "description": "This is the only pruning signal the product `Context` doc has (SPEC §4.7) — no sweep, no timer. A recorded decision is discovered stale exactly when work contradicts it. Empty array is the normal case: never invent a contradiction to fill it, and never report a mere gap — something the doc fails to mention — as a contradiction; a gap is not a contradiction. The operator resolves the doc as part of this issue; the extension does not rewrite the doc from this field.",
+                  "type": "object",
+                  "required": [
+                    "section",
+                    "recorded",
+                    "evidence"
+                  ],
+                  "properties": {
+                    "section": {
+                      "description": "Which agent-proposable section of the product `Context` doc this contradicts.",
+                      "anyOf": [
+                        {
+                          "const": "decisions",
+                          "type": "string"
+                        },
+                        {
+                          "const": "vocabulary",
+                          "type": "string"
+                        },
+                        {
+                          "const": "non-goals",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "recorded": {
+                      "minLength": 1,
+                      "description": "The claim as it appears in the Context doc, quoted.",
+                      "type": "string"
+                    },
+                    "evidence": {
+                      "minLength": 1,
+                      "description": "file:line proving the code contradicts it. An assertion with no location is not evidence.",
                       "type": "string"
                     }
                   }

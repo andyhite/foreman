@@ -25,6 +25,7 @@ import {
   type Confirmer,
   type LinearRequestEvent,
 } from "@foreman/core";
+import { nodeProcessProbe } from "./process-lock.ts";
 import { resolveDispatcher } from "./dispatch/resolve.ts";
 import { preflightLoopConfig } from "./preflight.ts";
 import { reconcile } from "./reconcile.ts";
@@ -65,7 +66,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       if (value !== "confirm" && value !== "yolo") throw new ConfigError(`--mode must be "confirm" or "yolo"`, []);
       args.mode = value;
     } else if (arg === "--home") {
-      args.homePath = argv[(i += 1)] ?? null;
+      const value = argv[(i += 1)];
+      if (value === undefined) throw new ConfigError("--home requires a path", []);
+      args.homePath = value;
     } else if (arg !== undefined && !arg.startsWith("-") && args.repo === null) {
       args.repo = arg;
     } else if (arg !== undefined) {
@@ -188,10 +191,23 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
  * directory to malformed JSON, e.g. because that loop has never run —
  * degrades to an empty set for that file rather than failing the reconcile run.
  */
-function readLiveDispatchIds(stateDir: string, alias: string, home: string | undefined): Set<string> {
+export function readLiveDispatchIds(stateDir: string, alias: string, home: string | undefined): Set<string> {
   const expanded = expandHome(stateDir, home);
   const ids = new Set<string>();
   for (const loop of ["build", "plan"]) {
+    // A dispatch id is only evidence of liveness while the loop that recorded
+    // it is alive: entries are pruned by the settle handler of a *running*
+    // loop, so a kill -9 leaves them behind forever and every expired lock
+    // then reads as "still live".
+    const lockPath = join(expanded, alias, `${loop}.lock`);
+    let holderAlive = false;
+    try {
+      const info = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: number };
+      holderAlive = typeof info.pid === "number" && nodeProcessProbe.isAlive(info.pid);
+    } catch {
+      holderAlive = false;
+    }
+    if (!holderAlive) continue;
     try {
       const raw = readFileSync(join(expanded, alias, `${loop}.json`), "utf8");
       const parsed = JSON.parse(raw) as { inFlight?: Record<string, { handle?: { dispatchId?: string } }> };

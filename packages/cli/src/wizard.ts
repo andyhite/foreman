@@ -109,19 +109,20 @@ async function resolveLinearApiKey(
   home: string,
   skipLinear: boolean,
 ): Promise<ResolvedApiKey> {
-  const envKey = process.env.LINEAR_API_KEY;
+  const apiKeyEnv = readGlobalConfig(home).apiKeyEnv;
+  const envKey = process.env[apiKeyEnv];
   if (envKey) {
-    log(`  ${style("green", "✓")} using $LINEAR_API_KEY from the environment (${maskKey(envKey)})`);
+    log(`  ${style("green", "✓")} using $${apiKeyEnv} from the environment (${maskKey(envKey)})`);
     const apiKeyFile = writeLinearApiKeyFile(envKey, home);
     log(`  wrote ${apiKeyFile} (mode 0600) so loop dispatch can read it too`);
     return { apiKey: envKey, apiKeyFile };
   }
   if (skipLinear) {
-    log("  skipping — set $LINEAR_API_KEY, or linear.apiKeyFile in the config, before starting the loop.");
+    log(`  skipping — set $${apiKeyEnv}, or linear.apiKeyFile in the config, before starting the loop.`);
     return { apiKey: null, apiKeyFile: null };
   }
   if (!(await prompter.confirm("Do you have a Linear personal API key to configure now?", true))) {
-    log("  skipping — set $LINEAR_API_KEY, or linear.apiKeyFile in the config, before starting the loop.");
+    log(`  skipping — set $${apiKeyEnv}, or linear.apiKeyFile in the config, before starting the loop.`);
     return { apiKey: null, apiKeyFile: null };
   }
   const apiKey = (await prompter.secret("Paste your Linear API key (input hidden): ")).trim();

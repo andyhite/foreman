@@ -75,6 +75,7 @@ function reviewMarkerComment(
     dodSatisfied: true,
     dodChecklist: [],
     findings: [],
+    contextContradictions: [],
     projectOrganization: "no concerns",
     scopeCreep: [],
     testAdequacy: "would fail if reverted",
@@ -340,5 +341,27 @@ describe("BUILD_LOOP — merge rule", () => {
 
     expect(reviewRule.select(snapshot)).toHaveLength(0);
     expect(mergeRule.select(snapshot)).toHaveLength(1);
+  });
+});
+
+describe("BUILD_LOOP — review/merge rules fail closed on null viewer id", () => {
+  it("fails closed on a null viewer id: review and merge rules propose nothing, even for an otherwise-mergeable issue", async () => {
+    const entry = makeEntry();
+    const issue = makeIssue({ state: STATE_IN_REVIEW, comments: [reviewMarkerComment("sha-head", "approve")] });
+    class RejectingViewerLinear extends FakeLinear {
+      override async viewerId(): Promise<string> {
+        throw new Error("linear unavailable");
+      }
+    }
+    const linear = new RejectingViewerLinear([issue]);
+    const github = openPrGithub("sha-head");
+    const ctx = makeCtx(linear, github, entry, { autoMerge: true });
+
+    const snapshot = await BUILD_LOOP.fetch(ctx);
+    expect(snapshot.viewerId).toBeNull();
+    const reviewRule = BUILD_LOOP.rules.find((rule) => rule.name === "review")!;
+    const mergeRule = BUILD_LOOP.rules.find((rule) => rule.name === "merge")!;
+    expect(reviewRule.select(snapshot)).toHaveLength(0);
+    expect(mergeRule.select(snapshot)).toHaveLength(0);
   });
 });

@@ -1,13 +1,12 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { GitHubAppCredentials } from "../github/app-auth.ts";
 import { Value } from "../typebox.ts";
 import {
   type AppBinding,
   type GlobalConfig,
   GlobalConfigSchema,
-  type RepoEntry,
   type RepoSettings,
   type RepoSettingsOverride,
 } from "./schema.ts";
@@ -203,17 +202,36 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
  * and the plugin runtime), not just the CLIs that used to check this alone.
  */
 function assertEndpointHostAllowed(config: GlobalConfig): void {
-  let endpointHost: string;
+  let url: URL;
   try {
-    endpointHost = new URL(config.linear.endpoint).host;
+    url = new URL(config.linear.endpoint);
   } catch {
-    endpointHost = "";
+    throw new ConfigError(`linear.endpoint is not a valid URL: ${config.linear.endpoint}`, [
+      "expected https://api.linear.app/graphql",
+    ]);
   }
-  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
+  if (url.protocol !== "https:") {
+    throw new ConfigError(`linear.endpoint must use https, not ${url.protocol} — the API key would be sent in cleartext.`, [
+      `linear.endpoint is ${config.linear.endpoint}`,
+    ]);
+  }
+  if (url.host !== "api.linear.app" && !config.linear.allowCustomEndpoint) {
     throw new ConfigError(
       `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
       ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
     );
+  }
+}
+
+/** A credential file readable by anyone but its owner is a finding, not a preference: every dispatched agent runs as this user's other processes do. Skipped on win32, which has no POSIX mode bits. */
+function assertPrivateFileMode(path: string, settingName: string): void {
+  if (process.platform === "win32") return;
+  const mode = statSync(path).mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    throw new ConfigError(`${path} is mode ${mode.toString(8)}; it must not be readable by group or others`, [
+      `${settingName} points at this file`,
+      `run: chmod 600 ${path}`,
+    ]);
   }
 }
 
@@ -350,6 +368,7 @@ export function resolveLinearApiKey(
   if (config.linear.apiKeyFile !== null) {
     const path = expandHome(config.linear.apiKeyFile, home);
     if (existsSync(path)) {
+      assertPrivateFileMode(path, "linear.apiKeyFile");
       const contents = readFileSync(path, "utf8");
       const firstLine = (contents.split("\n")[0] ?? "").trim();
       if (firstLine.length > 0) return firstLine;
@@ -425,5 +444,6 @@ export function resolveGitHubAppCredentials(config: GlobalConfig, home?: string)
       `githubApp.privateKeyFile is ${privateKeyFile}`,
     ]);
   }
+  assertPrivateFileMode(path, "githubApp.privateKeyFile");
   return { appId, privateKey: readFileSync(path, "utf8") };
 }

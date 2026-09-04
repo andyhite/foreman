@@ -178,9 +178,6 @@ export function parseAgentOutput<N extends ForemanAgentName>(
     const triageProblems: string[] = [];
     triageResult.items.forEach((item, index) => {
       const prefix = `/result/items/${index}`;
-      if (item.destination === "backlog" && item.destinationProjectId === null) {
-        triageProblems.push(`${prefix}/destinationProjectId: required and non-null when destination is "backlog"`);
-      }
       if (item.destination === "new-project" && item.newProject === null) {
         triageProblems.push(`${prefix}/newProject: required and non-null when destination is "new-project"`);
       }

@@ -35,10 +35,23 @@ const validReviewResult = {
   dodSatisfied: true,
   dodChecklist: [{ item: "tests pass", satisfied: true, evidence: "ci green" }],
   findings: [],
+  contextContradictions: [],
   projectOrganization: "Consistent with repo conventions.",
   scopeCreep: [],
   testAdequacy: "Tests fail if the change is reverted.",
   verdict: "approve",
+};
+
+const validImplementResult = {
+  issueId: "ENG-2",
+  branch: "eng-2-login",
+  prUrl: "https://github.com/acme/repo/pull/1",
+  headSha: "abc123",
+  criteriaMet: [{ criterion: "Login works", evidence: "auth.ts:42" }],
+  testsAdded: [{ path: "test/auth.test.ts", covers: "Login works" }],
+  discoveredWork: [],
+  contextContradictions: [],
+  approachSummary: "Added a session cookie check to the login handler.",
 };
 
 const validPlanResult = {
@@ -95,6 +108,16 @@ const validRefineResult = {
   subIssues: [],
   spikeCreated: null,
   readyForImplementation: true,
+};
+
+const validContextResult = {
+  teamId: "team-1",
+  decisions: "- We use TypeBox for all agent output schemas.",
+  vocabulary: "- \"issue\": a Linear issue, never a GitHub issue.",
+  nonGoals: "- We do not support non-Linear trackers.",
+  removals: [],
+  changeSummary: "Adds a note about GitHub vs Linear issue terminology.",
+  rationale: "Contributors keep confusing the two in review comments.",
 };
 
 describe("parseAgentOutput", () => {
@@ -210,6 +233,104 @@ describe("parseAgentOutput", () => {
       block: null,
     });
     expect(parsed.kind).toBe("result");
+  });
+
+  it("parses a review result with a populated contextContradictions", () => {
+    const parsed = parseAgentOutput("foreman-review", {
+      blocked: false,
+      result: {
+        ...validReviewResult,
+        contextContradictions: [
+          { section: "decisions", recorded: "Auth uses cookies, not JWT.", evidence: "auth.ts:12" },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("rejects a review result contextContradiction with an unknown section", () => {
+    const parsed = parseAgentOutput("foreman-review", {
+      blocked: false,
+      result: {
+        ...validReviewResult,
+        contextContradictions: [
+          { section: "bogus", recorded: "Auth uses cookies, not JWT.", evidence: "auth.ts:12" },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/contextContradictions"))).toBe(true);
+    }
+  });
+
+  it("parses a valid implement result envelope to kind: result", () => {
+    const parsed = parseAgentOutput("foreman-implement", {
+      blocked: false,
+      result: validImplementResult,
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("parses an implement result with a populated contextContradictions", () => {
+    const parsed = parseAgentOutput("foreman-implement", {
+      blocked: false,
+      result: {
+        ...validImplementResult,
+        contextContradictions: [
+          { section: "non-goals", recorded: "No admin dashboard.", evidence: "src/admin.ts:1" },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("rejects an implement result contextContradiction with an unknown section", () => {
+    const parsed = parseAgentOutput("foreman-implement", {
+      blocked: false,
+      result: {
+        ...validImplementResult,
+        contextContradictions: [
+          { section: "bogus", recorded: "No admin dashboard.", evidence: "src/admin.ts:1" },
+        ],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/contextContradictions"))).toBe(true);
+    }
+  });
+
+  it("parses a valid context result envelope to kind: result", () => {
+    const parsed = parseAgentOutput("foreman-context", {
+      blocked: false,
+      result: validContextResult,
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("rejects a context result carrying a definitionOfDone property", () => {
+    const parsed = parseAgentOutput("foreman-context", {
+      blocked: false,
+      result: { ...validContextResult, definitionOfDone: "Ship it." },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+  });
+
+  it("parses a valid block envelope for context to kind: blocked", () => {
+    const parsed = parseAgentOutput("foreman-context", {
+      blocked: true,
+      result: null,
+      block: validBlock,
+    });
+    expect(parsed.kind).toBe("blocked");
   });
 
   it("parses a valid plan result envelope to kind: result", () => {
@@ -401,14 +522,14 @@ describe("parseAgentOutput", () => {
     }
   });
 
-  it("rejects a backlog triage item missing destinationProjectId", () => {
+  it("allows a project-less backlog triage item (work with no ship moment)", () => {
     const itemWithoutProjectId = { ...validTriageResult.items[0]!, destinationProjectId: null };
     const parsed = parseAgentOutput("foreman-triage", {
       blocked: false,
       result: { ...validTriageResult, items: [itemWithoutProjectId] },
       block: null,
     });
-    expect(parsed.kind).toBe("invalid");
+    expect(parsed.kind).toBe("result");
   });
 });
 

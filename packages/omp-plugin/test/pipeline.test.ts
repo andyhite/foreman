@@ -117,11 +117,14 @@ class FakeLinear implements LinearWriter {
   async projectStatus(projectId: string): Promise<ProjectStatus | null> {
     return this.statusByProject.get(projectId) ?? null;
   }
-  async projectInitiatives() {
+  async teamDocuments() {
     return [];
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return KNOWN_STATES;
@@ -369,6 +372,7 @@ function makeImplementResult(overrides: Partial<ImplementResult> = {}): Implemen
     criteriaMet: [],
     testsAdded: [],
     discoveredWork: [],
+    contextContradictions: [],
     approachSummary: "Did the thing.",
     ...overrides,
   };

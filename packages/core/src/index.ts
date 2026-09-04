@@ -14,6 +14,7 @@ export * from "./confirm.ts";
 export * from "./provision.ts";
 export * from "./dispatch/index.ts";
 export * from "./domain/commands.ts";
+export * from "./domain/context-doc.ts";
 export * from "./domain/labels.ts";
 export * from "./domain/priority.ts";
 export * from "./domain/project-status.ts";

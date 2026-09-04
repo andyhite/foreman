@@ -32,17 +32,25 @@ flowchart LR
 | `foreman-refine` | Backlog → Todo | `@plan` | Acceptance criteria, a Fibonacci estimate, a split proposal |
 | `foreman-implement` | In Progress → In Review | `@default` | A branch, tests, a PR, per-criterion evidence |
 | `foreman-review` | In Review → Done / In Progress | `@slow` | Findings by severity against the diff |
+| `foreman-context` | Team's product `Context` doc, in place — no issue or project transition | `@plan` | Proposed decisions, vocabulary, non-goals; the Definition of Done stays operator-only |
 
-Six agents, one edge each. An agent returns a validated structured result;
+Seven agents, one edge each (`foreman-context` updates the team's `Context`
+doc in place instead of moving an issue or project). An agent returns a
+validated structured result;
 the extension performs the mutation. That split is the design:
 
 - No agent can spawn another: the `task` tool is withheld.
-- No agent can write to Linear: no write tool, and the loop scrubs the Linear
-  API key from every dispatched agent's environment on both dispatch paths
-  (`omp -p` print mode and the herdr pane). Residual exposure: an implement
-  agent holds `bash`, so it can read `linear.apiKeyFile` if the credential
-  is stored that way. This is defense in depth, not a sandbox; issue content
-  is untrusted input.
+- No agent can write to Linear: no write tool, and the loop scrubs every
+  `LINEAR_*` environment variable from a dispatched agent's environment on
+  both dispatch paths (`omp -p` print mode and the herdr pane), so the key
+  stays out of `ps`/`env` dumps and out of anything the agent spawns.
+  Residual exposure: loop dispatch requires `linear.apiKeyFile` precisely so
+  the dispatched agent's own extension can read the credential from disk,
+  and every agent holds `read` (implement also holds `bash`), so any agent
+  in that session can read `~/.foreman/linear-api-key` and, where
+  configured, `~/.foreman/github-app-private-key.pem` — whose installation
+  tokens can approve PRs. This is defense in depth, not a sandbox; issue
+  content is untrusted input.
 - A loop-dispatched deployment therefore requires `linear.apiKeyFile`. Both
   dispatch paths (`packages/loop/src/dispatch/print.ts`, `packages/loop/src/dispatch/herdr.ts`)
   scrub `apiKeyEnv`, and the dispatched session's own extension still needs
@@ -122,14 +130,17 @@ key or no network → setup writes none; set `$LINEAR_API_KEY` or
 
 Resolves the repo root (`git rev-parse --show-toplevel`), then:
 
-1. Writes `<repo>/.omp/plugins/omp-plugins.lock.json` and
+1. Asks for the Linear team this repo binds to (a select over the
+   workspace's teams, pre-selecting one already bound to this path), then
+   the apps hosted in this repo (comma-separated, blank for a single-app
+   repo).
+2. Writes the registry entry (alias, path, team, apps) to
+   `~/.foreman/config.json`. You confirm or edit every choice before it is
+   written.
+3. Writes `<repo>/.omp/plugins/omp-plugins.lock.json` and
    `<repo>/.omp/plugins/node_modules/@foreman/omp-plugin` (a symlink to
    `~/.foreman/plugin`), plus a `.git/info/exclude` line so neither shows in
-   `git status`. `--skip-plugin` skips both.
-2. Asks for the Linear team this repo binds to (a select over the
-   workspace's teams, pre-selecting one already bound to this path), then the
-   registry alias. You confirm or edit every choice before it is written to
-   `~/.foreman/config.json`.
+   `git status`. `--skip-plugin` skips this step.
 
 `foreman init` never prompts for or writes the Linear API key.
 
@@ -171,9 +182,13 @@ entry. The key resolves from `$LINEAR_API_KEY`, else `linear.apiKeyFile`.
   entry. `--path <dir>` targets another directory.
 - `foreman doctor` checks the global plugin link and every registered repo's
   activation; a broken symlink or stale lock entry is a problem. `--fix`
-  repairs what it can (re-runs the equivalent of `activateRepoPlugin` per
-  affected repo); `--checkout <path>` overrides the expected checkout. Exits
-  `0` when healthy, `1` when problems remain.
+  repairs what it can — re-runs the equivalent of `activateRepoPlugin` per
+  affected repo, and re-provisions each repo's Linear team (workflow
+  states, `app:*` issue/project labels). The Linear repair prompts for
+  confirmation unless `--yes` is also passed; with neither `--yes` nor a
+  terminal to prompt on, it is skipped and reported rather than applied.
+  `--checkout <path>` overrides the expected checkout. Exits `0` when
+  healthy, `1` when problems remain.
 - `foreman update` pulls the checkout and rebuilds the CLI. The plugin loads
   from source, so that is the entire update; every registered repo follows
   the global link with no per-repo work. Flags: `--checkout <path>`,
@@ -226,8 +241,9 @@ Slash commands inside any omp session:
 
 | Command | Does |
 | --- | --- |
-| `/foreman:triage` | Classify, prioritize, and route a batch of Inbox items. `[--initiatives <id,id,...>] <ISSUE-ID>...` |
-| `/foreman:roadmap` | Decompose an initiative's brief into sequenced projects. `<INITIATIVE-ID>...` |
+| `/foreman:triage` | Classify, prioritize, and route a batch of Inbox items. `<ISSUE-ID>...` |
+| `/foreman:roadmap` | Decompose the repo's team into its next slate of projects. `[DOCUMENT-PATH]` |
+| `/foreman:context` | Propose edits to the team's product `Context` doc (decisions, vocabulary, non-goals). Operator-invoked only. |
 | `/foreman:plan` | Seed a bare project's first Backlog issues. `<PROJECT-ID>...` |
 | `/foreman:refine` | Refine prioritized issues to Todo. `<ISSUE-ID>...` |
 | `/foreman:implement` | Implement one ready issue and open its PR. `<ISSUE-ID>` |
@@ -250,7 +266,9 @@ bun run typecheck      # tsc --build --force across the workspace
 bun test
 bun run contract       # agent/skill/schema wiring check
 bun run schemas        # regenerate output schemas into agent frontmatter
-bun run check          # typecheck + test + contract
+bun run check          # typecheck + test + contract + build
+bun run check:ci       # check, plus the CI mirror: bun audit, CLI smoke test,
+                        # install.sh syntax check, schema regen with a clean diff
 ```
 
 The plugin has no build step: `omp.extensions` names `./src/extension.ts`

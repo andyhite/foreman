@@ -85,6 +85,9 @@ export function registerGitHubPrTool(pi: ExtensionAPI): void {
       if (!params.title || !params.body || !params.head || !params.base) {
         return errorResult("op \"create\" requires \"title\", \"body\", \"head\", and \"base\".");
       }
+      if (params.base !== entry.baseBranch) {
+        return errorResult(`base must be ${entry.baseBranch} (this repo's configured baseBranch).`);
+      }
 
       const pr = await github.createPr(repoPath, {
         title: params.title,

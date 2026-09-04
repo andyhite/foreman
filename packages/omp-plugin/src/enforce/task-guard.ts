@@ -132,12 +132,13 @@ export function soleMarkerValue(re: RegExp, text: string, name: string): string 
 
 
 
-type Stage = "triage" | "plan" | "roadmap" | "refine" | "implement" | "review";
+type Stage = "triage" | "plan" | "roadmap" | "context" | "refine" | "implement" | "review";
 
 export function stageFor(agent: string): Stage | null {
   if (agent === "foreman-triage") return "triage";
   if (agent === "foreman-plan") return "plan";
   if (agent === "foreman-roadmap") return "roadmap";
+  if (agent === "foreman-context") return "context";
   if (agent === "foreman-refine") return "refine";
   if (agent === "foreman-implement") return "implement";
   if (agent === "foreman-review") return "review";
@@ -282,7 +283,7 @@ function takeDispatchId(deps: TaskGuardDeps, agent: string, subject: string, now
 }
 
 interface PreparedCleanup {
-  issue: Issue;
+  issue: Issue | null;
   dispatchId: string;
   agent: string;
   worktree: string | null;
@@ -328,16 +329,19 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     throw new Error(`Unknown Foreman agent "${agent}".`);
   }
 
-  // Plan, roadmap, and triage claim no lock — plan operates on a project,
-  // roadmap on an initiative, triage on a batch — but the result sink keys
-  // every capture on the `FOREMAN-DISPATCH` marker it recovers from the task
-  // text (`results/sink.ts`), so all three stages need one anyway. Without
-  // it their `PlanResult`/`RoadmapResult`/`TriageResult` is dropped on the
-  // floor: the agent yields, the extension sees a structured output it
-  // cannot attribute to a dispatch, and nothing is ever written to Linear.
-  if (stage === "triage" || stage === "plan" || stage === "roadmap") {
+  // Plan, roadmap, context, and triage claim no lock — plan operates on a
+  // project, roadmap on a team, context on a team document, triage
+  // on a batch — but the result sink keys every capture on the
+  // `FOREMAN-DISPATCH` marker it recovers from the task text
+  // (`results/sink.ts`), so all four stages need one anyway. Without it
+  // their `PlanResult`/`RoadmapResult`/`ContextResult`/`TriageResult` is
+  // dropped on the floor: the agent yields, the extension sees a
+  // structured output it cannot attribute to a dispatch, and nothing is
+  // ever written to Linear.
+  if (stage === "triage" || stage === "plan" || stage === "roadmap" || stage === "context") {
     let projectId: string | null = null;
     let briefPath: string | null = null;
+    let batchIssueIds: string | null = null;
     if (stage === "plan") {
       projectId = soleMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task, "FOREMAN-PROJECT");
       if (!projectId) {
@@ -349,24 +353,49 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
       // Absent means the agent works from the repo's own docs.
       briefPath = soleMarkerValue(/^FOREMAN-BRIEF:\s*(\S+)\s*$/gm, item.task, "FOREMAN-BRIEF");
     }
+    if (stage === "triage") {
+      batchIssueIds = soleMarkerValue(/^FOREMAN-ISSUES:\s*(\S+)\s*$/gm, item.task, "FOREMAN-ISSUES");
+      if (!batchIssueIds) {
+        throw new Error(`Missing "FOREMAN-ISSUES: <ID>,<ID>" line in the task text for agent "${agent}".`);
+      }
+    }
     // "batch" matches the subject the loop's own intake dispatch mints for
     // triage (`packages/loop/src/loops/plan.ts`'s `triageRule`), so an
     // inherited and a minted id read the same way in the log.
-    const dispatchId = takeDispatchId(deps, agent, projectId ?? (stage === "roadmap" ? deps.entry.team : "batch"), deps.now());
+    const dispatchId = takeDispatchId(
+      deps,
+      agent,
+      projectId ?? (stage === "roadmap" || stage === "context" ? deps.entry.team : "batch"),
+      deps.now(),
+    );
     revised.task = appendMarkers(item.task, {
       "FOREMAN-DISPATCH": dispatchId,
       "FOREMAN-PROJECT": projectId ?? undefined,
       // The guard writes this itself from the resolved entry rather than
       // parsing it from the command, so a dispatch cannot name a foreign team.
-      "FOREMAN-TEAM": stage === "roadmap" ? deps.entry.team : undefined,
+      "FOREMAN-TEAM": stage === "roadmap" || stage === "context" ? deps.entry.team : undefined,
       "FOREMAN-BRIEF": briefPath ?? undefined,
       "FOREMAN-APPS": deps.entry.appNames.join(",") || undefined,
+      "FOREMAN-ISSUES": batchIssueIds ?? undefined,
     });
-    // Roadmap has no single project to key a Context digest off — its
-    // command assembles the product `Context` doc plus the repo's existing
-    // projects (`team_roadmap` op) before dispatch, so there is nothing
+    // Roadmap and context have no single project to key a Context digest
+    // off — roadmap's command assembles the product `Context` doc plus the
+    // repo's existing projects (`team_roadmap` op) before dispatch, and
+    // context's command supplies the live doc itself — so there is nothing
     // here for the guard to append.
-    return { item: revised, contextDigest: stage === "roadmap" ? null : await deps.contextDigest(projectId) };
+    return {
+      item: revised,
+      contextDigest: stage === "roadmap" || stage === "context" ? null : await deps.contextDigest(projectId),
+      cleanup: {
+        issue: null,
+        dispatchId,
+        agent,
+        worktree: null,
+        takenAt: deps.now(),
+        ttlMs: lockTtlMs(deps.config),
+        previousStateId: null,
+      },
+    };
   }
 
   const identifier = soleMarkerValue(ISSUE_MARKER_RE, item.task, "FOREMAN-ISSUE");
@@ -377,10 +406,9 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   }
   const issue = await fetchIssue(deps.linear, identifier);
 
-  // Scope is asserted for every issue-targeted stage, refine included: a
-  // refine dispatch used to refuse an issue whose project belongs to zero
-  // or several bound initiatives, and `evaluateGate` no longer fetches
-  // `projectInitiatives` to catch that itself (SPEC §3.11).
+  // Scope is asserted for every issue-targeted stage, refine included: a repo
+  // binds one team now, so the registry entry is the whole scope check and no
+  // gate re-derives it from an issue's project (SPEC §3.11).
   assertIssueInScope(deps.entry, issue);
 
   let viewerId: string | null;
@@ -484,23 +512,25 @@ async function unwindPrepared(cleanups: readonly PreparedCleanup[], deps: TaskGu
   await Promise.all(
     cleanups.map(async (cleanup) => {
       try {
-        await deps.linear.updateIssue(cleanup.issue.id, {
-          assigneeId: null,
-          ...(cleanup.previousStateId ? { stateId: cleanup.previousStateId } : {}),
-        });
-        await deps.linear.createComment({
-          issueId: cleanup.issue.id,
-          body: renderLockComment({
-            dispatchId: cleanup.dispatchId,
-            agent: cleanup.agent,
-            issueId: cleanup.issue.identifier,
-            takenAt: cleanup.takenAt.toISOString(),
-            ttlMs: cleanup.ttlMs,
-            worktree: cleanup.worktree,
-            released: true,
-            releasedAt: deps.now().toISOString(),
-          }),
-        });
+        if (cleanup.issue) {
+          await deps.linear.updateIssue(cleanup.issue.id, {
+            assigneeId: null,
+            ...(cleanup.previousStateId ? { stateId: cleanup.previousStateId } : {}),
+          });
+          await deps.linear.createComment({
+            issueId: cleanup.issue.id,
+            body: renderLockComment({
+              dispatchId: cleanup.dispatchId,
+              agent: cleanup.agent,
+              issueId: cleanup.issue.identifier,
+              takenAt: cleanup.takenAt.toISOString(),
+              ttlMs: cleanup.ttlMs,
+              worktree: cleanup.worktree,
+              released: true,
+              releasedAt: deps.now().toISOString(),
+            }),
+          });
+        }
       } catch {
         // Preserve the original preparation failure. `foreman reconcile`'s
         // orphan-lock pass can recover a cleanup that fails because Linear

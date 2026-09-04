@@ -26,6 +26,40 @@ export const Finding = Type.Object(
 
 export type Finding = Static<typeof Finding>;
 
+export const ContextContradiction = Type.Object(
+  {
+    section: Type.Union(
+      [
+        Type.Literal("decisions"),
+        Type.Literal("vocabulary"),
+        Type.Literal("non-goals"),
+      ],
+      { description: "Which agent-proposable section of the product `Context` doc this contradicts." },
+    ),
+    recorded: Type.String({
+      minLength: 1,
+      description: "The claim as it appears in the Context doc, quoted.",
+    }),
+    evidence: Type.String({
+      minLength: 1,
+      description: "file:line proving the code contradicts it. An assertion with no location is not evidence.",
+    }),
+  },
+  {
+    additionalProperties: false,
+    title: "ContextContradiction",
+    description:
+      "This is the only pruning signal the product `Context` doc has (SPEC §4.7) — no sweep, " +
+      "no timer. A recorded decision is discovered stale exactly when work contradicts it. " +
+      "Empty array is the normal case: never invent a contradiction to fill it, and never " +
+      "report a mere gap — something the doc fails to mention — as a contradiction; a gap is " +
+      "not a contradiction. The operator resolves the doc as part of this issue; the " +
+      "extension does not rewrite the doc from this field.",
+  },
+);
+
+export type ContextContradiction = Static<typeof ContextContradiction>;
+
 export const CriterionVerification = Type.Object(
   {
     criterion: Type.String({ minLength: 1 }),
@@ -60,12 +94,16 @@ export const ReviewResult = Type.Object(
       description: "One entry per acceptance criterion on the issue.",
     }),
     dodSatisfied: Type.Boolean({
-      description: "The per-product Definition of Done from the product `Context` doc.",
+      description:
+        "The per-product Definition of Done from the product `Context` doc. That section is " +
+        "agent-locked: you grade against it here but cannot propose changes to it — the other " +
+        "three sections are proposable via `/foreman:context`.",
     }),
     dodChecklist: Type.Array(DodCheck, {
       description: "Per-item Definition of Done results, for the rendered checklist.",
     }),
     findings: Type.Array(Finding),
+    contextContradictions: Type.Array(ContextContradiction),
     projectOrganization: Type.String({
       minLength: 1,
       description:

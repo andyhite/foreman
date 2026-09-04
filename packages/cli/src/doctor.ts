@@ -18,9 +18,14 @@
 import {
   activateRepoPlugin,
   appLabelId,
+  ConfigError,
+  type Confirmer,
+  CONTEXT_DOC_TEMPLATE,
+  CONTEXT_DOC_TITLE,
   ensureGitExclude,
   expandHome,
   findUserScopeInstall,
+  type GlobalConfig,
   groupDisplayName,
   inspectRepoActivation,
   labelIdFromParts,
@@ -36,12 +41,12 @@ import {
   resolveLinearApiKey,
   type RepoEntry,
   type TeamRef,
+  TtyConfirmer,
   writeGlobalPluginLink,
   YOLO_CONFIRMER,
 } from "@foreman/core";
 import { existsSync, statSync } from "node:fs";
 import { findCheckoutRoot, looksLikeForemanRoot } from "./checkout.ts";
-import { readGlobalConfig } from "./global-config.ts";
 import type { Runner } from "./exec.ts";
 import { printSection, style, statusLine } from "./tui.ts";
 
@@ -49,6 +54,7 @@ export interface DoctorOptions {
   home: string;
   checkoutRoot: string | null;
   fix: boolean;
+  yes: boolean;
 }
 
 export interface DoctorDeps {
@@ -66,13 +72,24 @@ function resolveCheckoutForFix(options: DoctorOptions): string | null {
   }
 }
 
-/** Counts a problem, and prints it prefixed with `!`/`✗` styling via `statusLine`. */
-function report(deps: DoctorDeps, problems: string[], message: string): void {
-  problems.push(message);
+/**
+ * A reported problem, and whether `--fix` has any repair for it. The closing
+ * advice line must not point the operator at a flag that cannot help - that is
+ * how a stub `Context` doc came to answer "run `foreman doctor --fix`" with
+ * `--fix` having nothing to run.
+ */
+interface Problem {
+  message: string;
+  fixable: boolean;
+}
+
+/** Counts a problem, and prints it prefixed with `!`/`✗` styling via `statusLine`. `fixable: false` marks a problem only the operator can resolve. */
+function report(deps: DoctorDeps, problems: Problem[], message: string, fixable = true): void {
+  problems.push({ message, fixable });
   deps.log(statusLine(false, message));
 }
 
-async function checkTools(options: DoctorOptions, deps: DoctorDeps, problems: string[]): Promise<void> {
+async function checkTools(deps: DoctorDeps, problems: Problem[]): Promise<void> {
   printSection(deps.log, "Tools");
   for (const bin of ["bun", "git"]) {
     const found = await deps.runner.exists(bin);
@@ -85,7 +102,7 @@ async function checkTools(options: DoctorOptions, deps: DoctorDeps, problems: st
   }
 }
 
-function checkGlobalInstall(options: DoctorOptions, deps: DoctorDeps, problems: string[]): void {
+function checkGlobalInstall(options: DoctorOptions, deps: DoctorDeps, problems: Problem[]): void {
   printSection(deps.log, "Global install");
   let state = readGlobalPluginLink(options.home);
 
@@ -118,7 +135,7 @@ function checkGlobalInstall(options: DoctorOptions, deps: DoctorDeps, problems: 
   deps.log(statusLine(true, `${state.path} -> ${state.target} (v${state.version ?? "unknown"})`));
 }
 
-function checkUserScopeInstall(options: DoctorOptions, deps: DoctorDeps, problems: string[]): void {
+function checkUserScopeInstall(options: DoctorOptions, deps: DoctorDeps, problems: Problem[]): void {
   printSection(deps.log, "Machine-wide install");
   const install = findUserScopeInstall(options.home);
   if (!install) {
@@ -140,19 +157,32 @@ function checkUserScopeInstall(options: DoctorOptions, deps: DoctorDeps, problem
   );
 }
 
-function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: string[]): void {
+function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: Problem[]): void {
   printSection(deps.log, "Credential");
-  const envKey = process.env.LINEAR_API_KEY;
-  const config = readGlobalConfig(options.home);
-  const apiKeyFile = config.apiKeyFile ? expandHome(config.apiKeyFile, options.home) : null;
+  let config: GlobalConfig;
+  try {
+    ({ config } = loadGlobalConfig({ home: options.home }));
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    report(deps, problems, `~/.foreman/config.json is invalid: ${error.message}`);
+    for (const problem of error.problems) report(deps, problems, `  - ${problem}`);
+    return;
+  }
+  const apiKeyEnv = config.linear.apiKeyEnv;
+  const envKey = process.env[apiKeyEnv];
+  const apiKeyFile = config.linear.apiKeyFile ? expandHome(config.linear.apiKeyFile, options.home) : null;
   const fileConfigured = apiKeyFile !== null && existsSync(apiKeyFile);
 
   if (envKey) {
-    if (apiKeyFile === null) {
-      report(deps, problems, "linear.apiKeyFile is unset — loop dispatch cannot pass the credential to a dispatched agent");
+    if (!fileConfigured) {
+      report(
+        deps,
+        problems,
+        `linear.apiKeyFile is ${apiKeyFile ?? "unset"} — loop dispatch cannot pass the credential to a dispatched agent`,
+      );
       return;
     }
-    deps.log(statusLine(true, "LINEAR_API_KEY set in environment"));
+    deps.log(statusLine(true, `${apiKeyEnv} set in environment`));
     return;
   }
   if (fileConfigured) {
@@ -166,11 +196,11 @@ function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: str
   report(
     deps,
     problems,
-    "no Linear credential found — set LINEAR_API_KEY or run `foreman setup` to configure linear.apiKeyFile",
+    `no Linear credential found — set ${apiKeyEnv} or run \`foreman setup\` to configure linear.apiKeyFile`,
   );
 }
 
-function checkRepo(options: DoctorOptions, deps: DoctorDeps, problems: string[], alias: string, path: string): void {
+function checkRepo(options: DoctorOptions, deps: DoctorDeps, problems: Problem[], alias: string, path: string): void {
   if (!existsSync(path) || !statSync(path).isDirectory()) {
     report(deps, problems, `${alias}: ${path} does not exist`);
     return;
@@ -203,9 +233,17 @@ function checkRepo(options: DoctorOptions, deps: DoctorDeps, problems: string[],
   for (const problemText of state.problems) report(deps, problems, `${alias}: ${problemText}`);
 }
 
-function checkRepos(options: DoctorOptions, deps: DoctorDeps, problems: string[]): void {
+function checkRepos(options: DoctorOptions, deps: DoctorDeps, problems: Problem[]): void {
   printSection(deps.log, "Registered repos");
-  const { config } = loadGlobalConfig({ home: options.home });
+  let config: GlobalConfig;
+  try {
+    ({ config } = loadGlobalConfig({ home: options.home }));
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    report(deps, problems, `~/.foreman/config.json is invalid: ${error.message}`);
+    for (const problem of error.problems) report(deps, problems, `  - ${problem}`);
+    return;
+  }
   const aliases = Object.keys(config.repos);
 
   if (aliases.length === 0) {
@@ -237,14 +275,14 @@ async function missingWorkspaceLabels(client: LinearClient): Promise<string[]> {
 }
 
 async function checkWorkspaceLabels(
-  options: DoctorOptions,
   deps: DoctorDeps,
-  problems: string[],
+  problems: Problem[],
   client: LinearClient,
+  confirmer: Confirmer | null,
 ): Promise<void> {
   let missing = await missingWorkspaceLabels(client);
-  if (missing.length > 0 && options.fix) {
-    await provisionWorkspaceLabels(client, { confirmer: YOLO_CONFIRMER });
+  if (missing.length > 0 && confirmer) {
+    await provisionWorkspaceLabels(client, { confirmer });
     missing = await missingWorkspaceLabels(client);
   }
 
@@ -255,7 +293,7 @@ async function checkWorkspaceLabels(
   for (const id of missing) report(deps, problems, `linear: workspace label ${id} is missing`);
 }
 
-/** A team's provisioning drift: settings, missing/mismatched `MANAGED_STATES`, extra states, and missing `app:*` issue/project labels. */
+/** A team's provisioning drift: settings, missing/mismatched `MANAGED_STATES`, extra states, missing `app:*` issue/project labels, and an absent product `Context` doc. This is the `--fix` gate — an empty list skips `provisionTeam` entirely, so anything `provisionTeam` repairs MUST be detected here or the repair never runs. */
 async function teamProvisioningIssues(client: LinearClient, teamId: string, expectedApps: string[]): Promise<string[]> {
   const issues: string[] = [];
 
@@ -290,17 +328,69 @@ async function teamProvisioningIssues(client: LinearClient, teamId: string, expe
     if (!projectLabels.has(id)) issues.push(`project label ${id} is missing`);
   }
 
+  const documents = await client.teamDocuments(settings.key);
+  if (!documents.some((doc) => doc.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase())) {
+    issues.push(`no product "${CONTEXT_DOC_TITLE}" doc — agents run with no product context or Definition of Done`);
+  }
+
   return issues;
 }
 
+
+/**
+ * SPEC §4.7's italic placeholder markers, derived from the seed template
+ * rather than duplicated as literals - one per unfilled section (the
+ * Definition of Done section ships real checklist items, never a placeholder).
+ *
+ * Emphasis characters are stripped from both sides of the later comparison
+ * because Linear rewrites the marker it is given: a document seeded with
+ * `_text_` reads back as `*text*` (measured against the live API, VERIFIED.md).
+ * Matching raw substrings reported a doc seconds old as "filled in".
+ */
+function contextDocPlaceholders(): string[] {
+  return CONTEXT_DOC_TEMPLATE.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^_.+_$/.test(line))
+    .map((line) => line.replace(/[_*]/g, ""));
+}
+
+/**
+ * The product `Context` doc's *content* (SPEC §4.7): still the untouched seed
+ * stub, or filled in. Absence is `teamProvisioningIssues`' business, because
+ * that list gates the `provisionTeam` call which seeds it; reporting the
+ * absence only here is what made `--fix` print its own advice back at the
+ * operator. A stub has no repair by design - the body is operator-owned prose
+ * and `foreman-review` grades `dodSatisfied` against it, so Foreman writing it
+ * would move the bar under the thing being measured.
+ */
+async function checkContextDoc(deps: DoctorDeps, problems: Problem[], client: LinearClient, teamKey: string, alias: string): Promise<void> {
+  const documents = await client.teamDocuments(teamKey);
+  const doc = documents.find((candidate) => candidate.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase());
+  if (!doc) return;
+
+  const content = (doc.content ?? "").replace(/[_*]/g, "");
+  const placeholders = contextDocPlaceholders();
+  const stillStub = placeholders.length > 0 && placeholders.every((placeholder) => content.includes(placeholder));
+  if (stillStub) {
+    report(
+      deps,
+      problems,
+      `repos.${alias}: the product "${CONTEXT_DOC_TITLE}" doc on team ${teamKey} is still the seed stub — fill in its architectural decisions, domain vocabulary, and known non-goals, and confirm the Definition of Done`,
+      false,
+    );
+    return;
+  }
+
+  deps.log(statusLine(true, `repos.${alias}: product ${CONTEXT_DOC_TITLE} doc on team ${teamKey} is filled in`));
+}
 async function checkRepoProvisioning(
-  options: DoctorOptions,
   deps: DoctorDeps,
-  problems: string[],
+  problems: Problem[],
   client: LinearClient,
   teams: readonly TeamRef[],
   alias: string,
   entry: RepoEntry,
+  confirmer: Confirmer | null,
 ): Promise<void> {
   const team = teams.find((candidate) => candidate.key === entry.team);
   if (!team) {
@@ -312,16 +402,18 @@ async function checkRepoProvisioning(
   const expectedApps = appNames.length >= 2 ? [...appNames, "all"] : appNames;
 
   let issues = await teamProvisioningIssues(client, team.id, expectedApps);
-  if (issues.length > 0 && options.fix) {
-    await provisionTeam(client, { teamId: team.id, apps: appNames, confirmer: YOLO_CONFIRMER });
+  if (issues.length > 0 && confirmer) {
+    await provisionTeam(client, { teamId: team.id, apps: appNames, confirmer });
     issues = await teamProvisioningIssues(client, team.id, expectedApps);
   }
 
   if (issues.length === 0) {
     deps.log(statusLine(true, `repos.${alias}: team ${entry.team} fully provisioned`));
-    return;
+  } else {
+    for (const issue of issues) report(deps, problems, `repos.${alias}: ${issue}`);
   }
-  for (const issue of issues) report(deps, problems, `repos.${alias}: ${issue}`);
+
+  await checkContextDoc(deps, problems, client, team.key, alias);
 }
 
 /**
@@ -330,10 +422,18 @@ async function checkRepoProvisioning(
  * Skipped entirely with no Linear credential — provisioning is meaningless
  * without one, and `checkCredential` already reports that separately.
  */
-async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, problems: string[]): Promise<void> {
+async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, problems: Problem[]): Promise<void> {
   printSection(deps.log, "Linear provisioning");
 
-  const { config } = loadGlobalConfig({ home: options.home });
+  let config: GlobalConfig;
+  try {
+    ({ config } = loadGlobalConfig({ home: options.home }));
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    report(deps, problems, `~/.foreman/config.json is invalid: ${error.message}`);
+    for (const problem of error.problems) report(deps, problems, `  - ${problem}`);
+    return;
+  }
   let apiKey: string;
   try {
     apiKey = resolveLinearApiKey(config, process.env, options.home);
@@ -344,8 +444,23 @@ async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, probl
 
   const client = new LinearClient({ apiKey });
 
+  // A repair (`--fix`) needs a confirmer only when it is actually reachable:
+  // `--yes` bypasses the prompt entirely, and with neither `--yes` nor a TTY
+  // there is nobody who could answer a prompt, so building one would just be
+  // a `TtyConfirmer` nobody can ever satisfy. The explanation is reported
+  // after the checks rather than here, because announcing "needs repair"
+  // before knowing whether anything does made every `--fix` run in a
+  // non-terminal exit 1 on a perfectly healthy machine.
+  const confirmer: Confirmer | null =
+    !options.fix || (!options.yes && !process.stdin.isTTY)
+      ? null
+      : options.yes
+        ? YOLO_CONFIRMER
+        : new TtyConfirmer({ log: deps.log });
+  const problemsBefore = problems.length;
+
   try {
-    await checkWorkspaceLabels(options, deps, problems, client);
+    await checkWorkspaceLabels(deps, problems, client, confirmer);
 
     const aliases = Object.keys(config.repos);
     if (aliases.length === 0) return;
@@ -354,11 +469,24 @@ async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, probl
     for (const alias of aliases) {
       const entry = config.repos[alias];
       if (!entry) continue;
-      await checkRepoProvisioning(options, deps, problems, client, teams, alias, entry);
+      await checkRepoProvisioning(deps, problems, client, teams, alias, entry, confirmer);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     report(deps, problems, `linear: could not verify provisioning (${message})`);
+  } finally {
+    confirmer?.close();
+    // Only now is it known that a repair was wanted and could not be
+    // confirmed. Not `--fix`-fixable: the operator needs `--yes` (or a
+    // terminal), so the closing advice must not point back at `--fix`.
+    if (options.fix && confirmer === null && problems.length > problemsBefore) {
+      report(
+        deps,
+        problems,
+        "linear provisioning needs repair but there is no terminal to confirm on — re-run with `foreman doctor --fix --yes`",
+        false,
+      );
+    }
   }
 }
 
@@ -369,9 +497,9 @@ async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, probl
  * otherwise.
  */
 export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promise<number> {
-  const problems: string[] = [];
+  const problems: Problem[] = [];
 
-  await checkTools(options, deps, problems);
+  await checkTools(deps, problems);
   checkGlobalInstall(options, deps, problems);
   checkUserScopeInstall(options, deps, problems);
   checkCredential(options, deps, problems);
@@ -386,9 +514,11 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
 
   const verb = options.fix ? "still" : "found";
   deps.log(statusLine(false, `${problems.length} problem(s) ${verb}:`));
-  for (const problemText of problems) deps.log(`    ${style("yellow", "-")} ${problemText}`);
-  if (!options.fix) deps.log("");
-  if (!options.fix) deps.log(statusLine(false, "run `foreman doctor --fix` to attempt repairs"));
+  for (const problem of problems) deps.log(`    ${style("yellow", "-")} ${problem.message}`);
+  if (!options.fix && problems.some((problem) => problem.fixable)) {
+    deps.log("");
+    deps.log(statusLine(false, "run `foreman doctor --fix` to attempt repairs"));
+  }
 
   return 1;
 }

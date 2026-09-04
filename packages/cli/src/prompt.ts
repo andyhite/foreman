@@ -134,6 +134,7 @@ export class InteractivePrompter implements Prompter {
 
     const MASK = "****";
     let buffer = "";
+    let pending = "";
     let inPaste = false;
     let escapeState: "none" | "esc" | "csi" = "none";
     let masked = false;
@@ -155,8 +156,24 @@ export class InteractivePrompter implements Prompter {
       process.stdout.write(style("dim", MASK));
     };
 
+    const MARKERS = ["\x1b[200~", "\x1b[201~"] as const;
+    /** Length of the longest marker prefix `text` ends with, so a marker split across two `data` chunks is not consumed as literal text. */
+    const trailingPartial = (text: string): number => {
+      for (let take = Math.max(...MARKERS.map((m) => m.length)) - 1; take > 0; take -= 1) {
+        const tail = text.slice(-take);
+        if (MARKERS.some((marker) => marker.startsWith(tail))) return take;
+      }
+      return 0;
+    };
+
     const onData = (chunk: Buffer): void => {
-      let text = chunk.toString("utf8");
+      let text = pending + chunk.toString("utf8");
+      pending = "";
+      const hold = trailingPartial(text);
+      if (hold > 0) {
+        pending = text.slice(-hold);
+        text = text.slice(0, -hold);
+      }
       while (text.length > 0) {
         if (inPaste) {
           const end = text.indexOf("\x1b[201~");

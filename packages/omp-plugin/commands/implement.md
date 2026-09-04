@@ -38,4 +38,4 @@ appends `FOREMAN-DISPATCH`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, and
 
 `ImplementResult` → extension moves the issue to In Review, releases the
 lock, files `discoveredWork` as Backlog issues. `BlockRecord` → extension
-moves the issue to Needs Input and parks it. Nothing else changes state.
+moves the issue to Blocked and parks it. Nothing else changes state.

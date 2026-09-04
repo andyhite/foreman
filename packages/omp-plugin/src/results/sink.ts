@@ -37,6 +37,8 @@ export interface CapturedOutput {
   issueId: string | null;
   /** The `FOREMAN-PREV-STATE` workflow state id embedded in the dispatched task text, or null when absent (refine/review dispatches never move state, or the marker predates this field) — read back to restore the issue on an invalid result (Step 5 item 1). */
   previousStateId: string | null;
+  /** The `FOREMAN-ISSUES` comma-separated batch (triage only) embedded in the dispatched task text, or null for every other stage. */
+  batchIssueIds: string | null;
 }
 /** Recovers `dispatchId`/`issueId`/`previousStateId` from the `FOREMAN-*` marker lines embedded in the dispatched task text. */
 export function extractDispatchInfo(
@@ -46,6 +48,23 @@ export function extractDispatchInfo(
   const issueId = lastMarkerValue(/^FOREMAN-ISSUE:\s*(\S+)\s*$/gm, taskText);
   const previousStateId = lastMarkerValue(/^FOREMAN-PREV-STATE:\s*(\S+)\s*$/gm, taskText);
   return { dispatchId, issueId, previousStateId };
+}
+
+/** Every `task` entry, normalized the same way `extractFromToolResult` does — used by callers that need to walk task text before (or independent of) a `results[]` array. */
+function normalizeTasks(payload: unknown): unknown[] {
+  if (!isRecord(payload)) return [];
+  const input = isRecord(payload.input) ? payload.input : {};
+  return Array.isArray(input.tasks) ? input.tasks : "task" in input ? [input] : [];
+}
+
+/** Every `FOREMAN-DISPATCH` id in a `task` tool call's items, captured or not — the `tool_result` handler releases the live-dispatch registration for the ones the sink could not capture. */
+export function extractDispatchIds(payload: unknown): string[] {
+  const ids: string[] = [];
+  for (const task of normalizeTasks(payload)) {
+    const { dispatchId } = extractDispatchInfo(taskTextOf(task));
+    if (dispatchId) ids.push(dispatchId);
+  }
+  return ids;
 }
 
 function taskTextOf(entry: unknown): string {
@@ -99,6 +118,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
     if (typeof single.agent === "string" && agent !== null && single.agent !== agent) continue;
     const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskTextOf(task));
     if (!agent || !dispatchId) continue;
+    const batchIssueIds = lastMarkerValue(/^FOREMAN-ISSUES:\s*(\S+)\s*$/gm, taskTextOf(task));
 
     captured.push({
       dispatchId,
@@ -107,6 +127,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
       aborted: abortedOf(single),
       issueId,
       previousStateId,
+      batchIssueIds,
     });
   }
   return captured;
@@ -114,7 +135,7 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
 
 /** Marks a dispatch as applied, and checks whether it already was. Backed by Linear markers (`results/apply.ts` writes them). */
 export interface AppliedTracker {
-  /** `agent` lets a plan/roadmap/triage dispatch id — whose encoded "subject" is a project id, initiative id, or the literal `"batch"`, never an issue id — skip the issue-scoped marker lookup entirely rather than querying Linear with a non-issue id. */
+  /** `agent` lets a plan/roadmap/context/triage dispatch id — whose encoded "subject" is a project id, initiative id, team key, or the literal `"batch"`, never an issue id — skip the issue-scoped marker lookup entirely rather than querying Linear with a non-issue id. */
   wasApplied(dispatchId: string, agent: string): Promise<boolean>;
 }
 

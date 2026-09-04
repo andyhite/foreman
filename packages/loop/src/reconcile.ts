@@ -29,7 +29,6 @@ import {
   readLockComment,
   type ResolvedRepoEntry,
   resolveState,
-  RUNNING_FILTER,
   FOREMAN_STATE,
   type WorkflowStateType,
   cleanupMergedWork,
@@ -136,7 +135,7 @@ const mergedNotDone: Invariant = {
   name: "merged-not-done",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(inState(FOREMAN_STATE.inReview)),
+      filter: all(inState(FOREMAN_STATE.inReview), notHandsOff(ctx.viewerId ?? "")),
       includeComments: true,
       first: 250,
     });
@@ -211,6 +210,11 @@ const blockedAnswered: Invariant = {
   name: "blocked-answered",
   async select(ctx) {
     if (ctx.viewerId === null) return [];
+    // Without a configured operator there is no way to tell the operator's
+    // reply from a teammate's "+1" or a sync bot's comment, and un-parking on
+    // the wrong one silently lifts the operator's hold. `/foreman:unblock` is
+    // then the only way out, by design.
+    if (ctx.config.linear.operatorUserId === null) return [];
     const issues = await ctx.linear.issues({
       filter: all(HUMAN_QUEUE_FILTER),
       includeComments: true,
@@ -223,8 +227,7 @@ const blockedAnswered: Invariant = {
       return comments.some((comment) => {
         if (new Date(comment.createdAt).getTime() <= new Date(marker.createdAt).getTime()) return false;
         if (comment.user?.id === undefined) return false;
-        if (operatorUserId !== null) return comment.user.id === operatorUserId;
-        return findCommentAuthor(comments, marker.commentId) !== comment.user.id;
+        return comment.user.id === operatorUserId;
       });
     });
   },
@@ -239,7 +242,7 @@ const blockedAnswered: Invariant = {
     const answeringComment = comments
       .filter((comment) => {
         if (marker === null || new Date(comment.createdAt).getTime() <= new Date(marker.createdAt).getTime()) return false;
-        return operatorUserId !== null ? comment.user?.id === operatorUserId : true;
+        return comment.user?.id === operatorUserId;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
     const body = encodeMarker(
@@ -251,10 +254,6 @@ const blockedAnswered: Invariant = {
     return `moved to ${target.name}`;
   },
 };
-
-function findCommentAuthor(comments: readonly { id: string; user: { id: string } | null }[], commentId: string): string | null {
-  return comments.find((comment) => comment.id === commentId)?.user?.id ?? null;
-}
 
 export const INVARIANTS: Invariant[] = [
   inProgressAbandoned,

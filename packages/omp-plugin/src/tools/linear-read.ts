@@ -19,7 +19,7 @@ import {
   parseIdentifiers,
   withIdentifiers,
 } from "@foreman/core";
-import { getContextDigest, getEntry, getLinear } from "../runtime.ts";
+import { getContextDigest, getEntry, getLinear, getProductDigest } from "../runtime.ts";
 
 /**
  * A `view` row. Deliberately not an `Issue`: a view is a scan surface, and a
@@ -71,7 +71,7 @@ const SAVED_VIEWS: Record<string, () => IssueFilter> = {
   "in-review": () => inState(FOREMAN_STATE.inReview),
 };
 
-const OPS = ["issue", "issues", "comments", "project_context", "states", "labels", "teams", "team_roadmap", "project_labels", "view"] as const;
+const OPS = ["issue", "issues", "comments", "context", "project_context", "states", "labels", "teams", "team_roadmap", "project_labels", "view"] as const;
 
 export function registerLinearReadTool(pi: ExtensionAPI): void {
   const shape = {
@@ -161,6 +161,9 @@ export function registerLinearReadTool(pi: ExtensionAPI): void {
       if (params.op === "comments") {
         if (!params.id) return errorResult("op \"comments\" requires \"id\".");
         return jsonResult(await linear.comments(params.id));
+      }
+      if (params.op === "context") {
+        return jsonResult({ digest: await getProductDigest() });
       }
       if (params.op === "project_context") {
         if (!params.id) return errorResult("op \"project_context\" requires \"id\" (project id).");

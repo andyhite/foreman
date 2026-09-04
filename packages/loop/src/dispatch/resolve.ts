@@ -62,6 +62,10 @@ export class FallbackDispatcher implements Dispatcher {
     return this.#ownerOf(handle).settle(handle);
   }
 
+  async abort(handle: DispatchHandle): Promise<void> {
+    await this.#ownerOf(handle).abort?.(handle);
+  }
+
   async cleanup(issueId: string, repoPath: string, worktreePath: string | null): Promise<void> {
     await this.#primary.cleanup?.(issueId, repoPath, worktreePath);
   }

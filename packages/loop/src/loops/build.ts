@@ -84,6 +84,7 @@ const implementRule: Rule<BuildSnapshot> = {
 const reviewRule: Rule<BuildSnapshot> = {
   name: "review",
   select(snapshot) {
+    if (snapshot.viewerId === null) return [];
     const eligible = snapshot.inReview
       .filter(
         (entry) =>
@@ -116,6 +117,7 @@ const reviewRule: Rule<BuildSnapshot> = {
 const mergeRule: Rule<BuildSnapshot> = {
   name: "merge",
   select(snapshot) {
+    if (snapshot.viewerId === null) return [];
     if (!snapshot.autoMerge) return [];
     const eligible = snapshot.inReview
       .filter((entry) => {
@@ -180,7 +182,9 @@ export const BUILD_LOOP: Loop<BuildSnapshot> = {
       let branchSha: string | null = null;
       try {
         // eslint-disable-next-line no-await-in-loop -- one GitHub read per In Review issue; this loop's own poll cadence bounds the cost.
-        pr = ctx.entry.pr.required ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open" }) : null;
+        pr = ctx.entry.pr.required
+          ? await ctx.github.prForBranch(ctx.entry.repoPath, branch, { state: "open", base: ctx.entry.baseBranch })
+          : null;
         // eslint-disable-next-line no-await-in-loop
         branchSha = ctx.entry.pr.required ? null : await ctx.github.revParse(ctx.entry.repoPath, `origin/${branch}`);
       } catch {

@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
 import type {
   DispatchHandle,
@@ -29,6 +29,16 @@ interface RunningProcess {
   outcome: Promise<DispatchOutcome>;
   settled: boolean;
   status: DispatchStatus;
+  child: ChildProcess;
+}
+
+/** Signals a spawned child's whole process group (it is started `detached: true`), falling back to the bare pid if the group is already gone. */
+function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (child.pid) process.kill(-child.pid, signal);
+  } catch {
+    // The group (or the process) is already gone.
+  }
 }
 
 export class PrintDispatcher implements Dispatcher {
@@ -93,11 +103,14 @@ export class PrintDispatcher implements Dispatcher {
       prompt,
     ];
 
-    // FOREMAN-SEC-001: an implement agent has bash and inherits this child's
-    // environment, so a credential this loop resolved for its own Linear
-    // calls (e.g. LINEAR_API_KEY) must not be handed to a prompt-injectable
-    // workflow agent verbatim. Callers pass the configured credential env
-    // var name(s) as `scrubEnv`.
+    // FOREMAN-SEC-001: the loop's own Linear credential (e.g. LINEAR_API_KEY)
+    // must not be handed to a prompt-injectable workflow agent's environment
+    // verbatim, so it stays out of that process's `ps`/`env` surface and out
+    // of anything it spawns. This is not containment: `linear.apiKeyFile` is
+    // required for loop dispatch precisely so the dispatched session's own
+    // extension can read the credential from disk, and every agent in that
+    // session holds a `read` tool that can read it too. Callers pass the
+    // configured credential env var name(s) as `scrubEnv`.
     const env = { ...process.env };
     for (const name of this.#scrubEnv) {
       delete env[name];
@@ -110,6 +123,7 @@ export class PrintDispatcher implements Dispatcher {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env,
+      detached: true,
     });
 
     for (const handle of handles) {
@@ -146,8 +160,8 @@ export class PrintDispatcher implements Dispatcher {
     const killTimer =
       maxRuntimeMs > 0
         ? setTimeout(() => {
-            child.kill("SIGTERM");
-            hardKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+            killGroup(child, "SIGTERM");
+            hardKillTimer = setTimeout(() => killGroup(child, "SIGKILL"), 10_000);
           }, maxRuntimeMs)
         : undefined;
 
@@ -156,6 +170,7 @@ export class PrintDispatcher implements Dispatcher {
       status: "starting",
       settled: false,
       outcome: outcomeReady,
+      child,
     };
     this.#running.set(key, entry);
     for (const item of request.items) this.#keyByDispatchId.set(item.dispatchId, key);
@@ -207,7 +222,19 @@ export class PrintDispatcher implements Dispatcher {
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
     const key = this.#keyByDispatchId.get(handle.dispatchId);
     const entry = key ? this.#running.get(key) : undefined;
-    return entry ? entry.status : "settled";
+    if (entry) return entry.status;
+    // A handle from a previous process is not tracked here, but its child may
+    // still be alive — the same property `FallbackDispatcher.#ownerOf` preserves
+    // for herdr handles.
+    if (handle.pid !== null && handle.pid !== undefined) {
+      try {
+        process.kill(handle.pid, 0);
+        return "running";
+      } catch {
+        return "settled";
+      }
+    }
+    return "settled";
   }
 
   /** Awaits and prunes the tracked entry once the dispatch's outcome resolves. */
@@ -226,9 +253,17 @@ export class PrintDispatcher implements Dispatcher {
     return { ...outcome, handle };
   }
 
+  /** Best-effort SIGTERM of a live dispatch's process group; the existing `maxRuntimeMs` timer is the SIGKILL backstop, so this never escalates itself. */
+  async abort(handle: DispatchHandle): Promise<void> {
+    const key = this.#keyByDispatchId.get(handle.dispatchId);
+    const entry = key ? this.#running.get(key) : undefined;
+    if (!entry || entry.settled) return;
+    killGroup(entry.child, "SIGTERM");
+  }
+
   async available(): Promise<boolean> {
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    execFile(this.#config.agent.ompBin, ["--version"], (error) => {
+    execFile(this.#config.agent.ompBin, ["--version"], { timeout: 5_000 }, (error) => {
       resolve(!error);
     });
     return promise;

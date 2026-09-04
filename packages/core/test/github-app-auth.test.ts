@@ -128,3 +128,20 @@ describe("GitHubAppAuth.installationToken", () => {
     expect(second).toBe("token-2");
   });
 });
+
+describe("GitHubAppAuth timeout", () => {
+  it("rejects with GitHubAppError when the request never resolves", async () => {
+    const fetchImpl = ((_url: string | URL | Request, init?: { signal?: AbortSignal }) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const err = new Error("The operation was aborted");
+          err.name = "TimeoutError";
+          reject(err);
+        });
+      })) as unknown as typeof fetch;
+    const auth = new GitHubAppAuth(makeCredentials(), { fetchImpl, timeoutMs: 20 });
+
+    await expect(auth.app()).rejects.toThrow(/timed out/);
+    await expect(auth.app()).rejects.toBeInstanceOf(GitHubAppError);
+  });
+});

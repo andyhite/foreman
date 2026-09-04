@@ -91,11 +91,14 @@ class FakeLinear implements LinearWriter {
   async projectStatus(projectId: string): Promise<ProjectStatus | null> {
     return this.statusByProject.get(projectId) ?? null;
   }
-  async projectInitiatives() {
+  async teamDocuments() {
     return [];
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return KNOWN_STATES;
@@ -385,12 +388,26 @@ describe("prepareTaskCall — project and batch stages", () => {
     const linear = new FakeLinear([]);
     const input: TaskCallInput = {
       context: "shared context",
-      tasks: [{ agent: "foreman-triage", task: "Triage the inbox." }],
+      tasks: [{ agent: "foreman-triage", task: "FOREMAN-ISSUES: ENG-1,ENG-2\nTriage the inbox." }],
     };
     const decision = await prepareTaskCall(input, makeDeps(linear));
     expect(decision.block).toBeUndefined();
     const task = decision.input?.tasks?.[0]?.task ?? "";
     expect(extractDispatchInfo(task).dispatchId).toBe("foreman-triage-batch-dispatch-1");
+  });
+
+  /*
+   * The batch is the whole point of the marker: the original planning session
+   * handed triage ten ids and the agent read the entire team instead, so the
+   * extension now refuses any result item naming an issue outside it. A
+   * dispatch with no batch to check against must not run at all.
+   */
+  it("blocks a triage item with no FOREMAN-ISSUES marker", async () => {
+    const linear = new FakeLinear([]);
+    const input: TaskCallInput = { context: "c", tasks: [{ agent: "foreman-triage", task: "Triage the inbox." }] };
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    expect(decision.block).toBe(true);
+    expect(decision.reason).toContain("FOREMAN-ISSUES");
   });
 
   it("still blocks a plan item with no FOREMAN-PROJECT marker", async () => {
@@ -413,6 +430,24 @@ describe("prepareTaskCall — project and batch stages", () => {
     expect(task).toContain("FOREMAN-TEAM: ENG");
     expect(task).toContain("FOREMAN-BRIEF: docs/prd.md");
     expect(task).toContain("FOREMAN-APPS: fleet,zero");
+  });
+
+  it("gets FOREMAN-DISPATCH and FOREMAN-TEAM markers, claims no lock, needs no FOREMAN-ISSUE, and gets a null context digest", async () => {
+    const linear = new FakeLinear([]);
+    const input: TaskCallInput = {
+      context: "shared context",
+      tasks: [{ agent: "foreman-context", task: "Review the product Context doc." }],
+    };
+    const decision = await prepareTaskCall(input, makeDeps(linear));
+    expect(decision.block).toBeUndefined();
+    const task = decision.input?.tasks?.[0]?.task ?? "";
+    expect(task).toContain(`FOREMAN-DISPATCH: foreman-context-ENG-dispatch-1`);
+    expect(task).toContain("FOREMAN-TEAM: ENG");
+    expect(task).not.toContain("FOREMAN-ISSUE:");
+    expect(linear.updateCalls).toEqual([]);
+    expect(linear.createCommentCalls).toEqual([]);
+    // No project to key a Context digest off; nothing appended to `context`.
+    expect(decision.input?.context).toBe("shared context");
   });
 });
 
@@ -705,5 +740,32 @@ describe("prepareTaskCall — unwindPrepared releases the live-dispatch registra
     // why the id must still be dropped from the live registry: a reaper
     // sweep, not this in-process registry, is what recovers it.
     expect(released).toEqual(["foreman-implement-ENG-1-dispatch-1"]);
+  });
+});
+
+describe("prepareTaskCall — unwindPrepared releases a project-scoped item's dispatch id", () => {
+  it("a two-item task whose second item blocks releases the first (triage) item's dispatch id", async () => {
+    const linear = new FakeLinear([]);
+    const released: string[] = [];
+    const deps = makeDeps(linear, { releaseLiveDispatch: (dispatchId) => released.push(dispatchId) });
+
+    const input: TaskCallInput = {
+      tasks: [
+        { agent: "foreman-triage", task: "FOREMAN-ISSUES: ENG-1,ENG-2\nTriage the inbox." },
+        // References an issue the fake has never heard of: `fetchIssue`
+        // throws unconditionally, forcing `unwindPrepared` for item 1.
+        { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-ISSUE: ENG-404\n" },
+      ],
+    };
+
+    const decision = await prepareTaskCall(input, deps);
+
+    expect(decision.block).toBe(true);
+    // Triage claims no Linear lock, so there is nothing to roll back — but
+    // the dispatch id it registered must still be released, or it reads as
+    // live for the rest of the session.
+    expect(released).toEqual(["foreman-triage-batch-dispatch-1"]);
+    expect(linear.updateCalls).toEqual([]);
+    expect(linear.createCommentCalls).toEqual([]);
   });
 });

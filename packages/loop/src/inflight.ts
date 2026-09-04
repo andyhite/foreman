@@ -52,7 +52,12 @@ export class InflightStore {
       try {
         const raw = readFileSync(path, "utf8");
         const parsed = JSON.parse(raw) as Partial<InflightFile>;
-        state = { ...emptyFile(), ...parsed };
+        const isPlainRecord = (value: unknown): boolean =>
+          typeof value === "object" && value !== null && !Array.isArray(value);
+        state = {
+          inFlight: isPlainRecord(parsed.inFlight) ? (parsed.inFlight as InflightFile["inFlight"]) : {},
+          failures: isPlainRecord(parsed.failures) ? (parsed.failures as InflightFile["failures"]) : {},
+        };
       } catch {
         state = emptyFile();
       }

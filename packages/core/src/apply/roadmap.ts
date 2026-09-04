@@ -10,6 +10,7 @@
  */
 
 import { latestTargetDate } from "../linear/project.ts";
+import { sanitizeAgentText, stripControlChars } from "../sanitize.ts";
 import type { LinearWriter } from "../linear/api.ts";
 import type { LinearId, Project, ProjectRef } from "../linear/types.ts";
 import type { ProposedProject, RoadmapResult } from "../schemas/roadmap.ts";
@@ -212,7 +213,14 @@ export async function applyRoadmap(
       let startDate = entry.startDate;
       let targetDate = entry.targetDate;
       if (latest !== null && startDate <= latest) {
-        const durationDays = daysBetween(entry.startDate, entry.targetDate);
+        const rawDuration = daysBetween(entry.startDate, entry.targetDate);
+        if (rawDuration < 0) {
+          problems.push({
+            key,
+            error: `${key}: targetDate ${entry.targetDate} is before startDate ${entry.startDate}; treated as a zero-day project`,
+          });
+        }
+        const durationDays = Math.max(0, rawDuration);
         const shiftedStart = addDays(latest, 1);
         const shiftedTarget = addDays(shiftedStart, durationDays);
         dateAdjustments.push({
@@ -261,9 +269,9 @@ export async function applyRoadmap(
     let project: { id: LinearId; name: string };
     try {
       project = await linear.createProject({
-        name: entry.name,
+        name: stripControlChars(entry.name),
         teamIds: [input.teamId],
-        description: entry.description,
+        description: sanitizeAgentText(entry.description),
         content: entry.brief,
         startDate: dates.startDate,
         targetDate: dates.targetDate,

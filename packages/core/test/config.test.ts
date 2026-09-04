@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -438,6 +438,7 @@ describe("resolveLinearApiKey", () => {
     try {
       const keyFile = join(home, "key.txt");
       writeFileSync(keyFile, "file-key\nsecond line\n", "utf8");
+      chmodSync(keyFile, 0o600);
       writeGlobalConfig(home, { linear: { apiKeyFile: keyFile } });
       const { config } = loadGlobalConfig({ home });
       const key = resolveLinearApiKey(config, {});
@@ -450,6 +451,55 @@ describe("resolveLinearApiKey", () => {
   it("throws ConfigError explaining both options when neither is available", () => {
     const config = baseConfig();
     expect(() => resolveLinearApiKey(config, {})).toThrow(ConfigError);
+  });
+
+  it("throws ConfigError when apiKeyFile is readable by group or others", () => {
+    if (process.platform === "win32") return;
+    const home = makeHome();
+    try {
+      const keyFile = join(home, "key.txt");
+      writeFileSync(keyFile, "file-key\n", "utf8");
+      chmodSync(keyFile, 0o644);
+      writeGlobalConfig(home, { linear: { apiKeyFile: keyFile } });
+      const { config } = loadGlobalConfig({ home });
+      expect(() => resolveLinearApiKey(config, {})).toThrow(ConfigError);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("assertEndpointHostAllowed", () => {
+  const configWithEndpoint = (endpoint: string, allowCustomEndpoint = false): GlobalConfig => {
+    const home = makeHome();
+    try {
+      writeGlobalConfig(home, { linear: { endpoint, allowCustomEndpoint } });
+      return loadGlobalConfig({ home }).config;
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  it("throws ConfigError for an unparseable endpoint", () => {
+    expect(() => configWithEndpoint("not a url")).toThrow(ConfigError);
+  });
+
+  it("throws ConfigError for a non-https scheme", () => {
+    expect(() => configWithEndpoint("http://api.linear.app/graphql")).toThrow(ConfigError);
+  });
+
+  it("throws ConfigError for a disallowed https host", () => {
+    expect(() => configWithEndpoint("https://evil.example.com/graphql")).toThrow(ConfigError);
+  });
+
+  it("allows the default https://api.linear.app/graphql endpoint", () => {
+    const config = configWithEndpoint("https://api.linear.app/graphql");
+    expect(config.linear.endpoint).toBe("https://api.linear.app/graphql");
+  });
+
+  it("allows a custom https host when allowCustomEndpoint is set", () => {
+    const config = configWithEndpoint("https://custom.example.com/graphql", true);
+    expect(config.linear.endpoint).toBe("https://custom.example.com/graphql");
   });
 });
 

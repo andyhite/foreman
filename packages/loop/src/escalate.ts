@@ -41,9 +41,9 @@ export async function applyEscalation(linear: LinearWriter, escalation: Escalati
     blockedByIssues: [],
   };
 
+  await linear.createComment({ issueId: issue.id, body: encodeMarker(MARKER_KIND.block, block, whatINeed) });
   const states = await linear.workflowStates(issue.team.id);
   const target = resolveState("blocked", states);
   await linear.updateIssue(issue.id, { stateId: target.id, assigneeId: null });
-  await linear.createComment({ issueId: issue.id, body: encodeMarker(MARKER_KIND.block, block, whatINeed) });
   return `${escalation.issueId}: escalated to ${FOREMAN_STATE.blocked} (${escalation.kind})`;
 }

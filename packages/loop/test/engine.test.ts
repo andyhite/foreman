@@ -72,6 +72,14 @@ class FakeDispatcher implements Dispatcher {
   async available(): Promise<boolean> {
     return true;
   }
+
+  abortCalls: DispatchHandle[] = [];
+  async abort(handle: DispatchHandle): Promise<void> {
+    this.abortCalls.push(handle);
+    // Mirrors a real dispatcher's SIGTERM eventually reaching the child:
+    // resolve its settle if one is still pending.
+    if (this.#resolvers.has(handle.dispatchId)) this.finishSettle(handle.dispatchId, 143);
+  }
 }
 
 interface Snapshot {
@@ -398,5 +406,105 @@ describe("runLoop", () => {
     process.emit("SIGINT" as never);
     await run;
     expect(Date.now() - start).toBeLessThan(1_000);
+  });
+
+  it("calls abort on a still-settling dispatch when SIGINT arrives, and resolves within 1s", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 3);
+
+    const start = Date.now();
+    const run = runLoop(loop, makeCtx(), {
+      once: false,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 60_000,
+    });
+
+    await dispatcher.untilDispatched(1);
+    const dispatchId = dispatcher.dispatched[0]!.items[0]!.dispatchId;
+    // Never call finishSettle: the dispatch stays outstanding, so `stop`
+    // must reach it through `abort`, not through the settle resolving on
+    // its own.
+    process.emit("SIGINT" as never);
+    await run;
+
+    expect(Date.now() - start).toBeLessThan(1_000);
+    expect(dispatcher.abortCalls).toHaveLength(1);
+    expect(dispatcher.abortCalls[0]!.dispatchId).toBe(dispatchId);
+  });
+
+  it("still awaits and aborts a dispatch started on an earlier poll when stop arrives on a later one", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([makeCandidate("issue:A")], 1);
+
+    const run = runLoop(loop, makeCtx(), {
+      once: false,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 10,
+    });
+
+    await dispatcher.untilDispatched(1);
+    const dispatchId = dispatcher.dispatched[0]!.items[0]!.dispatchId;
+    // issue:A is still in flight (never settled), so subsequent polls add
+    // no new dispatch; `stop`, once it lands, must still find and abort
+    // this earlier poll's dispatch.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    process.emit("SIGINT" as never);
+    await run;
+
+    expect(dispatcher.abortCalls.map((h) => h.dispatchId)).toEqual([dispatchId]);
+  });
+
+  it("logs a declined retry-exhausted escalation exactly once across two polls, with no Linear write", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    state.recordFailure("issue:ENG-1");
+    state.recordFailure("issue:ENG-1");
+    const loop = makeLoop([makeCandidate("issue:ENG-1")], 3);
+    const logs: string[] = [];
+    let linearWrites = 0;
+    const fakeLinear = {
+      issue: async () => ({
+        id: "id-1",
+        identifier: "ENG-1",
+        team: { id: "team-1" },
+        state: { id: "state-in-progress", name: "In Progress", type: "started", position: 3 },
+        labels: [],
+      }),
+      workflowStates: async () => [{ id: "state-blocked", name: "Blocked", type: "started", position: 4 }],
+      ensureLabel: async (name: string) => ({ id: `label-${name}`, name }),
+      updateIssue: async () => {
+        linearWrites += 1;
+      },
+      createComment: async () => {
+        linearWrites += 1;
+      },
+    } as unknown as LoopContext["linear"];
+    // Denies the escalation confirm, approves nothing else is offered.
+    const DENY_CONFIRMER = { confirm: async () => false, close: () => {} };
+
+    const run = runLoop(loop, makeCtx({ linear: fakeLinear }), {
+      once: false,
+      dispatcher,
+      confirmer: DENY_CONFIRMER,
+      state,
+      log: (message) => logs.push(message),
+      pollMs: 5,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    process.emit("SIGINT" as never);
+    await run;
+
+    expect(linearWrites).toBe(0);
+    const declineLines = logs.filter((line) => line.includes("escalation declined; still retry-exhausted"));
+    expect(declineLines).toHaveLength(1);
   });
 });

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { YOLO_CONFIRMER } from "../src/confirm.ts";
+import { CONTEXT_DOC_TEMPLATE, CONTEXT_DOC_TITLE } from "../src/domain/context-doc.ts";
 import { provisionTeam } from "../src/provision.ts";
 import type {
   Comment,
-  Initiative,
-  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRelationType,
+  LinearDocument,
   LinearId,
   Project,
   ProjectRef,
@@ -15,7 +15,6 @@ import type {
   ProjectRelationAnchor,
   ProjectRelationType,
   ProjectStatus,
-  ProjectStatusType,
   TeamRef,
   TeamSettings,
   UserRef,
@@ -29,16 +28,19 @@ class FakeLinear implements LinearWriter {
   settings: TeamSettings;
   workspaceLabels: IssueLabel[] = [];
   workspaceProjectLabels: IssueLabel[] = [];
+  documents: LinearDocument[];
   createWorkflowStateCalls: Array<{ teamId: LinearId; name: string; type: string; color: string; description?: string; position?: number }> = [];
   updateWorkflowStateCalls: Array<{ id: LinearId; input: { name?: string; color?: string; description?: string; position?: number } }> = [];
   archiveWorkflowStateCalls: LinearId[] = [];
   updateTeamSettingsCalls: Array<{ teamId: LinearId; input: { triageEnabled?: boolean; cyclesEnabled?: boolean } }> = [];
   ensureWorkspaceLabelCalls: string[] = [];
   ensureProjectLabelCalls: string[] = [];
+  createDocumentCalls: Array<{ teamId: LinearId; title: string; content: string }> = [];
 
-  constructor(states: WorkflowState[], settings: TeamSettings) {
+  constructor(states: WorkflowState[], settings: TeamSettings, documents: LinearDocument[] = []) {
     this.states = states;
     this.settings = settings;
+    this.documents = documents;
   }
 
   async workflowStates(): Promise<WorkflowState[]> {
@@ -115,11 +117,20 @@ class FakeLinear implements LinearWriter {
   project(): Promise<Project | null> {
     throw new Error("not implemented");
   }
-  projectInitiatives(): Promise<InitiativeRef[]> {
-    throw new Error("not implemented");
+  async teamDocuments(): Promise<LinearDocument[]> {
+    return this.documents;
   }
-  initiative(): Promise<Initiative | null> {
-    throw new Error("not implemented");
+  async createDocument(input: { teamId: LinearId; title: string; content: string }): Promise<LinearDocument> {
+    this.createDocumentCalls.push(input);
+    const created: LinearDocument = { id: `doc-${input.title}`, title: input.title, content: input.content, updatedAt: "2026-01-01T00:00:00Z" };
+    this.documents.push(created);
+    return created;
+  }
+  updateDocumentCalls: Array<{ documentId: LinearId; content: string }> = [];
+  async updateDocument(input: { documentId: LinearId; content: string }): Promise<void> {
+    this.updateDocumentCalls.push(input);
+    const doc = this.documents.find((candidate) => candidate.id === input.documentId);
+    if (doc) doc.content = input.content;
   }
   projectRelations(): Promise<ProjectRelation[]> {
     throw new Error("not implemented");
@@ -308,5 +319,63 @@ describe("provisionTeam", () => {
     expect(linear.archiveWorkflowStateCalls).toHaveLength(0);
     expect(linear.updateTeamSettingsCalls).toHaveLength(0);
     expect(actions.some((action) => action.detail === "declined")).toBe(true);
+  });
+
+  it("seeds the product Context doc when the team has none", async () => {
+    const linear = new FakeLinear(stockStates(), stockSettings(), []);
+
+    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+
+    expect(linear.createDocumentCalls).toHaveLength(1);
+    expect(linear.createDocumentCalls[0]?.title).toBe(CONTEXT_DOC_TITLE);
+    expect(linear.createDocumentCalls[0]?.content).toContain("Definition of Done");
+    expect(linear.createDocumentCalls[0]?.content).toBe(CONTEXT_DOC_TEMPLATE);
+  });
+
+  it("never overwrites an existing Context doc, including one differing only in case or surrounding whitespace", async () => {
+    const existing: LinearDocument = { id: "doc-1", title: " context ", content: "operator's own prose", updatedAt: "2026-01-01T00:00:00Z" };
+    const linear = new FakeLinear(stockStates(), stockSettings(), [existing]);
+
+    await provisionTeam(linear, { teamId: "t1", apps: [], confirmer: YOLO_CONFIRMER });
+
+    expect(linear.createDocumentCalls).toHaveLength(0);
+    expect(linear.documents).toEqual([existing]);
+  });
+
+  it("declining the confirm writes no Context doc", async () => {
+    const linear = new FakeLinear(stockStates(), stockSettings(), []);
+
+    await provisionTeam(linear, {
+      teamId: "t1",
+      apps: [],
+      confirmer: { confirm: async () => false, close: () => {} },
+    });
+
+    expect(linear.createDocumentCalls).toHaveLength(0);
+  });
+
+  it("still prompts once when the Context doc is the only thing missing", async () => {
+    const states = stockStates();
+    for (const spec of ["Refining", "Needs Input", "Ready", "Blocked", "In Review"]) {
+      states.push({ id: `s-${spec}`, name: spec, type: "unstarted", position: states.length, color: "#000000", description: null });
+    }
+    const linear = new FakeLinear(states, stockSettings({ triageEnabled: true, cyclesEnabled: false }), []);
+    let confirmCalls = 0;
+    const actions = await provisionTeam(linear, {
+      teamId: "t1",
+      apps: [],
+      confirmer: {
+        confirm: async () => {
+          confirmCalls += 1;
+          return true;
+        },
+        close: () => {},
+      },
+    });
+
+    expect(confirmCalls).toBe(1);
+    expect(linear.createDocumentCalls).toHaveLength(1);
+    const documentAction = actions.find((action) => action.kind === "document");
+    expect(documentAction?.changed).toBe(true);
   });
 });

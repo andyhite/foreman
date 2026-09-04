@@ -6,7 +6,9 @@ export * from "./implement.ts";
 export * from "./review.ts";
 export * from "./plan.ts";
 export * from "./roadmap.ts";
+export * from "./context.ts";
 
+import { ContextOutput } from "./context.ts";
 import { ImplementOutput } from "./implement.ts";
 import { PlanOutput } from "./plan.ts";
 import { RefineOutput } from "./refine.ts";
@@ -17,7 +19,7 @@ import { TriageOutput } from "./triage.ts";
 /**
  * The complete set of agent output envelopes (SPEC §6), keyed by the agent
  * name that produces them. `parse.ts` and `emit-schemas.ts` both drive off
- * this registry so there is exactly one place that knows all six agents.
+ * this registry so there is exactly one place that knows all seven agents.
  */
 export const AGENT_OUTPUT_SCHEMAS = {
   "foreman-triage": TriageOutput,
@@ -26,6 +28,7 @@ export const AGENT_OUTPUT_SCHEMAS = {
   "foreman-refine": RefineOutput,
   "foreman-implement": ImplementOutput,
   "foreman-review": ReviewOutput,
+  "foreman-context": ContextOutput,
 } as const;
 
 export type ForemanAgentName = keyof typeof AGENT_OUTPUT_SCHEMAS;
@@ -41,4 +44,5 @@ export const SCHEMA_FILENAMES: Record<ForemanAgentName, string> = {
   "foreman-refine": "refine-result.json",
   "foreman-implement": "implement-result.json",
   "foreman-review": "review-result.json",
+  "foreman-context": "context-result.json",
 };

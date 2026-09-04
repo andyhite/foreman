@@ -34,6 +34,7 @@ interface GhPrListEntry {
   isDraft: boolean;
   mergeable: string;
   baseRefName: string;
+  isCrossRepository: boolean;
 }
 
 interface GhCheckRun {
@@ -57,15 +58,6 @@ export class DirtyWorkingTreeError extends Error {
 }
 
 export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
-
-/** `process.env`, filtered to defined entries — `execFile`'s `env` option rejects `undefined` values, but plain `{ ...process.env }` types as possibly holding them. */
-function definedEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  return env;
-}
 
 export class GitHubClient {
   readonly #runner: CommandRunner;
@@ -92,7 +84,7 @@ export class GitHubClient {
       "--state",
       options?.state ?? "open",
       "--json",
-      "number,url,headRefOid,state,isDraft,mergeable,baseRefName",
+      "number,url,headRefOid,state,isDraft,mergeable,baseRefName,isCrossRepository",
       "--limit",
       "20",
     ];
@@ -104,10 +96,22 @@ export class GitHubClient {
       return null;
     }
     const entries = JSON.parse(trimmed) as GhPrListEntry[];
-    const entry =
-      options?.state === "all"
-        ? (entries.find((candidate) => candidate.state === "MERGED") ?? entries[0])
-        : entries[0];
+    // GitHub's --head filter matches a head *ref name* in any repo, forks
+    // included, so a fork PR reusing the Foreman branch name would otherwise
+    // be reviewed, approved and merged in place of the real one.
+    const sameRepo = entries.filter((candidate) => candidate.isCrossRepository !== true);
+    let entry: GhPrListEntry | undefined;
+    if (options?.state === "all") {
+      entry = sameRepo.find((candidate) => candidate.state === "MERGED") ?? sameRepo[0];
+    } else {
+      if (sameRepo.length > 1) {
+        const numbers = sameRepo.map((candidate) => `#${candidate.number}`).join(", ");
+        throw new Error(
+          `refusing to act on branch ${branch}: ${sameRepo.length} same-repo PRs match its head ref (${numbers}) — close the extras first`,
+        );
+      }
+      entry = sameRepo[0];
+    }
     if (!entry) {
       return null;
     }
@@ -201,13 +205,13 @@ export class GitHubClient {
       "-f",
       `body=${options.body}`,
     ];
-    let env: Record<string, string> | undefined;
+    let extraEnv: Record<string, string> | undefined;
     if (this.#appAuth) {
       const { owner, repo } = await this.repoSlug(repoPath);
       const token = await this.#appAuth.installationToken(owner, repo);
-      env = { ...definedEnv(), GH_TOKEN: token };
+      extraEnv = { GH_TOKEN: token };
     }
-    await this.#runner.run(argv, { cwd: repoPath, env });
+    await this.#runner.run(argv, { cwd: repoPath, extraEnv });
   }
 
   /**
@@ -223,7 +227,7 @@ export class GitHubClient {
         "api",
         "--paginate",
         "--slurp",
-        `repos/{owner}/{repo}/commits/${ref}/check-runs`,
+        `repos/{owner}/{repo}/commits/${encodeURIComponent(ref)}/check-runs`,
       ],
       { cwd: repoPath },
     );
@@ -235,7 +239,15 @@ export class GitHubClient {
     if (runs.some((run) => run.status !== "completed")) {
       return "pending";
     }
-    if (runs.some((run) => run.conclusion !== "success" && run.conclusion !== "neutral")) {
+    if (
+      runs.some(
+        (run) =>
+          run.conclusion !== "success" &&
+          run.conclusion !== "neutral" &&
+          run.conclusion !== "skipped" &&
+          run.conclusion !== "stale",
+      )
+    ) {
       return "failure";
     }
     return "success";
@@ -386,13 +398,6 @@ export class GitHubClient {
 
       await this.#runner.run(["git", "push", remote, baseBranch], { cwd: repoPath });
       mergeCommit = (await this.#runner.run(["git", "rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-
-      if (deleteBranch) {
-        await this.#runner.run(["git", "branch", "-D", branch], { cwd: repoPath });
-        await this.#runner.run(["git", "push", remote, "--delete", branch], {
-          cwd: repoPath,
-        });
-      }
     } catch (error) {
       // A conflict mid-rebase/merge leaves an unresolved index; restoring
       // `startingRef` directly against that index fails, replacing the real
@@ -410,7 +415,14 @@ export class GitHubClient {
       throw error;
     }
 
-    await this.#runner.run(["git", "checkout", startingRef], { cwd: repoPath });
+    // Everything below is post-merge housekeeping: the merge commit is already
+    // pushed, so a failure here must not be reported as a failed merge — the
+    // caller would leave Linear In Review for code that has shipped.
+    if (deleteBranch) {
+      await attempt(["git", "branch", "-D", branch]);
+      await attempt(["git", "push", remote, "--delete", branch]);
+    }
+    await attempt(["git", "checkout", startingRef]);
     return mergeCommit;
   }
 }

@@ -13,9 +13,10 @@ argument-hint: "[DOCUMENT-PATH]"
 ## Resolve
 
 The repo's existing projects (name, status, dates, dependency edges) via
-`foreman_linear_read` op `team_roadmap`. Then the brief: read `$1` with the
-`read` tool when supplied; otherwise read `README.md` and `AGENTS.md` at the
-repo root.
+`foreman_linear_read` op `team_roadmap`, and the product `Context` doc
+(architectural decisions, non-goals) via op `context`. Then the brief: read
+`$1` with the `read` tool when supplied; otherwise read `README.md` and
+`AGENTS.md` at the repo root.
 
 ## Gate
 
@@ -24,9 +25,9 @@ None. Operator-invoked only.
 ## Dispatch
 
 `agent: foreman-roadmap`, one entry. Task text: `FOREMAN-BRIEF: $1` (only
-when `$1` is non-empty), the brief content you read, and the team's existing
-roadmap. `foreman-roadmap` places new work relative to that roadmap, never
-in a vacuum.
+when `$1` is non-empty), the brief content you read, the `context` op's
+digest, and the team's existing roadmap. `foreman-roadmap` places new work
+relative to that roadmap, never in a vacuum.
 
 ## After
 

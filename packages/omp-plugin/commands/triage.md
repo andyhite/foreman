@@ -6,6 +6,7 @@ argument-hint: <ISSUE-ID...>
 <critical>
 - Exactly ONE `tasks[]` entry carrying the WHOLE batch. NEVER one entry per issue: triage classifies over the batch as a unit.
 - Triage exactly the issues named in `$ARGUMENTS`, never the whole Inbox view; the `plan` loop already selected this batch via `loop.triageBatch`.
+- Task text MUST carry `FOREMAN-ISSUES: <ID>,<ID>,...` (comma-separated, no spaces) on its own line, listing exactly the issue ids named in `$ARGUMENTS`. The guard rewrites this line; the extension refuses to apply any result item naming an issue outside it.
 - NEVER set `schemaMode` or `isolated`; the extension forces `schemaMode: "strict"` and strips `isolated`.
 - NEVER restate the triage procedure; `foreman-triage-inbox` is autoloaded.
 - NEVER attempt a project-scoped context read for a Triage item; Triage items have no project.
@@ -21,7 +22,9 @@ those ids to the operator and triage the rest. NEVER call `op: "issue"`
 per id, and NEVER call `op: "issues"` without `id`.
 
 Also read `op: "team_roadmap"`: the candidate projects with their real
-ids, statuses, and dependency edges.
+ids, statuses, and dependency edges. Also read `op: "context"`: the
+product `Context` doc (Definition of Done included) — the only context
+available for Triage items, which carry no project of their own.
 
 ## Gate
 
@@ -29,11 +32,11 @@ None. Triage is read-only.
 
 ## Dispatch
 
-One entry, `agent: foreman-triage`. Task text: every resolved item in full.
-Shared `context`: the `team_roadmap` output (the candidate projects
-`destinationProjectId` must choose from) plus a note that Triage items
-carry no project, so there is no per-item project brief; the extension
-appends nothing for triage.
+One entry, `agent: foreman-triage`. Task text: `FOREMAN-ISSUES: <ID>,<ID>,...`
+listing exactly the issues resolved above, then every resolved item in full.
+Shared `context`: the `context` op's digest, plus the `team_roadmap` output
+(the candidate projects `destinationProjectId` must choose from) plus a note
+that Triage items carry no project, so there is no per-item project brief.
 
 ## After
 

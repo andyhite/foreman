@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "../src/git/exec.ts";
 import {
+  assertSafeRef,
   branchNameFor,
   ensureWorktree,
   listWorktrees,
@@ -81,6 +82,24 @@ describe("branchNameFor", () => {
   it("rejects an identifier starting with \"-\" (git option injection)", () => {
     const issue = { identifier: "-force-1", title: "Escape" };
     expect(() => branchNameFor("<issue-id>-<slug>", issue, "/repo")).toThrow(/identifier/);
+  });
+});
+
+describe("assertSafeRef", () => {
+  it("rejects a ref starting with -", () => {
+    expect(() => assertSafeRef("-danger", "ref")).toThrow(/starting with "-"/);
+  });
+
+  it("rejects a ref containing ..", () => {
+    expect(() => assertSafeRef("a/../b", "ref")).toThrow(/\.\./);
+  });
+
+  it("rejects a ref containing whitespace", () => {
+    expect(() => assertSafeRef("a b", "ref")).toThrow(/whitespace/);
+  });
+
+  it("accepts an ordinary branch ref", () => {
+    expect(() => assertSafeRef("origin/feat/x", "ref")).not.toThrow();
   });
 });
 

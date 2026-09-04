@@ -13,7 +13,11 @@ concurrency:
 jobs:
   check:
     name: typecheck, test, drift
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -48,6 +52,7 @@ jobs:
       # A hand-edit there would silently diverge from the validator the
       # extension applies, so regeneration must be a no-op on a clean tree.
       - name: Schemas and agent frontmatter are in sync
+        if: matrix.os == 'ubuntu-latest'
         run: |
           bun run schemas
           if ! git diff --quiet; then

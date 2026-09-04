@@ -246,6 +246,34 @@ describe("reconcile — merged-not-done", () => {
     expect(summary.fixed).toBe(1);
     expect(issue.state.id).toBe(STATE_DONE.id);
   });
+
+  it("leaves a merged In Review issue assigned to a non-viewer alone", async () => {
+    const issue = makeIssue({
+      state: STATE_IN_REVIEW,
+      labels: [],
+      comments: [],
+      assignee: { id: "human-operator", name: "Operator", displayName: "Operator" },
+    });
+    const linear = new FakeLinear([issue]);
+    const github = stubGitHub((argv) => {
+      if (argv.includes("list")) {
+        return {
+          stdout: JSON.stringify([
+            { number: 1, url: "https://github.com/acme/repo/pull/1", headRefOid: "abc", state: "MERGED", isDraft: false, mergeable: "MERGEABLE", baseRefName: "main" },
+          ]),
+        };
+      }
+      if (argv.includes("view")) return { stdout: JSON.stringify({ state: "MERGED" }) };
+      return { stdout: "" };
+    });
+    const ctx = makeContext({ linear, github, viewerId: "bot-1" });
+
+    const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
+
+    expect(summary.fixed).toBe(0);
+    expect(issue.state.id).toBe(STATE_IN_REVIEW.id);
+    expect(linear.updateCalls).toHaveLength(0);
+  });
 });
 
 describe("reconcile — in-review-no-pr", () => {
@@ -287,7 +315,7 @@ describe("reconcile — blocked-answered", () => {
       comments: [blockComment, replyComment],
     });
     const linear = new FakeLinear([issue]);
-    const ctx = makeContext({ linear, viewerId: "bot-1" });
+    const ctx = makeContext({ linear, viewerId: "bot-1", config: { ...makeConfig(), linear: { ...makeConfig().linear, operatorUserId: "operator-1" } } });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
@@ -317,7 +345,7 @@ describe("reconcile — blocked-answered", () => {
       comments: [blockComment, replyComment],
     });
     const linear = new FakeLinear([issue]);
-    const ctx = makeContext({ linear, viewerId: "bot-1" });
+    const ctx = makeContext({ linear, viewerId: "bot-1", config: { ...makeConfig(), linear: { ...makeConfig().linear, operatorUserId: "operator-1" } } });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
@@ -354,6 +382,36 @@ describe("reconcile — blocked-answered", () => {
 
     expect(summary.fixed).toBe(0);
     expect(issue.state.id).toBe(STATE_NEEDS_INPUT.id);
+  });
+
+  it("does not select a Blocked issue with a non-operator reply when operatorUserId is unconfigured", async () => {
+    const blockComment: Comment = {
+      id: "block-4",
+      body: encodeMarker(MARKER_KIND.block, { type: "needs-decision" }, "Need a decision"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+      parentId: null,
+    };
+    const teammateComment: Comment = {
+      id: "reply-4",
+      body: "Go ahead with option A.",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      user: { id: "teammate-1", name: "teammate-1", displayName: "teammate-1" },
+      parentId: null,
+    };
+    const issue = makeIssue({
+      state: STATE_BLOCKED,
+      comments: [blockComment, teammateComment],
+    });
+    const linear = new FakeLinear([issue]);
+    const config = makeConfig();
+    config.linear.operatorUserId = null;
+    const ctx = makeContext({ linear, viewerId: "bot-1", config });
+
+    const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
+
+    expect(summary.fixed).toBe(0);
+    expect(issue.state.id).toBe(STATE_BLOCKED.id);
   });
 });
 

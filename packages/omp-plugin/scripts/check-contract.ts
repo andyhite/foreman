@@ -14,7 +14,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_OUTPUT_SCHEMAS, SCHEMA_FILENAMES } from "@foreman/core";
 import { stageFor } from "../src/enforce/task-guard.ts";
@@ -505,8 +505,19 @@ const MARKER_SOURCES = {
 const markerNames = (text: string): Set<string> => new Set([...text.matchAll(/FOREMAN-[A-Z][A-Z-]*/g)].map((m) => m[0]));
 const written = markerNames(readFileSync(MARKER_SOURCES.guard, "utf8"));
 const read = markerNames(readFileSync(MARKER_SOURCES.sink, "utf8"));
+const promptFiles = [
+  ...readdirSync(join(pluginRoot, "commands"))
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => join(pluginRoot, "commands", f)),
+  ...agentFiles.map((f) => join(pluginRoot, "agents", f)),
+];
 for (const name of read) {
   if (!written.has(name)) problems.push(`${name} is read in results/sink.ts but written nowhere in enforce/task-guard.ts`);
+}
+for (const file of promptFiles) {
+  for (const name of markerNames(readFileSync(file, "utf8"))) {
+    if (!written.has(name)) problems.push(`${name} is named in ${basename(file)} but written nowhere in enforce/task-guard.ts`);
+  }
 }
 
 if (problems.length > 0) {

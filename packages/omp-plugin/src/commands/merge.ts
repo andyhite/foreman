@@ -36,9 +36,10 @@ export async function runMerge(
   entry: ResolvedRepoEntry = getEntry(),
   config: GlobalConfig = getConfig(),
 ): Promise<MergeCommandResult> {
+  if (!issueId) return { merged: false, message: "Usage: /foreman:merge <ISSUE-ID>" };
+
   const issue = await linear.issue(issueId, { includeComments: true });
   if (!issue) return { merged: false, message: `Unknown issue "${issueId}".` };
-  if (!issue.project) return { merged: false, message: `${issueId} has no project; cannot resolve its repo.` };
 
   assertIssueInScope(entry, issue);
   const repoPath = entry.repoPath;

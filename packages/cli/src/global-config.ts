@@ -55,6 +55,8 @@ function readExistingConfig(configPath: string): Record<string, unknown> {
 export interface ExistingConfig {
   repos: Record<string, RepoEntry>;
   apiKeyFile: string | null;
+  /** The env var checked first for the Linear key, defaulted like every other schema field via `defaultAndValidateGlobalConfig`. */
+  apiKeyEnv: string;
   /** Already-configured operator account, shown back as the wizard's re-run default. */
   operatorUserId: string | null;
   /** Already-configured GitHub App id, shown back as the wizard's re-run default (SPEC §7.4). */
@@ -84,6 +86,7 @@ export function readGlobalConfig(home: string = homedir()): ExistingConfig {
   return {
     repos: (existing.repos as Record<string, RepoEntry> | undefined) ?? {},
     apiKeyFile: typeof linear.apiKeyFile === "string" ? linear.apiKeyFile : null,
+    apiKeyEnv: typeof linear.apiKeyEnv === "string" ? linear.apiKeyEnv : "LINEAR_API_KEY",
     operatorUserId: typeof linear.operatorUserId === "string" ? linear.operatorUserId : null,
     githubAppId: typeof githubApp.appId === "string" ? githubApp.appId : null,
     effectiveBaseBranch: defaulted.repoDefaults.baseBranch,

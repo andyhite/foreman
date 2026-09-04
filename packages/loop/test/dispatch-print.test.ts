@@ -195,6 +195,34 @@ describe("PrintDispatcher", () => {
   });
 });
 
+describe("PrintDispatcher.status — untracked handle falls back to pid liveness", () => {
+  it("reports running for a handle whose pid is this process's own", async () => {
+    const dispatcher = new PrintDispatcher(makeConfig(fakeOmpBin(0)));
+    const status = await dispatcher.status({
+      dispatchId: "untracked",
+      agent: "foreman-implement",
+      issueId: "ENG-1",
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+      herdr: null,
+    });
+    expect(status).toBe("running");
+  });
+
+  it("reports settled for a handle whose pid is not alive", async () => {
+    const dispatcher = new PrintDispatcher(makeConfig(fakeOmpBin(0)));
+    const status = await dispatcher.status({
+      dispatchId: "untracked",
+      agent: "foreman-implement",
+      issueId: "ENG-1",
+      startedAt: new Date().toISOString(),
+      pid: 2 ** 30,
+      herdr: null,
+    });
+    expect(status).toBe("settled");
+  });
+});
+
 describe("herdrAgentName", () => {
   it("retains the random dispatch-id suffix when truncating batch agent names", () => {
     const first = herdrAgentName("triage-batch-20260829T120000-aaaa1111");

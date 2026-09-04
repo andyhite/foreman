@@ -143,7 +143,7 @@ describe("runUpdate", () => {
       });
       const log: string[] = [];
 
-      await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+      const failures = await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
 
       const pullCalls = runner.calls.filter((call) => call.bin === "git" && call.argv[0] === "pull");
       expect(pullCalls).toHaveLength(0);
@@ -152,6 +152,7 @@ describe("runUpdate", () => {
       expect(installCalls).toHaveLength(1);
       expect(buildCalls).toHaveLength(1);
       expect(log.some((line) => line.includes("uncommitted changes"))).toBe(true);
+      expect(failures).toBeGreaterThan(0);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

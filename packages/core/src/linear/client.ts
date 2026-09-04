@@ -7,13 +7,12 @@
 
 import type {
   Comment,
-  Initiative,
-  InitiativeRef,
   Issue,
   IssueLabel,
   IssueRef,
   IssueRelation,
   IssueRelationType,
+  LinearDocument,
   LinearId,
   Project,
   ProjectRef,
@@ -33,14 +32,14 @@ import type {
   IssueFilter,
   IssueMutation,
   IssueQuery,
-  LinearReader,
   LinearWriter,
 } from "./api.ts";
 import { LinearApiError, LinearPaginationError } from "./api.ts";
 import {
   COMMENT_CREATE_MUTATION,
   COMMENTS_QUERY,
-  INITIATIVE_QUERY_SCALAR_CONTENT,
+  DOCUMENT_CREATE_MUTATION,
+  DOCUMENT_UPDATE_MUTATION,
   ISSUE_BY_ID_QUERY,
   ISSUE_CREATE_MUTATION,
   ISSUE_LABEL_CREATE_MUTATION,
@@ -48,7 +47,6 @@ import {
   ISSUE_UPDATE_MUTATION,
   ISSUES_QUERY,
   PROJECT_CREATE_MUTATION,
-  PROJECT_INITIATIVES_QUERY,
   PROJECT_LABEL_CREATE_MUTATION,
   PROJECT_LABELS_QUERY,
   PROJECT_QUERY_SCALAR_CONTENT,
@@ -58,6 +56,7 @@ import {
   PROJECT_STATUSES_QUERY,
   PROJECT_UPDATE_MUTATION,
   PROJECTS_QUERY,
+  TEAM_DOCUMENTS_QUERY,
   TEAM_SETTINGS_QUERY,
   TEAM_UPDATE_MUTATION,
   TEAMS_QUERY,
@@ -236,10 +235,10 @@ export class LinearClient implements LinearWriter {
   private readonly labelGroupIdCache = new Map<string, { value: LinearId; at: number }>();
   private readonly projectLabelIdCache = new Map<string, { value: IssueLabel; at: number }>();
   private readonly projectLabelGroupIdCache = new Map<string, { value: LinearId; at: number }>();
-  /** Every initiative a project belongs to, keyed by project id — TTL-invalidated. */
-  private readonly projectInitiativesCache = new Map<string, { value: InitiativeRef[]; at: number }>();
+  /** The team's documents, keyed by team key — TTL-invalidated. Holds the product `Context` doc (SPEC §4.7). */
+  private readonly teamDocumentsCache = new Map<string, { value: LinearDocument[]; at: number }>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
-  private readonly projectStatusIdCache = new Map<ProjectStatusType, LinearId>();
+  private readonly projectStatusIdCache = new Map<ProjectStatusType, { value: LinearId; at: number }>();
   private viewerIdCache: { value: string; at: number } | null = null;
 
   constructor(options: LinearClientOptions) {
@@ -314,9 +313,7 @@ export class LinearClient implements LinearWriter {
       }
       if (retryable && attempt < 2 && !signal.aborted) {
         trace(null, false, `retrying transport failure: ${String(error)}`);
-        const { promise, resolve } = Promise.withResolvers<void>();
-        setTimeout(resolve, 500 * 2 ** attempt);
-        await promise;
+        await this.sleepUntil(500 * 2 ** attempt, signal);
         return this.requestWithRetry<T>(document, variables, attempt + 1, signal, retryable);
       }
       trace(null, false, String(error));
@@ -387,6 +384,16 @@ export class LinearClient implements LinearWriter {
   private async backoff(response: Response, signal: AbortSignal): Promise<void> {
     const retryAfter = response.headers.get("Retry-After");
     const delayMs = this.retryDelayMs(retryAfter);
+    await this.sleepUntil(delayMs, signal);
+  }
+
+  /**
+   * Sleeps `delayMs`, or rejects early if `signal` aborts first — so a retry
+   * sleep (transport-error backoff or `Retry-After`) can never let the total
+   * request outlive `timeoutMs`, which is exactly the deadline `signal`
+   * already encodes.
+   */
+  private async sleepUntil(delayMs: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
       throw new LinearApiError(`Linear API request timed out after ${this.timeoutMs}ms`, null, null);
     }
@@ -694,15 +701,6 @@ export class LinearClient implements LinearWriter {
         startDate: string | null;
         targetDate: string | null;
         status: WireStateRef | null;
-        labels: { nodes: WireLabel[] };
-        documents: {
-          nodes: Array<{
-            id: string;
-            title: string;
-            content: string | null;
-            updatedAt: string;
-          }>;
-        };
       } | null;
     }>(PROJECT_QUERY_SCALAR_CONTENT, { projectId });
     if (!data.project) return null;
@@ -714,13 +712,6 @@ export class LinearClient implements LinearWriter {
       startDate: data.project.startDate ?? null,
       targetDate: data.project.targetDate ?? null,
       status: this.mapProjectStatus(data.project.status),
-      labels: this.mapLabels(data.project.labels.nodes),
-      documents: data.project.documents.nodes.map((doc) => ({
-        id: doc.id,
-        title: doc.title,
-        content: doc.content,
-        updatedAt: doc.updatedAt,
-      })),
     };
   }
 
@@ -805,25 +796,20 @@ export class LinearClient implements LinearWriter {
     };
   }
 
-  /** The wire row behind `projectInitiatives`. */
-  private async fetchProjectInitiatives(projectId: string): Promise<InitiativeRef[]> {
-    const data = await this.request<{
-      project: { id: string; initiatives: { nodes: InitiativeRef[] } } | null;
-    }>(PROJECT_INITIATIVES_QUERY, { projectId });
-    return data.project?.initiatives.nodes ?? [];
-  }
-
   /**
-   * Every initiative a project belongs to, unfiltered — the context digest
-   * folds one in only when a project belongs to exactly one (SPEC-free: no
-   * routing decision depends on this).
+   * The team's documents — the product `Context` doc among them (SPEC §4.7).
+   * Cached on the same TTL as the rest: the doc changes when the operator
+   * edits it, which is rare, and every dispatch in a poll asks for it.
    */
-  async projectInitiatives(projectId: string): Promise<InitiativeRef[]> {
-    const cached = this.projectInitiativesCache.get(projectId);
+  async teamDocuments(teamKey: string): Promise<LinearDocument[]> {
+    const cached = this.teamDocumentsCache.get(teamKey);
     if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
-    const initiatives = await this.fetchProjectInitiatives(projectId);
-    this.projectInitiativesCache.set(projectId, { value: initiatives, at: Date.now() });
-    return initiatives;
+    const documents = await this.paginate<
+      LinearDocument,
+      { documents: { nodes: LinearDocument[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }
+    >("teamDocuments()", TEAM_DOCUMENTS_QUERY, { filter: { team: { key: { eq: teamKey } } }, first: 50 }, (data) => data.documents);
+    this.teamDocumentsCache.set(teamKey, { value: documents, at: Date.now() });
+    return documents;
   }
 
   /** A project's current native status. Null when the project itself is absent. */
@@ -838,19 +824,19 @@ export class LinearClient implements LinearWriter {
   /** Resolves `type` to the workspace's matching `ProjectStatus.id`, fetching the list once and caching every type found. */
   private async resolveProjectStatusId(type: ProjectStatusType): Promise<LinearId> {
     const cached = this.projectStatusIdCache.get(type);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
     const data = await this.request<{ projectStatuses: { nodes: Array<{ id: string; type: string }> } }>(
       PROJECT_STATUSES_QUERY,
       {},
     );
     for (const status of data.projectStatuses.nodes) {
-      this.projectStatusIdCache.set(status.type as ProjectStatusType, status.id);
+      this.projectStatusIdCache.set(status.type as ProjectStatusType, { value: status.id, at: Date.now() });
     }
     const resolved = this.projectStatusIdCache.get(type);
     if (!resolved) {
       throw new LinearApiError(`Workspace has no project status of type "${type}"`, null, null);
     }
-    return resolved;
+    return resolved.value;
   }
 
   async updateProjectStatus(input: { projectId: LinearId; type: ProjectStatusType }): Promise<void> {
@@ -881,35 +867,6 @@ export class LinearClient implements LinearWriter {
     });
     const user = data.users.nodes[0];
     return user ? { id: user.id, name: user.name, displayName: user.displayName } : null;
-  }
-
-  /** Same as `project()`: `Document.content` is a `String`, so there is one valid shape. */
-  async initiative(initiativeId: string): Promise<Initiative | null> {
-    const data = await this.request<{
-      initiative: {
-        id: string;
-        name: string;
-        documents: {
-          nodes: Array<{
-            id: string;
-            title: string;
-            content: string | null;
-            updatedAt: string;
-          }>;
-        };
-      } | null;
-    }>(INITIATIVE_QUERY_SCALAR_CONTENT, { initiativeId });
-    if (!data.initiative) return null;
-    return {
-      id: data.initiative.id,
-      name: data.initiative.name,
-      documents: data.initiative.documents.nodes.map((doc) => ({
-        id: doc.id,
-        title: doc.title,
-        content: doc.content,
-        updatedAt: doc.updatedAt,
-      })),
-    };
   }
 
   async workflowStates(teamId: string): Promise<WorkflowState[]> {
@@ -1324,6 +1281,41 @@ export class LinearClient implements LinearWriter {
     });
     if (!data.teamUpdate.success) {
       throw new LinearApiError(`Failed to update team ${teamId} settings`, null, null);
+    }
+  }
+
+  /** Seeds a team-scoped document (only `provisionTeam`'s Context-doc seed calls this — SPEC §4.7). */
+  async createDocument(input: { teamId: LinearId; title: string; content: string }): Promise<LinearDocument> {
+    const data = await this.request<{
+      documentCreate: { success: boolean; document: LinearDocument | null };
+    }>(DOCUMENT_CREATE_MUTATION, { input });
+    if (!data.documentCreate.success || !data.documentCreate.document) {
+      throw new LinearApiError(`Failed to create document "${input.title}"`, null, null);
+    }
+    // The team's document list is TTL-cached by key; a `doctor --fix` that
+    // just seeded the doc must not keep serving the stale empty list for
+    // up to `CACHE_TTL_MS` (SPEC §4.7's degradation is exactly this).
+    const { key } = await this.teamSettings(input.teamId);
+    this.teamDocumentsCache.delete(key);
+    return data.documentCreate.document;
+  }
+
+  /** Updates the product `Context` doc (SPEC §4.7); the caller carries the live Definition-of-Done section through verbatim. */
+  async updateDocument(input: { documentId: LinearId; content: string }): Promise<void> {
+    const data = await this.request<{ documentUpdate: { success: boolean } }>(DOCUMENT_UPDATE_MUTATION, {
+      id: input.documentId,
+      input: { content: input.content },
+    });
+    if (!data.documentUpdate.success) {
+      throw new LinearApiError(`Failed to update document ${input.documentId}`, null, null);
+    }
+    // Same cache-invalidation rationale as `createDocument`: a doctor or
+    // dispatch reading right after an update must not see the stale body
+    // for up to `CACHE_TTL_MS` (SPEC §4.7).
+    for (const [key, cached] of this.teamDocumentsCache) {
+      if (cached.value.some((doc) => doc.id === input.documentId)) {
+        this.teamDocumentsCache.delete(key);
+      }
     }
   }
 }

@@ -69,16 +69,19 @@ class FakeLinear implements LinearWriter {
     throw new Error("not implemented");
   }
   async project(_projectId: string): Promise<Project | null> {
-    return { id: "project-1", name: "Foreman", description: null, content: null, startDate: null, targetDate: null, status: null, documents: [] };
+    return { id: "project-1", name: "Foreman", description: null, content: null, startDate: null, targetDate: null, status: null };
   }
   async projectStatus() {
     return null;
   }
-  async projectInitiatives() {
+  async teamDocuments() {
     return [];
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return [STATE_IN_REVIEW, STATE_DONE];
@@ -172,6 +175,7 @@ function reviewComment(headSha: string) {
       dodSatisfied: true,
       dodChecklist: [{ item: "Tests pass", satisfied: true, evidence: "bun test" }],
       findings: [],
+      contextContradictions: [],
       projectOrganization: "No concerns.",
       scopeCreep: [],
       testAdequacy: "Adequate.",
@@ -313,6 +317,18 @@ describe("runMerge — partial failure recovery", () => {
     expect(second.message).toContain("already complete");
     expect(mergeCalls).toBe(1);
     expect((await flakyLinear.issue("ENG-1"))?.state.id).toBe(STATE_DONE.id);
+  });
+});
+
+describe("runMerge — usage guard", () => {
+  it("returns a usage message for an empty issueId and makes no Linear calls", async () => {
+    const linear = new FakeLinear([]);
+    const github = new GitHubClient({ runner: stubRunner(() => ({ stdout: "[]" })) });
+
+    const result = await runMerge(linear, github, "", entry, makeConfig());
+
+    expect(result).toEqual({ merged: false, message: "Usage: /foreman:merge <ISSUE-ID>" });
+    expect(linear.updateCalls).toHaveLength(0);
   });
 });
 

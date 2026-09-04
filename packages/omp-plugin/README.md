@@ -46,10 +46,13 @@ TypeScript directly.
   without structured output, so the extension would have nothing to apply.
 - No agent holds a Linear write tool. `foreman_github_pr` on
   `foreman-implement` is the one mutation tool any agent gets.
-- Task text carries marker lines (`FOREMAN-ISSUE`, `FOREMAN-PROJECT`,
-  `FOREMAN-INITIATIVE`; the guard appends `FOREMAN-DISPATCH`,
-  `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, `FOREMAN-BASE`, `FOREMAN-DIFF`). The
-  result sink keys every capture on them.
+- Task text carries marker lines written by the guard
+  (`src/enforce/task-guard.ts`) and read by the result sink
+  (`src/results/sink.ts`): `FOREMAN-DISPATCH`, `FOREMAN-ISSUE`,
+  `FOREMAN-PROJECT`, `FOREMAN-TEAM`, `FOREMAN-BRIEF`, `FOREMAN-APPS`,
+  `FOREMAN-ISSUES`, `FOREMAN-WORKTREE`, `FOREMAN-BRANCH`, `FOREMAN-BASE`,
+  `FOREMAN-DIFF`, `FOREMAN-PREV-STATE`. The result sink keys every capture
+  on them.
 
 ## Configuration
 

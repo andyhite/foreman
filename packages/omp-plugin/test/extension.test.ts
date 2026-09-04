@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { FOREMAN_STATE, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions } from "@foreman/core";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import { FOREMAN_STATE, PRIORITY, TYPE_LABEL, acceptanceCriteria, openQuestions, encodeMarker, decodeMarker, MARKER_KIND, ConfigError } from "@foreman/core";
 import type {
   BlockRecord,
   CreateIssueInput,
@@ -8,6 +8,7 @@ import type {
   IssueMutation,
   IssueRelationType,
   LinearWriter,
+  LockRecord,
   Project,
   RefineResult,
   TeamRef,
@@ -104,11 +105,14 @@ class FakeLinear implements LinearWriter {
   async projectStatus() {
     return null;
   }
-  async projectInitiatives() {
+  async teamDocuments() {
     return [];
   }
-  async initiative() {
-    return null;
+  async createDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
+  }
+  async updateDocument(): Promise<never> {
+    throw new Error("not implemented in fake");
   }
   async workflowStates(): Promise<WorkflowState[]> {
     return KNOWN_STATES;
@@ -263,11 +267,31 @@ describe("blockedOutcome — human block targets the locked issue", () => {
 });
 
 describe("applyBoundResult — cross-issue rejection restores previousStateId", () => {
-  it("restores previousStateId in the mutation", async () => {
+  it("restores previousStateId in the mutation and releases the lock", async () => {
+    const lockRecord: LockRecord = {
+      agent: "foreman-refine",
+      dispatchId: "foreman-refine-ENG-1-20260101T000000Z-abc123",
+      issueId: "ENG-1",
+      takenAt: "2026-01-01T00:00:00.000Z",
+      ttlMs: 3_600_000,
+      worktree: null,
+      released: false,
+      releasedAt: null,
+    };
     const lockedIssue = makeIssue({
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_IN_PROGRESS,
+      assignee: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+      comments: [
+        {
+          id: "comment-lock",
+          body: encodeMarker(MARKER_KIND.lock, lockRecord, "Locked."),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+          parentId: null,
+        },
+      ],
     });
     const otherIssue = makeIssue({ id: "issue-2", identifier: "ENG-9", title: "Someone else's issue", labels: [] });
     const linear = new FakeLinear([lockedIssue, otherIssue]);
@@ -279,11 +303,15 @@ describe("applyBoundResult — cross-issue rejection restores previousStateId", 
     await applyBoundResult(deps, "foreman-refine", outcome, "ENG-1", STATE_READY.id, () => {});
 
     const lockedUpdateCalls = linear.updateCalls.filter((call) => call.id === lockedIssue.id);
-    expect(lockedUpdateCalls).toHaveLength(1);
-    expect(lockedUpdateCalls[0]?.input.stateId).toBe(STATE_READY.id);
+    expect(lockedUpdateCalls.some((call) => call.input.stateId === STATE_READY.id)).toBe(true);
+    expect(lockedUpdateCalls.some((call) => call.input.assigneeId === null)).toBe(true);
 
     const updatedLocked = await linear.issue("ENG-1");
     expect(updatedLocked?.state.id).toBe(STATE_READY.id);
+    expect(updatedLocked?.assignee).toBeNull();
+
+    const releaseComment = linear.commentCalls.find((call) => decodeMarker<LockRecord>(MARKER_KIND.lock, call.body)?.released === true);
+    expect(releaseComment).toBeDefined();
   });
 });
 
@@ -314,10 +342,13 @@ describe("applyBoundResult — rejects a result naming a different issue than th
     expect(updatedOther?.labels).toEqual(otherIssue.labels);
 
     // `previousStateId` is null, so the locked issue's state is untouched;
-    // it received the rejection comment and nothing else.
+    // it received the rejection comment. `releaseLock` still clears its
+    // assignee (SPEC §11): the locked issue carries no lock marker comment
+    // here, so the release produces no marker comment, only the clear.
     const updatedLocked = await linear.issue("ENG-1");
     expect(updatedLocked?.state.id).toBe(lockedIssue.state.id);
-    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.updateCalls).toHaveLength(1);
+    expect(linear.updateCalls[0]?.input).toEqual({ assigneeId: null });
     expect(linear.commentCalls).toEqual([
       {
         issueId: "ENG-1",
@@ -353,11 +384,31 @@ describe("applyBoundResult — rejects a result naming a different issue than th
 });
 
 describe("handleCaptured — an invalid result restores the issue's pre-dispatch state", () => {
-  it("moves an implement dispatch's issue back to Ready instead of stranding it In Progress", async () => {
+  it("moves an implement dispatch's issue back to Ready instead of stranding it In Progress, and releases the lock", async () => {
+    const lockRecord: LockRecord = {
+      agent: "foreman-implement",
+      dispatchId: "foreman-implement-ENG-1-20260101T000000Z-abc123",
+      issueId: "ENG-1",
+      takenAt: "2026-01-01T00:00:00.000Z",
+      ttlMs: 3_600_000,
+      worktree: null,
+      released: false,
+      releasedAt: null,
+    };
     const issue = makeIssue({
       id: "issue-1",
       identifier: "ENG-1",
       state: STATE_IN_PROGRESS,
+      assignee: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+      comments: [
+        {
+          id: "comment-lock",
+          body: encodeMarker(MARKER_KIND.lock, lockRecord, "Locked."),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+          parentId: null,
+        },
+      ],
     });
     const linear = new FakeLinear([issue]);
     const deps = makeDeps(linear);
@@ -373,15 +424,20 @@ describe("handleCaptured — an invalid result restores the issue's pre-dispatch
       false,
       "ENG-1",
       STATE_READY.id,
+      null,
       (message, level) => notifications.push({ message, level }),
       deps,
     );
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.state.id).toBe(STATE_READY.id);
+    expect(updated?.assignee).toBeNull();
     expect(notifications).toEqual([
       { message: expect.stringContaining("Foreman rejected foreman-implement's invalid result"), level: "error" },
     ]);
+
+    const releaseComment = linear.commentCalls.find((call) => decodeMarker<LockRecord>(MARKER_KIND.lock, call.body)?.released === true);
+    expect(releaseComment).toBeDefined();
   });
 
   it("leaves state untouched for a refine dispatch when previousStateId already matches (previousStateId null is a no-op)", async () => {
@@ -396,12 +452,110 @@ describe("handleCaptured — an invalid result restores the issue's pre-dispatch
       false,
       "ENG-1",
       null,
+      null,
       () => {},
       deps,
     );
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.state.id).toBe(STATE_READY.id);
+  });
+});
+
+describe("session_start — survives an invalid config", () => {
+  it("notifies once with 'Invalid Foreman config' and does not throw when initRuntime rejects the config", async () => {
+    // Dynamic import: exercises bun's module-mocking boundary — `initRuntime`
+    // must be re-imported after `mock.module` swaps the module registry entry,
+    // which only takes effect for imports evaluated after this call.
+    const actualRuntime = await import("../src/runtime.ts");
+    mock.module("../src/runtime.ts", () => ({
+      ...actualRuntime,
+      initRuntime: () => {
+        throw new ConfigError("bad config", []);
+      },
+    }));
+    try {
+      const { default: createForemanExtension } = await import("../src/extension.ts");
+      const notices: Array<{ message: string; level: string }> = [];
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+      const zodStub: unknown = new Proxy(() => zodStub, {
+        get: (_target, prop) => (prop === "then" ? undefined : (..._args: unknown[]) => zodStub),
+      });
+      const fakePi = {
+        setLabel: () => {},
+        zod: zodStub,
+        registerTool: () => {},
+        registerCommand: () => {},
+        sendMessage: async () => {},
+        on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => {
+          handlers.set(name, handler);
+        },
+      };
+
+      createForemanExtension(fakePi as never);
+
+      const sessionStart = handlers.get("session_start");
+      expect(sessionStart).toBeDefined();
+      const fakeCtx = { ui: { notify: (message: string, level: string) => notices.push({ message, level }) }, cwd: "/repo" };
+      await expect(sessionStart!({}, fakeCtx)).resolves.toBeUndefined();
+
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.level).toBe("error");
+      expect(notices[0]?.message).toContain("Invalid Foreman config");
+    } finally {
+      mock.module("../src/runtime.ts", () => actualRuntime);
+    }
+  });
+});
+
+describe("tool_result — releases a dispatch id that never produced a captured result", () => {
+  it("a tool_result whose single result carries no structuredOutput releases the dispatch id named in the task text", async () => {
+    const actualRuntime = await import("../src/runtime.ts");
+    const released: string[] = [];
+    mock.module("../src/runtime.ts", () => ({
+      ...actualRuntime,
+      releaseLiveDispatch: (dispatchId: string) => released.push(dispatchId),
+    }));
+    try {
+      const { default: createForemanExtension } = await import("../src/extension.ts");
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+      const zodStub: unknown = new Proxy(() => zodStub, {
+        get: (_target, prop) => (prop === "then" ? undefined : (..._args: unknown[]) => zodStub),
+      });
+      const fakePi = {
+        setLabel: () => {},
+        zod: zodStub,
+        registerTool: () => {},
+        registerCommand: () => {},
+        sendMessage: async () => {},
+        logger: { error: () => {} },
+        on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => {
+          handlers.set(name, handler);
+        },
+      };
+
+      createForemanExtension(fakePi as never);
+
+      const toolResult = handlers.get("tool_result");
+      expect(toolResult).toBeDefined();
+      const dispatchId = "foreman-implement-ENG-1-20260101T000000Z-abc123";
+      const event = {
+        toolName: "task",
+        input: {
+          tasks: [{ agent: "foreman-implement", task: `Implement.\n\nFOREMAN-ISSUE: ENG-1\n\nFOREMAN-DISPATCH: ${dispatchId}\n` }],
+        },
+        // The agent crashed or was killed before yielding: `details.results`
+        // carries no `structuredOutput`, so `extractFromToolResult` captures
+        // nothing for this dispatch id.
+        details: { results: [{ index: 0, aborted: true }] },
+      };
+      const fakeCtx = { ui: { notify: () => {} } };
+      await toolResult!(event, fakeCtx);
+
+      expect(released).toEqual([dispatchId]);
+    } finally {
+      mock.module("../src/runtime.ts", () => actualRuntime);
+    }
   });
 });
 
@@ -432,13 +586,13 @@ describe("handleCaptured — appliedDispatchIds is not poisoned by a throwing ap
     const dispatchId = "foreman-implement-ENG-1-20260101T000000Z-abc123";
 
     await expect(
-      handleCaptured(dispatchId, "foreman-implement", { garbage: true }, false, "ENG-1", STATE_READY.id, () => {}, deps),
+      handleCaptured(dispatchId, "foreman-implement", { garbage: true }, false, "ENG-1", STATE_READY.id, null, () => {}, deps),
     ).rejects.toThrow("transient Linear failure");
 
     // Before the fix, `appliedDispatchIds.add(dispatchId)` ran before this
     // handling could throw, so the retry below would have been silently
     // dropped as "already applied" with no durable marker ever written.
-    await handleCaptured(dispatchId, "foreman-implement", { garbage: true }, false, "ENG-1", STATE_READY.id, () => {}, deps);
+    await handleCaptured(dispatchId, "foreman-implement", { garbage: true }, false, "ENG-1", STATE_READY.id, null, () => {}, deps);
 
     const updated = await linear.issue("ENG-1");
     expect(updated?.state.id).toBe(STATE_READY.id);
@@ -467,8 +621,8 @@ describe("handleCaptured — concurrent deliveries dedupe in-process", () => {
     };
 
     await Promise.all([
-      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, () => {}, deps, tracker),
-      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, () => {}, deps, tracker),
+      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, null, () => {}, deps, tracker),
+      handleCaptured(dispatchId, "foreman-refine", payload, false, "ENG-1", null, null, () => {}, deps, tracker),
     ]);
 
     const descriptionUpdates = linear.updateCalls.filter((call) => call.input.description !== undefined);
@@ -552,7 +706,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
 
   it("creates one Backlog issue per proposedIssue and marks the project planned", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
     linear.projectsList = [{ id: PROJECT_ID, name: "App settings" }];
 
@@ -568,6 +722,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.aborted,
       captured[0]!.issueId,
       captured[0]!.previousStateId,
+      captured[0]!.batchIssueIds,
       (message, level) => notices.push(`${level}: ${message}`),
       makeDeps(linear, { entry: { alias: "repo", team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>", pr: { required: true, draft: false, ciRequired: true } } }),
       { wasApplied: async () => false },
@@ -585,7 +740,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
 
   it("stores a description the parser can read back — one template, not one nested in another", async () => {
     const linear = new FakeLinear([]);
-    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
+    linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
     linear.projectsList = [{ id: PROJECT_ID, name: "App settings" }];
 
@@ -597,6 +752,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.aborted,
       captured[0]!.issueId,
       captured[0]!.previousStateId,
+      captured[0]!.batchIssueIds,
       () => {},
       makeDeps(linear, { entry: { alias: "repo", team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>", pr: { required: true, draft: false, ciRequired: true } } }),
       { wasApplied: async () => false },
@@ -658,6 +814,7 @@ describe("handleCaptured — a blocked triage result with no locked issue notifi
       "foreman-triage",
       payload,
       false,
+      null,
       null,
       null,
       (message: string, level: string) => notifications.push({ message, level }),

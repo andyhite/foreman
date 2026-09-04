@@ -5,7 +5,6 @@
 import {
   all,
   DISPATCH_COMMAND,
-  incompleteBlockers,
   incompleteProjectBlockers,
   implementationGate,
   INBOX_FILTER,

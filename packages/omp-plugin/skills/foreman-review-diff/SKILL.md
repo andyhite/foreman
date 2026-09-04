@@ -44,6 +44,19 @@ project brief, the shared `local://` root.
    makes the fix cycle machine-checkable: the extension re-dispatches review
    only when the PR head has no matching `ReviewResult`.
 
+## Context doc contradictions
+
+- Populate `contextContradictions` when the diff you just reviewed
+  contradicts a claim recorded in the product `Context` doc's decisions,
+  vocabulary, or non-goals. This is the doc's ONLY pruning signal (SPEC
+  §4.7) — no sweep, no age timer; a recorded line goes stale exactly when
+  work is found to contradict it.
+- `recorded` quotes the doc line; `evidence` is `file:line` in the diff.
+- Empty is the normal case. NEVER invent a contradiction to fill the field,
+  and NEVER report a mere gap (the doc is silent on something) as one.
+- This is a finding, not a fix: the operator resolves the doc as part of
+  this issue. You do not edit the doc.
+
 ## Output schema
 
 `schemas/review-result.json`: `ReviewResult` branch of the envelope

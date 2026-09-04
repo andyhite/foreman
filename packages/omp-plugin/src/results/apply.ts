@@ -8,6 +8,7 @@
 
 import type {
   BlockRecord,
+  ContextResult,
   GitHubClient,
   Issue,
   ImplementResult,
@@ -28,9 +29,12 @@ import {
   appLabelId,
   applyRoadmap,
   branchNameFor,
+  CONTEXT_DOC_TITLE,
   encodeMarker,
+  FOREMAN_STATE,
   issueScope,
   MARKER_KIND,
+  mergeContextDoc,
   readLockComment,
   renderLockComment,
   resolveState,
@@ -43,6 +47,7 @@ import {
 } from "@foreman/core";
 import {
   renderBlockComment,
+  renderImplementComment,
   renderIssueDescription,
   renderReviewComment,
   renderSpikeIssue,
@@ -59,6 +64,7 @@ export type AgentOutcome =
   | { kind: "result"; agent: "foreman-refine"; result: RefineResult }
   | { kind: "result"; agent: "foreman-implement"; result: ImplementResult }
   | { kind: "result"; agent: "foreman-review"; result: ReviewResult }
+  | { kind: "result"; agent: "foreman-context"; result: ContextResult }
   | { kind: "blocked"; agent: string; block: BlockRecord; issueId: string };
 
 /** An issue or project a result created, surfaced back to the operator/loop summary. */
@@ -98,6 +104,14 @@ export interface ApplyDeps {
    */
   entry?: Pick<ResolvedRepoEntry, "alias" | "team" | "repoPath" | "branchPattern" | "pr">;
   /**
+   * Every issue id named in this dispatch's `FOREMAN-ISSUES` marker (triage
+   * only). `applyTriage` refuses any item naming an issue outside this set
+   * instead of trusting the agent's own `item.issueId`. `null` (every
+   * non-triage stage, and tests that do not exercise batch scoping) skips
+   * the check.
+   */
+  batchIssueIds?: readonly string[] | null;
+  /**
    * Linear user id to assign a block that needs a human (SPEC §9 Case B) —
    * puts it in the operator's own "My Issues" view. `null`/absent skips
    * assignee-based routing; the `foreman:blocked` label and comment still
@@ -115,7 +129,7 @@ export interface ApplyDeps {
  * marker here, the next stage on this issue is refused until the lock's
  * full TTL expires.
  */
-async function releaseLock(deps: ApplyDeps, issue: Issue, assigneeId: string | null = null): Promise<void> {
+export async function releaseLock(deps: ApplyDeps, issue: Issue, assigneeId: string | null = null): Promise<void> {
   await deps.linear.updateIssue(issue.id, { assigneeId });
   const viewerId = await deps.linear.viewerId().catch(() => null);
   const withComments = await deps.linear.issue(issue.id, { includeComments: true });
@@ -205,6 +219,12 @@ async function applyTriageItem(
     const verdict = issueScope(deps.entry, issue);
     if (!verdict.inScope) throw new Error(verdict.message ?? `${item.issueId} is out of scope`);
   }
+  // Triage only ever moves work *out of* Triage. An item naming an issue in
+  // any other state is either a hallucination or an injected instruction, and
+  // applying it would overwrite refined or in-flight work.
+  if (issue.state.name !== FOREMAN_STATE.triage) {
+    throw new Error(`${item.issueId} is in ${issue.state.name}, not ${FOREMAN_STATE.triage}; triage refused`);
+  }
 
   if (item.destination === "backlog" || item.destination === "new-project") {
     let projectId = item.destinationProjectId;
@@ -231,9 +251,9 @@ async function applyTriageItem(
           }
         }
         project = await deps.linear.createProject({
-          name: newProject.name,
+          name: stripControlChars(newProject.name),
           teamIds: [issue.team.id],
-          description: newProject.description,
+          description: sanitizeAgentText(newProject.description),
           ...(labelIds.length > 0 ? { labelIds } : {}),
         });
         const status = await deps.linear.projectStatus(project.id);
@@ -242,9 +262,12 @@ async function applyTriageItem(
       }
       projectId = project.id;
     }
-    if (!projectId) throw new Error(`applyTriage: ${issue.identifier} is "backlog" with no destinationProjectId.`);
-
-    if (deps.entry && item.destination === "backlog") {
+    if (item.destination === "new-project" && !projectId) {
+      throw new Error(`applyTriage: ${issue.identifier} is "new-project" but no project was resolved.`);
+    }
+    // A `backlog` item with no project is legitimate: work with no ship moment
+    // rides on the `type:` label alone (agents/foreman-triage.md).
+    if (deps.entry && item.destination === "backlog" && projectId) {
       const siblings = teamProjects ?? (await deps.linear.projects(issue.team.key));
       if (!siblings.some((candidate) => candidate.id === projectId)) {
         throw new Error(`${issue.identifier}: destinationProjectId ${projectId} is not a project on team ${issue.team.key}`);
@@ -265,7 +288,7 @@ async function applyTriageItem(
       priority: item.proposedPriority,
       description: item.draftDescription ?? undefined,
       estimate: item.proposedEstimate ?? undefined,
-      projectId,
+      ...(projectId ? { projectId } : {}),
       addedLabelIds,
     });
     await moveToState(deps, issue, "backlog");
@@ -360,6 +383,10 @@ async function applyTriage(deps: ApplyDeps, result: TriageResult, notify?: Notif
   const notices: string[] = [];
   const cache = newAppLabelCache();
   for (const item of result.items) {
+    if (deps.batchIssueIds && !deps.batchIssueIds.includes(item.issueId)) {
+      failures.push(`${item.issueId}: not part of this dispatch's batch; ignored`);
+      continue;
+    }
     try {
       await applyTriageItem(deps, item, created, notices, cache);
     } catch (error) {
@@ -481,12 +508,19 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 
   const backlog = result.discoveredWork.length > 0 ? await backlogStateId(deps, issue.team.id) : null;
 
+  // A retry after a mid-sequence failure re-runs this loop from the top (the
+  // applied marker is only recorded once the whole sequence lands), so an
+  // existing relation with this title is a completed step, not a duplicate.
+  const existingRelatedTitles = new Set(issue.relations.map((relation) => relation.other.title));
+
   const createdEntities: CreatedEntity[] = [];
   for (const discovered of result.discoveredWork) {
+    const discoveredTitle = stripControlChars(discovered.title);
+    if (existingRelatedTitles.has(discoveredTitle)) continue;
     const discoveredTypeLabel = await deps.linear.ensureWorkspaceLabel(discovered.type, { color: TYPE_LABEL_COLOR[discovered.type as TypeLabel] });
     const created = await deps.linear.createIssue({
       teamId: issue.team.id,
-      title: stripControlChars(discovered.title),
+      title: discoveredTitle,
       description: sanitizeAgentText(discovered.description),
       projectId: issue.project?.id,
       labelIds: [discoveredTypeLabel.id],
@@ -502,12 +536,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
     createdEntities.push(createdIssue(created));
   }
 
-  const humanSummary = [
-    `**Branch:** ${result.branch}`,
-    result.prUrl.length > 0 ? `**PR:** ${result.prUrl}` : "**PR:** none (direct-branch mode)",
-    `**Approach:** ${result.approachSummary}`,
-  ].join("\n");
-  const body = encodeMarker(MARKER_KIND.implement, result, humanSummary);
+  const body = encodeMarker(MARKER_KIND.implement, result, renderImplementComment(result));
   await deps.linear.createComment({ issueId: issue.id, body });
 
   await moveToState(deps, issue, "inReview");
@@ -681,6 +710,13 @@ async function applyDependencyBlock(
       missing.push(blockerId);
       continue;
     }
+    if (deps.entry) {
+      const verdict = issueScope(deps.entry, blocker);
+      if (!verdict.inScope) {
+        missing.push(blockerId);
+        continue;
+      }
+    }
     // The blocker blocks THIS issue — `blockedByRelations` (core) reads
     // "blocked by" as `direction === "incoming"`, which only holds when the
     // relation is written {issueId: blocker, relatedIssueId: issue}.
@@ -820,16 +856,80 @@ async function applyRoadmapResult(
 }
 
 /**
+ * SPEC §4.7: splices the agent's proposal into the live product Context doc
+ * via `mergeContextDoc`, which alone decides whether the write is safe.
+ *
+ * Team-scoped like `applyRoadmapResult`: no issue, no lock, no project. The
+ * agent-supplied `teamId` is checked against the dispatch's own bound team
+ * (not trusted on its own) the same way `issueScope` refuses an agent-named
+ * id outside scope elsewhere in this file — a proposal naming a foreign team
+ * must not update that team's doc.
+ *
+ * `mergeContextDoc` refusing (an undeclared removal) is thrown loud rather
+ * than reported, unlike the roadmap's partial-success report: silent loss of
+ * a recorded decision is exactly the failure this path exists to prevent,
+ * so it must stop the apply rather than degrade to a notice.
+ */
+async function applyContextResult(deps: ApplyDeps, result: ContextResult, notify?: Notify): Promise<AppliedFacts> {
+  const teamRef = await resolveTeamRef(deps, "context");
+  if (result.teamId !== teamRef.id) {
+    throw new Error(`Context proposal names team "${result.teamId}", but this dispatch is bound to "${teamRef.key}".`);
+  }
+  const documents = await deps.linear.teamDocuments(teamRef.key);
+  const doc = documents.find((candidate) => candidate.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase());
+  if (!doc) {
+    throw new Error(
+      `Team "${teamRef.key}" has no "${CONTEXT_DOC_TITLE}" document to update. Run \`foreman doctor --fix\` to seed it.`,
+    );
+  }
+
+  const merge = mergeContextDoc(
+    doc.content ?? "",
+    { decisions: result.decisions, vocabulary: result.vocabulary, nonGoals: result.nonGoals },
+    result.removals,
+  );
+  if (merge.undeclaredRemovals.length > 0) {
+    throw new Error(
+      `Context proposal for "${teamRef.key}" drops recorded line(s) without a declared removal: ` +
+        merge.undeclaredRemovals.join("; "),
+    );
+  }
+
+  const facts: AppliedFacts = {
+    subject: null,
+    movedTo: null,
+    created: [],
+    summary:
+      merge.content === null
+        ? `context: proposal for "${teamRef.key}" matched the live doc; nothing written`
+        : `context: updated ${result.removals.length > 0 ? "and pruned " : ""}the "${teamRef.key}" Context doc`,
+  };
+
+  if (merge.content === null) return facts;
+
+  await deps.linear.updateDocument({ documentId: doc.id, content: merge.content });
+
+  if (result.removals.length > 0) {
+    const lines = result.removals.map((removal) => `- (${removal.section}) "${removal.text}": ${removal.reason}`);
+    notify?.(`Foreman updated the "${teamRef.key}" Context doc: ${result.changeSummary}\n${lines.join("\n")}`, "warn");
+  }
+
+  return facts;
+}
+
+/**
  * Dispatches one `AgentOutcome` to the matching applier. A blocked outcome
  * with no `issueId` (possible for `foreman-plan` and `foreman-roadmap`, which
- * operate on a project and an initiative rather than an issue) has nothing to
- * write to — Linear has no project-level `foreman:blocked` surface — so it is
+ * operate on a project and an initiative rather than an issue, and for
+ * `foreman-context`, which operates on a team) has nothing to write to —
+ * Linear has no project- or team-level `foreman:blocked` surface — so it is
  * a documented no-op; the block is still visible in the loop's own log and
  * `/foreman:status`.
  *
- * `notify` is optional because only the roadmap applier has a partial-success
- * report worth showing an operator mid-apply; every other stage either
- * succeeds outright or throws.
+ * `notify` is optional because only the roadmap and context appliers have
+ * something worth showing an operator mid-apply (a partial-success report,
+ * a list of pruned lines); every other stage either succeeds outright or
+ * throws.
  */
 export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notify?: Notify): Promise<AppliedFacts> {
   if (outcome.kind === "blocked") {
@@ -848,7 +948,9 @@ export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notif
     return applyRefine(deps, outcome.result);
   } else if (outcome.agent === "foreman-implement") {
     return applyImplement(deps, outcome.result);
-  } else {
+  } else if (outcome.agent === "foreman-review") {
     return applyReview(deps, outcome.result, notify);
+  } else {
+    return applyContextResult(deps, outcome.result, notify);
   }
 }

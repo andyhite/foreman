@@ -560,3 +560,47 @@ as an extra per-issue status read.
   `StringComparator`, so both support `nin`.** Excluding terminal issues and
   terminal-project issues costs a narrower result set at query time, not an
   extra status lookup per row.
+
+## Verified the product Context doc resolves through the team
+
+Introspected and executed against the live API while re-homing §4.7's product
+`Context` doc off the initiative layer (nothing attaches a created project to
+an initiative — `results/apply.ts` has no `initiativeToProjectCreate`,
+`provision.ts` dropped the per-initiative pass, and `config/load.ts` rejects a
+`repos.<alias>.initiatives` key — so the initiative-sourced layer could never
+populate).
+
+- **`Document` carries a `team` field and `DocumentFilter` has a `team`
+  input, but `Team` has no `documents` field.** A team-scoped document is a
+  real, filterable surface, but the filter has to be applied at the root
+  `documents(filter: { team: { key: { eq } } })` query rather than through
+  `Team.documents`, because that field does not exist.
+- **`IssueFilter.id` is an `IssueIDComparator`** — "Comparator for issue
+  identifiers" — so it accepts human identifiers, not only UUIDs.
+  `{ id: { in: ["PLT-183", "PLT-135"] } }` executed and returned exactly
+  those two issues, resolving a whole triage dispatch batch in one hop.
+- **`IssueConnection` exposes only `edges`, `nodes`, `pageInfo` — no
+  `totalCount`.** A project's issue count cannot be read cheaply; "has any
+  issue" is one `first: 1` probe, which is why `/foreman:plan`'s gate is a
+  boolean rather than a count comparison.
+- **`DocumentCreateInput` requires only `title`, and accepts `teamId` +
+  `content`.** Seeding the team's `Context` doc is one mutation, which is why
+  `provisionTeam` folds it into its existing single confirm rather than
+  needing a scope of its own.
+- **Linear rewrites the emphasis marker it is given: a document created with
+  `_text_` reads back as `*text*`.** Measured by seeding
+  `CONTEXT_DOC_TEMPLATE` on PLT and reading it straight back — 566 stored
+  bytes against 567 sent, with every `_..._` placeholder returned as
+  `*...*` and the trailing newline dropped. Any check that compares stored
+  document content against the template it wrote MUST normalise emphasis
+  first; matching raw substrings reported a doc seconds old as filled in.
+- **Linear also rewrites list bullets: a line written as `- item` reads back
+  as `* item`, while a `- [ ]` task item keeps its dash.** Measured by a live
+  round trip of `applyContextResult` on FMN — the appended `- Smoke probe…`
+  line came back as `* Smoke probe…`, and the seeded Definition of Done's
+  `- [ ] Tests written and passing` did not change. This is why
+  `comparableLine` in `domain/context-doc.ts` normalises the leading list
+  marker as well as emphasis: normalising emphasis alone mapped a `*` bullet
+  to `_` while leaving a `-` bullet untouched, so a proposal that faithfully
+  re-sent the line it had just read was refused as an undeclared removal.
+  Reasoning did not find this; only the round trip did.

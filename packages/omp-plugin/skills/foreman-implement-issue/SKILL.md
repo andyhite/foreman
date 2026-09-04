@@ -43,6 +43,19 @@ owns this issue.
    `discoveredWork[]`, `approachSummary`. The extension moves the issue to
    In Review, releases the lock, and files `discoveredWork`.
 
+## Context doc contradictions
+
+- Populate `contextContradictions` when the code you just touched
+  contradicts a claim recorded in the product `Context` doc's decisions,
+  vocabulary, or non-goals. This is the doc's ONLY pruning signal (SPEC
+  §4.7) — no sweep, no age timer; a recorded line goes stale exactly when
+  implementation is found to contradict it.
+- `recorded` quotes the doc line; `evidence` is `file:line` in your change.
+- Empty is the normal case. NEVER invent a contradiction to fill the field,
+  and NEVER report a mere gap (the doc is silent on something) as one.
+- This is a finding, not a fix: the operator resolves the doc as part of
+  this issue. You do not edit the doc.
+
 ## Output schema
 
 `schemas/implement-result.json`: `ImplementResult` branch of the envelope

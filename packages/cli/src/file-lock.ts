@@ -29,17 +29,19 @@ export function withFileLock<T>(lockPath: string, fn: () => T, staleMs = 30_000)
             if ((killError as NodeJS.ErrnoException).code === "ESRCH") holderGone = true;
           }
         }
-      } catch {
-        // Lock file vanished between the failed open and this read — another
-        // process already reclaimed it; loop around and try the open again.
-        continue;
+      } catch (readError) {
+        // Only "the lock vanished between the failed open and this read" is a
+        // reason to retry immediately. Anything else (EISDIR from a directory at
+        // the lock path, EACCES) must fall through to the deadline/sleep path
+        // below, or this loop spins forever with no output.
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
       }
       if (holderGone) {
-        rmSync(lockPath, { force: true });
+        rmSync(lockPath, { force: true, recursive: true });
         continue;
       }
       if (Date.now() > deadline) {
-        rmSync(lockPath, { force: true });
+        rmSync(lockPath, { force: true, recursive: true });
         continue;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);

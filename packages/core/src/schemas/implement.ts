@@ -1,6 +1,7 @@
 import { type Static, Type } from "../typebox.ts";
 import { TYPE_LABELS } from "../domain/labels.ts";
 import { envelope } from "./envelope.ts";
+import { ContextContradiction } from "./review.ts";
 
 export const CriterionEvidence = Type.Object(
   {
@@ -69,6 +70,7 @@ export const ImplementResult = Type.Object(
       description: "Tests covering each acceptance criterion.",
     }),
     discoveredWork: Type.Array(DiscoveredWork),
+    contextContradictions: Type.Array(ContextContradiction),
     approachSummary: Type.String({
       minLength: 1,
       description: "How you solved it, for the review comment and the PR body.",

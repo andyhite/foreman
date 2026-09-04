@@ -37,6 +37,7 @@ describe("extractFromToolResult", () => {
         aborted: false,
         issueId: null,
         previousStateId: null,
+        batchIssueIds: null,
       },
     ]);
   });
@@ -59,8 +60,8 @@ describe("extractFromToolResult", () => {
     };
     const captured = extractFromToolResult(payload);
     expect(captured).toEqual([
-      { dispatchId: "foreman-refine-ENG-2-1", agent: "foreman-refine", data: { issueId: "ENG-2" }, aborted: false, issueId: null, previousStateId: null },
-      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" }, aborted: false, issueId: null, previousStateId: null },
+      { dispatchId: "foreman-refine-ENG-2-1", agent: "foreman-refine", data: { issueId: "ENG-2" }, aborted: false, issueId: null, previousStateId: null, batchIssueIds: null },
+      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" }, aborted: false, issueId: null, previousStateId: null, batchIssueIds: null },
     ]);
   });
 
@@ -76,7 +77,7 @@ describe("extractFromToolResult", () => {
     };
     const captured = extractFromToolResult(payload);
     expect(captured).toEqual([
-      { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: null, previousStateId: null },
+      { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: null, previousStateId: null, batchIssueIds: null },
     ]);
   });
 
@@ -135,7 +136,7 @@ describe("sink — idempotency", () => {
   it("is a no-op on a second delivery of the same dispatch id", async () => {
     const applied = new Set<string>();
     const calls: CapturedOutput[] = [];
-    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: "ENG-1", previousStateId: null };
+    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-implement", data: {}, aborted: false, issueId: "ENG-1", previousStateId: null, batchIssueIds: null };
 
     await sink(captured, makeTracker(applied), async (value) => {
       calls.push(value);
@@ -156,7 +157,7 @@ describe("sink — idempotency", () => {
         return false;
       },
     };
-    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-plan", data: {}, aborted: false, issueId: null, previousStateId: null };
+    const captured: CapturedOutput = { dispatchId: "d-1", agent: "foreman-plan", data: {}, aborted: false, issueId: null, previousStateId: null, batchIssueIds: null };
 
     await sink(captured, tracker, async () => {});
 

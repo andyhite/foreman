@@ -11,10 +11,11 @@
  * load-time crash (SPEC §3.5 item 6).
  */
 
-import type { GlobalConfig, Initiative, LinearWriter, Project, WorkflowState } from "@foreman/core";
+import type { GlobalConfig, LinearDocument, LinearWriter, Project, WorkflowState } from "@foreman/core";
 import type { ResolvedRepoEntry } from "@foreman/core";
 import {
   ConfigError,
+  CONTEXT_DOC_TITLE,
   entryForCwd,
   GitHubAppAuth,
   GitHubClient,
@@ -47,6 +48,8 @@ interface Runtime {
   lockTtlMs: number;
   stateCache: Map<string, WorkflowState[]>;
   contextDigestCache: Map<string, string>;
+  /** Per-team cache for `getProductDigest()` — mirrors `contextDigestCache`'s per-project keying, but the product layer needs no project id. */
+  productDigestCache: Map<string, string>;
   /** Memoized by `getEntry()` on first access — `entryForCwd` throws `ConfigError` on an unregistered cwd, so it must not run eagerly in `initRuntime` (SPEC §3.5 item 6, mirroring the Linear client's lazy construction above). */
   entry: ResolvedRepoEntry | null;
 }
@@ -67,10 +70,10 @@ export function liveDispatchIds(): readonly string[] {
 
 let runtime: Runtime | null = null;
 
-function productDigest(initiative: Initiative | null): string {
-  const doc = initiative?.documents.find((entry) => entry.title.trim().toLowerCase() === "context");
+function productDigest(documents: LinearDocument[], teamKey: string): string {
+  const doc = documents.find((entry) => entry.title.trim().toLowerCase() === CONTEXT_DOC_TITLE.toLowerCase());
   const body = doc?.content?.trim();
-  return `## Product Context (${initiative?.name ?? "unknown"})\n${body && body.length > 0 ? body : "_none_"}`;
+  return `## Product Context (${teamKey})\n${body && body.length > 0 ? body : "_none_"}`;
 }
 
 /*
@@ -136,6 +139,7 @@ export function initRuntime(options?: { home?: string; env?: Record<string, stri
     lockTtlMs: lockTtlMs(config),
     stateCache: new Map(),
     contextDigestCache: new Map(),
+    productDigestCache: new Map(),
     entry: null,
   };
 
@@ -205,13 +209,12 @@ export function getGitHub(): GitHubClient {
 /**
  * Returns the cached two-layer Context digest for `projectId`, fetching and
  * caching it on first ask (SPEC §4.7): the product `Context` doc on the
- * project's initiative, concatenated product-first with the project's own
- * brief. Either layer degrades to a stub rather than throwing — a new
- * product with a stub `Context` doc, or a project with no brief yet, is a
- * legitimate state the digest must still render usefully. An unresolvable
- * initiative (the project belongs to zero or more than one — nothing gates
- * on that any more) degrades the product layer the same way a missing
- * document does.
+ * repo's team, concatenated product-first with the project's own brief. The
+ * product layer resolves through the team, not an initiative — a repo binds
+ * exactly one team, and nothing attaches a created project to an initiative
+ * any more. Either layer degrades to a stub rather than throwing — a new
+ * team with a stub `Context` doc, or a project with no brief yet, is a
+ * legitimate state the digest must still render usefully.
  */
 export async function getContextDigest(projectId: string): Promise<string> {
   const rt = requireRuntime();
@@ -225,11 +228,27 @@ export async function getContextDigest(projectId: string): Promise<string> {
     return "## Product Context\n_project not found_\n\n## Project Brief\n_project not found_";
   }
 
-  const refs = await linear.projectInitiatives(projectId);
-  const initiative = refs.length === 1 && refs[0] ? await linear.initiative(refs[0].id) : null;
-
-  const digest = `${productDigest(initiative)}\n\n${projectBriefDigest(project)}`;
+  const digest = `${await getProductDigest()}\n\n${projectBriefDigest(project)}`;
   rt.contextDigestCache.set(projectId, digest);
+  return digest;
+}
+
+/**
+ * Returns the product layer alone — the team's `Context` doc (SPEC §4.7) —
+ * for callers with no project id: triage items are `project: null` by
+ * definition, and roadmap runs before any project exists. Cached per team
+ * key, the same way `getContextDigest` caches per project id.
+ */
+export async function getProductDigest(): Promise<string> {
+  const rt = requireRuntime();
+  const team = getEntry().team;
+  const cached = rt.productDigestCache.get(team);
+  if (cached) return cached;
+
+  const linear = getLinear();
+  const documents = await linear.teamDocuments(team);
+  const digest = productDigest(documents, team);
+  rt.productDigestCache.set(team, digest);
   return digest;
 }
 

@@ -90,7 +90,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       args.pollSeconds = value;
     } else if (arg === "--home") {
-      args.homePath = argv[(i += 1)] ?? null;
+      const value = argv[(i += 1)];
+      if (value === undefined) throw new ConfigError("--home requires a path", []);
+      args.homePath = value;
     } else if (arg !== undefined && !arg.startsWith("-") && args.repo === null) {
       args.repo = arg;
     } else if (arg !== undefined) {

@@ -845,4 +845,28 @@ describe("HerdrDispatcher.settle", () => {
     const outcome = await dispatcher.settle(makeHandle({ herdr: null }));
     expect(outcome.status).toBe("lost");
   });
+
+  it("gives the underlying agent wait exec call a timeoutMs greater than maxRuntimeMs + lockTtlMarginMs, so herdr's own --timeout wins the race", async () => {
+    const recordedOptions: ({ timeoutMs?: number } | undefined)[] = [];
+    const runner = {
+      run(argv: string[], options?: { timeoutMs?: number }) {
+        if (argv.includes("agent") && argv.includes("wait")) {
+          recordedOptions.push(options);
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("close")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const config = makeConfig();
+    const dispatcher = new HerdrDispatcher(config, { runner });
+
+    await dispatcher.settle(makeHandle({}));
+
+    expect(recordedOptions).toHaveLength(1);
+    const ceiling = config.agent.maxRuntimeMs + config.agent.lockTtlMarginMs;
+    expect(recordedOptions[0]?.timeoutMs).toBeGreaterThan(ceiling);
+  });
 });
