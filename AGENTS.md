@@ -10,7 +10,7 @@ measured against omp and Linear where the spec was wrong.
 - NEVER hand a `foreman-*` agent `task`, `spawns`, a Linear write tool, `schemaMode`, or `isolated`. The task guard forces strictness at spawn; frontmatter omission is the fan-out control.
 - NEVER edit the generated `output:` block in `packages/omp-plugin/agents/*.md`. Edit `packages/core/src/schemas/*.ts`, run `bun run schemas`.
 - NEVER add a second Linear write path. `packages/core/src/linear/client.ts` behind the extension is the only one.
-- `bun run check` MUST pass before a PR: typecheck + tests + contract.
+- `bun run check` MUST pass before a PR: typecheck + tests + contract + build.
 </critical>
 
 ## Layout
@@ -30,7 +30,9 @@ bun run typecheck      # tsc --build --force
 bun test               # bun test; per package: bun test packages/<name>
 bun run contract       # plugin wiring: frontmatter YAML, tools, skills, rules, schema drift
 bun run schemas        # regenerate output schemas into agent frontmatter + schemas/*.json
-bun run check          # all three
+bun run build          # build every package (CLI dist output)
+bun run check          # typecheck + test + contract + build
+bun run check:ci       # check, plus bun audit, built-CLI smoke test, install.sh syntax check, schema-drift check — mirrors CI exactly
 bun run setup          # foreman setup --link from source
 ```
 

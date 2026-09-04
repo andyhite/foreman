@@ -207,7 +207,7 @@ export async function provisionTeam(
       continue;
     }
     try {
-      await linear.updateTeamSettings(input.teamId, { [change.name]: change.op === "enable" }); // eslint-disable-line @typescript-eslint/no-explicit-any -- keyed by the discriminated `name` above
+      await linear.updateTeamSettings(input.teamId, { [change.name]: change.op === "enable" });
       actions.push({ kind: "team-setting", name: change.name, op: change.op, changed: true, detail: null });
       if (change.name === "triageEnabled") triageJustEnabled = true;
     } catch (error) {

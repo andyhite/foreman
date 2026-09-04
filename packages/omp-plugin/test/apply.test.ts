@@ -166,12 +166,10 @@ class FakeLinear implements LinearWriter {
   async createRelation(input: { issueId: string; relatedIssueId: string; type: IssueRelationType }) {
     this.relationCalls.push(input);
   }
-  async deleteRelation() {}
   async projectRelations() {
     return [];
   }
   async createProjectRelation() {}
-  async deleteProjectRelation() {}
   async createLabel(input: { name: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);
@@ -202,7 +200,19 @@ class FakeLinear implements LinearWriter {
   async updateTeamSettings(): Promise<void> {}
 }
 
-function makeDeps(linear: FakeLinear, entry?: Pick<ResolvedRepoEntry, "team" | "repoPath" | "branchPattern">, operatorUserId: string | null = null): ApplyDeps {
+const TEST_ENTRY: Pick<ResolvedRepoEntry, "alias" | "team" | "repoPath" | "branchPattern" | "pr"> = {
+  alias: "repo",
+  team: "ENG",
+  repoPath: "/repo",
+  branchPattern: "<issue-id>-<slug>",
+  pr: { required: true, draft: false, ciRequired: true },
+};
+
+function makeDeps(
+  linear: FakeLinear,
+  entry?: Pick<ResolvedRepoEntry, "alias" | "team" | "repoPath" | "branchPattern" | "pr">,
+  operatorUserId: string | null = null,
+): ApplyDeps {
   return { linear, github: new GitHubClient(), now: () => new Date("2026-01-01T00:00:00.000Z"), entry, operatorUserId };
 }
 
@@ -313,6 +323,61 @@ describe("applyOutcome — triage", () => {
     });
 
     expect(linear.updateCalls.some((call) => call.input.assigneeId === "operator-1")).toBe(true);
+  });
+
+  it("an item naming an issue on another team is recorded as a failure and mutates nothing", async () => {
+    const issue = makeIssue({
+      state: { id: "state-triage", name: "Triage", type: "triage", position: 0 },
+      team: { id: "team-2", key: "OTHR", name: "Other" },
+    });
+    const linear = new FakeLinear([issue]);
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      makeDeps(linear, TEST_ENTRY),
+      { kind: "result", agent: "foreman-triage", result: makeTriageItem() },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(linear.commentCalls).toHaveLength(0);
+    expect(notices.some((notice) => notice.level === "error" && notice.message.includes("OTHR"))).toBe(true);
+  });
+
+  it("an item with a destinationProjectId from another team is recorded as a failure", async () => {
+    const issue = makeIssue({ state: { id: "state-triage", name: "Triage", type: "triage", position: 0 } });
+    const linear = new FakeLinear([issue]);
+    // deps.entry binds team ENG, but `projects("ENG")` never lists this id.
+    linear.projectsList = [];
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      makeDeps(linear, TEST_ENTRY),
+      { kind: "result", agent: "foreman-triage", result: makeTriageItem({ destinationProjectId: "project-x" }) },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.updateCalls).toHaveLength(0);
+    expect(notices.some((notice) => notice.level === "error" && notice.message.includes("not a project on team ENG"))).toBe(true);
+  });
+
+  it("an out-of-scope proposedBlockedBy entry yields a problems line while the rest of the item still applies", async () => {
+    const issue = makeIssue({ state: { id: "state-triage", name: "Triage", type: "triage", position: 0 } });
+    const blocker = makeIssue({
+      id: "issue-2",
+      identifier: "OTHR-1",
+      team: { id: "team-2", key: "OTHR", name: "Other" },
+    });
+    const linear = new FakeLinear([issue, blocker]);
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
+    const notices: Array<{ message: string; level: string }> = [];
+    await applyOutcome(
+      makeDeps(linear, TEST_ENTRY),
+      { kind: "result", agent: "foreman-triage", result: makeTriageItem({ proposedBlockedBy: ["OTHR-1"] }) },
+      (message, level) => notices.push({ message, level }),
+    );
+
+    expect(linear.relationCalls).toHaveLength(0);
+    expect(linear.updateCalls.some((call) => call.input.stateId === STATE_BACKLOG.id)).toBe(true);
+    expect(notices.some((notice) => notice.message.includes("blocker OTHR-1 is out of scope"))).toBe(true);
   });
 });
 
@@ -512,7 +577,7 @@ describe("applyOutcome — review, GitHub submission", () => {
       linear,
       github: new GitHubClient({ runner }),
       now: () => new Date("2026-01-01T00:00:00.000Z"),
-      entry: { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" },
+      entry: TEST_ENTRY,
       operatorUserId: null,
     };
   }
@@ -646,7 +711,8 @@ describe("applyOutcome — plan", () => {
       status: null,
     };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
-    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
       kind: "result",
       agent: "foreman-plan",
       result: makePlanResult(),
@@ -678,7 +744,8 @@ describe("applyOutcome — plan", () => {
       status: null,
     };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
-    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
       kind: "result",
       agent: "foreman-plan",
       result: makePlanResult({
@@ -746,7 +813,8 @@ describe("applyOutcome — plan", () => {
       targetDate: null,
       status: null,
     };
-    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
       kind: "result",
       agent: "foreman-plan",
       result: makePlanResult({ proposedIssues: [], fullyPlanned: true }),
@@ -766,7 +834,8 @@ describe("applyOutcome — plan", () => {
       targetDate: null,
       status: null,
     };
-    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
       kind: "result",
       agent: "foreman-plan",
       result: makePlanResult({ proposedIssues: [], fullyPlanned: true }),
@@ -777,8 +846,29 @@ describe("applyOutcome — plan", () => {
   it("throws when the project no longer exists", async () => {
     const linear = new FakeLinear([]);
     await expect(
-      applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), { kind: "result", agent: "foreman-plan", result: makePlanResult() }),
+      applyOutcome(makeDeps(linear, TEST_ENTRY), { kind: "result", agent: "foreman-plan", result: makePlanResult() }),
     ).rejects.toThrow("unknown project");
+  });
+
+  it("throws and records a failure when the project belongs to another team", async () => {
+    const linear = new FakeLinear([]);
+    linear.projectRecord = {
+      id: "project-1",
+      name: "Search revamp",
+      description: null,
+      content: "Brief.",
+      documents: [],
+      startDate: null,
+      targetDate: null,
+      status: null,
+    };
+    // The entry is bound to team ENG; `projects("ENG")` never lists this
+    // project, so it belongs to some other team.
+    linear.projectsList = [];
+    await expect(
+      applyOutcome(makeDeps(linear, TEST_ENTRY), { kind: "result", agent: "foreman-plan", result: makePlanResult() }),
+    ).rejects.toThrow("not on team ENG");
+    expect(linear.createIssueCalls).toHaveLength(0);
   });
 
   it("resolves a proposedIssue's app to an existing workspace label id", async () => {
@@ -794,8 +884,9 @@ describe("applyOutcome — plan", () => {
       status: null,
     };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
     linear.labelsById.set("label-app-fleet", { id: "label-app-fleet", name: "app:fleet", parentId: null });
-    await applyOutcome(makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }), {
+    await applyOutcome(makeDeps(linear, TEST_ENTRY), {
       kind: "result",
       agent: "foreman-plan",
       result: makePlanResult({ proposedIssues: [{ ...makePlanResult().proposedIssues[0]!, app: "fleet" }] }),
@@ -818,9 +909,10 @@ describe("applyOutcome — plan", () => {
       status: null,
     };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.projectsList = [{ id: "project-1", name: "Search revamp" }];
     const notices: Array<{ message: string; level: string }> = [];
     await applyOutcome(
-      makeDeps(linear, { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" }),
+      makeDeps(linear, TEST_ENTRY),
       {
         kind: "result",
         agent: "foreman-plan",

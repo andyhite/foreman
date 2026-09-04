@@ -12,6 +12,7 @@ export {
   diffRange,
   ensureWorktree,
   listWorktrees,
+  remoteName,
   removeWorktree,
   slugify,
   worktreePathFor,

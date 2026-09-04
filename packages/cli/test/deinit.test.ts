@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDeinit, type DeinitDeps, type DeinitOptions } from "../src/deinit.ts";
-import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
+import type { Choice, Prompter } from "../src/prompt.ts";
 
 class ScriptedPrompter implements Prompter {
   confirmResult = true;
@@ -25,9 +25,6 @@ class ScriptedPrompter implements Prompter {
     return Promise.resolve("");
   }
 
-  multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
-    return Promise.resolve(choices.filter((choice) => choice.checked).map((choice) => choice.value));
-  }
 
   close(): void {
     // no-op

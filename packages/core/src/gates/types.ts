@@ -19,7 +19,7 @@ export interface GateResult {
 }
 
 /** Name of each gate, for logging and for the interceptor's error messages. */
-export type GateName = "refinement" | "implementation" | "review";
+export type GateName = "refinement" | "refine entry" | "implementation" | "review";
 
 export function gateSummary(name: GateName, result: GateResult): string {
   if (result.ok) return `${name} gate: pass`;

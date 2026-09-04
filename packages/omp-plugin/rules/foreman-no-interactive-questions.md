@@ -3,7 +3,7 @@ description: Catches an agent starting to ask the operator a question in-session
 condition: "(?i)(let me know|could you (confirm|clarify|tell me)|please (confirm|clarify|advise)|should I (proceed|continue)|which (option|approach) (do you|would you)|waiting (for|on) (your|the operator))"
 scope: "text"
 interruptMode: always
-agents: [main, "foreman-*"]
+agents: ["foreman-*"]
 ---
 
 Stop. Headless children have no approval UI; asking stalls the run and burns

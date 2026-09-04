@@ -1,8 +1,9 @@
 export { renderIssueDescription } from "./issue-description.ts";
 export type { IssueDescriptionInput } from "./issue-description.ts";
 
-export { renderPrBody } from "./pr-body.ts";
-export type { PrBodyInput } from "./pr-body.ts";
+// The PR body is never rendered here: it is authored by the implement agent
+// at PR-creation time from `skills/foreman-implement-issue/pr-body.md`, and
+// the extension only ever reads the PR back — it never rewrites the body.
 
 export { renderSpikeIssue } from "./spike.ts";
 

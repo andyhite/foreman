@@ -1,14 +1,21 @@
 /**
  * Lock protocol (SPEC §11).
  *
- * `foreman:running` is the mutex; it can carry no structure, so the dispatch
- * ID, timestamp, TTL, and worktree ride in a `foreman:lock` comment marker
- * written in the same mutation as the label. The dispatcher claims — it
- * writes both the label and this comment before spawning; agents only ever
- * read it back to verify ownership (`verifyLockOwnership`). This module
- * classifies lock state; it never takes an action. `foreman reconcile`'s
- * orphan-lock pass acts on `orphaned` locks and never deletes a worktree
- * (SPEC §11).
+ * `foreman:running` plus a `foreman:lock` comment marker (dispatch ID,
+ * timestamp, TTL, worktree) is an *advisory* claim, not a mutex: the
+ * dispatcher writes the assignee and posts the comment in two sequential
+ * mutations before spawning, and agents only ever read it back to verify
+ * ownership (`verifyLockOwnership`). Nothing about a Linear label or comment
+ * is atomic or exclusive across processes. What actually serializes
+ * dispatch is process-local: the loop's own singleton lockfile
+ * (`packages/loop/src/process-lock.ts`) keeps two loop instances for the
+ * same repo from running at once, and omp's in-process live-dispatch
+ * registry keeps one session from double-dispatching the same issue. Neither
+ * spans processes or machines; the advisory claim is what a second, unrelated
+ * process (another operator, another loop instance elsewhere) is expected to
+ * honor by convention. This module classifies lock state; it never takes an
+ * action. `foreman reconcile`'s orphan-lock pass acts on `orphaned` locks and
+ * never deletes a worktree (SPEC §11).
  */
 
 import { encodeMarker, latestMarker, MARKER_KIND } from "./markers.ts";
@@ -57,9 +64,9 @@ export function renderLockComment(record: LockRecord): string {
 
 export function readLockComment(
   comments: readonly MarkerSource[],
-  authoredBy?: string,
+  authoredBy: string | null,
 ): FoundMarker<LockRecord> | null {
-  return latestMarker<LockRecord>(MARKER_KIND.lock, comments, authoredBy ? { authoredBy } : undefined);
+  return latestMarker<LockRecord>(MARKER_KIND.lock, comments, { authoredBy });
 }
 
 export interface LockState {

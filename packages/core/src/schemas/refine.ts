@@ -8,7 +8,7 @@ const TypeLabelSchema = Type.Union(
 );
 
 /** Fibonacci, read as agent-session size (SPEC §4.6). 5 means split; 8 means not an issue. */
-const EstimateSchema = Type.Union(
+export const EstimateSchema = Type.Union(
   [
     Type.Literal(1),
     Type.Literal(2),

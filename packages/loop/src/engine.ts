@@ -140,10 +140,9 @@ async function offerCandidates<S>(
           gaveUpLogged.add(candidate.key);
           if (candidate.key.startsWith("issue:")) {
             const summary = `escalate ${candidate.subject} (retry-exhausted)`;
-            // eslint-disable-next-line no-await-in-loop -- confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
+            // Confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
             if (await opts.confirmer.confirm({ kind: "linear-write", summary })) {
               try {
-                // eslint-disable-next-line no-await-in-loop
                 opts.log(
                   await applyEscalation(ctx.linear, {
                     issueId: candidate.subject,
@@ -152,6 +151,10 @@ async function offerCandidates<S>(
                     detail: candidate.reason,
                   }),
                 );
+                // The escalation is the terminal outcome of this failure streak; retire the
+                // streak with it, or the issue is re-escalated the moment the operator
+                // returns it to the queue.
+                opts.state.clearFailures(candidate.key);
               } catch (error) {
                 opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
               }
@@ -163,14 +166,12 @@ async function offerCandidates<S>(
         continue;
       }
 
-      // eslint-disable-next-line no-await-in-loop -- confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
+      // Confirmation and dispatch must serialize against the concurrency cap this same loop enforces.
       const approved = await opts.confirmer.confirm({ kind: `dispatch-${loop.name}`, summary: candidate.reason });
       if (!approved) continue;
 
       try {
-        // eslint-disable-next-line no-await-in-loop
         const request = await buildRequest(candidate, ctx);
-        // eslint-disable-next-line no-await-in-loop
         const handles = await opts.dispatcher.dispatch(request);
         const handle = handles[0];
         if (!handle) continue;
@@ -208,19 +209,23 @@ async function offerCandidates<S>(
 export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopOptions): Promise<void> {
   const gaveUpLogged = new Set<string>();
   let stop = false;
+  let wakeResolve: (() => void) | null = null;
   const signalHandler = (): void => {
     stop = true;
+    wakeResolve?.();
   };
   // Bun's bundled `Process` type declares `once`/`removeListener` only
   // against a `"memoryPressure"` overload, dropping Node's `NodeJS.Signals`
   // overload; `signals` is `process` narrowed to the plain
   // `NodeJS.EventEmitter` surface Node itself guarantees it implements.
   const signals: NodeJS.EventEmitter = nodeProcess;
-  signals.once("SIGINT", signalHandler);
-  signals.once("SIGTERM", signalHandler);
+  // `on`, not `once`: a repeated signal must set `stop` and re-wake again
+  // rather than fall through to Node's default handler, which would kill
+  // the process and skip the CLI's `lock.release()`.
+  signals.on("SIGINT", signalHandler);
+  signals.on("SIGTERM", signalHandler);
 
   try {
-    let wakeResolve: (() => void) | null = null;
     const wake = (): void => {
       wakeResolve?.();
     };
@@ -239,10 +244,8 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
 
       for (const escalation of loop.escalations?.(snapshot, ctx) ?? []) {
         const summary = `escalate ${escalation.issueId} (${escalation.kind})`;
-        // eslint-disable-next-line no-await-in-loop
         if (!(await opts.confirmer.confirm({ kind: "linear-write", summary }))) continue;
         try {
-          // eslint-disable-next-line no-await-in-loop
           opts.log(await applyEscalation(ctx.linear, escalation));
         } catch (error) {
           opts.log(`${summary}: failed (${error instanceof Error ? error.message : String(error)})`);
@@ -271,6 +274,7 @@ export async function runLoop<S>(loop: Loop<S>, ctx: LoopContext, opts: RunLoopO
       wakeResolve = null;
 
       if (stop) {
+        await Promise.all(settling);
         return;
       }
     }

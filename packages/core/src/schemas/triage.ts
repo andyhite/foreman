@@ -1,6 +1,7 @@
 import { type Static, Type } from "../typebox.ts";
 import { TYPE_LABELS } from "../domain/labels.ts";
 import { envelope } from "./envelope.ts";
+import { EstimateSchema } from "./refine.ts";
 
 const TypeLabelSchema = Type.Union(
   TYPE_LABELS.map((name) => Type.Literal(name)),
@@ -71,7 +72,7 @@ export const TriageItem = Type.Object(
     draftDescription: Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
       description: "Drafted issue body when the source Inbox item lacks one; applied directly. Null when the existing description is adequate.",
     }),
-    proposedEstimate: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()], {
+    proposedEstimate: Type.Union([EstimateSchema, Type.Null()], {
       description: "Estimate to apply, or null when you cannot yet estimate it.",
     }),
     missingInfo: Type.Array(Type.String(), {

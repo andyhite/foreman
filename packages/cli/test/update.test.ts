@@ -249,4 +249,26 @@ describe("runUpdate", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("returns a non-zero exit code and skips the build when bun install fails", async () => {
+    const home = makeTempHome();
+    const checkoutRoot = join(home, "checkout");
+    try {
+      makeCheckout(checkoutRoot);
+      writeConfig(home, {});
+      const runner = new RecordingRunner({
+        responses: { "bun install --frozen-lockfile": { code: 1 } },
+      });
+      const log: string[] = [];
+
+      const failures = await runUpdate(baseOptions({}, home, checkoutRoot), { runner, log: (m) => log.push(m) });
+
+      expect(failures).toBeGreaterThan(0);
+      const buildCalls = runner.calls.filter((call) => call.bin === "bun" && call.argv.join(" ") === "run build");
+      expect(buildCalls).toHaveLength(0);
+      expect(log.some((line) => line.includes("lockfile is out of date"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

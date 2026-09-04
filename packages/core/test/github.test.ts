@@ -240,19 +240,93 @@ describe("GitHubClient.mergeBranchLocally", () => {
     ).rejects.toThrow(DirtyWorkingTreeError);
   });
 
-  it("restores the starting ref after merging, even on failure", async () => {
+  it("resolves the argv sequence for rebase: rebase base branch -> checkout base -> merge --ff-only", async () => {
+    const { runner, calls } = stubRunner((argv) => {
+      if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    await client.mergeBranchLocally("/repo", "eng-142-fix", "main", "rebase", false);
+
+    const argvs = calls.map((call) => call.argv);
+    expect(argvs).toContainEqual(["git", "rebase", "main", "eng-142-fix"]);
+    expect(argvs).toContainEqual(["git", "merge", "--ff-only", "eng-142-fix"]);
+
+    const rebaseIndex = argvs.findIndex((argv) => argv[0] === "git" && argv[1] === "rebase");
+    const checkoutBaseIndex = argvs.findIndex(
+      (argv, index) => index > rebaseIndex && argv[0] === "git" && argv[1] === "checkout" && argv[2] === "main",
+    );
+    const ffOnlyIndex = argvs.findIndex((argv) => argv[0] === "git" && argv[1] === "merge" && argv[2] === "--ff-only");
+    expect(rebaseIndex).toBeGreaterThanOrEqual(0);
+    expect(checkoutBaseIndex).toBeGreaterThan(rebaseIndex);
+    expect(ffOnlyIndex).toBeGreaterThan(checkoutBaseIndex);
+  });
+
+  it("aborts and restores the starting ref on merge failure, surfacing the merge's error rather than the restore's", async () => {
     const { runner, calls } = stubRunner((argv) => {
       if (argv.includes("status")) return { stdout: "" };
       if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
-      if (argv.includes("rebase")) throw new Error("rebase conflict");
+      if (argv[1] === "merge" && argv[2] === "--ff-only") {
+        throw new Error("not fast-forward");
+      }
       return { stdout: "" };
     });
     const client = new GitHubClient({ runner });
     await expect(
       client.mergeBranchLocally("/repo", "eng-142-fix", "main", "rebase", false),
-    ).rejects.toThrow();
+    ).rejects.toThrow("not fast-forward");
+
+    const argvs = calls.map((call) => call.argv);
+    expect(argvs).toContainEqual(["git", "rebase", "--abort"]);
+    expect(argvs).toContainEqual(["git", "reset", "--hard"]);
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.argv).toEqual(["git", "checkout", "feature-branch"]);
+  });
+
+  it("restores the starting ref after a successful merge", async () => {
+    const { runner, calls } = stubRunner((argv) => {
+      if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    await client.mergeBranchLocally("/repo", "eng-142-fix", "main", "merge", false);
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.argv).toEqual(["git", "checkout", "feature-branch"]);
+  });
+
+  it("resolves the configured remote once instead of hardcoding origin", async () => {
+    const { runner, calls } = stubRunner((argv) => {
+      if (argv.includes("remote") && argv.length === 2) return { stdout: "upstream\n" };
+      if (argv.includes("symbolic-ref")) return { stdout: "feature-branch\n" };
+      return { stdout: "" };
+    });
+    const client = new GitHubClient({ runner });
+    await client.mergeBranchLocally("/repo", "eng-142-fix", "main", "merge", true);
+    const argvs = calls.map((call) => call.argv);
+    expect(argvs).toContainEqual(["git", "pull", "upstream", "main"]);
+    expect(argvs).toContainEqual(["git", "push", "upstream", "main"]);
+    expect(argvs).toContainEqual(["git", "push", "upstream", "--delete", "eng-142-fix"]);
+  });
+});
+
+describe("GitHubClient.mergedBranches", () => {
+  it("rejects an unsafe base ref before any command runs", async () => {
+    const { runner, calls } = stubRunner(() => ({ stdout: "" }));
+    const client = new GitHubClient({ runner });
+    await expect(client.mergedBranches("/repo", "--upload-pack=evil", ["eng-1-fix"])).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects an unsafe branch ref", async () => {
+    const { runner } = stubRunner(() => ({ stdout: "" }));
+    const client = new GitHubClient({ runner });
+    await expect(client.mergedBranches("/repo", "main", ["-x"])).rejects.toThrow();
+  });
+
+  it("accepts safe refs and reports merged branches", async () => {
+    const { runner } = stubRunner(() => ({ stdout: "eng-1-fix\n" }));
+    const client = new GitHubClient({ runner });
+    expect(await client.mergedBranches("/repo", "main", ["eng-1-fix"])).toEqual(["eng-1-fix"]);
   });
 });
 

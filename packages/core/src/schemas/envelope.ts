@@ -61,7 +61,7 @@ export const BlockRecord = Type.Object(
       minLength: 1,
       description: "What it costs if you guess instead of asking. This is why you blocked.",
     }),
-    blockedByIssues: Type.Array(Type.String(), {
+    blockedByIssues: Type.Array(Type.String({ minLength: 1, pattern: "^[A-Za-z][A-Za-z0-9]*-[0-9]+$" }), {
       description:
         "Human identifiers (e.g. ENG-142) of issues that block this one. " +
         "Required and non-empty when `type` is `dependency`; empty otherwise.",

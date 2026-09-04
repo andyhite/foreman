@@ -153,12 +153,13 @@ describe("runLoop", () => {
     expect(dispatcher.dispatched.length).toBe(1);
 
     const dispatchId = dispatcher.dispatched[0]!.items[0]!.dispatchId;
-    // Signal stop first: `runLoop` checks `stop` right after the wake race
-    // resolves, before fetching again, so finishing the settle afterward
-    // wakes a loop that is about to exit rather than one that re-offers
-    // the now-idle candidate a second time.
-    process.emit("SIGINT" as never);
+    // Settle first, then signal: the settle's `finally()` removes the
+    // in-flight entry and (redundantly, since `stop` isn't set yet) wakes
+    // the loop; only then does SIGINT flip `stop`, so `runLoop`'s very next
+    // check sees both effects rather than returning mid-flight and racing
+    // the settle's own microtask chain.
     dispatcher.finishSettle(dispatchId, 0);
+    process.emit("SIGINT" as never);
     await run;
     expect(dispatcher.dispatched.length).toBe(1);
     expect(state.has("issue:A")).toBe(false);
@@ -256,6 +257,72 @@ describe("runLoop", () => {
     expect(commentCalls.length).toBe(1);
   });
 
+  it("clears the failure counter on a successful escalation, so a re-scoped issue is not escalated again next tick", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    state.recordFailure("issue:ENG-1");
+    state.recordFailure("issue:ENG-1");
+    const loop = makeLoop([makeCandidate("issue:ENG-1")], 3);
+    const updateCalls: unknown[] = [];
+    const commentCalls: unknown[] = [];
+    let blocked = false;
+    const fakeLinear = {
+      issue: async () =>
+        blocked
+          ? null
+          : {
+              id: "id-1",
+              identifier: "ENG-1",
+              team: { id: "team-1" },
+              state: { id: "state-in-progress", name: "In Progress", type: "started", position: 3 },
+              labels: [],
+            },
+      workflowStates: async () => [{ id: "state-blocked", name: "Blocked", type: "started", position: 4 }],
+      ensureLabel: async (name: string) => ({ id: `label-${name}`, name }),
+      updateIssue: async (id: string, input: unknown) => {
+        updateCalls.push({ id, input });
+        blocked = true;
+      },
+      createComment: async (input: unknown) => {
+        commentCalls.push(input);
+      },
+    } as unknown as LoopContext["linear"];
+
+    await runLoop(loop, makeCtx({ linear: fakeLinear }), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 5000,
+    });
+
+    expect(updateCalls.length).toBe(1);
+    expect(commentCalls.length).toBe(1);
+    expect(state.failures("issue:ENG-1")).toBe(0);
+
+    // Second tick: the failure streak was retired with the escalation, so
+    // if the operator returned the issue to the queue it would get a fresh
+    // retry budget, not an immediate second escalation. It proceeds to a
+    // normal dispatch instead; resolve that dispatch's settle so the
+    // `once: true` run can complete.
+    const secondTick = runLoop(loop, makeCtx({ linear: fakeLinear }), {
+      once: true,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 5000,
+    });
+    await dispatcher.untilDispatched(1);
+    dispatcher.finishSettle(dispatcher.dispatched[0]!.items[0]!.dispatchId, 0);
+    await secondTick;
+
+    expect(updateCalls.length).toBe(1);
+    expect(commentCalls.length).toBe(1);
+    expect(dispatcher.dispatched.length).toBe(1);
+  });
+
   it("does not record a failure for a DispatcherBusyError, only logs a routine skip", async () => {
     class BusyDispatcher extends FakeDispatcher {
       override async dispatch(): Promise<never> {
@@ -308,5 +375,28 @@ describe("runLoop", () => {
     process.emit("SIGINT" as never);
     dispatcher.finishSettle(dispatcher.dispatched[1]!.items[0]!.dispatchId, 0);
     await run;
+  });
+
+  it("wakes the poll sleep on SIGINT immediately, well under pollMs, with nothing settling", async () => {
+    const dispatcher = new FakeDispatcher();
+    const state = await InflightStore.load(tempStatePath(), dispatcher);
+    const loop = makeLoop([], 3);
+
+    const start = Date.now();
+    const run = runLoop(loop, makeCtx(), {
+      once: false,
+      dispatcher,
+      confirmer: ALWAYS_APPROVE,
+      state,
+      log: () => {},
+      pollMs: 60_000,
+    });
+
+    // No candidates to dispatch, so the loop reaches its 60s poll sleep on
+    // the very first iteration; SIGINT must resolve that race immediately
+    // rather than waiting out the full interval.
+    process.emit("SIGINT" as never);
+    await run;
+    expect(Date.now() - start).toBeLessThan(1_000);
   });
 });

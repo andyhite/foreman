@@ -26,12 +26,14 @@ import {
   type LinearRequestEvent,
 } from "@foreman/core";
 import { resolveDispatcher } from "./dispatch/resolve.ts";
+import { preflightLoopConfig } from "./preflight.ts";
 import { reconcile } from "./reconcile.ts";
 
 interface ParsedArgs {
   repo: string | null;
   dryRun: boolean;
   mode: "confirm" | "yolo" | null;
+  verbose: boolean;
   homePath: string | null;
   help: boolean;
 }
@@ -43,18 +45,21 @@ Usage: foreman reconcile [alias] [options]
 Options:
   --dry-run              Log every invariant's fix without applying it.
   --mode <confirm|yolo>   Autonomy mode; overrides config.
+  --verbose               Log every Linear request and confirmation decision.
   --home <path>           Home directory for ~/.foreman (test hook).
   --help, -h              Show this text.
 `;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  const args: ParsedArgs = { repo: null, dryRun: false, mode: null, homePath: null, help: false };
+  const args: ParsedArgs = { repo: null, dryRun: false, mode: null, verbose: false, homePath: null, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else if (arg === "--dry-run") {
       args.dryRun = true;
+    } else if (arg === "--verbose") {
+      args.verbose = true;
     } else if (arg === "--mode") {
       const value = argv[(i += 1)];
       if (value !== "confirm" && value !== "yolo") throw new ConfigError(`--mode must be "confirm" or "yolo"`, []);
@@ -106,19 +111,11 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
   };
 
   const apiKey = resolveLinearApiKey(config);
+  if (!preflightLoopConfig(config, "foreman-reconcile", args.homePath ?? undefined)) {
+    process.exitCode = 1;
+    return;
+  }
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
-  let endpointHost: string;
-  try {
-    endpointHost = new URL(config.linear.endpoint).host;
-  } catch {
-    endpointHost = "";
-  }
-  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
-    throw new ConfigError(
-      `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
-      ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
-    );
-  }
 
   let team: string;
   try {
@@ -132,7 +129,7 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
     }
     throw error;
   }
-  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: traceLinearRequest });
+  const linear = new LinearClient({ apiKey, endpoint: config.linear.endpoint, team, onRequest: args.verbose ? traceLinearRequest : undefined });
 
   const confirmationRequired = config.loop.mode === "confirm" && !args.dryRun;
   if (confirmationRequired && !process.stdin.isTTY) {
@@ -146,11 +143,14 @@ export async function runReconcile(argv: readonly string[]): Promise<void> {
     return;
   }
   const baseConfirmer: Confirmer = confirmationRequired ? new TtyConfirmer({ log }) : YOLO_CONFIRMER;
-  const confirmer = !confirmationRequired ? verboseConfirmer(baseConfirmer, log) : baseConfirmer;
+  const confirmer = args.verbose && !confirmationRequired ? verboseConfirmer(baseConfirmer, log) : baseConfirmer;
   const liveDispatchIds = readLiveDispatchIds(config.loop.stateDir, entry.alias, args.homePath ?? undefined);
 
   const github = new GitHubClient();
-  const dispatcher = await resolveDispatcher(config);
+  // `resolveDispatcher` shells `herdr workspace list` (up to 30s) to probe
+  // herdr availability; only `mergedNotDone.fix` uses the result, and
+  // `--dry-run` never calls `fix`.
+  const dispatcher = args.dryRun ? undefined : await resolveDispatcher(config);
   let viewerId: string | null;
   try {
     viewerId = await linear.viewerId();

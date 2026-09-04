@@ -16,6 +16,7 @@ import {
   assertIssueInScope,
   branchNameFor,
   diffRange,
+  FOREMAN_STATE,
   gateSummary,
   implementationGate,
   isHandsOff,
@@ -24,7 +25,7 @@ import {
   lockState,
   lockTtlMs,
   readLockComment,
-  refinementGate,
+  refineEntryGate,
   renderLockComment,
   resolveState,
   worktreePathFor,
@@ -110,6 +111,25 @@ export function lastMarkerValue(re: RegExp, text: string): string | null {
   return value;
 }
 
+/**
+ * The one marker value in caller-supplied task text, refusing disagreement.
+ * Untrusted issue prose is pasted into that text by every command, so
+ * last-wins silently redirects the dispatch. `lastMarkerValue` stays for
+ * `results/sink.ts`, whose input the guard already normalized through
+ * `appendMarkers`.
+ */
+export function soleMarkerValue(re: RegExp, text: string, name: string): string | null {
+  re.lastIndex = 0;
+  const values = new Set<string>();
+  for (let match = re.exec(text); match !== null; match = re.exec(text)) {
+    if (match[1]) values.add(match[1]);
+  }
+  if (values.size > 1) {
+    throw new Error(`Conflicting ${name} marker lines: ${[...values].join(", ")}; refusing to dispatch.`);
+  }
+  return values.size === 1 ? [...values][0]! : null;
+}
+
 
 
 type Stage = "triage" | "plan" | "roadmap" | "refine" | "implement" | "review";
@@ -139,7 +159,7 @@ export function stageFor(agent: string): Stage | null {
 async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps, viewerId: string): Promise<GateResult | null> {
   if (stage !== "refine" && stage !== "implement") return null;
   const projectStatus = issue.project ? await deps.linear.projectStatus(issue.project.id) : null;
-  const result = stage === "refine" ? refinementGate(issue) : implementationGate(issue, viewerId);
+  const result = stage === "refine" ? refineEntryGate(issue) : implementationGate(issue, viewerId);
   if (isTerminalProjectStatus(projectStatus)) {
     return {
       ok: false,
@@ -161,7 +181,7 @@ async function evaluateGate(stage: Stage, issue: Issue, deps: TaskGuardDeps, vie
           code: "paused-project",
           message:
             `Project "${issue.project?.name}" is ${projectStatus?.name} (paused); refinement would commit new work to it. ` +
-            `Un-pause the project, or implement what it already has in Todo.`,
+            `Un-pause the project, or implement what it already has in ${FOREMAN_STATE.ready}.`,
         },
       ],
     };
@@ -287,8 +307,12 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
   const agent = item.agent;
   if (!agent || !agent.startsWith(FOREMAN_PREFIX)) return { item, contextDigest: null };
 
+  // schemaMode is forced to "strict" and isolated/outputSchema are stripped:
+  // the guard neither injects nor accepts a caller-supplied `outputSchema`
+  // (see the comment below on why the schema always comes from frontmatter).
   const revised: TaskItemInput = { ...item, schemaMode: "strict" };
   delete revised.isolated;
+  delete revised.outputSchema;
 
   const stage = stageFor(agent);
   // The schema is inlined in each agent's frontmatter `output:` key
@@ -315,7 +339,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     let projectId: string | null = null;
     let briefPath: string | null = null;
     if (stage === "plan") {
-      projectId = lastMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task);
+      projectId = soleMarkerValue(/^FOREMAN-PROJECT:\s*(\S+)\s*$/gm, item.task, "FOREMAN-PROJECT");
       if (!projectId) {
         throw new Error(`Missing "FOREMAN-PROJECT: <PROJECT-ID>" line in the task text for agent "${agent}".`);
       }
@@ -323,7 +347,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     if (stage === "roadmap") {
       // Optional: a repo-relative brief/PRD/spec document to decompose.
       // Absent means the agent works from the repo's own docs.
-      briefPath = lastMarkerValue(/^FOREMAN-BRIEF:\s*(\S+)\s*$/gm, item.task);
+      briefPath = soleMarkerValue(/^FOREMAN-BRIEF:\s*(\S+)\s*$/gm, item.task, "FOREMAN-BRIEF");
     }
     // "batch" matches the subject the loop's own intake dispatch mints for
     // triage (`packages/loop/src/loops/plan.ts`'s `triageRule`), so an
@@ -345,7 +369,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
     return { item: revised, contextDigest: stage === "roadmap" ? null : await deps.contextDigest(projectId) };
   }
 
-  const identifier = lastMarkerValue(ISSUE_MARKER_RE, item.task);
+  const identifier = soleMarkerValue(ISSUE_MARKER_RE, item.task, "FOREMAN-ISSUE");
   if (!identifier) {
     throw new Error(
       `Missing "FOREMAN-ISSUE: <IDENTIFIER>" line in the task text for agent "${agent}".`,
@@ -378,7 +402,7 @@ async function prepareItem(item: TaskItemInput, deps: TaskGuardDeps): Promise<Pr
 
   const gate = await evaluateGate(stage, issue, deps, viewerId ?? "");
   if (gate && !gate.ok) {
-    const gateName = stage === "refine" ? "refinement" : "implementation";
+    const gateName = stage === "refine" ? "refine entry" : "implementation";
     throw new Error(`${identifier}: ${gateSummary(gateName, gate)}`);
   }
 
@@ -533,6 +557,7 @@ export async function prepareTaskCall(
           isolated: first?.isolated,
         }
       : { ...input, tasks: revisedItems };
+    delete revisedInput.outputSchema;
 
     if (contextAppend.length > 0) {
       revisedInput.context = `${input.context ?? ""}${contextAppend}`;

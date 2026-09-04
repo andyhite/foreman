@@ -5,10 +5,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runInit, type InitDeps, type InitOptions } from "../src/init.ts";
-import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
+import type { Choice, Prompter } from "../src/prompt.ts";
 
 class ScriptedPrompter implements Prompter {
-  multiSelectResult: string[] | null = null;
   textAnswers: Record<string, string> = {};
   confirmAnswers: Record<string, boolean> = {};
 
@@ -28,10 +27,6 @@ class ScriptedPrompter implements Prompter {
     return Promise.resolve("");
   }
 
-  multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
-    if (this.multiSelectResult) return Promise.resolve(this.multiSelectResult as T[]);
-    return Promise.resolve(choices.filter((choice) => choice.checked).map((choice) => choice.value));
-  }
 
   close(): void {
     // no-op
@@ -226,6 +221,57 @@ describe("runInit", () => {
         runInit(baseOptions({}, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
       ).rejects.toThrow(/A Linear team is required/);
     } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-interactive init with no --team and writes no config", async () => {
+    const home = makeTempHome();
+    try {
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+
+      await expect(
+        runInit(baseOptions({ nonInteractive: true }, home, "/repos/plotroom"), { prompter, git, log: () => {} }),
+      ).rejects.toThrow(ConfigError);
+
+      expect(existsSync(join(home, ".foreman", "config.json"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown --team and writes no config", async () => {
+    const home = makeTempHome();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("query Teams")) {
+        return new Response(
+          JSON.stringify({ data: { teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+        );
+      }
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as typeof fetch;
+    const ambientApiKey = process.env.LINEAR_API_KEY;
+    try {
+      process.env.LINEAR_API_KEY = "lin_api_test";
+      const git = new FakeGit(defaultGitResponses("/repos/plotroom"));
+      const prompter = new ScriptedPrompter();
+
+      await expect(
+        runInit(baseOptions({ skipLinear: false, team: "NOPE" }, home, "/repos/plotroom"), {
+          prompter,
+          git,
+          log: () => {},
+        }),
+      ).rejects.toThrow(/does not exist in this workspace/);
+
+      expect(existsSync(join(home, ".foreman", "config.json"))).toBe(false);
+    } finally {
+      if (ambientApiKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = ambientApiKey;
+      globalThis.fetch = originalFetch;
       rmSync(home, { recursive: true, force: true });
     }
   });

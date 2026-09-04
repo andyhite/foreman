@@ -19,7 +19,7 @@ export interface ScopeVerdict {
  * entry's bound team. Pure and synchronous — team membership is on the issue
  * already, so this makes no Linear call.
  */
-export function issueScope(entry: ResolvedRepoEntry, issue: Issue): ScopeVerdict {
+export function issueScope(entry: Pick<ResolvedRepoEntry, "alias" | "team">, issue: Issue): ScopeVerdict {
   if (issue.team.key.toLowerCase() !== entry.team.toLowerCase()) {
     return {
       inScope: false,
@@ -36,7 +36,7 @@ export function issueScope(entry: ResolvedRepoEntry, issue: Issue): ScopeVerdict
  * operator error there, not a routine skip, so it throws with the reason
  * rather than returning a verdict to ignore.
  */
-export function assertIssueInScope(entry: ResolvedRepoEntry, issue: Issue): void {
+export function assertIssueInScope(entry: Pick<ResolvedRepoEntry, "alias" | "team">, issue: Issue): void {
   const verdict = issueScope(entry, issue);
   if (!verdict.inScope) {
     throw new ConfigError(verdict.message ?? `Issue ${issue.identifier} is out of scope`, [

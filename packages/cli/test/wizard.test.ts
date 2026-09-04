@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBinDir } from "../src/cli-link.ts";
 import type { Runner } from "../src/exec.ts";
-import type { Choice, CheckboxChoice, Prompter } from "../src/prompt.ts";
+import type { Choice, Prompter } from "../src/prompt.ts";
 import { runWizard, type WizardOptions } from "../src/wizard.ts";
 
 /** A `WorkspaceLabels` response reporting every managed group and member already present, so `provisionWorkspaceLabels` creates nothing. */
@@ -30,7 +30,6 @@ function existingWorkspaceLabelsResponse(): Response {
 
 class ScriptedPrompter implements Prompter {
   confirmCalls: string[] = [];
-  multiSelectResult: string[] | null = null;
   textAnswers: Record<string, string> = {};
   secretAnswer = "";
   private confirmScript: boolean[];
@@ -55,11 +54,6 @@ class ScriptedPrompter implements Prompter {
 
   secret(_question: string): Promise<string> {
     return Promise.resolve(this.secretAnswer);
-  }
-
-  multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
-    if (this.multiSelectResult) return Promise.resolve(this.multiSelectResult as T[]);
-    return Promise.resolve(choices.filter((choice) => choice.checked).map((choice) => choice.value));
   }
 
   close(): void {
@@ -267,6 +261,37 @@ describe("runWizard", () => {
       const config = JSON.parse(readFileSync(join(home, ".foreman", "config.json"), "utf8"));
       expect(config.repos).toBeUndefined();
       expect(config.linear?.apiKeyFile ?? null).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = originalEnvKey;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(checkoutRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the global plugin link even when label provisioning throws", async () => {
+    const home = mkdtempSync(join(tmpdir(), "foreman-wizard-"));
+    const checkoutRoot = makeCheckout();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network unreachable");
+    }) as unknown as typeof fetch;
+    const originalEnvKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_test";
+
+    try {
+      const prompter = new ScriptedPrompter();
+      const logs: string[] = [];
+      await runWizard(baseOptions({ skipLinear: false }, home, checkoutRoot), {
+        prompter,
+        runner: new RecordingRunner(),
+        log: (message) => logs.push(message),
+      });
+
+      const linkPath = globalPluginLinkPath(home);
+      expect(readlinkSync(linkPath)).toBe(join(checkoutRoot, "packages", "omp-plugin"));
+      expect(logs.some((line) => line.includes("label provisioning failed"))).toBe(true);
     } finally {
       globalThis.fetch = originalFetch;
       if (originalEnvKey === undefined) delete process.env.LINEAR_API_KEY;

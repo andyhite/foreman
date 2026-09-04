@@ -494,7 +494,7 @@ export class HerdrDispatcher implements Dispatcher {
         "--approval-mode",
         this.#config.agent.approvalMode,
         "--cwd",
-        request.cwd,
+        worktreeItems[0]?.worktree?.path ?? request.cwd,
       ]);
       await this.#runChecked([
         this.#config.agent.herdrBin,
@@ -510,33 +510,33 @@ export class HerdrDispatcher implements Dispatcher {
         "--timeout",
         "30000",
       ]);
+
+      seqCounter += 1;
+      const issueToken =
+        request.items
+          .map((item) => item.issueId)
+          .filter((issueId): issueId is string => issueId !== null)
+          .join(",") || BATCH_SUBJECT;
+      await this.#runChecked([
+        this.#config.agent.herdrBin,
+        "pane",
+        "report-metadata",
+        paneId,
+        "--source",
+        "foreman",
+        "--token",
+        `issue=${issueToken}`,
+        "--token",
+        `agent=${request.agent}`,
+        "--seq",
+        String(seqCounter),
+        "--ttl-ms",
+        String(this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs),
+      ]);
     } catch (error) {
       await this.#runner.run([this.#config.agent.herdrBin, "pane", "close", paneId]);
       throw error;
     }
-
-    seqCounter += 1;
-    const issueToken =
-      request.items
-        .map((item) => item.issueId)
-        .filter((issueId): issueId is string => issueId !== null)
-        .join(",") || BATCH_SUBJECT;
-    await this.#runChecked([
-      this.#config.agent.herdrBin,
-      "pane",
-      "report-metadata",
-      paneId,
-      "--source",
-      "foreman",
-      "--token",
-      `issue=${issueToken}`,
-      "--token",
-      `agent=${request.agent}`,
-      "--seq",
-      String(seqCounter),
-      "--ttl-ms",
-      String(this.#config.agent.maxRuntimeMs + this.#config.agent.lockTtlMarginMs),
-    ]);
 
     const startedAt = new Date().toISOString();
     return request.items.map((item) => ({

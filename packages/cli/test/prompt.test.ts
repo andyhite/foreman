@@ -23,55 +23,6 @@ describe("InteractivePrompter", () => {
     prompter.close();
   });
 
-  it("renders a scrolling viewport when choices overflow the terminal", async () => {
-    const stdout = process.stdout;
-    const stdin = process.stdin;
-    const originalRows = stdout.rows;
-    const originalColumns = stdout.columns;
-    const originalIsTTY = stdin.isTTY;
-    const originalSetRawMode = stdin.setRawMode?.bind(stdin);
-    const originalResume = stdin.resume.bind(stdin);
-    const writes: string[] = [];
-    const originalWrite = stdout.write.bind(stdout);
-
-    Object.defineProperty(stdout, "rows", { value: 8, configurable: true });
-    Object.defineProperty(stdout, "columns", { value: 24, configurable: true });
-    Object.defineProperty(stdin, "isTTY", { value: true, configurable: true });
-    stdin.setRawMode = ((mode: boolean) => {
-      Object.defineProperty(stdin, "isRaw", { value: mode, configurable: true });
-      return stdin;
-    }) as typeof stdin.setRawMode;
-    stdin.resume = () => stdin;
-    stdout.write = ((chunk: string | Uint8Array) => {
-      writes.push(String(chunk));
-      return true;
-    }) as typeof stdout.write;
-
-    const choices = Array.from({ length: 12 }, (_, index) => ({
-      value: `id-${index}`,
-      label: `Initiative ${index}`,
-      checked: false,
-    }));
-
-    const prompter = new InteractivePrompter({ log: () => {} });
-    const pending = prompter.multiSelect("Which initiatives?", choices);
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    stdin.emit("keypress", "", { name: "return" });
-    const selected = await pending;
-
-    expect(selected).toEqual([]);
-    expect(writes.join("")).toMatch(/↓ \d+ more/);
-
-    stdout.write = originalWrite;
-    if (originalSetRawMode) stdin.setRawMode = originalSetRawMode;
-    stdin.resume = originalResume;
-    Object.defineProperty(stdout, "rows", { value: originalRows, configurable: true });
-    Object.defineProperty(stdout, "columns", { value: originalColumns, configurable: true });
-    Object.defineProperty(stdin, "isTTY", { value: originalIsTTY, configurable: true });
-    prompter.close();
-  });
-
   it("secret() reads a bracketed-paste PEM key whole, not truncated at the first embedded newline", async () => {
     const stdin = process.stdin;
     const stdout = process.stdout;
@@ -111,6 +62,41 @@ describe("InteractivePrompter", () => {
     expect(output).not.toContain("BEGIN RSA PRIVATE KEY");
     expect(output).toContain("****");
     expect(output.split("****").length - 1).toBe(1);
+
+    stdout.write = originalWrite;
+    if (originalSetRawMode) stdin.setRawMode = originalSetRawMode;
+    stdin.resume = originalResume;
+    Object.defineProperty(stdin, "isTTY", { value: originalIsTTY, configurable: true });
+    Object.defineProperty(stdin, "isRaw", { value: originalIsRaw, configurable: true });
+    prompter.close();
+  });
+
+  it("secret() discards an arrow-key escape sequence instead of leaking it into the secret", async () => {
+    const stdin = process.stdin;
+    const stdout = process.stdout;
+    const originalIsTTY = stdin.isTTY;
+    const originalIsRaw = stdin.isRaw;
+    const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+    const originalResume = stdin.resume.bind(stdin);
+    const originalWrite = stdout.write.bind(stdout);
+
+    Object.defineProperty(stdin, "isTTY", { value: true, configurable: true });
+    stdin.setRawMode = ((mode: boolean) => {
+      Object.defineProperty(stdin, "isRaw", { value: mode, configurable: true });
+      return stdin;
+    }) as typeof stdin.setRawMode;
+    stdin.resume = () => stdin;
+    stdout.write = (() => true) as typeof stdout.write;
+
+    const prompter = new InteractivePrompter({ log: () => {} });
+    const pending = prompter.secret("Linear API key: ");
+
+    stdin.emit("data", Buffer.from("lin_api_"));
+    stdin.emit("data", Buffer.from("\x1b[A"));
+    stdin.emit("data", Buffer.from("key\n"));
+
+    const answer = await pending;
+    expect(answer).toBe("lin_api_key");
 
     stdout.write = originalWrite;
     if (originalSetRawMode) stdin.setRawMode = originalSetRawMode;

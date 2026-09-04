@@ -93,8 +93,11 @@ export function extractFromToolResult(payload: unknown): CapturedOutput[] {
     // malformed result. `isStructuredOutput` remains the shape gate.
     if (!isStructuredOutput(structuredOutput)) continue;
 
-    const agent = agentOf(tasks[index]);
-    const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskTextOf(tasks[index]));
+    const reportedIndex = typeof single.index === "number" ? single.index : index;
+    const task = tasks[reportedIndex];
+    const agent = agentOf(task);
+    if (typeof single.agent === "string" && agent !== null && single.agent !== agent) continue;
+    const { dispatchId, issueId, previousStateId } = extractDispatchInfo(taskTextOf(task));
     if (!agent || !dispatchId) continue;
 
     captured.push({

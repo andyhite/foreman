@@ -119,6 +119,7 @@ export function parseAgentOutput<N extends ForemanAgentName>(
       subIssues: readonly unknown[];
       spikeCreated: unknown;
       readyForImplementation: boolean;
+      acceptanceCriteria: readonly unknown[];
     };
     const refineProblems: string[] = [];
     if (
@@ -132,6 +133,9 @@ export function parseAgentOutput<N extends ForemanAgentName>(
     if (refineResult.estimate >= 5 && refineResult.subIssues.length === 0) {
       refineProblems.push("/result/subIssues: must be non-empty when estimate >= 5");
     }
+    if (refineResult.readyForImplementation && refineResult.acceptanceCriteria.length === 0) {
+      refineProblems.push("/result/acceptanceCriteria: must be non-empty when readyForImplementation is true");
+    }
     if (refineProblems.length > 0) return { kind: "invalid", problems: refineProblems };
   }
 
@@ -141,6 +145,7 @@ export function parseAgentOutput<N extends ForemanAgentName>(
       findings: ReadonlyArray<{ severity: string }>;
       dodSatisfied: boolean;
       dodChecklist: ReadonlyArray<{ satisfied: boolean }>;
+      criteriaVerification: ReadonlyArray<{ satisfied: boolean }>;
     };
     const reviewProblems: string[] = [];
     const hasBlocking = reviewResult.findings.some((finding) => finding.severity === "blocking");
@@ -152,6 +157,10 @@ export function parseAgentOutput<N extends ForemanAgentName>(
     const allDodSatisfied = reviewResult.dodChecklist.every((check) => check.satisfied);
     if (reviewResult.dodSatisfied && !allDodSatisfied) {
       reviewProblems.push("/result/dodSatisfied: must be false when any dodChecklist entry is not satisfied");
+    }
+    const criterionFailed = reviewResult.criteriaVerification.some((entry) => !entry.satisfied);
+    if ((criterionFailed || !reviewResult.dodSatisfied) && !hasBlocking) {
+      reviewProblems.push('/result/findings: a failed criterion or Definition of Done item requires a "blocking" finding');
     }
     if (reviewProblems.length > 0) return { kind: "invalid", problems: reviewProblems };
   }

@@ -301,6 +301,7 @@ async function main(): Promise<void> {
           apps: args.apps.length > 0 ? args.apps : undefined,
           alias: args.alias ?? undefined,
           team: args.team ?? undefined,
+          nonInteractive,
         },
         { prompter, log, git: nodeRunner, openUrl: nonInteractive ? undefined : openUrl },
       );
@@ -334,7 +335,7 @@ async function main(): Promise<void> {
      * registry and the checkout's git state, so there is nothing to ask.
      */
     if (args.command === "update") {
-      await runUpdate(
+      const failures = await runUpdate(
         {
           checkoutRoot: resolveCheckoutRoot(args.checkoutPath),
           home,
@@ -343,6 +344,7 @@ async function main(): Promise<void> {
         },
         { runner: processRunner, log },
       );
+      process.exitCode = failures > 0 ? 1 : 0;
       return;
     }
 

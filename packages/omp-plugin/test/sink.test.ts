@@ -41,6 +41,29 @@ describe("extractFromToolResult", () => {
     ]);
   });
 
+  it("pairs a result with its task by reported index when details.results is reordered", () => {
+    const payload = {
+      toolName: "task",
+      input: {
+        tasks: [
+          { agent: "foreman-implement", task: "Implement.\n\nFOREMAN-DISPATCH: foreman-implement-ENG-1-1\n" },
+          { agent: "foreman-refine", task: "Refine.\n\nFOREMAN-DISPATCH: foreman-refine-ENG-2-1\n" },
+        ],
+      },
+      details: {
+        results: [
+          { index: 1, agent: "foreman-refine", structuredOutput: { source: "agent", mode: "strict", status: "valid", data: { issueId: "ENG-2" } } },
+          { index: 0, agent: "foreman-implement", structuredOutput: { source: "agent", mode: "strict", status: "valid", data: { issueId: "ENG-1" } } },
+        ],
+      },
+    };
+    const captured = extractFromToolResult(payload);
+    expect(captured).toEqual([
+      { dispatchId: "foreman-refine-ENG-2-1", agent: "foreman-refine", data: { issueId: "ENG-2" }, aborted: false, issueId: null, previousStateId: null },
+      { dispatchId: "foreman-implement-ENG-1-1", agent: "foreman-implement", data: { issueId: "ENG-1" }, aborted: false, issueId: null, previousStateId: null },
+    ]);
+  });
+
   it("still captures a status: invalid structuredOutput — a budget-truncated yield must reach the classifier downstream", () => {
     const payload = {
       toolName: "task",

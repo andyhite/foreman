@@ -20,10 +20,12 @@ import {
   issueIdFromDispatchId,
   lockState,
   newDispatchId,
+  notHandsOff,
   parseAgentOutput,
   readLockComment,
   resolveState,
   RUNNING_FILTER,
+  sanitizeAgentText,
   type ForemanAgentName,
 } from "@foreman/core";
 import { checkSkillAutoload, formatSkillGuardProblem } from "./enforce/skill-guard.ts";
@@ -138,13 +140,18 @@ async function resolveEntryTeamId(linear: LinearWriter, entry: ResolvedRepoEntry
  * session start; no timer.
  */
 async function repairOrphanedLocks(linear: LinearWriter, now: Date): Promise<number> {
+  const viewerId = await linear.viewerId().catch(() => null);
   const issues = await linear.issues({
-    filter: RUNNING_FILTER,
+    filter: all(RUNNING_FILTER, notHandsOff(viewerId ?? "")),
     includeComments: true,
   });
   let repaired = 0;
   for (const issue of issues) {
-    const record = readLockComment(issue.comments ?? [])?.data ?? null;
+    const record = readLockComment(issue.comments ?? [], viewerId)?.data ?? null;
+    // No marker is not proof of an orphan: `prepareItem` moves the issue to
+    // In Progress before `claimLock` writes the comment, so a session
+    // starting inside that window would release a live claim.
+    if (record === null && now.getTime() - new Date(issue.updatedAt).getTime() <= 60_000) continue;
     const orphaned = lockState(record, { now, liveDispatchIds: liveDispatchIds() }).orphaned;
     if (!orphaned && record !== null) continue;
 
@@ -191,7 +198,7 @@ export async function applyBoundResult(
     const reported = outcome.result.issueId;
     await deps.linear.createComment({
       issueId: target,
-      body: `Foreman rejected this dispatch result: it reported issue ${reported}, but this dispatch locked ${target}.`,
+      body: `Foreman rejected this dispatch result: it reported issue ${sanitizeAgentText(reported)}, but this dispatch locked ${target}.`,
     });
     const lockedIssue = await deps.linear.issue(target);
     if (lockedIssue) {
@@ -382,7 +389,7 @@ export default function createForemanExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand(commandName("unblock"), {
-    description: "Record the operator's reply to a blocked issue and clear its foreman:blocked label.",
+    description: "Record the operator's reply to a blocked issue and return it to Backlog or Ready.",
     handler: async (args: string) =>
       runCommand("foreman.unblock", async (linear) => {
         const [issueId, ...replyParts] = args.trim().split(/\s+/);

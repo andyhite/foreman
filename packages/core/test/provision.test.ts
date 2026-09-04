@@ -163,9 +163,6 @@ class FakeLinear implements LinearWriter {
   createRelation(_input: { issueId: string; relatedIssueId: string; type: IssueRelationType }): Promise<void> {
     throw new Error("not implemented");
   }
-  deleteRelation(): Promise<void> {
-    throw new Error("not implemented");
-  }
   createProjectRelation(_input: {
     projectId: LinearId;
     relatedProjectId: LinearId;
@@ -173,9 +170,6 @@ class FakeLinear implements LinearWriter {
     anchorType: ProjectRelationAnchor;
     relatedAnchorType: ProjectRelationAnchor;
   }): Promise<void> {
-    throw new Error("not implemented");
-  }
-  deleteProjectRelation(): Promise<void> {
     throw new Error("not implemented");
   }
   createLabel(): Promise<IssueLabel> {

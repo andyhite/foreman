@@ -10,7 +10,7 @@
 
 import type { CommandRunner } from "../git/exec.ts";
 import { nodeRunner } from "../git/exec.ts";
-import { assertSafeRef } from "../git/worktree.ts";
+import { assertSafeRef, remoteName } from "../git/worktree.ts";
 import type { GitHubAppAuth } from "./app-auth.ts";
 
 export type MergeStrategy = "merge" | "squash" | "rebase";
@@ -281,8 +281,10 @@ export class GitHubClient {
     base: string,
     branches: readonly string[],
   ): Promise<string[]> {
+    assertSafeRef(base, "base");
     const merged: string[] = [];
     for (const branch of branches) {
+      assertSafeRef(branch, "branch");
       const { stdout } = await this.#runner.run(
         ["git", "branch", "--merged", base, "--list", branch],
         { cwd: repoPath },
@@ -341,6 +343,8 @@ export class GitHubClient {
       throw new DirtyWorkingTreeError(repoPath);
     }
 
+    const remote = (await remoteName(repoPath, this.#runner)) ?? "origin";
+
     const startingRef = (
       await this.#runner.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], {
         cwd: repoPath,
@@ -349,10 +353,19 @@ export class GitHubClient {
       )
     ).stdout.trim();
 
+    /** Best-effort cleanup: never let a restore failure mask the real error. */
+    const attempt = async (argv: string[]): Promise<void> => {
+      try {
+        await this.#runner.run(argv, { cwd: repoPath });
+      } catch {
+        // Swallowed deliberately — see call sites.
+      }
+    };
+
     let mergeCommit: string;
     try {
       await this.#runner.run(["git", "checkout", baseBranch], { cwd: repoPath });
-      await this.#runner.run(["git", "pull", "origin", baseBranch], { cwd: repoPath });
+      await this.#runner.run(["git", "pull", remote, baseBranch], { cwd: repoPath });
 
       if (strategy === "squash") {
         await this.#runner.run(["git", "merge", "--squash", branch], { cwd: repoPath });
@@ -361,23 +374,43 @@ export class GitHubClient {
           { cwd: repoPath },
         );
       } else if (strategy === "rebase") {
-        await this.#runner.run(["git", "rebase", branch], { cwd: repoPath });
+        // Rebase the branch onto the base, not the other way around: HEAD is
+        // on `baseBranch` here, so a bare `git rebase <branch>` would replay
+        // base onto the feature branch — the inverse of "Rebase and merge".
+        await this.#runner.run(["git", "rebase", baseBranch, branch], { cwd: repoPath });
+        await this.#runner.run(["git", "checkout", baseBranch], { cwd: repoPath });
+        await this.#runner.run(["git", "merge", "--ff-only", branch], { cwd: repoPath });
       } else {
         await this.#runner.run(["git", "merge", "--no-ff", branch], { cwd: repoPath });
       }
 
-      await this.#runner.run(["git", "push", "origin", baseBranch], { cwd: repoPath });
+      await this.#runner.run(["git", "push", remote, baseBranch], { cwd: repoPath });
       mergeCommit = (await this.#runner.run(["git", "rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
 
       if (deleteBranch) {
         await this.#runner.run(["git", "branch", "-D", branch], { cwd: repoPath });
-        await this.#runner.run(["git", "push", "origin", "--delete", branch], {
+        await this.#runner.run(["git", "push", remote, "--delete", branch], {
           cwd: repoPath,
         });
       }
-    } finally {
-      await this.#runner.run(["git", "checkout", startingRef], { cwd: repoPath });
+    } catch (error) {
+      // A conflict mid-rebase/merge leaves an unresolved index; restoring
+      // `startingRef` directly against that index fails, replacing the real
+      // error with a spurious one and leaving HEAD on `baseBranch` mid-merge
+      // — the exact state this method's docstring promises to prevent. Abort
+      // the in-progress operation first, then restore, and never let either
+      // cleanup step's own failure mask the original error.
+      if (strategy === "rebase") {
+        await attempt(["git", "rebase", "--abort"]);
+      } else {
+        await attempt(["git", "merge", "--abort"]);
+      }
+      await attempt(["git", "reset", "--hard"]);
+      await attempt(["git", "checkout", startingRef]);
+      throw error;
     }
+
+    await this.#runner.run(["git", "checkout", startingRef], { cwd: repoPath });
     return mergeCommit;
   }
 }

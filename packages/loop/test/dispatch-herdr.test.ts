@@ -439,6 +439,60 @@ describe("HerdrDispatcher.dispatch — writing stages get a dedicated worktree w
     expect(promptCall?.[4]).toBe("/foreman:implement ENG-142");
   });
 
+  it("starts the omp session with --cwd pointed at the worktree, not the repo root", async () => {
+    const calls: string[][] = [];
+    const runner = {
+      run(argv: string[]) {
+        calls.push(argv);
+        if (argv.includes("workspace") && argv.includes("list")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { workspaces: [] } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("workspace") && argv.includes("create")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { workspace_id: "w1" } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("worktree") && argv.includes("create")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              result: { workspace: { workspace_id: "w2" }, tab: { tab_id: "w2:t1" }, root_pane: { pane_id: "w2:p1" } },
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (argv.includes("pane") && argv.includes("split")) {
+          return Promise.resolve({ stdout: JSON.stringify({ result: { pane: { pane_id: "w2:p2" } } }), stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("close")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("start")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("agent") && argv.includes("prompt")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        if (argv.includes("pane") && argv.includes("report-metadata")) {
+          return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+        }
+        throw new Error(`unexpected herdr call: ${argv.join(" ")}`);
+      },
+    };
+    const dispatcher = new HerdrDispatcher(makeConfig(), { runner });
+
+    await dispatcher.dispatch({
+      agent: "foreman-implement",
+      command: "/foreman:implement",
+      cwd: "/repos/product",
+      alias: "product",
+      items: [item({ issueId: "ENG-142", subject: "ENG-142", dispatchId: "dispatch-4", worktree })],
+    });
+
+    const startCall = calls.find((call) => call.includes("agent") && call.includes("start"));
+    const cwdIndex = startCall?.indexOf("--cwd") ?? -1;
+    expect(cwdIndex).toBeGreaterThan(-1);
+    expect(startCall?.[cwdIndex + 1]).toBe(worktree.path);
+  });
+
   it("reuses an already-open worktree workspace by splitting off its anchor pane", async () => {
     const calls: string[][] = [];
     const runner = {

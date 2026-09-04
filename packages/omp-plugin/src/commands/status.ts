@@ -10,7 +10,7 @@ import { renderStatusConsole } from "../render/index.ts";
 import { liveDispatchIds } from "../runtime.ts";
 
 function excerptFor(issue: Issue): string {
-  const found = latestMarker<{ whatINeed: string }>(MARKER_KIND.block, issue.comments);
+  const found = latestMarker<{ whatINeed: string }>(MARKER_KIND.block, issue.comments, { authoredBy: null });
   return found?.data.whatINeed ?? "(no block marker found on this issue)";
 }
 
@@ -26,7 +26,7 @@ export async function buildStatusState(linear: LinearWriter, now: Date = new Dat
   const blocked: BlockedEntry[] = blockedIssues.map(toEntry);
 
   const running: RunningEntry[] = runningIssues.map((issue) => {
-    const found = readLockComment(issue.comments);
+    const found = readLockComment(issue.comments, null);
     // A state in `RUNNING_FILTER` with no matching lock comment is drift
     // `reconcile`'s stale-running invariant repairs — surfaced here rather
     // than dropped, so the headline count and this section agree

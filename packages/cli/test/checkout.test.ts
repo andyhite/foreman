@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { findCheckoutRoot, resolveCheckoutRoot } from "../src/checkout.ts";
 
 function makeFakeCheckout(): string {
@@ -49,6 +49,20 @@ describe("resolveCheckoutRoot", () => {
       expect(() => resolveCheckoutRoot(stray)).toThrow(/does not look like a foreman checkout/);
     } finally {
       rmSync(stray, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a relative --checkout path to an absolute one", () => {
+    const root = makeFakeCheckout();
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(dirname(root));
+      const resolved = resolveCheckoutRoot(`./${basename(root)}`);
+      expect(resolved).toBe(realpathSync(root));
+      expect(resolved).toMatch(/^\//);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

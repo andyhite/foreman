@@ -13,7 +13,7 @@ import { execFile } from "node:child_process";
 export interface CommandRunner {
   run(
     argv: string[],
-    options: { cwd: string; env?: Record<string, string> },
+    options: { cwd: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ stdout: string; stderr: string; code: number }>;
 }
 
@@ -48,8 +48,17 @@ export const nodeRunner: CommandRunner = {
       args,
       {
         cwd: options.cwd,
-        env: options.env ?? process.env,
+        // `git`/`gh` reach the network (fetch, pr list) from inside the loop's
+        // singleton tick; an HTTPS remote with no cached credential would
+        // otherwise block forever under piped stdio, freezing the whole loop
+        // (LinearClient bounds its own requests with a 30s AbortSignal.timeout
+        // for the same reason). `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS` suppress
+        // the interactive credential prompt that timeout alone would just
+        // make slower to hit.
+        env: { ...(options.env ?? process.env), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "" },
         maxBuffer: 64 * 1024 * 1024,
+        timeout: options.timeoutMs ?? 120_000,
+        killSignal: "SIGKILL",
       },
       (error, stdout, stderr) => {
         if (error && typeof error.code !== "number") {

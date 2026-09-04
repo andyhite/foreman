@@ -42,8 +42,12 @@ class FakeLinear implements LinearWriter {
   createProjectCalls: Array<{ name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string; labelIds?: LinearId[] }> = [];
   createProjectRelationCalls: Array<{ projectId: LinearId; relatedProjectId: LinearId; type: ProjectRelationType; anchorType: ProjectRelationAnchor; relatedAnchorType: ProjectRelationAnchor }> = [];
   failCreateProjectFor = new Set<string>();
+  failProjectFor = new Set<string>();
 
   async project(projectId: string): Promise<Project | null> {
+    if (this.failProjectFor.has(projectId)) {
+      throw new Error(`simulated project() failure for ${projectId}`);
+    }
     return this.existingProjects.get(projectId) ?? null;
   }
   async createProject(input: { name: string; teamIds: LinearId[]; description?: string; content?: string; startDate?: string; targetDate?: string; labelIds?: LinearId[] }): Promise<ProjectRef> {
@@ -78,8 +82,6 @@ class FakeLinear implements LinearWriter {
   async updateProjectStatus(_input: { projectId: LinearId; type: ProjectStatusType }): Promise<void> { throw new Error("not implemented in fake"); }
   async createComment(): Promise<Comment> { throw new Error("not implemented in fake"); }
   async createRelation(_input: { issueId: string; relatedIssueId: string; type: IssueRelationType }): Promise<void> { throw new Error("not implemented in fake"); }
-  async deleteRelation(): Promise<void> { throw new Error("not implemented in fake"); }
-  async deleteProjectRelation(): Promise<void> { throw new Error("not implemented in fake"); }
   async createLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
   async ensureLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
   async ensureWorkspaceLabel(): Promise<IssueLabel> { throw new Error("not implemented in fake"); }
@@ -270,5 +272,44 @@ describe("applyRoadmap — problem isolation", () => {
     expect(report.problems).toEqual([{ key: "a", error: "failed to create project: simulated createProject failure for Project A" }]);
     expect(report.createdProjects).toHaveLength(1);
     expect(report.createdProjects[0]?.key).toBe("b");
+  });
+});
+
+describe("applyRoadmap — pass 1 isolation", () => {
+  it("still creates every other project and reports one problem when linear.project() throws for one key", async () => {
+    const linear = new FakeLinear();
+    linear.failProjectFor.add("bad-existing");
+    const result = makeRoadmapResult({
+      proposedProjects: [
+        makeProposedProject({ key: "a", name: "Project A", blockedByExisting: ["bad-existing"] }),
+        makeProposedProject({ key: "b", name: "Project B" }),
+      ],
+    });
+
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
+
+    expect(report.problems).toHaveLength(1);
+    expect(report.problems[0]?.key).toBe("a");
+    expect(report.problems[0]?.error).toContain("failed to compute dates");
+    expect(report.createdProjects).toHaveLength(2);
+    expect(report.createdProjects.map((entry) => entry.key)).toEqual(["a", "b"]);
+  });
+
+  it("reports an unparseable calendar date as a problem instead of throwing", async () => {
+    const linear = new FakeLinear();
+    const result = makeRoadmapResult({
+      proposedProjects: [
+        makeProposedProject({ key: "a", name: "Project A", startDate: "2026-13-01", targetDate: "2026-13-15" }),
+        makeProposedProject({ key: "b", name: "Project B" }),
+      ],
+    });
+
+    const report = await applyRoadmap(linear, result, { teamId: "team-1", appLabelIds: {} });
+
+    expect(report.problems).toEqual([
+      { key: "a", error: "a: startDate/targetDate 2026-13-01 is not a real calendar date" },
+    ]);
+    expect(report.createdProjects).toHaveLength(2);
+    expect(report.createdProjects.map((entry) => entry.key)).toEqual(["a", "b"]);
   });
 });

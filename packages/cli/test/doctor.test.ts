@@ -141,6 +141,7 @@ afterAll(() => {
 /** Builds a fixture checkout: `<checkoutRoot>/packages/omp-plugin` with a package.json. */
 function makeFixtureCheckout(): string {
   const checkoutRoot = makeTempDir("foreman-doctor-checkout-");
+  writeFileSync(join(checkoutRoot, "package.json"), JSON.stringify({ name: "foreman" }));
   const pluginDir = join(checkoutRoot, "packages", "omp-plugin");
   mkdirSync(pluginDir, { recursive: true });
   writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: "@foreman/omp-plugin", version: "9.9.9" }));
@@ -260,5 +261,24 @@ describe("runDoctor", () => {
 
     expect(code).toBe(1);
     cleanup(home, checkoutRoot);
+  });
+
+  it("contains a repair error when the repo symlink location is a real directory, and still summarizes", async () => {
+    const home = makeHome();
+    const checkoutRoot = makeFixtureCheckout();
+    writeGlobalPluginLink(checkoutRoot, home);
+    const repoRoot = makeGitRepo();
+    writeGlobalConfig({ repos: { fixture: { path: repoRoot, team: "ENG" } } }, home);
+
+    mkdirSync(repoPluginLinkPath(repoRoot), { recursive: true });
+
+    const log: string[] = [];
+    const deps = { runner: new FakeRunner(), log: (m: string) => log.push(m) };
+    const code = await runDoctor(baseOptions(home, { checkoutRoot, fix: true }), deps);
+
+    expect(code).toBe(1);
+    expect(log.some((line) => line.includes("could not repair"))).toBe(true);
+
+    cleanup(home, checkoutRoot, repoRoot);
   });
 });

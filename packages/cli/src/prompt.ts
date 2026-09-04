@@ -6,12 +6,6 @@
  * library here. `Prompter` is the seam — `NonInteractivePrompter` answers
  * every question with its default so `--yes` and piped/CI stdin behave the
  * same way instead of hanging on a read from a closed stream.
- *
- * `multiSelect` is the one prompt that needs raw keypresses instead of
- * line input (arrow keys, space to toggle) — it borrows the readline
- * interface's own input stream but takes over `keypress` handling for the
- * duration of the prompt, restoring the interface's listeners and cooked
- * mode before returning so `text`/`confirm`/`select` keep working after it.
  */
 
 import * as readline from "node:readline";
@@ -21,48 +15,13 @@ export interface Choice<T extends string> {
   value: T;
   label: string;
 }
-
-export interface CheckboxChoice<T extends string> extends Choice<T> {
-  checked: boolean;
-  /** Rendered dim after the label, e.g. "(already mapped)". */
-  hint?: string;
-}
-
 export interface Prompter {
   text(question: string, defaultValue: string): Promise<string>;
   confirm(question: string, defaultValue: boolean): Promise<boolean>;
   select<T extends string>(question: string, choices: Array<Choice<T>>, defaultValue: T): Promise<T>;
   /** Never echoes input. Non-interactive implementations must return "". */
   secret(question: string): Promise<string>;
-  /** Checkbox picker. Non-interactive implementations return every pre-checked value. */
-  multiSelect<T extends string>(question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]>;
   close(): void;
-}
-
-type Keypress = { name?: string; ctrl?: boolean } | undefined;
-
-function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-function terminalSize(): { rows: number; columns: number } {
-  return {
-    rows: process.stdout.rows && process.stdout.rows > 0 ? process.stdout.rows : 24,
-    columns: process.stdout.columns && process.stdout.columns > 0 ? process.stdout.columns : 80,
-  };
-}
-
-function physicalLineCount(line: string, columns: number): number {
-  const visible = stripAnsi(line);
-  if (visible.length === 0) return 1;
-  return Math.max(1, Math.ceil(visible.length / columns));
-}
-
-function truncateVisible(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) return "";
-  if (text.length <= maxWidth) return text;
-  if (maxWidth <= 1) return "…";
-  return `${text.slice(0, maxWidth - 1)}…`;
 }
 
 /** Prompts on a real terminal: default hints in `[brackets]`, secrets masked with `*`. */
@@ -73,6 +32,17 @@ export class InteractivePrompter implements Prompter {
   constructor(options?: { log?: (message: string) => void }) {
     this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     this.log = options?.log ?? ((message: string) => console.log(message));
+    // With no listener, readline's own SIGINT default just closes the
+    // interface — `rl.question`'s callback never fires, so `text`/`confirm`/
+    // `select` (which all go through `this.ask`) leave the process to fall
+    // off the event loop with exit code 0 instead of the Ctrl-C convention
+    // `secret` already honors. Attaching a listener here makes
+    // readline emit "SIGINT" instead of self-closing, for every prompt alike.
+    this.rl.on("SIGINT", () => {
+      this.rl.close();
+      process.stdout.write("\n");
+      process.exit(130);
+    });
   }
 
   private ask(question: string): Promise<string> {
@@ -132,8 +102,7 @@ export class InteractivePrompter implements Prompter {
    * this method does — that's both the un-masked characters showing up
    * mid-paste and the prompt line vanishing on a tab switch.
    *
-   * Fix: detach that listener for the duration of the prompt (`multiSelect`
-   * already does the same for its own custom keypress loop) and drive
+   * Fix: detach that listener for the duration of the prompt and drive
    * bytes off a private `data` listener instead. Bracketed paste mode
    * (`\x1b[?2004h`) asks the terminal to wrap a paste in
    * `\x1b[200~`/`\x1b[201~` markers rather than sending it as ordinary
@@ -166,6 +135,7 @@ export class InteractivePrompter implements Prompter {
     const MASK = "****";
     let buffer = "";
     let inPaste = false;
+    let escapeState: "none" | "esc" | "csi" = "none";
     let masked = false;
 
     const cleanup = (): void => {
@@ -201,7 +171,22 @@ export class InteractivePrompter implements Prompter {
         const start = text.indexOf("\x1b[200~");
         const chars = start === -1 ? text : text.slice(0, start);
         for (const ch of chars) {
-          if (ch === "\x03") {
+          if (escapeState === "csi") {
+            // Consuming a CSI body: parameter/intermediate bytes continue
+            // it, a byte in `@`-`~` is the final byte that ends it. An arrow
+            // key's direction, a focus-report's `I`/`O`, a mouse event's
+            // coordinates — none of it is typed text. Swallow it whole so a
+            // stray escape sequence never corrupts the masked secret.
+            if (ch >= "@" && ch <= "~") escapeState = "none";
+            continue;
+          }
+          if (escapeState === "esc") {
+            escapeState = ch === "[" || ch === "O" ? "csi" : "none";
+            continue;
+          }
+          if (ch === "\x1b") {
+            escapeState = "esc";
+          } else if (ch === "\x03") {
             cleanup();
             process.stdout.write("\n");
             process.exit(130);
@@ -227,115 +212,6 @@ export class InteractivePrompter implements Prompter {
     return promise;
   }
 
-  /** Renders `lines` in place: `redraw` overwrites the previous frame instead of scrolling. */
-  private redraw(lines: string[], previousPhysicalRows: number): number {
-    const { columns } = terminalSize();
-    if (previousPhysicalRows > 0) process.stdout.write(`\x1b[${previousPhysicalRows}A\x1b[0J`);
-    let physicalRows = 0;
-    for (const line of lines) {
-      process.stdout.write(`${line}\n`);
-      physicalRows += physicalLineCount(line, columns);
-    }
-    return physicalRows;
-  }
-
-  async multiSelect<T extends string>(question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
-    if (!process.stdin.isTTY || choices.length === 0) {
-      return choices.filter((choice) => choice.checked).map((choice) => choice.value);
-    }
-
-    const checked = choices.map((choice) => choice.checked);
-    let cursor = 0;
-    let scrollTop = 0;
-    let linesPrinted = 0;
-
-    const frame = (): string[] => {
-      const { rows, columns } = terminalSize();
-      const headerLines = 2;
-      const scrollHintReserve = 2;
-      const maxVisible = Math.max(1, rows - headerLines - scrollHintReserve);
-      if (cursor < scrollTop) scrollTop = cursor;
-      if (cursor >= scrollTop + maxVisible) scrollTop = cursor - maxVisible + 1;
-
-      const lines = [
-        `${style("cyan", "?")} ${style("bold", question)}`,
-        style("dim", "  ↑/↓ move   space toggle   a select all   enter confirm"),
-      ];
-      if (scrollTop > 0) {
-        lines.push(style("dim", `  ↑ ${scrollTop} more`));
-      }
-
-      const visibleEnd = Math.min(choices.length, scrollTop + maxVisible);
-      for (let index = scrollTop; index < visibleEnd; index += 1) {
-        const choice = choices[index]!;
-        const box = checked[index] ? style("green", "[x]") : style("dim", "[ ]");
-        const pointer = index === cursor ? style("cyan", "›") : " ";
-        const plainLabel = truncateVisible(choice.label, Math.max(1, columns - 8));
-        const label = index === cursor ? style("bold", plainLabel) : plainLabel;
-        const hint = choice.hint ? style("dim", `  ${choice.hint}`) : "";
-        lines.push(`  ${pointer} ${box} ${label}${hint}`);
-      }
-
-      const below = choices.length - visibleEnd;
-      if (below > 0) {
-        lines.push(style("dim", `  ↓ ${below} more`));
-      }
-      return lines;
-    };
-
-    linesPrinted = this.redraw(frame(), 0);
-
-    const stdin = process.stdin;
-    const wasRaw = stdin.isRaw ?? false;
-    const savedListeners = [...stdin.listeners("keypress")] as Array<(...args: unknown[]) => void>;
-    for (const listener of savedListeners) stdin.removeListener("keypress", listener);
-    readline.emitKeypressEvents(stdin, this.rl);
-    stdin.setRawMode(true);
-    stdin.resume();
-
-    const { promise, resolve } = Promise.withResolvers<T[]>();
-    const cleanup = (): void => {
-      stdin.removeListener("keypress", onKeypress);
-      stdin.setRawMode(wasRaw);
-      for (const listener of savedListeners) stdin.on("keypress", listener);
-    };
-    const onKeypress = (_chunk: string, key: Keypress): void => {
-      if (key?.ctrl && key.name === "c") {
-        cleanup();
-        process.stdout.write("\n");
-        process.exit(130);
-      }
-      switch (key?.name) {
-        case "up":
-        case "k":
-          cursor = (cursor - 1 + choices.length) % choices.length;
-          break;
-        case "down":
-        case "j":
-          cursor = (cursor + 1) % choices.length;
-          break;
-        case "space":
-          checked[cursor] = !checked[cursor];
-          break;
-        case "a": {
-          const nextValue = !checked.every(Boolean);
-          for (let index = 0; index < checked.length; index += 1) checked[index] = nextValue;
-          break;
-        }
-        case "return":
-          cleanup();
-          resolve(choices.filter((_, index) => checked[index]).map((choice) => choice.value));
-          return;
-        default:
-          break;
-      }
-      linesPrinted = this.redraw(frame(), linesPrinted);
-    };
-    stdin.on("keypress", onKeypress);
-
-    return promise;
-  }
-
   close(): void {
     this.rl.close();
   }
@@ -357,10 +233,6 @@ export class NonInteractivePrompter implements Prompter {
 
   secret(_question: string): Promise<string> {
     return Promise.resolve("");
-  }
-
-  multiSelect<T extends string>(_question: string, choices: Array<CheckboxChoice<T>>): Promise<T[]> {
-    return Promise.resolve(choices.filter((choice) => choice.checked).map((choice) => choice.value));
   }
 
   close(): void {

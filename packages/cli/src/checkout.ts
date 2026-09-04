@@ -15,7 +15,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export class CheckoutNotFoundError extends Error {
@@ -59,7 +59,7 @@ export function resolveCheckoutRoot(explicitPath: string | null): string {
     if (!looksLikeForemanRoot(explicitPath)) {
       throw new Error(`--checkout ${explicitPath} does not look like a foreman checkout (no packages/omp-plugin).`);
     }
-    return explicitPath;
+    return resolve(explicitPath);
   }
   return findCheckoutRoot();
 }

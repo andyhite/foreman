@@ -48,19 +48,31 @@ if [ -e "$FOREMAN_INSTALL_DIR" ]; then
   if [ -n "$(git -C "$FOREMAN_INSTALL_DIR" status --porcelain)" ]; then
     die "$FOREMAN_INSTALL_DIR has uncommitted changes; commit, stash, or discard them before updating."
   fi
-  if ! git -C "$FOREMAN_INSTALL_DIR" fetch --quiet origin; then
-    die "could not fetch origin for $FOREMAN_INSTALL_DIR; check network access and the origin remote."
-  fi
-  if ! git -C "$FOREMAN_INSTALL_DIR" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-    die "$FOREMAN_INSTALL_DIR has no upstream branch; configure one or choose a fresh FOREMAN_INSTALL_DIR."
-  fi
-  if ! git -C "$FOREMAN_INSTALL_DIR" merge-base --is-ancestor HEAD '@{u}'; then
-    die "$FOREMAN_INSTALL_DIR has local commits that cannot be fast-forwarded; push them or reset it before updating."
-  fi
 
-  info "updating existing checkout at $FOREMAN_INSTALL_DIR"
-  if ! git -C "$FOREMAN_INSTALL_DIR" pull --quiet --ff-only; then
-    die "could not fast-forward $FOREMAN_INSTALL_DIR; update or reset the checkout, then re-run the installer."
+  if git -C "$FOREMAN_INSTALL_DIR" symbolic-ref -q HEAD >/dev/null; then
+    if ! git -C "$FOREMAN_INSTALL_DIR" fetch --quiet origin; then
+      die "could not fetch origin for $FOREMAN_INSTALL_DIR; check network access and the origin remote."
+    fi
+    if ! git -C "$FOREMAN_INSTALL_DIR" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+      die "$FOREMAN_INSTALL_DIR has no upstream branch; configure one or choose a fresh FOREMAN_INSTALL_DIR."
+    fi
+    if ! git -C "$FOREMAN_INSTALL_DIR" merge-base --is-ancestor HEAD '@{u}'; then
+      die "$FOREMAN_INSTALL_DIR has local commits that cannot be fast-forwarded; push them or reset it before updating."
+    fi
+
+    info "updating existing checkout at $FOREMAN_INSTALL_DIR"
+    if ! git -C "$FOREMAN_INSTALL_DIR" pull --quiet --ff-only; then
+      die "could not fast-forward $FOREMAN_INSTALL_DIR; update or reset the checkout, then re-run the installer."
+    fi
+  elif [ -n "$FOREMAN_REF" ]; then
+    # A detached HEAD is expected here: a previous run pinned it via
+    # FOREMAN_REF below. Re-fetch so that pin's `git checkout` further down
+    # can move to a newer commit if the ref is a branch or moved tag.
+    info "$FOREMAN_INSTALL_DIR is pinned to FOREMAN_REF=$FOREMAN_REF (detached HEAD) — re-fetching"
+    git -C "$FOREMAN_INSTALL_DIR" fetch --quiet --tags origin ||
+      die "could not fetch origin for $FOREMAN_INSTALL_DIR; check network access and the origin remote."
+  else
+    die "$FOREMAN_INSTALL_DIR is on a detached HEAD, most likely left over from a previous FOREMAN_REF pin. Unset FOREMAN_REF and run \`git -C $FOREMAN_INSTALL_DIR checkout main\` to reattach it to a branch, then re-run this installer, or set FOREMAN_REF again to keep the pin."
   fi
 else
   info "cloning $FOREMAN_REPO_URL to $FOREMAN_INSTALL_DIR"

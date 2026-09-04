@@ -6,7 +6,7 @@
  */
 
 import type { GitHubClient, GlobalConfig, LinearWriter, MergedRecord, ResolvedRepoEntry } from "@foreman/core";
-import { assertIssueInScope, cleanupMergedWork, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
+import { assertIssueInScope, branchNameFor, cleanupMergedWork, encodeMarker, latestMarker, MARKER_KIND, resolveState, reviewGate } from "@foreman/core";
 import type { ReviewResult } from "@foreman/core";
 import { getConfig, getEntry } from "../runtime.ts";
 
@@ -43,7 +43,7 @@ export async function runMerge(
   assertIssueInScope(entry, issue);
   const repoPath = entry.repoPath;
   const repoSettings = entry;
-  const branch = issue.branchName;
+  const branch = branchNameFor(entry.branchPattern, issue, repoPath);
 
   let viewerId: string | null;
   try {
@@ -82,7 +82,9 @@ export async function runMerge(
   }
 
   if (!gitMergeComplete) {
-    const headSha = pr?.headSha ?? null;
+    const branchSha = repoSettings.pr.required ? null : await github.revParse(repoPath, `origin/${branch}`);
+    const headSha = pr?.headSha ?? branchSha ?? "";
+    const prOpen = repoSettings.pr.required ? pr !== null && pr.state.toLowerCase() === "open" : branchSha !== null;
     const ciStatus = headSha ? await github.ciStatus(repoPath, headSha) : "none";
     const review = latestReview(issue.comments, viewerId);
 
@@ -91,7 +93,7 @@ export async function runMerge(
       review,
       headSha,
       ciStatus,
-      prOpen: pr !== null && pr.state.toLowerCase() === "open",
+      prOpen,
       prRequired: repoSettings.pr.required,
       ciRequired: repoSettings.pr.ciRequired,
     });

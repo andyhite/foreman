@@ -29,7 +29,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     priority: PRIORITY.Medium,
     estimate: 2,
     url: "https://linear.app/foreman/issue/ENG-1",
-    branchName: "eng-1-do-the-thing",
+    branchName: "andy/eng-1-do-the-thing",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: STATE_IN_REVIEW,
@@ -129,12 +129,10 @@ class FakeLinear implements LinearWriter {
     };
   }
   async createRelation() {}
-  async deleteRelation() {}
   async projectRelations() {
     return [];
   }
   async createProjectRelation() {}
-  async deleteProjectRelation() {}
   async createLabel(input: {
     name: string;
     teamId?: string;
@@ -315,6 +313,44 @@ describe("runMerge — partial failure recovery", () => {
     expect(second.message).toContain("already complete");
     expect(mergeCalls).toBe(1);
     expect((await flakyLinear.issue("ENG-1"))?.state.id).toBe(STATE_DONE.id);
+  });
+});
+
+describe("runMerge — direct-branch mode head SHA (SPEC §10)", () => {
+  it("resolves headSha from the branch ref and passes the review gate when the marker matches", async () => {
+    const headSha = "branch-sha-1";
+    const issue = makeIssue({
+      comments: [
+        {
+          id: "c-review",
+          body: reviewComment(headSha),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          user: { id: "bot-1", name: "Bot", displayName: "Bot" },
+          parentId: null,
+        },
+      ],
+    });
+    const linear = new FakeLinear([issue]);
+    const directEntry: ResolvedRepoEntry = { ...entry, pr: { required: false, draft: false, ciRequired: false } };
+    const branch = "eng-1-do-the-thing";
+    const github = new GitHubClient({
+      runner: stubRunner((argv) => {
+        if (argv.includes("pr") && argv.includes("list")) return { stdout: "[]" };
+        if (argv[0] === "git" && argv[1] === "rev-parse" && argv[2] === `origin/${branch}`) {
+          return { stdout: `${headSha}\n` };
+        }
+        if (argv.includes("api") && argv.some((a) => a.includes("check-runs"))) return { stdout: "[]" };
+        if (argv.includes("status")) return { stdout: "" };
+        if (argv.includes("symbolic-ref")) return { stdout: "main\n" };
+        if (argv[0] === "git" && argv[1] === "rev-parse" && argv[2] === "HEAD") return { stdout: "merge-commit-sha\n" };
+        return { stdout: "" };
+      }),
+    });
+
+    const result = await runMerge(linear, github, "ENG-1", directEntry, makeConfig());
+
+    expect(result.merged).toBe(true);
+    expect(result.message).not.toContain("review gate: fail");
   });
 });
 

@@ -71,6 +71,7 @@ class FakeLinear implements LinearWriter {
   createIssueCalls: CreateIssueInput[] = [];
   projectStatusCalls: Array<{ projectId: string; type: string }> = [];
   projectRecord: Project | null = null;
+  projectsList: { id: string; name: string }[] = [];
 
   constructor(issues: Issue[]) {
     for (const issue of issues) this.issuesById.set(issue.identifier, issue);
@@ -119,7 +120,7 @@ class FakeLinear implements LinearWriter {
     return this.teamsList;
   }
   async projects() {
-    return [];
+    return this.projectsList;
   }
   async teamSettings(): Promise<TeamSettings> {
     return { id: "team-1", key: "ENG", name: "Engineering", triageEnabled: true, cyclesEnabled: false, triageStateId: null };
@@ -167,12 +168,10 @@ class FakeLinear implements LinearWriter {
   async createRelation(input: { issueId: string; relatedIssueId: string; type: IssueRelationType }) {
     this.relationCalls.push(input);
   }
-  async deleteRelation() {}
   async projectRelations() {
     return [];
   }
   async createProjectRelation() {}
-  async deleteProjectRelation() {}
   async createLabel(input: { name: string }): Promise<IssueLabel> {
     const created = label(input.name);
     this.labelsById.set(created.id, created);
@@ -555,6 +554,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     const linear = new FakeLinear([]);
     linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.projectsList = [{ id: PROJECT_ID, name: "App settings" }];
 
     const captured = extractFromToolResult(toolResultPayload(planEnvelope()));
     expect(captured).toHaveLength(1);
@@ -569,7 +569,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.issueId,
       captured[0]!.previousStateId,
       (message, level) => notices.push(`${level}: ${message}`),
-      makeDeps(linear, { entry: { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" } }),
+      makeDeps(linear, { entry: { alias: "repo", team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>", pr: { required: true, draft: false, ciRequired: true } } }),
       { wasApplied: async () => false },
     );
 
@@ -587,6 +587,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
     const linear = new FakeLinear([]);
     linear.projectRecord = { id: PROJECT_ID, name: "App settings", description: null, content: "Brief.", startDate: null, targetDate: null, status: null, documents: [] };
     linear.teamsList = [{ id: "team-1", key: "ENG", name: "Engineering" }];
+    linear.projectsList = [{ id: PROJECT_ID, name: "App settings" }];
 
     const captured = extractFromToolResult(toolResultPayload(planEnvelope()));
     await handleCaptured(
@@ -597,7 +598,7 @@ describe("handleCaptured — a plan tool_result reaches Linear", () => {
       captured[0]!.issueId,
       captured[0]!.previousStateId,
       () => {},
-      makeDeps(linear, { entry: { team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>" } }),
+      makeDeps(linear, { entry: { alias: "repo", team: "ENG", repoPath: "/repo", branchPattern: "<issue-id>-<slug>", pr: { required: true, draft: false, ciRequired: true } } }),
       { wasApplied: async () => false },
     );
 

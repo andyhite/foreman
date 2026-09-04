@@ -1,6 +1,6 @@
 ---
 description: Catches an implementer about to merge its own PR or push straight to the base branch, which no agent has authority to do.
-condition: "(?i)(gh\\s+pr\\s+merge|git\\s+merge(\\s|$)|git\\s+push[^\\n]*\\s(HEAD:)?(main|master)(\\s|$))"
+condition: "(?i)(gh\\s+pr\\s+merge|git\\s+merge(\\s|$)|git\\s+push[^\\n]*[\\s:](main|master|develop|trunk|release)(\\s|$)|git\\s+push[^\\n]*--force)"
 scope: "tool:bash(*)"
 interruptMode: tool-only
 agents: foreman-implement

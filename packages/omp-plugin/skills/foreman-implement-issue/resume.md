@@ -29,7 +29,11 @@ resume.
 4. Continue: address the findings or the answer, extend existing work. Re-run
    only tests affected by your changes plus the full suite for the criteria
    you touch.
-5. Proceed with `SKILL.md` steps 3–6.
+5. The PR already exists on a fix cycle. Call `foreman_github_pr` with
+   `op: "view"` and `head` set to the `FOREMAN-BRANCH` branch, push your new
+   commits, and carry that PR's URL into `prUrl`. NEVER call `create` on
+   resume.
+6. Proceed with `SKILL.md` steps 3–6.
 
 NEVER discard prior commits to "start clean." The worktree is the only record
 of that work; the operator paid for it once already.

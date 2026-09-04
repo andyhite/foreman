@@ -11,7 +11,7 @@
  */
 
 import { dirname } from "node:path";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export interface ProcessLockInfo {
@@ -31,6 +31,13 @@ export class ProcessLockHeldError extends Error {
 /** Seam over `process.kill(pid, 0)`, so tests can simulate a dead pid without spawning one. */
 export interface ProcessProbe {
   isAlive(pid: number): boolean;
+  /**
+   * Test seam only: invoked between unlinking the observed-stale lock and
+   * exclusively `link`ing the reclaim temp file into place — the exact
+   * window a genuine second reclaimer could win. Lets a test simulate that
+   * race deterministically instead of racing real processes.
+   */
+  onReclaiming?(): void;
 }
 
 export const nodeProcessProbe: ProcessProbe = {
@@ -45,13 +52,16 @@ export const nodeProcessProbe: ProcessProbe = {
 };
 
 /**
- * Reclaiming a stale lock never unlinks: two processes observing the same
- * dead holder could otherwise each unlink whatever is at the path —
- * including the other's just-written fresh lock — and both end up believing
- * they hold it. The reclaim write is instead an atomic rename, and each
- * `acquire()` mints a random `token`; `release()` only unlinks the file when
- * its on-disk token still matches this instance's, so a departing loser
- * never deletes the winner's lock.
+ * A stale reclaim never blindly unlinks-then-writes: two processes racing
+ * the same dead holder could otherwise both believe they won. The reclaim
+ * writes a temp file, unlinks the observed-stale path, then `link`s the
+ * temp file into place — `link(2)` fails atomically with `EEXIST` if a
+ * concurrent reclaimer's file is already there (a plain `rename` would
+ * silently overwrite it instead), so exactly one reclaimer wins. The
+ * on-disk token read-back stays as a second line of defence. Each
+ * `acquire()` mints a random `token`; `release()` only unlinks the file
+ * when its on-disk token still matches this instance's, so a departing
+ * loser never deletes the winner's lock.
  */
 export class ProcessLock {
   readonly #path: string;
@@ -86,7 +96,31 @@ export class ProcessLock {
 
     const tempPath = `${this.#path}.${token}`;
     writeFileSync(tempPath, JSON.stringify(info, null, 2), { encoding: "utf8", mode: 0o600 });
-    renameSync(tempPath, this.#path);
+    try {
+      unlinkSync(this.#path);
+    } catch {
+      // Already gone — a prior reclaimer's cleanup or a crash that left no
+      // file at all. Either way there's nothing to remove.
+    }
+    probe.onReclaiming?.();
+    try {
+      linkSync(tempPath, this.#path);
+    } catch (error) {
+      unlinkSync(tempPath);
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+      let winner: ProcessLockInfo | null = null;
+      try {
+        winner = JSON.parse(readFileSync(this.#path, "utf8")) as ProcessLockInfo;
+      } catch {
+        winner = null;
+      }
+      throw new ProcessLockHeldError(winner ?? info, this.#path);
+    }
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Best-effort: the link succeeded, `this.#path` already carries our data.
+    }
 
     let reclaimed: ProcessLockInfo | null = null;
     try {

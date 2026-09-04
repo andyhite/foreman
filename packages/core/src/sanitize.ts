@@ -7,9 +7,9 @@
  * sequences.
  */
 
-/** Drops C0 (except `\n`/`\t`), DEL, and C1 — so ESC/OSC/CSI can never reach a terminal or a log line. */
+/** Drops C0 (except `\n`/`\t`), DEL, C1, bidi overrides, and zero-width formatting — so ESC/OSC/CSI, and the trojan-source class of bidi/zero-width smuggling (CVE-2021-42574), can never reach a terminal or a log line. */
 export function stripControlChars(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
+  return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "");
 }
 
 /**

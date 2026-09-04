@@ -163,7 +163,7 @@ export async function listWorktrees(
 }
 
 /** Returns the first configured remote's name, or `null` when there is none. */
-async function remoteName(repoPath: string, runner: CommandRunner): Promise<string | null> {
+export async function remoteName(repoPath: string, runner: CommandRunner): Promise<string | null> {
   const { stdout } = await runner.run(["git", "remote"], { cwd: repoPath });
   const name = stdout.split("\n")[0]?.trim();
   return name && name.length > 0 ? name : null;

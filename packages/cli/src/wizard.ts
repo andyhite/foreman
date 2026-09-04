@@ -273,10 +273,16 @@ async function provisionLabels(deps: WizardDeps, options: WizardOptions, apiKey:
   const client = new LinearClient({ apiKey });
   const confirmer = options.yes ? YOLO_CONFIRMER : promptConfirmer(deps.prompter, deps.log);
 
-  const actions = await provisionWorkspaceLabels(client, { confirmer });
-  const failed = printProvisionActions(deps.log, actions);
-  if (failed) {
-    deps.log(`  ${style("yellow", "!")} some labels weren't provisioned; re-run \`foreman doctor --fix\` to retry.`);
+  try {
+    const actions = await provisionWorkspaceLabels(client, { confirmer });
+    const failed = printProvisionActions(deps.log, actions);
+    if (failed) {
+      deps.log(`  ${style("yellow", "!")} some labels weren't provisioned; re-run \`foreman doctor --fix\` to retry.`);
+    }
+  } catch (error) {
+    deps.log(
+      `  ${style("yellow", "!")} label provisioning failed (${(error as Error).message}); re-run \`foreman doctor --fix\` to retry.`,
+    );
   }
 }
 
@@ -323,8 +329,8 @@ export async function runWizard(options: WizardOptions, deps: WizardDeps): Promi
   printBanner(deps.log);
   const { missingGh } = await preflight(deps);
   const apiKey = await configureGlobalConfig(deps.prompter, deps.log, options.home, options.skipLinear);
-  await provisionLabels(deps, options, apiKey);
   await linkGlobalPlugin(deps, options);
+  await provisionLabels(deps, options, apiKey);
   await removeStrayUserScopeInstall(deps, options);
 
   if (options.linkCli) {

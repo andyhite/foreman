@@ -154,7 +154,6 @@ export interface LinearWriter extends LinearReader {
     relatedIssueId: string;
     type: IssueRelationType;
   }): Promise<void>;
-  deleteRelation(relationId: LinearId): Promise<void>;
   /**
    * Creates a project dependency edge. `anchorType`/`relatedAnchorType` are
    * required by `ProjectRelationCreateInput` (measured) and carry the
@@ -168,7 +167,6 @@ export interface LinearWriter extends LinearReader {
     anchorType: ProjectRelationAnchor;
     relatedAnchorType: ProjectRelationAnchor;
   }): Promise<void>;
-  deleteProjectRelation(relationId: LinearId): Promise<void>;
   createLabel(input: {
     name: string;
     teamId?: LinearId;

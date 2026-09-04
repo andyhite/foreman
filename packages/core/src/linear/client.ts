@@ -45,7 +45,6 @@ import {
   ISSUE_CREATE_MUTATION,
   ISSUE_LABEL_CREATE_MUTATION,
   ISSUE_RELATION_CREATE_MUTATION,
-  ISSUE_RELATION_DELETE_MUTATION,
   ISSUE_UPDATE_MUTATION,
   ISSUES_QUERY,
   PROJECT_CREATE_MUTATION,
@@ -54,7 +53,6 @@ import {
   PROJECT_LABELS_QUERY,
   PROJECT_QUERY_SCALAR_CONTENT,
   PROJECT_RELATION_CREATE_MUTATION,
-  PROJECT_RELATION_DELETE_MUTATION,
   PROJECT_RELATIONS_QUERY,
   PROJECT_STATUS_QUERY,
   PROJECT_STATUSES_QUERY,
@@ -157,14 +155,14 @@ interface WireIssue {
   createdAt: string;
   updatedAt: string;
   state: WireStateRef;
-  labels: { nodes: WireLabel[] };
+  labels: { nodes: WireLabel[]; pageInfo?: { hasNextPage: boolean } };
   project: { id: string; name: string } | null;
   team: { id: string; key: string; name: string };
   assignee: WireUser | null;
   parent: WireIssueRef | null;
-  children: { nodes: WireIssueRef[] };
-  relations: { nodes: WireRelation[] };
-  inverseRelations?: { nodes: WireRelation[] };
+  children: { nodes: WireIssueRef[]; pageInfo?: { hasNextPage: boolean } };
+  relations: { nodes: WireRelation[]; pageInfo?: { hasNextPage: boolean } };
+  inverseRelations?: { nodes: WireRelation[]; pageInfo?: { hasNextPage: boolean } };
   comments?: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 }
 
@@ -235,9 +233,9 @@ export class LinearClient implements LinearWriter {
   private readonly onRequest: ((event: LinearRequestEvent) => void) | null;
   private static readonly CACHE_TTL_MS = 10 * 60_000;
   private readonly labelIdCache = new Map<string, { value: IssueLabel; at: number }>();
-  private readonly labelGroupIdCache = new Map<string, LinearId>();
+  private readonly labelGroupIdCache = new Map<string, { value: LinearId; at: number }>();
   private readonly projectLabelIdCache = new Map<string, { value: IssueLabel; at: number }>();
-  private readonly projectLabelGroupIdCache = new Map<string, LinearId>();
+  private readonly projectLabelGroupIdCache = new Map<string, { value: LinearId; at: number }>();
   /** Every initiative a project belongs to, keyed by project id — TTL-invalidated. */
   private readonly projectInitiativesCache = new Map<string, { value: InitiativeRef[]; at: number }>();
   /** Resolved once per `type`: the workspace's own statusId for that fixed enum value. */
@@ -269,7 +267,12 @@ export class LinearClient implements LinearWriter {
     variables: Record<string, unknown>,
   ): Promise<T> {
     const signal = AbortSignal.timeout(this.timeoutMs);
-    return this.requestWithRetry<T>(document, variables, 0, signal);
+    // A dropped response for an already-committed mutation must never be
+    // replayed — retrying `IssueCreate`/`CommentCreate`/etc. on a transport
+    // blip risks a duplicate write. Only queries, which are safe to repeat,
+    // get the retry loop below.
+    const retryable = /^\s*query\b/.test(document);
+    return this.requestWithRetry<T>(document, variables, 0, signal, retryable);
   }
 
   private async requestWithRetry<T>(
@@ -277,6 +280,7 @@ export class LinearClient implements LinearWriter {
     variables: Record<string, unknown>,
     attempt: number,
     signal: AbortSignal,
+    retryable: boolean,
   ): Promise<T> {
     const startedAt = performance.now();
     const trace = (status: number | null, ok: boolean, error?: string): void => {
@@ -308,52 +312,68 @@ export class LinearClient implements LinearWriter {
         trace(null, false, message);
         throw new LinearApiError(message, null, null);
       }
-      if (attempt < 2 && !signal.aborted) {
+      if (retryable && attempt < 2 && !signal.aborted) {
         trace(null, false, `retrying transport failure: ${String(error)}`);
         const { promise, resolve } = Promise.withResolvers<void>();
         setTimeout(resolve, 500 * 2 ** attempt);
         await promise;
-        return this.requestWithRetry<T>(document, variables, attempt + 1, signal);
+        return this.requestWithRetry<T>(document, variables, attempt + 1, signal, retryable);
       }
       trace(null, false, String(error));
       throw error;
     }
 
-    if (!response.ok) {
-      if (attempt < 2 && RETRYABLE_STATUS.has(response.status)) {
-        // Drain the body before backing off: undici keeps the connection's
-        // underlying socket pinned to the pool until the body is consumed
-        // or GC'd, and every retryable status here is precisely the
-        // rate-limit condition that can least afford a leaked connection.
+    // Body reads (`text()`/`json()`) live inside this try too: a mid-body
+    // abort must surface as a `LinearApiError` like every other failure
+    // here, not escape as a raw `AbortError`/`TypeError` that skips the
+    // retry logic above and the `instanceof LinearApiError` branches
+    // `init.ts`/`wizard.ts` use to fall back to manual entry.
+    try {
+      if (!response.ok) {
+        if (retryable && attempt < 2 && RETRYABLE_STATUS.has(response.status)) {
+          // Drain the body before backing off: undici keeps the connection's
+          // underlying socket pinned to the pool until the body is consumed
+          // or GC'd, and every retryable status here is precisely the
+          // rate-limit condition that can least afford a leaked connection.
+          const body = await response.text();
+          trace(response.status, false, `retrying: ${body}`);
+          await this.backoff(response, signal);
+          return this.requestWithRetry<T>(document, variables, attempt + 1, signal, retryable);
+        }
         const body = await response.text();
-        trace(response.status, false, `retrying: ${body}`);
-        await this.backoff(response, signal);
-        return this.requestWithRetry<T>(document, variables, attempt + 1, signal);
+        trace(response.status, false, body);
+        throw new LinearApiError(
+          `Linear API request failed with status ${response.status}: ${body}`,
+          response.status,
+          body,
+        );
       }
-      const body = await response.text();
-      trace(response.status, false, body);
+
+      const payload = (await response.json()) as GraphQlResponse<T>;
+      if (payload.errors && payload.errors.length > 0) {
+        // A 200 with a GraphQL errors array is still a rate-limit/transient
+        // failure in Linear's implementation for some resolvers; only the HTTP
+        // status is documented as retryable, so errors here are terminal.
+        const message = payload.errors.map((entry) => entry.message).join("; ");
+        trace(response.status, false, message);
+        throw new LinearApiError(message, response.status, payload.errors);
+      }
+      if (payload.data === null || payload.data === undefined) {
+        trace(response.status, false, "Linear API returned no data");
+        throw new LinearApiError("Linear API returned no data", response.status, payload.errors);
+      }
+      trace(response.status, true);
+      return payload.data;
+    } catch (error) {
+      if (error instanceof LinearApiError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      trace(response.status, false, message);
       throw new LinearApiError(
-        `Linear API request failed with status ${response.status}: ${body}`,
+        `Linear API request failed while reading the response: ${message}`,
         response.status,
-        body,
+        null,
       );
     }
-
-    const payload = (await response.json()) as GraphQlResponse<T>;
-    if (payload.errors && payload.errors.length > 0) {
-      // A 200 with a GraphQL errors array is still a rate-limit/transient
-      // failure in Linear's implementation for some resolvers; only the HTTP
-      // status is documented as retryable, so errors here are terminal.
-      const message = payload.errors.map((entry) => entry.message).join("; ");
-      trace(response.status, false, message);
-      throw new LinearApiError(message, response.status, payload.errors);
-    }
-    if (payload.data === null || payload.data === undefined) {
-      trace(response.status, false, "Linear API returned no data");
-      throw new LinearApiError("Linear API returned no data", response.status, payload.errors);
-    }
-    trace(response.status, true);
-    return payload.data;
   }
 
   /**
@@ -402,6 +422,48 @@ export class LinearClient implements LinearWriter {
   /** Pagination must run to completion or fail loudly — partial pages corrupt lock/reconcile decisions. */
   private refusePartialPage(operation: string, pages: number, partialCount: number): never {
     throw new LinearPaginationError(operation, pages, partialCount);
+  }
+
+  /**
+   * Shared stepper for the five list queries whose pagination tail is
+   * otherwise byte-identical: push nodes, stop when the connection reports
+   * no next page, refuse a stalled `endCursor` or a page beyond `MAX_PAGES`
+   * as a partial result. `pick` reaches into the response for this query's
+   * one connection; a `null` return tolerates a first-page miss (the only
+   * caller that needs this is `paginateComments`, whose root `issue` can be
+   * absent) and is refused on every later page instead. `issues()` is not
+   * routed through this: its per-node early exit on `query.limit` and
+   * `first` shrinking as results accumulate don't fit this shape.
+   */
+  private async paginate<TNode, TData>(
+    operation: string,
+    document: string,
+    variables: Record<string, unknown>,
+    pick: (data: TData) => { nodes: TNode[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } | null,
+    initialAfter?: string,
+  ): Promise<TNode[]> {
+    const results: TNode[] = [];
+    let after = initialAfter;
+    let pages = 0;
+    for (;;) {
+      const data = await this.request<TData>(document, { ...variables, after });
+      const page = pick(data);
+      if (page === null) {
+        if (pages === 0 && initialAfter === undefined) return results;
+        this.refusePartialPage(operation, pages, results.length);
+      }
+      results.push(...page.nodes);
+      if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) break;
+      if (page.pageInfo.endCursor === after) {
+        this.refusePartialPage(operation, pages, results.length);
+      }
+      after = page.pageInfo.endCursor;
+      pages += 1;
+      if (pages >= MAX_PAGES) {
+        this.refusePartialPage(operation, pages, results.length);
+      }
+    }
+    return results;
   }
 
 
@@ -472,7 +534,29 @@ export class LinearClient implements LinearWriter {
     };
   }
 
+  /**
+   * `children`, `relations`, `inverseRelations`, and `labels` are selected
+   * with no `first:` — Linear's default page size applies. A truncated page
+   * here reads as "no children" (letting a re-applied refine duplicate
+   * every child past the default) or "unblocked" (a dropped `blocks` edge),
+   * so a page beyond the default must fail loudly rather than silently.
+   */
+  private assertIssueConnectionsComplete(wire: WireIssue): void {
+    const connections: Array<[string, { pageInfo?: { hasNextPage: boolean } } | undefined]> = [
+      ["children", wire.children],
+      ["relations", wire.relations],
+      ["inverseRelations", wire.inverseRelations],
+      ["labels", wire.labels],
+    ];
+    for (const [name, connection] of connections) {
+      if (connection?.pageInfo?.hasNextPage) {
+        this.refusePartialPage(`issue(${wire.identifier}).${name}`, 0, 0);
+      }
+    }
+  }
+
   private mapIssue(wire: WireIssue): Issue {
+    this.assertIssueConnectionsComplete(wire);
     return {
       id: wire.id,
       identifier: wire.identifier,
@@ -580,30 +664,17 @@ export class LinearClient implements LinearWriter {
    * page silently loses whichever marker fell past Linear's default 50.
    */
   private async paginateComments(issueId: string, after: string | undefined): Promise<Comment[]> {
-    const results: Comment[] = [];
-    let cursor = after;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        issue: {
-          comments: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-        } | null;
-      }>(COMMENTS_QUERY, { issueId, after: cursor, first: 100 });
-      if (!data.issue) break;
-      for (const comment of data.issue.comments.nodes) {
-        results.push(this.mapComment(comment));
-      }
-      if (!data.issue.comments.pageInfo.hasNextPage || !data.issue.comments.pageInfo.endCursor) break;
-      if (data.issue.comments.pageInfo.endCursor === cursor) {
-        this.refusePartialPage(`paginateComments(${issueId})`, pages, results.length);
-      }
-      cursor = data.issue.comments.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage(`paginateComments(${issueId})`, pages, results.length);
-      }
-    }
-    return results;
+    const wireComments = await this.paginate<
+      WireComment,
+      { issue: { comments: { nodes: WireComment[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }
+    >(
+      `paginateComments(${issueId})`,
+      COMMENTS_QUERY,
+      { issueId, first: 100 },
+      (data) => data.issue?.comments ?? null,
+      after,
+    );
+    return wireComments.map((comment) => this.mapComment(comment));
   }
 
   /**
@@ -688,11 +759,14 @@ export class LinearClient implements LinearWriter {
     const data = await this.request<{
       project: {
         id: string;
-        relations: { nodes: WireOutgoingProjectRelation[] };
-        inverseRelations: { nodes: WireIncomingProjectRelation[] };
+        relations: { nodes: WireOutgoingProjectRelation[]; pageInfo?: { hasNextPage: boolean } };
+        inverseRelations: { nodes: WireIncomingProjectRelation[]; pageInfo?: { hasNextPage: boolean } };
       } | null;
     }>(PROJECT_RELATIONS_QUERY, { projectId });
     if (!data.project) return [];
+    if (data.project.relations.pageInfo?.hasNextPage || data.project.inverseRelations.pageInfo?.hasNextPage) {
+      this.refusePartialPage(`projectRelations(${projectId})`, 0, 0);
+    }
 
     const seen = new Set<string>();
     const merged: ProjectRelation[] = [];
@@ -755,14 +829,10 @@ export class LinearClient implements LinearWriter {
   /** A project's current native status. Null when the project itself is absent. */
   async projectStatus(projectId: string): Promise<ProjectStatus | null> {
     const data = await this.request<{
-      project: { id: string; status: { id: string; name: string; type: string } } | null;
+      project: { id: string; status: WireStateRef | null } | null;
     }>(PROJECT_STATUS_QUERY, { projectId });
     if (!data.project) return null;
-    return {
-      id: data.project.status.id,
-      name: data.project.status.name,
-      type: data.project.status.type as ProjectStatusType,
-    };
+    return this.mapProjectStatus(data.project.status);
   }
 
   /** Resolves `type` to the workspace's matching `ProjectStatus.id`, fetching the list once and caching every type found. */
@@ -870,24 +940,12 @@ export class LinearClient implements LinearWriter {
    * team's same-named label and applying it cross-team.
    */
   private async fetchRawLabels(teamId?: string): Promise<WireLabel[]> {
-    const results: WireLabel[] = [];
-    let after: string | undefined;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        issueLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(WORKSPACE_LABELS_QUERY, { after });
-      results.push(...data.issueLabels.nodes);
-      if (!data.issueLabels.pageInfo.hasNextPage || !data.issueLabels.pageInfo.endCursor) break;
-      if (data.issueLabels.pageInfo.endCursor === after) {
-        this.refusePartialPage("fetchRawLabels()", pages, results.length);
-      }
-      after = data.issueLabels.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage("fetchRawLabels()", pages, results.length);
-      }
-    }
+    const results = await this.paginate<WireLabel, { issueLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(
+      "fetchRawLabels()",
+      WORKSPACE_LABELS_QUERY,
+      {},
+      (data) => data.issueLabels,
+    );
     return teamId ? results.filter((label) => label.team === null || label.team.id === teamId) : results;
   }
 
@@ -903,47 +961,22 @@ export class LinearClient implements LinearWriter {
   }
 
   async teams(): Promise<TeamRef[]> {
-    const results: TeamRef[] = [];
-    let after: string | undefined;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        teams: { nodes: TeamRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(TEAMS_QUERY, { after });
-      results.push(...data.teams.nodes);
-      if (!data.teams.pageInfo.hasNextPage || !data.teams.pageInfo.endCursor) break;
-      if (data.teams.pageInfo.endCursor === after) {
-        this.refusePartialPage("teams()", pages, results.length);
-      }
-      after = data.teams.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage("teams()", pages, results.length);
-      }
-    }
-    return results;
+    return this.paginate<TeamRef, { teams: { nodes: TeamRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(
+      "teams()",
+      TEAMS_QUERY,
+      {},
+      (data) => data.teams,
+    );
   }
 
   async projects(teamKey: string): Promise<ProjectRef[]> {
-    const results: ProjectRef[] = [];
-    let after: string | undefined;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        projects: { nodes: WireTeamProjectRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(PROJECTS_QUERY, { teamKey, after });
-      results.push(...data.projects.nodes.map((node) => this.mapProjectRef(node)));
-      if (!data.projects.pageInfo.hasNextPage || !data.projects.pageInfo.endCursor) break;
-      if (data.projects.pageInfo.endCursor === after) {
-        this.refusePartialPage("projects()", pages, results.length);
-      }
-      after = data.projects.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage("projects()", pages, results.length);
-      }
-    }
-    return results;
+    const nodes = await this.paginate<WireTeamProjectRef, { projects: { nodes: WireTeamProjectRef[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(
+      "projects()",
+      PROJECTS_QUERY,
+      { teamKey },
+      (data) => data.projects,
+    );
+    return nodes.map((node) => this.mapProjectRef(node));
   }
 
   /**
@@ -1042,26 +1075,6 @@ export class LinearClient implements LinearWriter {
     }
   }
 
-  async deleteProjectRelation(relationId: LinearId): Promise<void> {
-    const data = await this.request<{ projectRelationDelete: { success: boolean } }>(
-      PROJECT_RELATION_DELETE_MUTATION,
-      { id: relationId },
-    );
-    if (!data.projectRelationDelete.success) {
-      throw new LinearApiError(`Failed to delete project relation ${relationId}`, null, null);
-    }
-  }
-
-  async deleteRelation(relationId: LinearId): Promise<void> {
-    const data = await this.request<{ issueRelationDelete: { success: boolean } }>(
-      ISSUE_RELATION_DELETE_MUTATION,
-      { id: relationId },
-    );
-    if (!data.issueRelationDelete.success) {
-      throw new LinearApiError(`Failed to delete relation ${relationId}`, null, null);
-    }
-  }
-
   async createLabel(input: {
     name: string;
     teamId?: LinearId;
@@ -1079,100 +1092,119 @@ export class LinearClient implements LinearWriter {
   }
 
   /**
-   * Resolves a canonical colon-form label id (e.g. `"foreman:hands-off"`) to
-   * its Linear label, creating the label — and its nested parent group, e.g.
-   * "Foreman" -> "Hands Off" (SPEC §4.5) — if either is absent. An ungrouped
-   * id (no colon) would be created flat, unchanged. `teamId` undefined
-   * resolves and creates workspace-level.
+   * Shared "resolve or create" logic behind `ensureLabel`/`ensureWorkspaceLabel`
+   * and `ensureProjectLabel`: resolve a canonical colon-form label id
+   * (e.g. `"foreman:hands-off"`) against every label `fetchRaw` returns,
+   * creating the label — and its nested parent group, e.g. "Foreman" ->
+   * "Hands Off" (SPEC §4.5) — if either is absent. An ungrouped id (no
+   * colon) is created flat, unchanged. `scope` composes the cache key so
+   * distinct label surfaces (team-scoped, workspace-scoped, project-level)
+   * sharing this logic never collide.
    */
-  private async ensureLabelIn(
-    name: string,
-    teamId: LinearId | undefined,
-    opts?: { color?: string; description?: string },
-  ): Promise<IssueLabel> {
-    const cacheKey = `${teamId ?? "workspace"}:${name}`;
-    const cached = this.labelIdCache.get(cacheKey);
+  private async ensureLabelUsing(config: {
+    name: string;
+    scope: string;
+    opts: { color?: string; description?: string } | undefined;
+    idCache: Map<string, { value: IssueLabel; at: number }>;
+    groupIdCache: Map<string, { value: LinearId; at: number }>;
+    fetchRaw: () => Promise<WireLabel[]>;
+    create: (input: {
+      name: string;
+      isGroup?: boolean;
+      parentId?: LinearId;
+      color?: string;
+      description?: string;
+    }) => Promise<IssueLabel>;
+    ambiguousMessage: (count: number) => string;
+  }): Promise<IssueLabel> {
+    const { name, scope, opts, idCache, groupIdCache, fetchRaw, create, ambiguousMessage } = config;
+    const cacheKey = `${scope}:${name}`;
+    const cached = idCache.get(cacheKey);
     if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
 
-    const matches = (await this.labels(teamId)).filter((label) => label.name === name);
+    const matches = this.mapLabels(await fetchRaw()).filter((label) => label.name === name);
     if (matches.length > 1) {
-      throw new LinearApiError(
-        `Label "${name}" matches ${matches.length} labels visible ${teamId ? `to team ${teamId}` : "workspace-wide"} (team-owned and workspace-level); cannot resolve unambiguously.`,
-        null,
-        null,
-      );
+      throw new LinearApiError(ambiguousMessage(matches.length), null, null);
     }
     const existing = matches[0];
     if (existing) {
-      this.labelIdCache.set(cacheKey, { value: existing, at: Date.now() });
+      idCache.set(cacheKey, { value: existing, at: Date.now() });
       return existing;
     }
 
     const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
-    const parentId = group ? await this.ensureLabelGroupIn(group.prefix, teamId) : undefined;
+    const parentId = group
+      ? await this.ensureLabelGroupUsing({ prefix: group.prefix, scope, groupIdCache, fetchRaw, create })
+      : undefined;
     const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
 
-    const created = await this.createLabel({
-      name: childName,
-      teamId,
-      parentId,
-      color: opts?.color,
-      description: opts?.description,
-    });
+    const created = await create({ name: childName, parentId, color: opts?.color, description: opts?.description });
     const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
-    this.labelIdCache.set(cacheKey, { value: label, at: Date.now() });
+    idCache.set(cacheKey, { value: label, at: Date.now() });
     return label;
   }
 
-  async ensureLabel(name: string, teamId: LinearId, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
-    return this.ensureLabelIn(name, teamId, opts);
-  }
-
-  async ensureWorkspaceLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
-    return this.ensureLabelIn(name, undefined, opts);
-  }
-
-  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix, e.g. `"agent:"` -> "Agent". `teamId` undefined resolves and creates workspace-level. */
-  private async ensureLabelGroupIn(prefix: string, teamId: LinearId | undefined): Promise<LinearId> {
-    const cacheKey = `${teamId ?? "workspace"}:${prefix}`;
-    const cached = this.labelGroupIdCache.get(cacheKey);
-    if (cached) return cached;
+  /** Resolve (creating if absent) the `isGroup: true` parent for a managed label prefix, shared by every `ensureLabelUsing` caller. */
+  private async ensureLabelGroupUsing(config: {
+    prefix: string;
+    scope: string;
+    groupIdCache: Map<string, { value: LinearId; at: number }>;
+    fetchRaw: () => Promise<WireLabel[]>;
+    create: (input: { name: string; isGroup?: boolean; parentId?: LinearId }) => Promise<IssueLabel>;
+  }): Promise<LinearId> {
+    const { prefix, scope, groupIdCache, fetchRaw, create } = config;
+    const cacheKey = `${scope}:${prefix}`;
+    const cached = groupIdCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
 
     const displayName = groupDisplayName(prefix);
-    const existing = (await this.fetchRawLabels(teamId)).find(
-      (label) => label.isGroup === true && label.name === displayName,
-    );
+    const existing = (await fetchRaw()).find((label) => label.isGroup === true && label.name === displayName);
     if (existing) {
-      this.labelGroupIdCache.set(cacheKey, existing.id);
+      groupIdCache.set(cacheKey, { value: existing.id, at: Date.now() });
       return existing.id;
     }
 
-    const created = await this.createLabel({ name: displayName, teamId, isGroup: true });
-    this.labelGroupIdCache.set(cacheKey, created.id);
+    const created = await create({ name: displayName, isGroup: true });
+    groupIdCache.set(cacheKey, { value: created.id, at: Date.now() });
     return created.id;
+  }
+
+  async ensureLabel(name: string, teamId: LinearId, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
+    return this.ensureLabelUsing({
+      name,
+      scope: teamId,
+      opts,
+      idCache: this.labelIdCache,
+      groupIdCache: this.labelGroupIdCache,
+      fetchRaw: () => this.fetchRawLabels(teamId),
+      create: (input) => this.createLabel({ ...input, teamId }),
+      ambiguousMessage: (count) =>
+        `Label "${name}" matches ${count} labels visible to team ${teamId} (team-owned and workspace-level); cannot resolve unambiguously.`,
+    });
+  }
+
+  async ensureWorkspaceLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
+    return this.ensureLabelUsing({
+      name,
+      scope: "workspace",
+      opts,
+      idCache: this.labelIdCache,
+      groupIdCache: this.labelGroupIdCache,
+      fetchRaw: () => this.fetchRawLabels(undefined),
+      create: (input) => this.createLabel(input),
+      ambiguousMessage: (count) =>
+        `Label "${name}" matches ${count} labels visible workspace-wide (team-owned and workspace-level); cannot resolve unambiguously.`,
+    });
   }
 
   /** Raw workspace `ProjectLabel`s, unmapped, paged to exhaustion — mirrors `fetchRawLabels` for the project-label surface. */
   private async fetchRawProjectLabels(): Promise<WireLabel[]> {
-    const results: WireLabel[] = [];
-    let after: string | undefined;
-    let pages = 0;
-    for (;;) {
-      const data = await this.request<{
-        projectLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      }>(PROJECT_LABELS_QUERY, { after });
-      results.push(...data.projectLabels.nodes);
-      if (!data.projectLabels.pageInfo.hasNextPage || !data.projectLabels.pageInfo.endCursor) break;
-      if (data.projectLabels.pageInfo.endCursor === after) {
-        this.refusePartialPage("fetchRawProjectLabels()", pages, results.length);
-      }
-      after = data.projectLabels.pageInfo.endCursor;
-      pages += 1;
-      if (pages >= MAX_PAGES) {
-        this.refusePartialPage("fetchRawProjectLabels()", pages, results.length);
-      }
-    }
-    return results;
+    return this.paginate<WireLabel, { projectLabels: { nodes: WireLabel[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(
+      "fetchRawProjectLabels()",
+      PROJECT_LABELS_QUERY,
+      {},
+      (data) => data.projectLabels,
+    );
   }
 
   /** Every workspace `ProjectLabel`, canonical colon-form ids reconstructed the same way `labels()` does for issue labels. */
@@ -1197,57 +1229,18 @@ export class LinearClient implements LinearWriter {
     return { id: label.id, name: label.name, parentId: label.parent?.id ?? null };
   }
 
-  /** Resolve (creating if absent) the `isGroup: true` parent for a managed project-label prefix, workspace-level. */
-  private async ensureProjectLabelGroup(prefix: string): Promise<LinearId> {
-    const cached = this.projectLabelGroupIdCache.get(prefix);
-    if (cached) return cached;
-
-    const displayName = groupDisplayName(prefix);
-    const existing = (await this.fetchRawProjectLabels()).find(
-      (label) => label.isGroup === true && label.name === displayName,
-    );
-    if (existing) {
-      this.projectLabelGroupIdCache.set(prefix, existing.id);
-      return existing.id;
-    }
-
-    const created = await this.createProjectLabel({ name: displayName, isGroup: true });
-    this.projectLabelGroupIdCache.set(prefix, created.id);
-    return created.id;
-  }
-
   /** Workspace-level project label; creates the parent group on demand, mirroring `ensureWorkspaceLabel`. */
   async ensureProjectLabel(name: string, opts?: { color?: string; description?: string }): Promise<IssueLabel> {
-    const cached = this.projectLabelIdCache.get(name);
-    if (cached && Date.now() - cached.at < LinearClient.CACHE_TTL_MS) return cached.value;
-
-    const matches = (await this.projectLabels()).filter((label) => label.name === name);
-    if (matches.length > 1) {
-      throw new LinearApiError(
-        `Project label "${name}" matches ${matches.length} labels; cannot resolve unambiguously.`,
-        null,
-        null,
-      );
-    }
-    const existing = matches[0];
-    if (existing) {
-      this.projectLabelIdCache.set(name, { value: existing, at: Date.now() });
-      return existing;
-    }
-
-    const group = MANAGED_LABEL_GROUPS.find((candidate) => name.startsWith(candidate.prefix));
-    const parentId = group ? await this.ensureProjectLabelGroup(group.prefix) : undefined;
-    const childName = group ? labelDisplayName(name.slice(group.prefix.length)) : name;
-
-    const created = await this.createProjectLabel({
-      name: childName,
-      parentId,
-      color: opts?.color,
-      description: opts?.description,
+    return this.ensureLabelUsing({
+      name,
+      scope: "project",
+      opts,
+      idCache: this.projectLabelIdCache,
+      groupIdCache: this.projectLabelGroupIdCache,
+      fetchRaw: () => this.fetchRawProjectLabels(),
+      create: (input) => this.createProjectLabel(input),
+      ambiguousMessage: (count) => `Project label "${name}" matches ${count} labels; cannot resolve unambiguously.`,
     });
-    const label: IssueLabel = { id: created.id, name, parentId: created.parentId };
-    this.projectLabelIdCache.set(name, { value: label, at: Date.now() });
-    return label;
   }
 
   async createWorkflowState(input: {

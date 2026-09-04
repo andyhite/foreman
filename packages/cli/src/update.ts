@@ -64,32 +64,40 @@ const SKIP = style("dim", "○");
  * this runs on the machine someone develops Foreman on, and silently moving
  * their work is a worse outcome than an un-updated checkout.
  */
-async function pullCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<void> {
+async function pullCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<boolean> {
   const inGit = await deps.runner.capture("git", ["rev-parse", "--git-dir"], { cwd: checkoutRoot });
   if (inGit.code !== 0) {
     deps.log(`  ${SKIP} not a git checkout — nothing to pull.`);
-    return;
+    return false;
   }
 
   const dirty = await deps.runner.capture("git", ["status", "--porcelain"], { cwd: checkoutRoot });
   if (dirty.stdout.trim().length > 0) {
     deps.log(`  ${WARN} uncommitted changes — skipped the pull. Commit or stash, then re-run.`);
-    return;
+    return false;
   }
 
   const upstream = await deps.runner.capture("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
     cwd: checkoutRoot,
   });
   if (upstream.code !== 0) {
-    deps.log(`  ${SKIP} branch has no upstream — nothing to pull.`);
-    return;
+    // A detached HEAD (e.g. a `FOREMAN_REF` pin from install.sh) has no
+    // upstream by design, not by drift — say so, rather than reporting a
+    // silent no-op the operator has no way to distinguish from "nothing to do".
+    const detached = await deps.runner.capture("git", ["symbolic-ref", "-q", "HEAD"], { cwd: checkoutRoot });
+    deps.log(
+      detached.code !== 0
+        ? `  ${SKIP} checkout is pinned to a detached HEAD (FOREMAN_REF) — nothing to pull.`
+        : `  ${SKIP} branch has no upstream — nothing to pull.`,
+    );
+    return false;
   }
 
   const before = await deps.runner.capture("git", ["rev-parse", "HEAD"], { cwd: checkoutRoot });
   const code = await deps.runner.run("git", ["pull", "--ff-only"], { cwd: checkoutRoot });
   if (code !== 0) {
     deps.log(`  ${WARN} git pull failed (exit ${code}) — the rest of this update uses the checkout as-is.`);
-    return;
+    return true;
   }
 
   const after = await deps.runner.capture("git", ["rev-parse", "HEAD"], { cwd: checkoutRoot });
@@ -98,19 +106,23 @@ async function pullCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<voi
       ? `  ${INFO} already up to date (${upstream.stdout.trim()}).`
       : `  ${OK} pulled ${upstream.stdout.trim()} → ${after.stdout.trim().slice(0, 7)}.`,
   );
+  return false;
 }
 
 /** Reinstalls dependencies and rebuilds, so the installed `foreman` bin matches the source just pulled. */
-async function rebuildCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<void> {
+async function rebuildCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<boolean> {
   if (!(await deps.runner.exists("bun"))) {
     deps.log(`  ${WARN} bun not found on PATH — skipped install and build.`);
-    return;
+    return true;
   }
 
-  const installCode = await deps.runner.run("bun", ["install"], { cwd: checkoutRoot });
+  // `--frozen-lockfile` matches `install.sh`: a post-pull lockfile drift
+  // should be reported, not silently resolved to fresh dependency versions
+  // on the operator's machine.
+  const installCode = await deps.runner.run("bun", ["install", "--frozen-lockfile"], { cwd: checkoutRoot });
   if (installCode !== 0) {
-    deps.log(`  ${WARN} bun install failed (exit ${installCode}) — skipping the build.`);
-    return;
+    deps.log(`  ${WARN} bun install --frozen-lockfile failed (exit ${installCode}) — the lockfile is out of date. Skipping the build.`);
+    return true;
   }
 
   const buildCode = await deps.runner.run("bun", ["run", "build"], { cwd: checkoutRoot });
@@ -119,22 +131,26 @@ async function rebuildCheckout(deps: UpdateDeps, checkoutRoot: string): Promise<
       ? `  ${OK} rebuilt — the installed \`foreman\` now matches this checkout.`
       : `  ${WARN} bun run build failed (exit ${buildCode}) — the installed \`foreman\` is still the previous build.`,
   );
+  return buildCode !== 0;
 }
 
-export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promise<void> {
+export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promise<number> {
+  let failures = 0;
   printSection(deps.log, "Foreman checkout");
   deps.log(`  ${INFO} ${options.checkoutRoot}`);
   if (options.skipPull) {
     deps.log(`  ${SKIP} skipped the pull (--skip-pull).`);
-  } else {
-    await pullCheckout(deps, options.checkoutRoot);
+  } else if (await pullCheckout(deps, options.checkoutRoot)) {
+    failures += 1;
   }
-  await rebuildCheckout(deps, options.checkoutRoot);
+  if (await rebuildCheckout(deps, options.checkoutRoot)) {
+    failures += 1;
+  }
 
   if (options.skipPlugin) {
     printSection(deps.log, "omp plugin");
     deps.log(`  ${SKIP} skipped (--skip-plugin).`);
-    return;
+    return failures;
   }
 
   printSection(deps.log, "Global plugin link");
@@ -150,13 +166,14 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
   const aliases = Object.keys(config.repos).sort();
   if (aliases.length === 0) {
     deps.log(`  ${SKIP} none registered — run \`foreman init\` in a repo first.`);
-    return;
+    return failures;
   }
 
   for (const alias of aliases) {
     const repoPath = expandHome(config.repos[alias]!.path, options.home);
     if (!existsSync(repoPath)) {
       deps.log(`  ${WARN} ${alias} — ${repoPath} no longer exists.`);
+      failures += 1;
       continue;
     }
 
@@ -177,6 +194,8 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
       );
     } catch (error) {
       deps.log(`  ${WARN} ${alias} — ${(error as Error).message}`);
+      failures += 1;
     }
   }
+  return failures;
 }

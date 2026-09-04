@@ -54,11 +54,20 @@ export function reviewGate(input: ReviewGateInput): GateResult {
     }
 
     const requiredCriteria = acceptanceCriteria(issue.description);
-    const unchecked = review.criteriaVerification.filter((entry) => !entry.satisfied);
-    if (unchecked.length > 0 || review.criteriaVerification.length < requiredCriteria.length) {
+    const verified = new Set(
+      review.criteriaVerification
+        .filter((entry) => entry.satisfied)
+        .map((entry) => entry.criterion.trim().toLowerCase()),
+    );
+    const missing = requiredCriteria.filter((criterion) => !verified.has(criterion.trim().toLowerCase()));
+    const unsatisfied = review.criteriaVerification.filter((entry) => !entry.satisfied);
+    if (missing.length > 0 || unsatisfied.length > 0) {
       failures.push({
         code: "unverified-criteria",
-        message: `${unchecked.length} criterion/criteria unchecked or unverified against the issue's list.`,
+        message:
+          missing.length > 0
+            ? `${missing.length} acceptance criterion/criteria not verified: ${missing.join("; ")}.`
+            : `${unsatisfied.length} criterion/criteria unchecked.`,
       });
     }
 

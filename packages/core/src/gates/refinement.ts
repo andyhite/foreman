@@ -1,5 +1,5 @@
 /**
- * Refinement gate (`Backlog → Todo`, SPEC §10).
+ * Refinement gate (`Backlog → Ready`, SPEC §10).
  *
  * Pure: everything it needs is already on the fetched `Issue`. No Linear
  * calls here — a gate that fetches is a gate that can be evaluated

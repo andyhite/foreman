@@ -54,20 +54,20 @@ describe("renderLockComment / readLockComment", () => {
     const record = makeRecord();
     const body = renderLockComment(record);
     const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "bot-1" } }];
-    const found = readLockComment(comments);
+    const found = readLockComment(comments, null);
     expect(found).not.toBeNull();
     expect(found?.data).toEqual(record);
   });
 
   it("returns null when no lock comment is present", () => {
-    expect(readLockComment([])).toBeNull();
+    expect(readLockComment([], null)).toBeNull();
   });
 
-  it("finds the lock among comments from any author when authoredBy is omitted", () => {
+  it("finds the lock among comments from any author when authoredBy is null", () => {
     const record = makeRecord();
     const body = renderLockComment(record);
     const comments: MarkerSource[] = [{ id: "c1", body, createdAt: record.takenAt, user: { id: "bot-1" } }];
-    const found = readLockComment(comments);
+    const found = readLockComment(comments, null);
     expect(found).not.toBeNull();
     expect(found?.data).toEqual(record);
   });

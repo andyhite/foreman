@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "bun run --filter '*' build",
-    "check": "bun run typecheck && bun run test && bun run contract",
+    "check": "bun run typecheck && bun run test && bun run contract && bun run build",
+    "check:ci": "bun run check && bun audit --audit-level=high && bun packages/cli/dist/main.js --help && bash -n scripts/install.sh && bun run schemas && git diff --quiet",
     "contract": "bun run packages/omp-plugin/scripts/check-contract.ts",
     "schemas": "bun run packages/core/scripts/emit-schemas.ts",
     "schema:linear": "bun run packages/core/scripts/validate-linear-schema.ts",

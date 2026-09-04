@@ -85,6 +85,18 @@ const dependencyBlock = {
   blockedByIssues: ["ENG-9"],
 };
 
+const validRefineResult = {
+  issueId: "ENG-1",
+  refinedDescription: "Search is slow because the index is unbounded.",
+  estimate: 2,
+  acceptanceCriteria: ["Search returns results for a known query in under 200ms"],
+  affectedAreas: ["src/search/index.ts"],
+  outOfScope: ["Ranking tuning"],
+  subIssues: [],
+  spikeCreated: null,
+  readyForImplementation: true,
+};
+
 describe("parseAgentOutput", () => {
   it("parses a valid triage result envelope to kind: result", () => {
     const parsed = parseAgentOutput("foreman-triage", {
@@ -94,6 +106,102 @@ describe("parseAgentOutput", () => {
     });
     expect(parsed.kind).toBe("result");
   });
+
+  it("parses a valid refine result envelope to kind: result", () => {
+    const parsed = parseAgentOutput("foreman-refine", {
+      blocked: false,
+      result: validRefineResult,
+      block: null,
+    });
+    expect(parsed.kind).toBe("result");
+  });
+
+  it("rejects readyForImplementation: true with estimate > 3", () => {
+    const parsed = parseAgentOutput("foreman-refine", {
+      blocked: false,
+      result: { ...validRefineResult, estimate: 5, subIssues: [], readyForImplementation: true },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/readyForImplementation"))).toBe(true);
+    }
+  });
+
+  it("rejects estimate: 5 with an empty subIssues", () => {
+    const parsed = parseAgentOutput("foreman-refine", {
+      blocked: false,
+      result: { ...validRefineResult, estimate: 5, subIssues: [], readyForImplementation: false },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/subIssues"))).toBe(true);
+    }
+  });
+
+  it("rejects readyForImplementation: true with an empty acceptanceCriteria", () => {
+    const parsed = parseAgentOutput("foreman-refine", {
+      blocked: false,
+      result: { ...validRefineResult, acceptanceCriteria: [], readyForImplementation: true },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/acceptanceCriteria"))).toBe(true);
+    }
+  });
+
+  it("rejects verdict: approve with a blocking finding", () => {
+    const parsed = parseAgentOutput("foreman-review", {
+      blocked: false,
+      result: {
+        ...validReviewResult,
+        verdict: "approve",
+        findings: [{ severity: "blocking", file: "src/thing.ts", line: 1, description: "bug" }],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/verdict"))).toBe(true);
+    }
+  });
+
+  it("rejects dodSatisfied: true with an unsatisfied checklist entry", () => {
+    const parsed = parseAgentOutput("foreman-review", {
+      blocked: false,
+      result: {
+        ...validReviewResult,
+        dodSatisfied: true,
+        dodChecklist: [{ item: "tests pass", satisfied: false, evidence: "ci red" }],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/dodSatisfied"))).toBe(true);
+    }
+  });
+
+  it("rejects an unsatisfied criterion with no blocking finding", () => {
+    const parsed = parseAgentOutput("foreman-review", {
+      blocked: false,
+      result: {
+        ...validReviewResult,
+        criteriaVerification: [
+          { criterion: "Login works", satisfied: false, evidence: "auth.ts:42" },
+        ],
+        findings: [],
+      },
+      block: null,
+    });
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind === "invalid") {
+      expect(parsed.problems.some((problem) => problem.includes("/result/findings"))).toBe(true);
+    }
+  });
+
 
   it("parses a valid review result envelope to kind: result", () => {
     const parsed = parseAgentOutput("foreman-review", {
@@ -316,10 +424,16 @@ describe("AGENT_OUTPUT_SCHEMAS", () => {
   const agentNames = Object.keys(AGENT_OUTPUT_SCHEMAS) as ForemanAgentName[];
 
   for (const agent of agentNames) {
-    it(`${agent} schema round-trips through JSON.stringify/JSON.parse`, () => {
+    it(`${agent} schema round-trips through JSON.stringify/JSON.parse with its envelope shape intact`, () => {
       const schema = AGENT_OUTPUT_SCHEMAS[agent];
-      const roundTripped = JSON.parse(JSON.stringify(schema));
-      expect(roundTripped).toEqual(JSON.parse(JSON.stringify(schema)));
+      const roundTripped = JSON.parse(JSON.stringify(schema)) as {
+        properties: { blocked: unknown; result: unknown; block: unknown };
+        additionalProperties: boolean;
+      };
+      expect(roundTripped.properties.blocked).toBeDefined();
+      expect(roundTripped.properties.result).toBeDefined();
+      expect(roundTripped.properties.block).toBeDefined();
+      expect(roundTripped.additionalProperties).toBe(false);
     });
 
     it(`${agent} schema has no external $ref`, () => {

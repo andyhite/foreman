@@ -18,8 +18,8 @@ import type {
 import { HerdrDispatcher, isHerdrUnavailable } from "./herdr.ts";
 import { PrintDispatcher } from "./print.ts";
 
-/** SPEC §17.2: a herdr that stops answering degrades to print rather than stalling the loop. */
-class FallbackDispatcher implements Dispatcher {
+/** SPEC §17.2: a herdr that stops answering degrades to print rather than stalling the loop. Exported for direct testing of `#ownerOf`'s restart-time routing (step 5.2). */
+export class FallbackDispatcher implements Dispatcher {
   readonly kind: "print" | "herdr";
 
   readonly #primary: Dispatcher;
@@ -45,12 +45,21 @@ class FallbackDispatcher implements Dispatcher {
     }
   }
 
+  #ownerOf(handle: DispatchHandle): Dispatcher {
+    // After a restart `#owner` is empty for every persisted handle. A
+    // herdr handle carries a non-null `herdr` field (SPEC §17.2); routing
+    // it to the print fallback would let `status`/`settle` answer
+    // "settled" for a handle they know nothing about, defeating
+    // `InflightStore`'s persistence of still-running herdr dispatches.
+    return this.#owner.get(handle.dispatchId) ?? (handle.herdr ? this.#primary : this.#fallback);
+  }
+
   async status(handle: DispatchHandle): Promise<DispatchStatus> {
-    return (this.#owner.get(handle.dispatchId) ?? this.#fallback).status(handle);
+    return this.#ownerOf(handle).status(handle);
   }
 
   async settle(handle: DispatchHandle): Promise<DispatchOutcome> {
-    return (this.#owner.get(handle.dispatchId) ?? this.#fallback).settle(handle);
+    return this.#ownerOf(handle).settle(handle);
   }
 
   async cleanup(issueId: string, repoPath: string, worktreePath: string | null): Promise<void> {

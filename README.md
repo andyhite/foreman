@@ -124,23 +124,22 @@ Resolves the repo root (`git rev-parse --show-toplevel`), then:
    `<repo>/.omp/plugins/node_modules/@foreman/omp-plugin` (a symlink to
    `~/.foreman/plugin`), plus a `.git/info/exclude` line so neither shows in
    `git status`. `--skip-plugin` skips both.
-2. Lists every initiative in your Linear workspace as a checkbox picker
-   (`↑`/`↓` move, `space` toggle, `a` toggle all, `enter` confirm; scrolls
-   with `↑ N more` / `↓ N more`), pre-checking any already mapped to this
-   repo.
-3. Asks for the team and alias. You confirm or edit every choice before it is
-   written to `~/.foreman/config.json`.
+2. Asks for the Linear team this repo binds to (a select over the
+   workspace's teams, pre-selecting one already bound to this path), then the
+   registry alias. You confirm or edit every choice before it is written to
+   `~/.foreman/config.json`.
 
 `foreman init` never prompts for or writes the Linear API key.
 
 | Flag | Does |
 | --- | --- |
-| `--initiative <uuid>[:subdir]` | Bind an initiative (repeat the flag); `:subdir` is the per-initiative subdirectory binding. |
-| `--alias <name>`, `--team <KEY>` | Override the registry alias and Linear team key. |
-| `--skip-linear` | Take initiative ids manually instead of querying the API. |
+| `--app <name>` | App in this repo; repeat for a monorepo. |
+| `--alias <name>` | Registry alias override (default: derived from the repo directory name). |
+| `--team <KEY>` | Linear team for this repo. Required when run non-interactively (`--yes` or no TTY) and no team is already bound to this repo. |
+| `--skip-linear` | Skip Linear API access (team provisioning is skipped too). |
 | `--skip-plugin` | Register only; leave `.omp/plugins/` alone. |
 | `--path <dir>` | Register a directory other than the current one. |
-| `-y`, `--yes` | Accept every default and pre-checked value. On a fresh repo nothing is pre-checked, so init fails unless `--initiative` is also passed. |
+| `-y`, `--yes` | Accept every default non-interactively. Fails with an error if `--team` is also omitted and no team is already bound to this repo. |
 
 The resulting entry:
 
@@ -149,7 +148,8 @@ The resulting entry:
   "repos": {
     "my-app": {
       "path": "~/Code/my-app",
-      "initiatives": ["a1b2c3d4-0000-0000-0000-000000000000"]
+      "team": "ENG",
+      "apps": [{ "name": "fleet" }]
     }
   },
   "linear": {
@@ -159,10 +159,8 @@ The resulting entry:
 ```
 
 The `repos` registry, keyed by alias, is the single table binding a repo to
-a team and the initiatives it hosts; a monorepo lists several initiatives on
-one entry. An issue whose project has no initiative, or whose initiative is
-bound to no entry, is skipped rather than guessed at. The key resolves from
-`$LINEAR_API_KEY`, else `linear.apiKeyFile`.
+a Linear team and the apps it hosts; a monorepo lists several apps on one
+entry. The key resolves from `$LINEAR_API_KEY`, else `linear.apiKeyFile`.
 
 ### `foreman deinit`, `foreman doctor`, `foreman update`
 
@@ -188,23 +186,36 @@ removes it. Then `foreman init` in each repo that should have Foreman.
 ## Running the loop
 
 Order of operations: `setup` once per machine, `init` once per repo,
-`update` when Foreman changes upstream. `foreman plan` and `foreman build`
-(the per-repo planning and build loops) are not available yet — the CLI
-accepts both names and exits `2` with "not yet available" until they land.
-`foreman reconcile` is available now and repairs Linear drift a stopped or
-crashed loop can leave behind — an orphaned `foreman:running` lock, an
-abandoned in-progress issue, a merged PR whose issue never moved to Done, an
-`In Review` issue with no PR and an unpushed branch, or a `foreman:blocked`
-issue the operator already answered:
+`update` when Foreman changes upstream. Three loops run per repo:
 
 ```bash
+foreman plan [alias] [--once] [--mode confirm|yolo] [--dispatcher auto|print|herdr] [--poll <seconds>]
+foreman build [alias] [--once] [--mode confirm|yolo] [--dispatcher auto|print|herdr] [--poll <seconds>]
 foreman reconcile [alias] [--mode confirm|yolo] [--dry-run]
 ```
 
+`foreman plan` runs triage/plan/refine; `foreman build` runs
+implement/review/merge. `--once` runs a single poll, dispatches whatever is
+eligible, waits for it, then exits — the way to drive either loop by hand or
+from a scheduler. `--dispatcher` picks how an agent is spawned (`auto`
+prefers `herdr` when available, falling back to `print`). `foreman reconcile`
+repairs Linear drift a stopped or crashed loop can leave behind — an
+orphaned `foreman:running` lock, an abandoned in-progress issue, a merged PR
+whose issue never moved to Done, an `In Review` issue with no PR and an
+unpushed branch, or a `foreman:blocked` issue the operator already answered.
 `--dry-run` logs every invariant's fix without applying it or prompting.
-`loop.mode` (overridable with `--mode`) defaults to `confirm`: reconcile asks
-before every Linear mutation; `confirm` needs a TTY, and a run with no
-terminal attached refuses to start rather than declining silently.
+
+`loop.mode` (overridable with `--mode`) defaults to `confirm`: every loop
+asks before every Linear mutation and every dispatch; `confirm` needs a TTY,
+and a run with no terminal attached refuses to start rather than declining
+silently.
+
+Dispatching an agent requires `linear.apiKeyFile`: the loop scrubs every
+`LINEAR_*` environment variable from a dispatched agent's process, so an
+`$LINEAR_API_KEY`-only setup cannot pass the credential through and every
+loop refuses to start with a `loop dispatch requires linear.apiKeyFile`
+error. Run `foreman setup` to write the key to `~/.foreman/linear-api-key`
+and set `linear.apiKeyFile` to it.
 
 
 ## Operator surface
@@ -221,7 +232,7 @@ Slash commands inside any omp session:
 | `/foreman:review` | Cold-review in-review diffs. `<ISSUE-ID or PR>...` |
 | `/foreman:status` | Operator console: blocked queue, in-flight locks, and loop state. |
 | `/foreman:merge` | Merge one issue's PR (or branch) once the review gate passes. `<ISSUE-ID>`. Operator-invoked only. |
-| `/foreman:unblock` | Record your reply to a blocked issue and clear its `foreman:blocked` label. `<ISSUE-ID> <reply>` |
+| `/foreman:unblock` | Record your reply to a blocked issue and return it to Backlog or Ready. `<ISSUE-ID> <reply>` |
 
 ## Development
 

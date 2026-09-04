@@ -181,19 +181,11 @@ describe("LinearClient mutation payload guards", () => {
   });
 
   it("rejects relation mutations when Linear reports failure", async () => {
-    const fetchStub: FetchLike = async (_url, init) => {
-      const body = JSON.parse(init.body) as { query: string };
-      return jsonResponse(200, {
-        data: body.query.includes("IssueRelationCreate")
-          ? { issueRelationCreate: { success: false } }
-          : { issueRelationDelete: { success: false } },
-      });
-    };
+    const fetchStub: FetchLike = async () => jsonResponse(200, { data: { issueRelationCreate: { success: false } } });
     const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
     await expect(
       client.createRelation({ issueId: "issue-1", relatedIssueId: "issue-2", type: "blocks" }),
     ).rejects.toThrow(LinearApiError);
-    await expect(client.deleteRelation("relation-1")).rejects.toThrow(LinearApiError);
   });
 });
 
@@ -211,6 +203,19 @@ describe("LinearClient retry", () => {
     const issue = await client.issue("ENG-1");
     expect(calls).toBe(2);
     expect(issue?.identifier).toBe("ENG-1");
+  });
+
+  it("attempts a mutation exactly once when the response is a retryable status", async () => {
+    let calls = 0;
+    const fetchStub: FetchLike = async () => {
+      calls += 1;
+      return jsonResponse(500, { errors: [{ message: "internal error" }] });
+    };
+    const client = new LinearClient({ apiKey: "key", fetch: fetchStub });
+    await expect(
+      client.createRelation({ issueId: "issue-1", relatedIssueId: "issue-2", type: "blocks" }),
+    ).rejects.toThrow(LinearApiError);
+    expect(calls).toBe(1);
   });
 });
 

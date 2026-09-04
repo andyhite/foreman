@@ -3,12 +3,11 @@ import { acceptanceCriteria, openQuestions } from "@foreman/core";
 import {
   renderBlockComment,
   renderIssueDescription,
-  renderPrBody,
   renderReviewComment,
   renderSpikeIssue,
   renderStatusConsole,
 } from "../src/render/index.ts";
-import type { BlockRecord, ImplementResult, SpikeSpec, ReviewResult } from "@foreman/core";
+import type { BlockRecord, SpikeSpec, ReviewResult } from "@foreman/core";
 import type { StatusState } from "../src/render/status.ts";
 
 describe("renderIssueDescription", () => {
@@ -101,35 +100,6 @@ describe("renderIssueDescription", () => {
   });
 });
 
-describe("renderPrBody", () => {
-  const implementResult: ImplementResult = {
-    issueId: "ENG-142",
-    branch: "eng-142-fix-thing",
-    prUrl: "https://github.com/example/repo/pull/1",
-    headSha: "abc123",
-    criteriaMet: [{ criterion: "Thing works", evidence: "test.ts:12" }],
-    testsAdded: [{ path: "test/thing.test.ts", covers: "Thing works" }],
-    discoveredWork: [
-      { title: "Fix flaky test", description: "Found while implementing.", type: "type:bug", relation: "related" },
-      { title: "Refactor helper", description: "Extract shared logic.", type: "type:chore", relation: "blocks" },
-    ],
-    approachSummary: "Added a guard clause and a test.",
-  };
-
-  it("includes every discovered-work item and every DoD line", () => {
-    const output = renderPrBody({
-      issue: { identifier: "ENG-142", url: "https://linear.app/x/issue/ENG-142", title: "Fix the thing" },
-      result: implementResult,
-      definitionOfDone: ["Tests pass", "No lint errors", "Docs updated"],
-    });
-    expect(output).toContain("Fix flaky test");
-    expect(output).toContain("Refactor helper");
-    expect(output).toContain("- [ ] Tests pass");
-    expect(output).toContain("- [ ] No lint errors");
-    expect(output).toContain("- [ ] Docs updated");
-    expect(output).toContain("ENG-142");
-  });
-});
 
 describe("renderSpikeIssue", () => {
   it("names the question, budget, deliverable, and the blocked issue", () => {

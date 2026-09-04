@@ -58,7 +58,20 @@ export async function runUnblock(
     };
   }
 
-  const recommendedTerminal = latestMarker<BlockRecord>(MARKER_KIND.block, issue.comments ?? [])?.data;
+  // A forged `recommendation: "cancel"`/`"duplicate"` marker from another
+  // Linear user must not turn the operator's reply into a terminal
+  // disposition, so the marker is trusted only when authored by this
+  // credential's own viewer id (mirrors `merge.ts`'s `latestReview`).
+  let viewerId: string | null;
+  try {
+    viewerId = await linear.viewerId();
+  } catch {
+    viewerId = null;
+  }
+  const recommendedTerminal =
+    viewerId !== null
+      ? latestMarker<BlockRecord>(MARKER_KIND.block, issue.comments ?? [], { authoredBy: viewerId })?.data
+      : undefined;
   const wantsTerminal =
     recommendedTerminal?.type === "needs-decision" &&
     (recommendedTerminal.recommendation === "cancel" || recommendedTerminal.recommendation === "duplicate") &&

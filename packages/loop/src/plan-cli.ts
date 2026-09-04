@@ -26,6 +26,7 @@ import { resolveDispatcher } from "./dispatch/resolve.ts";
 import { runLoop, type LoopContext } from "./engine.ts";
 import { InflightStore } from "./inflight.ts";
 import { PLAN_LOOP } from "./loops/plan.ts";
+import { preflightLoopConfig } from "./preflight.ts";
 import { ProcessLock, ProcessLockHeldError } from "./process-lock.ts";
 
 interface ParsedArgs {
@@ -143,19 +144,11 @@ export async function runPlan(argv: readonly string[]): Promise<void> {
   };
 
   const apiKey = resolveLinearApiKey(config);
+  if (!preflightLoopConfig(config, "foreman-plan", args.homePath ?? undefined)) {
+    process.exitCode = 1;
+    return;
+  }
   const bootstrapLinear = new LinearClient({ apiKey, endpoint: config.linear.endpoint });
-  let endpointHost: string;
-  try {
-    endpointHost = new URL(config.linear.endpoint).host;
-  } catch {
-    endpointHost = "";
-  }
-  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
-    throw new ConfigError(
-      `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
-      ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
-    );
-  }
 
   let team: string;
   try {

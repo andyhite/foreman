@@ -25,6 +25,7 @@ import {
   type MergedRecord,
   nextProjectStatus,
   notHandsOff,
+  notInTerminalProject,
   readLockComment,
   type ResolvedRepoEntry,
   resolveState,
@@ -74,16 +75,21 @@ async function isIssueMerged(issue: Issue, ctx: ReconcileContext): Promise<boole
   return mergedBranches.includes(branch);
 }
 
+/** Covers Refining only — In Progress ownership belongs to `in-progress-abandoned`, which routes by whether an open PR exists. */
 const staleRunning: Invariant = {
   name: "stale-running",
   async select(ctx) {
     const issues = await ctx.linear.issues({
-      filter: all(RUNNING_FILTER),
+      filter: all(inState(FOREMAN_STATE.refining), notHandsOff(ctx.viewerId ?? "")),
       includeComments: true,
     });
     return issues.filter((issue) => {
-      const record = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined)?.data ?? null;
-      return lockState(record, { now: ctx.now, liveDispatchIds: [...ctx.liveDispatchIds] }).orphaned || record === null;
+      const record = readLockComment(issue.comments ?? [], ctx.viewerId)?.data ?? null;
+      // No marker is not proof of an orphan: a session starting inside the
+      // claim window (issue moved to Refining, lock comment not yet
+      // written) would otherwise release a live claim.
+      if (record === null) return ctx.now.getTime() - new Date(issue.updatedAt).getTime() > 60_000;
+      return lockState(record, { now: ctx.now, liveDispatchIds: [...ctx.liveDispatchIds] }).orphaned;
     });
   },
   async fix(issue, ctx) {
@@ -93,7 +99,7 @@ const staleRunning: Invariant = {
     } else {
       await ctx.linear.updateIssue(issue.id, { assigneeId: null });
     }
-    const record = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined)?.data ?? null;
+    const record = readLockComment(issue.comments ?? [], ctx.viewerId)?.data ?? null;
     const summary = record
       ? `Foreman: released orphaned lock ${record.dispatchId} (taken ${record.takenAt}). Worktree ${record.worktree ?? "none"} left standing for inspection — reconcile never deletes it.`
       : "Foreman: released an orphaned lock with no matching lock comment.";
@@ -110,7 +116,7 @@ const inProgressAbandoned: Invariant = {
       includeComments: true,
     });
     return issues.filter((issue) => {
-      const found = readLockComment(issue.comments ?? [], ctx.viewerId ?? undefined);
+      const found = readLockComment(issue.comments ?? [], ctx.viewerId);
       const record = found?.data ?? null;
       if (record === null) return ctx.now.getTime() - new Date(issue.updatedAt).getTime() > 60_000;
       return lockState(record, { now: ctx.now, liveDispatchIds: [...ctx.liveDispatchIds] }).orphaned;
@@ -190,23 +196,36 @@ const BLOCKED_ANSWERED_RESUME_STATE: Record<string, ForemanStateKey> = {
   [FOREMAN_STATE.blocked]: "ready",
 };
 
+/**
+ * The block marker itself must be attributed to the credential's own Linear
+ * user (2.5) — a forged `block` marker from another user must not be read
+ * back as ours to answer. `select`/`fix` fail closed when `ctx.viewerId` is
+ * unresolvable: no marker can be trusted, so nothing is un-parked. Once the
+ * marker is trusted, the *answering* comment's author must be the
+ * configured operator when `linear.operatorUserId` is set; a teammate's
+ * "+1" or a sync bot's comment must not read as the operator's reply. When
+ * unconfigured, the looser "any comment from someone other than the
+ * marker's own author" rule is kept.
+ */
 const blockedAnswered: Invariant = {
   name: "blocked-answered",
   async select(ctx) {
+    if (ctx.viewerId === null) return [];
     const issues = await ctx.linear.issues({
       filter: all(HUMAN_QUEUE_FILTER),
       includeComments: true,
     });
+    const operatorUserId = ctx.config.linear.operatorUserId;
     return issues.filter((issue) => {
       const comments = issue.comments ?? [];
-      const marker = latestMarker(MARKER_KIND.block, comments);
+      const marker = latestMarker(MARKER_KIND.block, comments, { authoredBy: ctx.viewerId });
       if (!marker) return false;
-      return comments.some(
-        (comment) =>
-          new Date(comment.createdAt).getTime() > new Date(marker.createdAt).getTime() &&
-          comment.user?.id !== undefined &&
-          findCommentAuthor(comments, marker.commentId) !== comment.user?.id,
-      );
+      return comments.some((comment) => {
+        if (new Date(comment.createdAt).getTime() <= new Date(marker.createdAt).getTime()) return false;
+        if (comment.user?.id === undefined) return false;
+        if (operatorUserId !== null) return comment.user.id === operatorUserId;
+        return findCommentAuthor(comments, marker.commentId) !== comment.user.id;
+      });
     });
   },
   async fix(issue, ctx) {
@@ -215,12 +234,13 @@ const blockedAnswered: Invariant = {
     const target = resolveState(resumeKey, states);
     await ctx.linear.updateIssue(issue.id, { stateId: target.id, assigneeId: null });
     const comments = issue.comments ?? [];
-    const marker = latestMarker(MARKER_KIND.block, comments);
+    const marker = latestMarker(MARKER_KIND.block, comments, { authoredBy: ctx.viewerId });
+    const operatorUserId = ctx.config.linear.operatorUserId;
     const answeringComment = comments
-      .filter(
-        (comment) =>
-          marker !== null && new Date(comment.createdAt).getTime() > new Date(marker.createdAt).getTime(),
-      )
+      .filter((comment) => {
+        if (marker === null || new Date(comment.createdAt).getTime() <= new Date(marker.createdAt).getTime()) return false;
+        return operatorUserId !== null ? comment.user?.id === operatorUserId : true;
+      })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
     const body = encodeMarker(
       MARKER_KIND.unblock,
@@ -237,8 +257,8 @@ function findCommentAuthor(comments: readonly { id: string; user: { id: string }
 }
 
 export const INVARIANTS: Invariant[] = [
-  staleRunning,
   inProgressAbandoned,
+  staleRunning,
   mergedNotDone,
   inReviewNoPr,
   blockedAnswered,
@@ -251,7 +271,7 @@ async function reconcileProjectStatus(
 ): Promise<{ fixed: number; skipped: number }> {
   let fixed = 0;
   let skipped = 0;
-  const issues = await ctx.linear.issues({ filter: {}, first: 250 });
+  const issues = await ctx.linear.issues({ filter: all(notInTerminalProject()), first: 250 });
   const byProject = new Map<string, WorkflowStateType[]>();
   for (const issue of issues) {
     if (!issue.project) continue;
@@ -293,7 +313,14 @@ export async function reconcile(
   let fixed = 0;
   let skipped = 0;
   for (const invariant of INVARIANTS) {
-    const issues = await invariant.select(ctx);
+    let issues: Issue[];
+    try {
+      issues = await invariant.select(ctx);
+    } catch (error) {
+      opts.log(`${invariant.name}: select failed (${error instanceof Error ? error.message : String(error)})`);
+      skipped += 1;
+      continue;
+    }
     for (const issue of issues) {
       const summary = `${invariant.name} ${issue.identifier}`;
       if (opts.dryRun) {

@@ -6,6 +6,7 @@ import { FakeLinear } from "./fake-linear.ts";
 import { reconcile, type ReconcileContext } from "../src/reconcile.ts";
 
 const STATE_BACKLOG: WorkflowState = { id: "state-backlog", name: "Backlog", type: "backlog", position: 0 };
+const STATE_REFINING: WorkflowState = { id: "state-refining", name: "Refining", type: "started", position: 1 };
 const STATE_READY: WorkflowState = { id: "state-ready", name: "Ready", type: "unstarted", position: 3 };
 const STATE_IN_PROGRESS: WorkflowState = { id: "state-in-progress", name: "In Progress", type: "started", position: 5 };
 const STATE_NEEDS_INPUT: WorkflowState = { id: "state-needs-input", name: "Needs Input", type: "unstarted", position: 2 };
@@ -124,7 +125,7 @@ function makeContext(overrides: Partial<ReconcileContext> = {}): ReconcileContex
 }
 
 describe("reconcile — stale-running", () => {
-  it("moves an orphaned Refining/In Progress issue to Ready, clears the assignee, and comments", async () => {
+  it("moves an orphaned Refining issue to Ready, clears the assignee, and comments", async () => {
     const lockComment: Comment = {
       id: "c1",
       body: renderLockComment({
@@ -141,7 +142,7 @@ describe("reconcile — stale-running", () => {
       user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
       parentId: null,
     };
-    const issue = makeIssue({ state: STATE_IN_PROGRESS, comments: [lockComment] });
+    const issue = makeIssue({ state: STATE_REFINING, comments: [lockComment] });
     const linear = new FakeLinear([issue]);
     const ctx = makeContext({ linear });
 
@@ -156,21 +157,21 @@ describe("reconcile — stale-running", () => {
   });
 
   it("a declined confirmation counts as skipped and performs no mutation", async () => {
-    const issue = makeIssue({ state: STATE_IN_PROGRESS, comments: [] });
+    const issue = makeIssue({ state: STATE_REFINING, comments: [] });
     const linear = new FakeLinear([issue]);
     const ctx = makeContext({ linear, confirmer: ALWAYS_DENY });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(0);
-    expect(summary.skipped).toBe(2);
-    expect(issue.state.id).toBe(STATE_IN_PROGRESS.id);
+    expect(summary.skipped).toBe(1);
+    expect(issue.state.id).toBe(STATE_REFINING.id);
     expect(linear.updateCalls).toHaveLength(0);
   });
 });
 
 describe("reconcile — in-progress-abandoned", () => {
-  it("an orphaned In Progress issue is moved to Ready by stale-running before in-progress-abandoned's PR check runs, regardless of an open PR", async () => {
+  it("routes an abandoned In Progress issue with an open PR to In Review (stale-running no longer preempts it — it covers Refining only)", async () => {
     const issue = makeIssue({ state: STATE_IN_PROGRESS, labels: [], comments: [] });
     const linear = new FakeLinear([issue]);
     const github = stubGitHub((argv) => {
@@ -189,7 +190,7 @@ describe("reconcile — in-progress-abandoned", () => {
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
-    expect(issue.state.id).toBe(STATE_READY.id);
+    expect(issue.state.id).toBe(STATE_IN_REVIEW.id);
   });
 
   it("moves to Ready when no PR exists for the branch", async () => {
@@ -201,6 +202,25 @@ describe("reconcile — in-progress-abandoned", () => {
 
     expect(summary.fixed).toBe(1);
     expect(issue.state.id).toBe(STATE_READY.id);
+  });
+
+  it("leaves a self-assigned (hands-off) In Progress issue with no lock comment alone — notHandsOff must exclude it at the query level", async () => {
+    const issue = makeIssue({
+      state: STATE_IN_PROGRESS,
+      labels: [],
+      comments: [],
+      assignee: { id: "human-operator", name: "Operator", displayName: "Operator" },
+      updatedAt: "2026-06-01T11:59:50.000Z",
+    });
+    const linear = new FakeLinear([issue]);
+    const ctx = makeContext({ linear });
+
+    const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
+
+    expect(summary.fixed).toBe(0);
+    expect(issue.state.id).toBe(STATE_IN_PROGRESS.id);
+    expect(issue.assignee?.id).toBe("human-operator");
+    expect(linear.updateCalls).toHaveLength(0);
   });
 });
 
@@ -267,7 +287,7 @@ describe("reconcile — blocked-answered", () => {
       comments: [blockComment, replyComment],
     });
     const linear = new FakeLinear([issue]);
-    const ctx = makeContext({ linear });
+    const ctx = makeContext({ linear, viewerId: "bot-1" });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
@@ -297,13 +317,43 @@ describe("reconcile — blocked-answered", () => {
       comments: [blockComment, replyComment],
     });
     const linear = new FakeLinear([issue]);
-    const ctx = makeContext({ linear });
+    const ctx = makeContext({ linear, viewerId: "bot-1" });
 
     const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
 
     expect(summary.fixed).toBe(1);
     expect(issue.state.id).toBe(STATE_READY.id);
     expect(linear.commentCalls.some((call) => call.body.includes("auto: answered in comment reply-2"))).toBe(true);
+  });
+
+  it("does not select an issue whose only later comment is from a third user, once operatorUserId is configured", async () => {
+    const blockComment: Comment = {
+      id: "block-3",
+      body: encodeMarker(MARKER_KIND.block, { type: "needs-decision" }, "Need a decision"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      user: { id: "bot-1", name: "bot-1", displayName: "bot-1" },
+      parentId: null,
+    };
+    const thirdPartyComment: Comment = {
+      id: "reply-3",
+      body: "+1",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      user: { id: "teammate-1", name: "teammate-1", displayName: "teammate-1" },
+      parentId: null,
+    };
+    const issue = makeIssue({
+      state: STATE_NEEDS_INPUT,
+      comments: [blockComment, thirdPartyComment],
+    });
+    const linear = new FakeLinear([issue]);
+    const config = makeConfig();
+    config.linear.operatorUserId = "operator-1";
+    const ctx = makeContext({ linear, viewerId: "bot-1", config });
+
+    const summary = await reconcile(ctx, { dryRun: false, log: () => {} });
+
+    expect(summary.fixed).toBe(0);
+    expect(issue.state.id).toBe(STATE_NEEDS_INPUT.id);
   });
 });
 

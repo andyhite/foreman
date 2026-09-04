@@ -105,25 +105,27 @@ export interface MarkerSource {
   user: { id: string } | null;
 }
 
-/** Options gating marker trust by comment authorship. Rendering-only reads omit this. */
+/** Options gating marker trust by comment authorship. Required on every read — forgery resistance must not be something a caller can forget. */
 export interface MarkerReadOptions {
   /**
-   * When set, comments not authored by this user id are skipped entirely —
-   * a forged marker from another Linear user cannot be read back as truth
-   * by any downstream decision (lock ownership, review/merge gating, etc).
+   * Comments not authored by this user id are skipped entirely — a forged
+   * marker from another Linear user cannot be read back as truth by any
+   * downstream decision (lock ownership, review/merge gating, etc). `null`
+   * means "any author" — a deliberate choice for rendering-only reads, never
+   * the default.
    */
-  authoredBy?: string;
+  authoredBy: string | null;
 }
 
 /** Every marker of `kind` across a comment list, oldest first. */
 export function findMarkers<T>(
   kind: MarkerKind,
   comments: readonly MarkerSource[],
-  options?: MarkerReadOptions,
+  options: MarkerReadOptions,
 ): FoundMarker<T>[] {
   const found: FoundMarker<T>[] = [];
   for (const comment of comments) {
-    if (options?.authoredBy !== undefined && comment.user?.id !== options.authoredBy) continue;
+    if (options.authoredBy !== null && comment.user?.id !== options.authoredBy) continue;
     const data = decodeMarker<T>(kind, comment.body);
     if (data !== null) {
       found.push({ commentId: comment.id, createdAt: comment.createdAt, data });
@@ -137,7 +139,7 @@ export function findMarkers<T>(
 export function latestMarker<T>(
   kind: MarkerKind,
   comments: readonly MarkerSource[],
-  options?: MarkerReadOptions,
+  options: MarkerReadOptions,
 ): FoundMarker<T> | null {
   const all = findMarkers<T>(kind, comments, options);
   return all.length === 0 ? null : (all[all.length - 1] as FoundMarker<T>);

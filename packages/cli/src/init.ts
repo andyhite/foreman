@@ -61,6 +61,8 @@ export interface InitOptions {
   alias?: string;
   /** Non-interactive Linear team key. */
   team?: string;
+  /** True when no prompt can be answered by a human: `--yes` or non-TTY stdin. */
+  nonInteractive?: boolean;
 }
 
 export interface InitDeps {
@@ -122,7 +124,7 @@ async function resolveConfiguredApiKey(options: InitOptions): Promise<string | n
   if (options.skipLinear) return null;
   try {
     const { config } = loadGlobalConfig({ home: options.home });
-    return resolveLinearApiKey(config);
+    return resolveLinearApiKey(config, process.env, options.home);
   } catch {
     return null;
   }
@@ -148,6 +150,21 @@ async function resolveTeam(
       throw new ConfigError("A Linear team is required", [
         "pass --team <KEY>, or run `foreman setup` to configure a Linear credential",
       ]);
+    }
+    if (apiKey) {
+      try {
+        const client = new LinearClient({ apiKey });
+        const teams: TeamRef[] = await client.teams();
+        if (teams.length > 0 && !teams.some((candidate) => candidate.key === team)) {
+          throw new ConfigError(`Linear team "${team}" does not exist in this workspace`, [
+            `available teams: ${teams.map((candidate) => candidate.key).join(", ") || "(none)"}`,
+          ]);
+        }
+      } catch (error) {
+        if (error instanceof ConfigError) throw error;
+        const message = error instanceof LinearApiError ? error.message : String(error);
+        deps.log(`  ${style("yellow", "!")} couldn't reach the Linear API (${message}) — skipping team validation.`);
+      }
     }
     return team;
   }
@@ -395,6 +412,11 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
   if (existingEntry) {
     deps.log(`  ${style("cyan", "i")} "${alias}" is already registered at ${existingEntry.path} — updating it.`);
   }
+  if (options.team === undefined && options.nonInteractive && existingEntry?.team === undefined) {
+    throw new ConfigError("A Linear team is required", [
+      "pass --team <KEY>, or run `foreman init` from an interactive terminal",
+    ]);
+  }
 
   // Every team already bound to a *different* alias, lowercased for the
   // select prompt's case-insensitive hint — `assertTeamsUnique` rejects the
@@ -445,13 +467,18 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<voi
       printSection(deps.log, "Linear team provisioning");
       deps.log("  skipped, no Linear credential — run `foreman setup` to configure one.");
     } else {
-      provisioningFailed = await provisionTeamForRepo(
-        deps,
-        options,
-        provisionKey,
-        team,
-        apps.map((app) => app.name),
-      );
+      try {
+        provisioningFailed = await provisionTeamForRepo(
+          deps,
+          options,
+          provisionKey,
+          team,
+          apps.map((app) => app.name),
+        );
+      } catch (error) {
+        deps.log(`  ${style("yellow", "!")} team provisioning failed: ${(error as Error).message}`);
+        provisioningFailed = true;
+      }
     }
   }
 

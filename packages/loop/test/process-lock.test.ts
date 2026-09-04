@@ -87,4 +87,34 @@ describe("ProcessLock", () => {
     lock.release();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("loses the reclaim race to a concurrent reclaimer without corrupting the winner's lock", () => {
+    const path = tempLockPath();
+    const holder = new ProcessLock(path);
+    holder.acquire(111, new Date("2026-06-01T12:00:00.000Z"), ALWAYS_DEAD);
+
+    const winner = new ProcessLock(path);
+    winner.acquire(222, new Date("2026-06-01T12:10:00.000Z"), ALWAYS_DEAD);
+
+    // Simulate a second concurrent reclaimer racing the same dead holder:
+    // its `onReclaiming` hook fires in the window between the loser's own
+    // unlink of the stale file and its exclusive `link` — exactly when the
+    // real winner's fresh lock lands on disk.
+    const raceProbe: ProcessProbe = {
+      isAlive: () => false,
+      onReclaiming: () => {
+        writeFileSync(path, JSON.stringify({ pid: 333, startedAt: "2026-06-01T12:11:00.000Z", token: "racer-token" }, null, 2), {
+          mode: 0o600,
+        });
+      },
+    };
+    const loser = new ProcessLock(path);
+    expect(() => loser.acquire(444, new Date("2026-06-01T12:12:00.000Z"), raceProbe)).toThrow(ProcessLockHeldError);
+    expect(loser.acquired).toBe(false);
+
+    const onDisk = JSON.parse(readFileSync(path, "utf8")) as { pid: number };
+    expect(onDisk.pid).toBe(333);
+
+    winner.release();
+  });
 });

@@ -105,7 +105,7 @@ function assertRepoAliasesValid(config: GlobalConfig, describeFor: string): void
   for (const alias of Object.keys(config.repos)) {
     if (alias.trim().length === 0) {
       problems.push(`repos key ${JSON.stringify(alias)} must not be empty or whitespace-only`);
-    } else if (/[:/\\]/.test(alias)) {
+    } else if (alias === "." || alias === ".." || /[:/\\]/.test(alias)) {
       problems.push(`repos key ${JSON.stringify(alias)} must not contain ":", "/", or "\\"`);
     }
   }
@@ -192,7 +192,29 @@ export function defaultAndValidateGlobalConfig(value: unknown, describeFor: stri
   const config = defaulted as GlobalConfig;
   assertRepoAliasesValid(config, describeFor);
   assertTeamsUnique(config, describeFor);
+  assertEndpointHostAllowed(config);
   return config;
+}
+
+/**
+ * Refuses a `linear.endpoint` whose host is not `api.linear.app` unless
+ * `linear.allowCustomEndpoint` opts in — the credential would otherwise be
+ * sent to an arbitrary host. Applies to every loader (the three loop CLIs
+ * and the plugin runtime), not just the CLIs that used to check this alone.
+ */
+function assertEndpointHostAllowed(config: GlobalConfig): void {
+  let endpointHost: string;
+  try {
+    endpointHost = new URL(config.linear.endpoint).host;
+  } catch {
+    endpointHost = "";
+  }
+  if (endpointHost !== "api.linear.app" && endpointHost !== "" && !config.linear.allowCustomEndpoint) {
+    throw new ConfigError(
+      `linear.endpoint is ${config.linear.endpoint}, not https://api.linear.app/graphql — the API key would be sent there.`,
+      ["Set linear.allowCustomEndpoint: true in ~/.foreman/config.json if this is deliberate."],
+    );
+  }
 }
 
 /**
@@ -315,14 +337,18 @@ export function teamIndex(config: GlobalConfig): Record<string, string> {
  * first, then the trimmed first line of `config.linear.apiKeyFile` (SPEC
  * §3.10) when the env var is unset.
  */
-export function resolveLinearApiKey(config: GlobalConfig, env: Record<string, string | undefined> = process.env): string {
+export function resolveLinearApiKey(
+  config: GlobalConfig,
+  env: Record<string, string | undefined> = process.env,
+  home?: string,
+): string {
   const fromEnv = env[config.linear.apiKeyEnv];
   if (fromEnv !== undefined && fromEnv.length > 0) {
     return fromEnv;
   }
 
   if (config.linear.apiKeyFile !== null) {
-    const path = expandHome(config.linear.apiKeyFile);
+    const path = expandHome(config.linear.apiKeyFile, home);
     if (existsSync(path)) {
       const contents = readFileSync(path, "utf8");
       const firstLine = (contents.split("\n")[0] ?? "").trim();
@@ -335,6 +361,22 @@ export function resolveLinearApiKey(config: GlobalConfig, env: Record<string, st
       `or point linear.apiKeyFile at a file whose first line is the key.`,
     [`env.${config.linear.apiKeyEnv} is unset`, `linear.apiKeyFile is ${config.linear.apiKeyFile ?? "unset"}`],
   );
+}
+
+/**
+ * A dispatched agent's environment has every `LINEAR_*` name scrubbed
+ * (`packages/loop/src/dispatch/{print,herdr}.ts`), so the child can only
+ * resolve the credential from `linear.apiKeyFile`. An env-var-only
+ * deployment cannot support loop dispatch (README "The shape of it").
+ */
+export function assertLoopDispatchCredential(config: GlobalConfig, home?: string): void {
+  const file = config.linear.apiKeyFile;
+  if (file === null || !existsSync(expandHome(file, home))) {
+    throw new ConfigError("loop dispatch requires linear.apiKeyFile", [
+      "every LINEAR_* env var is scrubbed from a dispatched agent's environment",
+      "write the key to a file (`foreman setup` puts it at ~/.foreman/linear-api-key, mode 0600) and set linear.apiKeyFile",
+    ]);
+  }
 }
 
 /**

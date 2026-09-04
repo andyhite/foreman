@@ -19,12 +19,12 @@ const ISSUE_FIELDS = `
   createdAt
   updatedAt
   state { id name type }
-  labels { nodes { id name isGroup parent { id name } } }
+  labels { nodes { id name isGroup parent { id name } } pageInfo { hasNextPage } }
   project { id name }
   team { id key name }
   assignee { id name displayName }
   parent { id identifier title state { id name type } }
-  children { nodes { id identifier title state { id name type } } }
+  children { nodes { id identifier title state { id name type } } pageInfo { hasNextPage } }
   relations {
     nodes {
       id
@@ -32,6 +32,7 @@ const ISSUE_FIELDS = `
       issue { id identifier title state { id name type } }
       relatedIssue { id identifier title state { id name type } }
     }
+    pageInfo { hasNextPage }
   }
   inverseRelations {
     nodes {
@@ -40,6 +41,7 @@ const ISSUE_FIELDS = `
       issue { id identifier title state { id name type } }
       relatedIssue { id identifier title state { id name type } }
     }
+    pageInfo { hasNextPage }
   }
 `;
 
@@ -293,12 +295,6 @@ export const ISSUE_RELATION_CREATE_MUTATION = `
   }
 `;
 
-export const ISSUE_RELATION_DELETE_MUTATION = `
-  mutation IssueRelationDelete($id: String!) {
-    issueRelationDelete(id: $id) { success }
-  }
-`;
-
 export const ISSUE_LABEL_CREATE_MUTATION = `
   mutation IssueLabelCreate($input: IssueLabelCreateInput!) {
     issueLabelCreate(input: $input) {
@@ -363,6 +359,7 @@ export const PROJECT_RELATIONS_QUERY = `
           relatedAnchorType
           relatedProject { id name startDate targetDate status { id name type } }
         }
+        pageInfo { hasNextPage }
       }
       inverseRelations(first: 100) {
         nodes {
@@ -372,6 +369,7 @@ export const PROJECT_RELATIONS_QUERY = `
           relatedAnchorType
           project { id name startDate targetDate status { id name type } }
         }
+        pageInfo { hasNextPage }
       }
     }
   }
@@ -383,11 +381,5 @@ export const PROJECT_RELATION_CREATE_MUTATION = `
       success
       projectRelation { id }
     }
-  }
-`;
-
-export const PROJECT_RELATION_DELETE_MUTATION = `
-  mutation ProjectRelationDelete($id: String!) {
-    projectRelationDelete(id: $id) { success }
   }
 `;

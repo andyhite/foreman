@@ -29,7 +29,10 @@ import {
   applyRoadmap,
   branchNameFor,
   encodeMarker,
+  issueScope,
   MARKER_KIND,
+  readLockComment,
+  renderLockComment,
   resolveState,
   resolveTeamKey,
   sanitizeAgentText,
@@ -88,10 +91,12 @@ export interface ApplyDeps {
    * `applyPlan` and `applyRoadmap` need `team` to resolve the team a new
    * issue or project must carry (SPEC §7.6, §7.7); `applyReview` needs
    * `repoPath`/`branchPattern` to find the PR a GitHub review mirrors onto
-   * (SPEC §7.4). Absent entirely for a batch apply with no single repo
-   * scope (e.g. triage).
+   * (SPEC §7.4); `applyTriageItem`/`applyPlan` need `alias`/`team` to refuse
+   * an agent-supplied id outside this dispatch's bound team (`issueScope`).
+   * Passed for every stage (`extension.ts`'s `toApplyDeps`); absent only in
+   * tests that do not exercise team scoping.
    */
-  entry?: Pick<ResolvedRepoEntry, "team" | "repoPath" | "branchPattern">;
+  entry?: Pick<ResolvedRepoEntry, "alias" | "team" | "repoPath" | "branchPattern" | "pr">;
   /**
    * Linear user id to assign a block that needs a human (SPEC §9 Case B) —
    * puts it in the operator's own "My Issues" view. `null`/absent skips
@@ -102,9 +107,25 @@ export interface ApplyDeps {
 }
 
 
-/** Clears the lock; `assigneeId` sets the final owner in the same mutation (`null` clears it, the default). */
+/**
+ * Clears the visible half of the lock (the assignee); `assigneeId` sets the
+ * final owner in the same mutation (`null` clears it, the default). Then
+ * releases the marker half `checkLockFree` actually reads: symmetric with
+ * `claimLock` (enforce/task-guard.ts). Without posting a `released: true`
+ * marker here, the next stage on this issue is refused until the lock's
+ * full TTL expires.
+ */
 async function releaseLock(deps: ApplyDeps, issue: Issue, assigneeId: string | null = null): Promise<void> {
   await deps.linear.updateIssue(issue.id, { assigneeId });
+  const viewerId = await deps.linear.viewerId().catch(() => null);
+  const withComments = await deps.linear.issue(issue.id, { includeComments: true });
+  if (!withComments) return;
+  const held = readLockComment(withComments.comments, viewerId)?.data ?? null;
+  if (!held || held.released) return;
+  await deps.linear.createComment({
+    issueId: issue.id,
+    body: renderLockComment({ ...held, released: true, releasedAt: deps.now().toISOString() }),
+  });
 }
 
 async function moveToState(deps: ApplyDeps, issue: Issue, stateKey: Parameters<typeof resolveState>[0]): Promise<void> {
@@ -177,16 +198,25 @@ async function applyTriageItem(
   const issue = await deps.linear.issue(item.issueId);
   if (!issue) throw new Error(`unknown issue "${item.issueId}"`);
 
+  // The dispatch is scoped to one repo entry, and `linear.issue()` is not
+  // team-scoped: without this, an injected item rewrites any issue in the
+  // workspace. Thrown here, so `applyTriage` records it per item.
+  if (deps.entry) {
+    const verdict = issueScope(deps.entry, issue);
+    if (!verdict.inScope) throw new Error(verdict.message ?? `${item.issueId} is out of scope`);
+  }
+
   if (item.destination === "backlog" || item.destination === "new-project") {
     let projectId = item.destinationProjectId;
+    let teamProjects: { id: string; name: string }[] | null = null;
     if (item.destination === "new-project") {
       if (!item.newProject) throw new Error(`applyTriage: ${issue.identifier} is "new-project" with no newProject.`);
       const newProject = item.newProject;
       // Idempotent: no durable dedupe marker survives a redelivered batch
       // any more (SPEC §17.7), so a second apply must reuse the project it
       // already created rather than creating a sibling with the same name.
-      const siblings = await deps.linear.projects(issue.team.key);
-      const existing = siblings.find(
+      teamProjects = await deps.linear.projects(issue.team.key);
+      const existing = teamProjects.find(
         (candidate) => candidate.name.trim().toLowerCase() === newProject.name.trim().toLowerCase(),
       );
       let project = existing;
@@ -214,6 +244,13 @@ async function applyTriageItem(
     }
     if (!projectId) throw new Error(`applyTriage: ${issue.identifier} is "backlog" with no destinationProjectId.`);
 
+    if (deps.entry && item.destination === "backlog") {
+      const siblings = teamProjects ?? (await deps.linear.projects(issue.team.key));
+      if (!siblings.some((candidate) => candidate.id === projectId)) {
+        throw new Error(`${issue.identifier}: destinationProjectId ${projectId} is not a project on team ${issue.team.key}`);
+      }
+    }
+
     const typeLabel = await deps.linear.ensureWorkspaceLabel(item.type, { color: TYPE_LABEL_COLOR[item.type as TypeLabel] });
     const addedLabelIds = [typeLabel.id];
     if (item.app !== null) {
@@ -239,11 +276,18 @@ async function applyTriageItem(
     if (item.missingInfo.length > 0) {
       notes.push("", "Missing before this is refinable:", ...item.missingInfo.map((line) => `- ${line}`));
     }
-    await deps.linear.createComment({ issueId: issue.id, body: notes.join("\n") });
+    await deps.linear.createComment({ issueId: issue.id, body: sanitizeAgentText(notes.join("\n")) });
 
     for (const blockerId of item.proposedBlockedBy) {
       const blocker = await deps.linear.issue(blockerId);
       if (!blocker) continue;
+      if (deps.entry) {
+        const verdict = issueScope(deps.entry, blocker);
+        if (!verdict.inScope) {
+          problems.push(`${issue.identifier}: blocker ${blockerId} is out of scope; no relation created`);
+          continue;
+        }
+      }
       const alreadyRelated = issue.relations.some(
         (relation) =>
           relation.type === "blocks" &&
@@ -262,14 +306,19 @@ async function applyTriageItem(
     if (!item.duplicateOf) throw new Error(`applyTriage: ${issue.identifier} is "duplicate" with no duplicateOf.`);
     const original = await deps.linear.issue(item.duplicateOf);
     if (original) {
-      const alreadyRelated = issue.relations.some(
-        (relation) =>
-          relation.type === "duplicate" &&
-          relation.direction === "outgoing" &&
-          relation.other.id === original.id,
-      );
-      if (!alreadyRelated) {
-        await deps.linear.createRelation({ issueId: issue.id, relatedIssueId: original.id, type: "duplicate" });
+      const outOfScope = deps.entry ? !issueScope(deps.entry, original).inScope : false;
+      if (outOfScope) {
+        problems.push(`${issue.identifier}: blocker ${item.duplicateOf} is out of scope; no relation created`);
+      } else {
+        const alreadyRelated = issue.relations.some(
+          (relation) =>
+            relation.type === "duplicate" &&
+            relation.direction === "outgoing" &&
+            relation.other.id === original.id,
+        );
+        if (!alreadyRelated) {
+          await deps.linear.createRelation({ issueId: issue.id, relatedIssueId: original.id, type: "duplicate" });
+        }
       }
     }
   }
@@ -392,7 +441,7 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
       (relation) => relation.type === "blocks" && relation.other.title === spikeTitle,
     );
     if (!existingSpike) {
-      const spikeBody = renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier });
+      const spikeBody = sanitizeAgentText(renderSpikeIssue(result.spikeCreated, { identifier: issue.identifier }));
       const spikeTypeLabel = await deps.linear.ensureWorkspaceLabel(TYPE_LABEL.spike, { color: TYPE_LABEL_COLOR[TYPE_LABEL.spike] });
       const spike = await deps.linear.createIssue({
         teamId: issue.team.id,
@@ -426,6 +475,9 @@ async function applyRefine(deps: ApplyDeps, result: RefineResult): Promise<Appli
 async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(result.issueId);
   if (!issue) throw new Error(`ImplementResult references unknown issue ${result.issueId}.`);
+  if (deps.entry?.pr.required && result.prUrl.trim() === "") {
+    throw new Error(`${issue.identifier}: pr.required is true but the implement result carries no prUrl`);
+  }
 
   const backlog = result.discoveredWork.length > 0 ? await backlogStateId(deps, issue.team.id) : null;
 
@@ -435,7 +487,7 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
     const created = await deps.linear.createIssue({
       teamId: issue.team.id,
       title: stripControlChars(discovered.title),
-      description: discovered.description,
+      description: sanitizeAgentText(discovered.description),
       projectId: issue.project?.id,
       labelIds: [discoveredTypeLabel.id],
       stateId: backlog ?? undefined,
@@ -479,6 +531,12 @@ async function applyImplement(deps: ApplyDeps, result: ImplementResult): Promise
 async function applyPlan(deps: ApplyDeps, result: PlanResult, notify?: Notify): Promise<AppliedFacts> {
   const project = await deps.linear.project(result.projectId);
   if (!project) throw new Error(`PlanResult references unknown project ${result.projectId}.`);
+  if (deps.entry) {
+    const siblings = await deps.linear.projects(deps.entry.team);
+    if (!siblings.some((candidate) => candidate.id === project.id)) {
+      throw new Error(`plan result targets project ${project.id}, which is not on team ${deps.entry.team}`);
+    }
+  }
   if (result.proposedIssues.length === 0) {
     return { subject: project.name, summary: `planned "${project.name}": no issues proposed`, created: [], movedTo: null };
   }
@@ -608,11 +666,21 @@ async function applyReview(deps: ApplyDeps, result: ReviewResult, notify?: Notif
   };
 }
 
-/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no state carried, back to Ready. */
-async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord): Promise<AppliedFacts> {
+/** SPEC §9 Case A: a `dependency` block creates/verifies the relation, no state carried, back to Ready. An unresolvable blocker identifier is not silently dropped: it is routed like a human block (Case B) instead, so the issue does not loop forever waiting on an identifier that will never resolve. */
+async function applyDependencyBlock(
+  deps: ApplyDeps,
+  issue: Issue,
+  block: BlockRecord,
+  agent: string,
+  notify?: Notify,
+): Promise<AppliedFacts> {
+  const missing: string[] = [];
   for (const blockerId of block.blockedByIssues) {
     const blocker = await deps.linear.issue(blockerId);
-    if (!blocker) continue;
+    if (!blocker) {
+      missing.push(blockerId);
+      continue;
+    }
     // The blocker blocks THIS issue — `blockedByRelations` (core) reads
     // "blocked by" as `direction === "incoming"`, which only holds when the
     // relation is written {issueId: blocker, relatedIssueId: issue}.
@@ -632,6 +700,21 @@ async function applyDependencyBlock(deps: ApplyDeps, issue: Issue, block: BlockR
   }
   const body = sanitizeAgentText(renderBlockComment(block));
   await deps.linear.createComment({ issueId: issue.id, body });
+  if (missing.length > 0) {
+    notify?.(
+      `${issue.identifier}: dependency block names unresolvable issue(s) ${missing.join(", ")}; routed to a human queue instead of Ready`,
+      "warn",
+    );
+    const stateKey = IMPLEMENTATION_BLOCK_AGENTS[agent] ? "blocked" : "needsInput";
+    await moveToState(deps, issue, stateKey);
+    await releaseLock(deps, issue, deps.operatorUserId ?? null);
+    return {
+      subject: issue.identifier,
+      summary: `blocked ${issue.identifier}: dependency on unresolvable issue(s) ${missing.join(", ")}`,
+      created: [],
+      movedTo: stateKey,
+    };
+  }
   await releaseLock(deps, issue);
   await moveToState(deps, issue, "ready");
   return { subject: issue.identifier, summary: `blocked ${issue.identifier}: ${block.type} — ${block.whatINeed}`, created: [], movedTo: "ready" };
@@ -651,12 +734,12 @@ async function applyHumanBlock(deps: ApplyDeps, issue: Issue, block: BlockRecord
 }
 
 /** Routes a `BlockRecord` through SPEC §9 instead of the normal result path. `agent` picks the human-block queue (Needs Input vs Blocked). */
-export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord, agent: string): Promise<AppliedFacts> {
+export async function applyBlock(deps: ApplyDeps, issueId: string, block: BlockRecord, agent: string, notify?: Notify): Promise<AppliedFacts> {
   const issue = await deps.linear.issue(issueId);
   if (!issue) throw new Error(`Block references unknown issue ${issueId}.`);
 
   if (block.type === "dependency") {
-    return applyDependencyBlock(deps, issue, block);
+    return applyDependencyBlock(deps, issue, block, agent, notify);
   }
   return applyHumanBlock(deps, issue, block, agent);
 }
@@ -753,7 +836,7 @@ export async function applyOutcome(deps: ApplyDeps, outcome: AgentOutcome, notif
     if (!outcome.issueId) {
       return { subject: null, summary: `dropped a block from ${outcome.agent}: no issue to write it to`, created: [], movedTo: null };
     }
-    return applyBlock(deps, outcome.issueId, outcome.block, outcome.agent);
+    return applyBlock(deps, outcome.issueId, outcome.block, outcome.agent, notify);
   }
   if (outcome.agent === "foreman-triage") {
     return applyTriage(deps, outcome.result, notify);

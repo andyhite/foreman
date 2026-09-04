@@ -137,6 +137,12 @@ function topoOrder(entries: readonly ProposedProject[]): string[] {
  * Not atomic — each entry's create/relate sequence is isolated in its own
  * try/catch, exactly as `applyProposal`/`runApplyPass` isolate a triage
  * candidate, so one bad entry never hides the rest of the roadmap.
+ *
+ * Not idempotent: `createProject` is unconditional, so re-running this
+ * function against the same `RoadmapResult` creates a second set of
+ * duplicate projects rather than detecting and skipping ones already
+ * created. Acceptable for the one-shot flow this is used from; a caller
+ * that might re-apply the same result must de-duplicate itself.
  */
 export async function applyRoadmap(
   linear: LinearWriter,
@@ -178,39 +184,59 @@ export async function applyRoadmap(
     const entry = byKey.get(key);
     if (!entry) continue;
 
-    const blockerRefs: ProjectRef[] = [];
-    for (const blockerKey of entry.blockedBy) {
-      const computed = computedDates.get(blockerKey);
-      if (computed) blockerRefs.push({ id: blockerKey, name: blockerKey, targetDate: computed.targetDate });
-    }
-    for (const existingId of entry.blockedByExisting) {
-      const project = await resolveExisting(existingId);
-      if (!project) {
-        problems.push({ key, error: `blockedByExisting project "${existingId}" could not be resolved` });
+    try {
+      const invalidDate = [entry.startDate, entry.targetDate].find(
+        (value) => Number.isNaN(Date.parse(`${value}T00:00:00Z`)),
+      );
+      if (invalidDate !== undefined) {
+        problems.push({ key, error: `${key}: startDate/targetDate ${invalidDate} is not a real calendar date` });
+        computedDates.set(key, { startDate: entry.startDate, targetDate: entry.targetDate });
         continue;
       }
-      blockerRefs.push({ id: project.id, name: project.name, targetDate: project.targetDate });
-    }
 
-    const latest = latestTargetDate(blockerRefs);
-    let startDate = entry.startDate;
-    let targetDate = entry.targetDate;
-    if (latest !== null && startDate <= latest) {
-      const durationDays = daysBetween(entry.startDate, entry.targetDate);
-      const shiftedStart = addDays(latest, 1);
-      const shiftedTarget = addDays(shiftedStart, durationDays);
-      dateAdjustments.push({
-        key,
-        requestedStartDate: entry.startDate,
-        requestedTargetDate: entry.targetDate,
-        appliedStartDate: shiftedStart,
-        appliedTargetDate: shiftedTarget,
-        forcedByTargetDate: latest,
-      });
-      startDate = shiftedStart;
-      targetDate = shiftedTarget;
+      const blockerRefs: ProjectRef[] = [];
+      for (const blockerKey of entry.blockedBy) {
+        const computed = computedDates.get(blockerKey);
+        if (computed) blockerRefs.push({ id: blockerKey, name: blockerKey, targetDate: computed.targetDate });
+      }
+      for (const existingId of entry.blockedByExisting) {
+        const project = await resolveExisting(existingId);
+        if (!project) {
+          problems.push({ key, error: `blockedByExisting project "${existingId}" could not be resolved` });
+          continue;
+        }
+        blockerRefs.push({ id: project.id, name: project.name, targetDate: project.targetDate });
+      }
+
+      const latest = latestTargetDate(blockerRefs);
+      let startDate = entry.startDate;
+      let targetDate = entry.targetDate;
+      if (latest !== null && startDate <= latest) {
+        const durationDays = daysBetween(entry.startDate, entry.targetDate);
+        const shiftedStart = addDays(latest, 1);
+        const shiftedTarget = addDays(shiftedStart, durationDays);
+        dateAdjustments.push({
+          key,
+          requestedStartDate: entry.startDate,
+          requestedTargetDate: entry.targetDate,
+          appliedStartDate: shiftedStart,
+          appliedTargetDate: shiftedTarget,
+          forcedByTargetDate: latest,
+        });
+        startDate = shiftedStart;
+        targetDate = shiftedTarget;
+      }
+      computedDates.set(key, { startDate, targetDate });
+    } catch (error) {
+      // Passes 2/3 already isolate every write per entry; pass 1 has no
+      // Linear write but does call `linear.project()` (via
+      // `resolveExisting`), which throws `LinearApiError` for a malformed
+      // id or a permissions error. Without this, one bad entry discards the
+      // whole decomposition instead of just this entry's date shift.
+      const reason = error instanceof Error ? error.message : String(error);
+      problems.push({ key, error: `failed to compute dates: ${reason}` });
+      computedDates.set(key, { startDate: entry.startDate, targetDate: entry.targetDate });
     }
-    computedDates.set(key, { startDate, targetDate });
   }
 
   // Pass 2: create each project. A project may optionally carry one `app:`

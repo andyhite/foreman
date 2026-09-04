@@ -22,15 +22,25 @@ import type {
 } from "@foreman/core";
 
 /**
- * Evaluates the small subset of `IssueFilter` shapes `filters.ts` actually
- * produces — `and`/`or`, `state.name`/`state.type` (`eq`/`nin`),
- * `labels.some`/`labels.none` (matched against this fake's labels, which
- * carry a Linear-shaped `name`/`parentId` pair the same way `filter()` did
- * for the tests seeding them) — good enough to keep each invariant's
- * `select` seeing only the issues a real server-side filter would return.
+ * Evaluates the `IssueFilter` shapes `filters.ts` actually produces —
+ * `and`/`or`, `state.name`/`state.type` (`eq`/`nin`), `labels.some`/`none`
+ * (matched against this fake's labels, which carry a Linear-shaped
+ * `name`/`parentId` pair the same way `filter()` did for the tests seeding
+ * them), `assignee` (`null`/`id.eq`), `priority` (`eq`/`neq`), and
+ * `project` (`null`/`status.type.nin`/`status.type.neq`) — good enough to
+ * keep each invariant's `select` seeing only the issues a real server-side
+ * filter would return. An unrecognized key throws rather than silently
+ * matching everything, so a filter this fake does not yet understand fails
+ * the test that exercises it instead of passing it vacuously.
  */
 function matchesFilter(issue: Issue, filter: IssueFilter): boolean {
   const asRecord = filter as Record<string, unknown>;
+  for (const key of Object.keys(asRecord)) {
+    if (!["and", "or", "state", "labels", "assignee", "priority", "project"].includes(key)) {
+      throw new Error(`fake-linear: unhandled filter key "${key}"`);
+    }
+  }
+
   if (Array.isArray(asRecord.and)) return (asRecord.and as IssueFilter[]).every((sub) => matchesFilter(issue, sub));
   if (Array.isArray(asRecord.or)) return (asRecord.or as IssueFilter[]).some((sub) => matchesFilter(issue, sub));
 
@@ -42,6 +52,21 @@ function matchesFilter(issue: Issue, filter: IssueFilter): boolean {
   const labels = asRecord.labels as { some?: Record<string, unknown>; none?: Record<string, unknown> } | undefined;
   if (labels?.some && !issue.labels.some((label) => labelMatches(label, labels.some!))) return false;
   if (labels?.none && issue.labels.some((label) => labelMatches(label, labels.none!))) return false;
+
+  const assignee = asRecord.assignee as { null?: boolean; id?: { eq?: string } } | undefined;
+  if (assignee?.null !== undefined && (issue.assignee === null) !== assignee.null) return false;
+  if (assignee?.id?.eq !== undefined && issue.assignee?.id !== assignee.id.eq) return false;
+
+  const priority = asRecord.priority as { eq?: number; neq?: number } | undefined;
+  if (priority?.eq !== undefined && issue.priority !== priority.eq) return false;
+  if (priority?.neq !== undefined && issue.priority === priority.neq) return false;
+
+  const project = asRecord.project as { null?: boolean; status?: { type?: { nin?: string[]; neq?: string } } } | undefined;
+  if (project?.null !== undefined && (issue.project === null) !== project.null) return false;
+  if (Array.isArray(project?.status?.type?.nin) && issue.project?.status?.type !== undefined) {
+    if ((project.status.type.nin as string[]).includes(issue.project.status.type)) return false;
+  }
+  if (project?.status?.type?.neq !== undefined && issue.project?.status?.type === project.status.type.neq) return false;
 
   return true;
 }
@@ -203,17 +228,11 @@ export class FakeLinear implements LinearWriter {
     throw new Error("not implemented");
   }
 
-  async deleteRelation(): Promise<void> {
-    throw new Error("not implemented");
-  }
 
   async createProjectRelation(): Promise<void> {
     throw new Error("not implemented");
   }
 
-  async deleteProjectRelation(): Promise<void> {
-    throw new Error("not implemented");
-  }
 
   async createLabel(): Promise<IssueLabel> {
     throw new Error("not implemented");

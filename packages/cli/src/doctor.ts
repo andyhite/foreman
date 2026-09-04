@@ -40,7 +40,7 @@ import {
   YOLO_CONFIRMER,
 } from "@foreman/core";
 import { existsSync, statSync } from "node:fs";
-import { findCheckoutRoot } from "./checkout.ts";
+import { findCheckoutRoot, looksLikeForemanRoot } from "./checkout.ts";
 import { readGlobalConfig } from "./global-config.ts";
 import type { Runner } from "./exec.ts";
 import { printSection, style, statusLine } from "./tui.ts";
@@ -58,7 +58,7 @@ export interface DoctorDeps {
 
 /** Resolves a checkout root for `--fix` repairs, without throwing when none is found. */
 function resolveCheckoutForFix(options: DoctorOptions): string | null {
-  if (options.checkoutRoot) return options.checkoutRoot;
+  if (options.checkoutRoot) return looksLikeForemanRoot(options.checkoutRoot) ? options.checkoutRoot : null;
   try {
     return findCheckoutRoot();
   } catch {
@@ -93,7 +93,12 @@ function checkGlobalInstall(options: DoctorOptions, deps: DoctorDeps, problems: 
     if (options.fix) {
       const checkoutRoot = resolveCheckoutForFix(options);
       if (checkoutRoot) {
-        writeGlobalPluginLink(checkoutRoot, options.home);
+        try {
+          writeGlobalPluginLink(checkoutRoot, options.home);
+        } catch (error) {
+          report(deps, problems, `could not repair — ${(error as Error).message}`);
+          return;
+        }
         state = readGlobalPluginLink(options.home);
         deps.log(statusLine(true, `repaired: linked ${state.path} -> ${checkoutRoot}/packages/omp-plugin`));
       } else {
@@ -143,6 +148,10 @@ function checkCredential(options: DoctorOptions, deps: DoctorDeps, problems: str
   const fileConfigured = apiKeyFile !== null && existsSync(apiKeyFile);
 
   if (envKey) {
+    if (apiKeyFile === null) {
+      report(deps, problems, "linear.apiKeyFile is unset — loop dispatch cannot pass the credential to a dispatched agent");
+      return;
+    }
     deps.log(statusLine(true, "LINEAR_API_KEY set in environment"));
     return;
   }
@@ -173,8 +182,13 @@ function checkRepo(options: DoctorOptions, deps: DoctorDeps, problems: string[],
 
   let state = inspectRepoActivation(path, options.home);
   if (!state.active && options.fix) {
-    activateRepoPlugin(path, options.home);
-    ensureGitExclude(path);
+    try {
+      activateRepoPlugin(path, options.home);
+      ensureGitExclude(path);
+    } catch (error) {
+      report(deps, problems, `${alias}: could not repair — ${(error as Error).message}`);
+      return;
+    }
     state = inspectRepoActivation(path, options.home);
     if (state.active) {
       deps.log(statusLine(true, `${alias}: repaired, now active`));
@@ -322,7 +336,7 @@ async function checkProvisioning(options: DoctorOptions, deps: DoctorDeps, probl
   const { config } = loadGlobalConfig({ home: options.home });
   let apiKey: string;
   try {
-    apiKey = resolveLinearApiKey(config);
+    apiKey = resolveLinearApiKey(config, process.env, options.home);
   } catch {
     deps.log(statusLine(true, "skipped — no Linear credential configured"));
     return;
